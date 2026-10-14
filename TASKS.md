@@ -69,7 +69,7 @@ Hardware: RTX 4090 (24GB VRAM), 128GB system RAM, Ubuntu 24.04. Architecture: wa
 - [ ] Set `ANTHROPIC_API_KEY` and `REPO_URL` before running
 - [ ] Export the task list doc to `TASKS.md` in the repo so Claude has it as its brief
 
-Note: during initial bootstrap (fresh machine → system fully up), everything runs on Sonnet unconditionally — no cost-approval gate during this stage, since it's a one-time build cost. The approval gate / cost threshold logic (Phase 3) only applies once the system is live and running steady-state jobs.
+Note: during initial bootstrap (fresh machine → system fully up), the NVIDIA driver/CUDA stage runs on Haiku (escalating to Sonnet in the same conversation if the GPU isn't working afterwards) and everything after runs on Sonnet — no cost-approval gate during this stage, since it's a one-time build cost. The approval gate / cost threshold logic (Phase 3) only applies once the system is live and running steady-state jobs.
 
 ## Phase 6 — Monitoring Dashboard (web)
 

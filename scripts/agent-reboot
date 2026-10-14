@@ -26,3 +26,6 @@ printf '%s\n' "$reason" > "$CONF/resume-pending"
 sync
 jarvis-discord notify "Rebooting now. I'll message you when I'm back." || true
 sudo -n systemctl reboot
+# systemctl returns before shutdown finishes. Hold this command open so the
+# agent can't carry on (or exit) while the machine is going down.
+sleep infinity

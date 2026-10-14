@@ -37,6 +37,12 @@
 #   chmod +x bootstrap.sh
 #   ./bootstrap.sh
 #
+# Or put those lines (without "export") in an env file, e.g. on network
+# storage next to the .pem, and pass its path. See bootstrap.env.example.
+# GITHUB_APP_KEY may then be relative to the env file's folder. Values are
+# copied onto this box, so the share isn't needed after bootstrap.
+#   ./bootstrap.sh /mnt/nas/jarvis/bootstrap.env
+#
 # Optional:
 #   GITHUB_ORG        org the app is installed on and the agent may build
 #                     new repos in (default: the org in REPO_URL)
@@ -57,6 +63,17 @@
 # Never commit the .pem file.
 
 set -euo pipefail
+
+if [[ -n "${1:-}" ]]; then
+  [[ -r "$1" ]] || { echo "ERROR: can't read env file $1" >&2; exit 1; }
+  set -a
+  # shellcheck disable=SC1090
+  source "$1"
+  set +a
+  if [[ -n "${GITHUB_APP_KEY:-}" && "$GITHUB_APP_KEY" != /* ]]; then
+    GITHUB_APP_KEY="$(cd "$(dirname "$1")" && pwd)/$GITHUB_APP_KEY"
+  fi
+fi
 
 REPO_URL="${REPO_URL:-}"
 AGENT_USER="${AGENT_USER:-agent}"
@@ -247,7 +264,8 @@ sudo systemctl enable agent-resume.service
 trap 'as_agent jarvis-discord notify "bootstrap.sh failed on $(hostname) at line $LINENO (exit $?)." || true' ERR
 
 log "Writing agent briefs"
-COMMON=$(sed "s|@GITHUB_ORG@|$GITHUB_ORG|; s|@AGENT_USER@|$AGENT_USER|" <<'COMMON_EOF'
+# read (not $(... <<EOF)) so every bash version parses this the same way.
+read -r -d '' COMMON <<'COMMON_EOF' || true
 You are running as the '@AGENT_USER@' user, which has passwordless sudo.
 Use sudo for system changes rather than asking me for a password.
 
@@ -282,7 +300,8 @@ GH_TOKEN=$(ghapp-token) gh ... because the token expires hourly.
 I review and merge. Never commit secrets: no API keys, tokens, .pem
 files, or .env files; add them to .gitignore first.
 COMMON_EOF
-)
+COMMON=${COMMON//@GITHUB_ORG@/$GITHUB_ORG}
+COMMON=${COMMON//@AGENT_USER@/$AGENT_USER}
 
 {
 cat <<'STAGE1_EOF'
