@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#
+# agent-resume: run at boot by agent-resume.service. If agent-reboot left a
+# marker, tell the owner we're back and hand off to agent-run, which
+# continues the bootstrap agent's Claude conversation (and its model-stage
+# logic) where it left off.
+
+set -uo pipefail
+
+CONF="${JARVIS_CONF:-$HOME/.config/jarvis}"
+MARK="$CONF/resume-pending"
+COUNT="$CONF/resume-count"
+MAX_RESUMES="${MAX_RESUMES:-5}"
+
+[[ -f "$MARK" ]] || exit 0
+reason=$(cat "$MARK")
+# Remove the marker before doing anything else, so a crash here can never
+# turn into a reboot/resume loop.
+rm -f "$MARK"
+
+# Discord may not be reachable the instant the network comes up.
+notify() {
+  for _ in 1 2 3 4 5 6; do
+    jarvis-discord notify "$1" && return 0
+    sleep 10
+  done
+}
+
+n=$(( $(cat "$COUNT" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$COUNT"
+if (( n > MAX_RESUMES )); then
+  notify "$(hostname) is back up, but the agent has already been resumed $MAX_RESUMES times. Not resuming again; check on it, then delete $COUNT."
+  exit 1
+fi
+
+gpu=$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1 | head -n 3)
+notify "$(hostname) is back up after reboot ($reason).
+nvidia-smi: ${gpu:-no output}
+Resuming Claude."
+
+echo "==> $(date "+%F %T") resuming after reboot: $reason"
+agent-run --resume "$reason" "${gpu:-none}"
+status=$?
+
+notify "Claude's resumed run on $(hostname) ended (exit $status)."

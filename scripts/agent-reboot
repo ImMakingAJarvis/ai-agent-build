@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#
+# agent-reboot: the only way the bootstrap agent reboots the box.
+#
+#   agent-reboot "NVIDIA driver installed, needs reboot to load"
+#
+# Asks the owner on Discord first. On approval it leaves a marker so
+# agent-resume.service continues the Claude conversation after boot,
+# then reboots. Exits 2 (printing the owner's reply) if not approved.
+
+set -euo pipefail
+
+CONF="${JARVIS_CONF:-$HOME/.config/jarvis}"
+reason="${*:-no reason given}"
+
+answer=$(jarvis-discord ask -choices "Reboot now,Not yet" \
+  "$(hostname) needs to reboot: $reason. The agent will resume automatically afterwards. OK?")
+
+shopt -s nocasematch
+if [[ ! "$answer" =~ ^(reboot now|reboot|yes|y|ok|go)$ ]]; then
+  echo "Reboot not approved. Owner replied: $answer"
+  exit 2
+fi
+
+printf '%s\n' "$reason" > "$CONF/resume-pending"
+sync
+jarvis-discord notify "Rebooting now. I'll message you when I'm back." || true
+sudo -n systemctl reboot
