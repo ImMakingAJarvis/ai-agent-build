@@ -41,7 +41,7 @@
 # storage next to the .pem, and pass its path. See bootstrap.env.example.
 # GITHUB_APP_KEY may then be relative to the env file's folder. Values are
 # copied onto this box, so the share isn't needed after bootstrap.
-#   ./bootstrap.sh /mnt/nas/jarvis/bootstrap.env
+#   bash /mnt/setup/setup/bootstrap.sh /mnt/setup/setup/bootstrap.env
 #
 # Optional:
 #   GITHUB_ORG        org the app is installed on and the agent may build
@@ -55,6 +55,10 @@
 #                       If the GPU isn't working afterwards it escalates to the
 #                       stage-2 model. Set to sonnet to skip the cheap pass.
 #   AGENT_STAGE2_MODEL  model for everything after that (default: sonnet)
+#   NAS_SHARE         SMB share to mount read-write at /mnt/jarvis for the
+#                     agent, e.g. //192.168.1.20/JarvissFolder. Needs
+#                     NAS_USER and NAS_PASSWORD (a NAS account limited to
+#                     that share). The password is kept root-only on the box.
 #
 # Run this as your own (sudo-capable) user, not as root. It only uses sudo
 # to set up the system and the agent user; the agent never runs as you.
@@ -105,6 +109,10 @@ GITHUB_APP_KEY=$(realpath "$GITHUB_APP_KEY")
 [[ -z "${ANTHROPIC_API_KEY:-}" ]] && die "Set ANTHROPIC_API_KEY first."
 [[ -z "${DISCORD_BOT_TOKEN:-}" ]] && die "Set DISCORD_BOT_TOKEN (see docs/discord.md)."
 [[ -z "${DISCORD_OWNER_ID:-}" ]] && die "Set DISCORD_OWNER_ID (your Discord user ID)."
+if [[ -n "${NAS_SHARE:-}" ]]; then
+  [[ "$NAS_SHARE" == //* ]] || die "NAS_SHARE must look like //host/share."
+  [[ -n "${NAS_USER:-}" && -n "${NAS_PASSWORD:-}" ]] || die "NAS_SHARE is set; also set NAS_USER and NAS_PASSWORD."
+fi
 
 log "Installing prerequisites"
 sudo apt-get update
@@ -128,6 +136,23 @@ sudo visudo -cf "$SUDOERS" >/dev/null || die "Generated sudoers rule is invalid.
 sudo install -m 440 "$SUDOERS" "/etc/sudoers.d/$AGENT_USER"
 rm "$SUDOERS"
 as_agent sudo -n true || die "Passwordless sudo for '$AGENT_USER' is not working."
+
+if [[ -n "${NAS_SHARE:-}" ]]; then
+  log "Mounting $NAS_SHARE at /mnt/jarvis"
+  sudo apt-get install -y cifs-utils
+  NAS_CRED=/etc/jarvis-nas.credentials
+  printf 'username=%s\npassword=%s\n' "$NAS_USER" "$NAS_PASSWORD" |
+    sudo sh -c 'umask 077; cat > "$1"' _ "$NAS_CRED"
+  sudo mkdir -p /mnt/jarvis
+  # fstab separates fields with spaces, so escape any in the share name.
+  FSTAB_LINE="$(printf '%s' "$NAS_SHARE" | sed 's/ /\\040/g') /mnt/jarvis cifs credentials=$NAS_CRED,uid=$AGENT_USER,gid=$AGENT_USER,file_mode=0660,dir_mode=0770,vers=3.0,_netdev,nofail 0 0"
+  { grep -v ' /mnt/jarvis cifs ' /etc/fstab || true; echo "$FSTAB_LINE"; } > /tmp/fstab.jarvis
+  sudo install -m 644 /tmp/fstab.jarvis /etc/fstab
+  rm /tmp/fstab.jarvis
+  sudo systemctl daemon-reload
+  mountpoint -q /mnt/jarvis || sudo mount /mnt/jarvis
+  as_agent test -w /mnt/jarvis || die "/mnt/jarvis is mounted but $AGENT_USER can't write to it. Check the NAS user's permissions."
+fi
 
 log "Installing Go $GO_VERSION"
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go$GO_VERSION "; then
@@ -302,6 +327,14 @@ files, or .env files; add them to .gitignore first.
 COMMON_EOF
 COMMON=${COMMON//@GITHUB_ORG@/$GITHUB_ORG}
 COMMON=${COMMON//@AGENT_USER@/$AGENT_USER}
+if [[ -n "${NAS_SHARE:-}" ]]; then
+  COMMON+="
+
+Network storage: my NAS share is mounted read-write at /mnt/jarvis (it
+comes back on its own after a reboot). Use it for things worth keeping
+off this box. setup/ in it is read-only and holds secrets: never copy
+from it into a repo, and don't try to change it."
+fi
 
 {
 cat <<'STAGE1_EOF'
