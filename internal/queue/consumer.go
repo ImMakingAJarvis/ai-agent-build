@@ -20,6 +20,11 @@ type Handler func(Message) error
 // pending rather than being discarded.
 var ErrQueuePaused = fmt.Errorf("queue paused")
 
+// ErrApprovalDenied is returned by the handler when a job's estimated cost
+// exceeds the approval threshold. The consumer leaves the message unacked so
+// it stays pending until manually approved via the dashboard or Discord.
+var ErrApprovalDenied = fmt.Errorf("approval denied: estimated cost exceeds threshold")
+
 // Consumer manages concurrent consumers on the three queues with manual ack and QoS.
 type Consumer struct {
 	conn    *Conn
@@ -109,6 +114,10 @@ func (c *Consumer) handleOne(queueName string, del amqp.Delivery) error {
 	if err := c.handler(msg); err != nil {
 		if err == ErrQueuePaused {
 			// Leave unacked — message stays pending in RabbitMQ.
+			return nil
+		}
+		if err == ErrApprovalDenied {
+			// Leave unacked — message stays pending for manual approval.
 			return nil
 		}
 		del.Nack(false, false) // do not requeue on handler error
