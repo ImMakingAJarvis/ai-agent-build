@@ -68,10 +68,13 @@ func (s *Scheduler) SetDepths(depths map[string]int) {
 		s.paused[VoiceQueue] = false
 		s.paused[CodingQueue] = false
 	} else {
-		// All idle.
+		// All idle — un-pause everything so the next job can run.
 		s.voiceActive.Store(0)
 		s.codingActive.Store(0)
 		s.backgroundActive.Store(0)
+		s.paused[VoiceQueue] = false
+		s.paused[CodingQueue] = false
+		s.paused[BackgroundQueue] = false
 	}
 }
 

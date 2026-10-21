@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
@@ -54,7 +55,30 @@ func run() error {
 	// Priority scheduler.
 	sched := queue.NewScheduler()
 
+	// Periodic queue-depth monitor: queries RabbitMQ for pending message
+	// counts and feeds them to the scheduler so it can adjust which queues
+	// are paused. Runs every 2 seconds.
+	stopDepth := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopDepth:
+				return
+			case <-ticker.C:
+				depths := getQueueDepths(conn)
+				sched.SetDepths(depths)
+			}
+		}
+	}()
+
 	// Consumer handler: processes one job.
+	// Evaluate queue depths once before starting, so the scheduler is in the
+	// right state from the first message.
+	initialDepths := getQueueDepths(conn)
+	sched.SetDepths(initialDepths)
+
 	handle := func(msg queue.Message) error {
 		// Check if this queue is paused by the scheduler.
 		if sched.IsPaused(msg.Type) {
@@ -107,6 +131,22 @@ func run() error {
 	<-sigCh
 
 	log.Printf("worker: shutting down")
+	close(stopDepth)
 	consumer.Stop()
 	return nil
+}
+
+// getQueueDepths queries RabbitMQ for the pending message count on each
+// managed queue. Returns a map of queue-name → depth.
+func getQueueDepths(conn *queue.Conn) map[string]int {
+	depths := make(map[string]int)
+	ch := conn.Channel()
+	for _, q := range queue.AllQueues {
+		get, err := ch.QueueInspect(q)
+		if err != nil {
+			continue
+		}
+		depths[q] = get.Messages
+	}
+	return depths
 }
