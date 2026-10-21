@@ -2,3 +2,6 @@
 *.pem
 .env
 *.env
+
+# Compiled binaries
+worker

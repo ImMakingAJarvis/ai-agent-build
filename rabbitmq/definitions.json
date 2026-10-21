@@ -1,0 +1,80 @@
+{
+  "users": [
+    {
+      "name": "jarvis",
+      "password": "jarvis-local",
+      "tags": "administrator"
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "tasks",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "voice",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-priority": 10
+      }
+    },
+    {
+      "name": "coding",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-priority": 5
+      }
+    },
+    {
+      "name": "background",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-priority": 1
+      }
+    }
+  ],
+  "bindings": [
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "voice",
+      "destination_type": "queue",
+      "routing_key": "voice.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "coding",
+      "destination_type": "queue",
+      "routing_key": "coding.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "background",
+      "destination_type": "queue",
+      "routing_key": "background.#",
+      "arguments": {}
+    }
+  ]
+}
