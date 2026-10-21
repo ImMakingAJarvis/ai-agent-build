@@ -147,7 +147,7 @@ Division of labor: the Phase 6 dashboard owns job-level views (queue, approvals,
 
 ## Queued jobs — Oct 21, 2026 (index)
 
-Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. J0.1-J0.8 were done by a Sonnet round on branch `phase-3-queue-agent-jobs`. J0.9 must land on that branch before the migration is run. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context.
+Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. J0.1-J0.8 were done by a Sonnet round on branch `phase-3-queue-agent-jobs`. J0.9 must land on that branch before the migration is run. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context. Order: J (queue, database), D0 (dashboard fix), E (record everything and show it in the UI, so history starts early), D1-D2 (bot daemon), R (reliable, responsive comms), D3-D8 (commands and chat), Q1.
 
 ### J0 — Make the queue the source of all work
 
@@ -179,13 +179,44 @@ Do these in order, one job per round. Each line names its job doc. Read only tha
 - [ ] **D0.2 — Fix the template error that cuts the page off; buffered render** · `docs/jobs/d0-dashboard.md`
 - [ ] **D0.3 — Dashboard and worker as systemd services; exactly one worker** · `docs/jobs/d0-dashboard.md`
 
-### D1-D8 — Two-way Discord conversation
+### E — Everything in the database, shown in the UI
+
+- [ ] **E1.1 — `events` and `rounds` tables** · `docs/jobs/e-activity-ui.md`
+- [ ] **E1.2 — `jarvis-event` CLI; `agent-run` records rounds, checkpoints and answers** · `docs/jobs/e-activity-ui.md`
+- [ ] **E1.3 — Per-round log files, linked from the database** · `docs/jobs/e-activity-ui.md`
+- [ ] **E1.4 — Worker and job state changes as events** · `docs/jobs/e-activity-ui.md`
+- [ ] **E1.5 — Every Discord message in and out as events** · `docs/jobs/e-activity-ui.md`
+- [ ] **E1.6 — System sampler: GPU, models, queues, services every 30s** · `docs/jobs/e-activity-ui.md`
+- [ ] **E2.1 — Dashboard "Now" panel: current round, job, model, VRAM, services** · `docs/jobs/e-activity-ui.md`
+- [ ] **E2.2 — Activity timeline page with filters** · `docs/jobs/e-activity-ui.md`
+- [ ] **E2.3 — Job detail page: events, output, PR, round log** · `docs/jobs/e-activity-ui.md`
+- [ ] **E2.4 — Rounds page with live log tail** · `docs/jobs/e-activity-ui.md`
+- [ ] **E2.5 — Discord conversation view** · `docs/jobs/e-activity-ui.md`
+- [ ] **E2.6 — Charts: VRAM and power, jobs per hour, duration per model** · `docs/jobs/e-activity-ui.md`
+- [ ] **E2.7 — Password on the dashboard** · `docs/jobs/e-activity-ui.md`
+
+### D1-D2 — Discord bot daemon
 
 - [ ] **D1.1 — Bot daemon with owner-only intake** · `docs/jobs/d-discord.md`
 - [ ] **D1.2 — `jarvis-bot.service`** · `docs/jobs/d-discord.md`
 - [ ] **D1.3 — Optional guild channel and Nathan's manual steps in the docs** · `docs/jobs/d-discord.md`
 - [ ] **D2.1 — Daemon routes answers to open `ask` questions over a local socket** · `docs/jobs/d-discord.md`
 - [ ] **D2.2 — `jarvis-discord ask` uses the socket, with fallback** · `docs/jobs/d-discord.md`
+
+### R — Reliable, responsive direct comms over Discord
+
+- [ ] **R1.1 — Survive disconnects: catch up missed DMs, dedupe, in order** · `docs/jobs/r-discord-reliability.md`
+- [ ] **R1.2 — Outbox with retry, 429 handling, no double posts** · `docs/jobs/r-discord-reliability.md`
+- [ ] **R1.3 — Watchdog and a REST-only "bot down" alert** · `docs/jobs/r-discord-reliability.md`
+- [ ] **R1.4 — Instant acknowledgement: reaction and typing within 1s** · `docs/jobs/r-discord-reliability.md`
+- [ ] **R1.5a — Measure fast-chat options while the GPU is busy; Nathan picks** · `docs/jobs/r-discord-reliability.md`
+- [ ] **R1.5b — Front-desk replies within 10s, brain answers follow** · `docs/jobs/r-discord-reliability.md`
+- [ ] **R1.6 — Talk to the running round (`>` messages via a Claude Code hook)** · `docs/jobs/r-discord-reliability.md`
+- [ ] **R1.7 — Progress pushes with `!verbose`** · `docs/jobs/r-discord-reliability.md`
+- [ ] **R1.8 — Reliability and latency check with Nathan** · `docs/jobs/r-discord-reliability.md`
+
+### D3-D8 — Discord commands, status, jobs, chat, memory
+
 - [ ] **D3.1 — Command parser and `!help`** · `docs/jobs/d-discord.md`
 - [ ] **D3.2 — `!pause jobs` and `!resume jobs`** · `docs/jobs/d-discord.md`
 - [ ] **D3.3 — `!pause build` and `!resume build`** · `docs/jobs/d-discord.md`
