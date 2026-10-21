@@ -1,5 +1,7 @@
 # Local AI Agent Build — Task List
 
+> **Work now lives in the queue (see the dashboard); this file is history.** Do not read it whole: it is large. Your job text comes from the queue.
+
 Oct 14, 2026 · @Nathan Meyers
 
 Hardware: RTX 4090 (24GB VRAM), 128GB system RAM, Ubuntu 24.04. Architecture: wake-word-triggered light model pinned in VRAM for voice/chat, heavy coding/background model offloaded into system RAM, RabbitMQ + Go listener for the priority task queue, Home Assistant Voice Preview Edition as the voice front end with on-device openWakeWord.
@@ -144,7 +146,7 @@ Added by Nathan's request. Do them in this order, one job per round (each on its
 
 ### J0 — Make the queue the source of all work
 
-- [ ] **Run build work from the queue instead of TASKS.md** (branch `phase-3-queue-agent-jobs`)
+- [x] **Run build work from the queue instead of TASKS.md** (branch `phase-3-queue-agent-jobs`)
     - Intent: once the queue and its view exist, all work (build work included) lives on the queue, and TASKS.md becomes history. Today it doesn't. The stage-3 brief (`STAGE3L` in `bootstrap.sh`, written to `~/.config/jarvis/stage3-local.txt`) still says "Read TASKS.md" and "Everything else in TASKS.md, in order", and `agent-run` starts every round from it. The worker cannot run build work either. In `cmd/worker/main.go` a local job is one tool-less `ollama.Generate` call whose output is discarded (`_, err := ...`). The API path logs "not yet implemented" and still marks the job completed. So the ~41 `bench-*` runs in history measured nothing.
     - Agent jobs: add a job kind for build work. The message carries `kind: "agent"`, `title`, `instructions` (the full job text including acceptance criteria), `branch`, `depends_on` (job IDs) and `driver` (`local` default, or `sonnet`). Running one means a Claude Code session with tools: `agent-local --dangerously-skip-permissions -p` for `local`, `claude --model "$AGENT_STAGE2_MODEL"` for `sonnet`. The prompt is the stage-3 rules (git, Discord, reboot) plus the job text. Store the transcript and output under `~/.local/share/jarvis/jobs/<id>/`, and record status, duration, model, PR URL (parsed from output or `gh pr list --head <branch>`) and a short summary in history.
     - Who runs them: the `agent-run` stage-3 loop. Each round, it takes the next ready agent job (highest priority, then oldest, with all `depends_on` done) and names it in the Discord checkpoint ("Next: D0 — Fix the dashboard poll… Local model / Sonnet / Skip / Stop"). Then it runs that job on the chosen driver and records the result. Typed instructions still apply to that round. Keep the Discord checkpoint between rounds, since that is how Nathan approves work. Run one agent job at a time: the GPU serves one sequence (`-np 1`).
