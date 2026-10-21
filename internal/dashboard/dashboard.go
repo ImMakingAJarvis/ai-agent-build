@@ -177,11 +177,7 @@ func (s *Server) readRecentJobs(limit int) []JobRecord {
 		all = append(all, rec)
 	}
 
-	if len(all) <= limit {
-		return all
-	}
-	// Return the most recent records. The last record for each job ID
-	// is the completed/failed state, so we deduplicate by ID keeping the last.
+	// Deduplicate by ID, keeping the last (completed/failed) record for each job.
 	byID := make(map[string]JobRecord)
 	for _, rec := range all {
 		byID[rec.ID] = rec

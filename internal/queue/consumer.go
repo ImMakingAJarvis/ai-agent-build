@@ -11,7 +11,14 @@ import (
 
 // Handler is called with each delivered job message.
 // Return an error to nack the message; the worker decides whether to requeue.
+// Return ErrQueuePaused to leave the message unacknowledged (it stays pending
+// in RabbitMQ until the queue is unpaused and the consumer reprocesses it).
 type Handler func(Message) error
+
+// ErrQueuePaused is returned by the handler when a queue is paused by the
+// priority scheduler. The consumer leaves the message unacked so it remains
+// pending rather than being discarded.
+var ErrQueuePaused = fmt.Errorf("queue paused")
 
 // Consumer manages concurrent consumers on the three queues with manual ack and QoS.
 type Consumer struct {
@@ -100,6 +107,10 @@ func (c *Consumer) handleOne(queueName string, del amqp.Delivery) error {
 	log.Printf("consumer: %s → job %s (type=%s, source=%s)", queueName, msg.ID, msg.Type, msg.Source)
 
 	if err := c.handler(msg); err != nil {
+		if err == ErrQueuePaused {
+			// Leave unacked — message stays pending in RabbitMQ.
+			return nil
+		}
 		del.Nack(false, false) // do not requeue on handler error
 		return fmt.Errorf("job %s: %w", msg.ID, err)
 	}

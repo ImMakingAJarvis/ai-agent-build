@@ -82,8 +82,8 @@ func run() error {
 	handle := func(msg queue.Message) error {
 		// Check if this queue is paused by the scheduler.
 		if sched.IsPaused(msg.Type) {
-			log.Printf("worker: queue %s is paused by scheduler, skipping", msg.Type)
-			return nil
+			log.Printf("worker: queue %s is paused by scheduler, leaving unacked", msg.Type)
+			return queue.ErrQueuePaused
 		}
 
 		// Check if local model is available.
