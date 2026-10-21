@@ -30,7 +30,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	specs := agentjob.Plan(string(md), time.Now().UTC(), strings.Split(*skip, ","))
+	specs := agentjob.Plan(".", string(md), time.Now().UTC(), strings.Split(*skip, ","))
 
 	dir := agentjob.DataDir()
 	store, err := agentjob.Open(dir)

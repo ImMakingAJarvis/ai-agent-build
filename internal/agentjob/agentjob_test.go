@@ -206,7 +206,7 @@ func ids(sp []Spec) []string {
 }
 
 func TestPlanOrderAndDeps(t *testing.T) {
-	sp := Plan(sample, time.Unix(0, 0), []string{"Phase 1"})
+	sp := Plan(".", sample, time.Unix(0, 0), []string{"Phase 1"})
 	got := strings.Join(ids(sp), ",")
 	want := "d0,d1,d2,q1,phase-2-write-benchmark-swap-sh-that-times-things,phase-2b-measure-idle-power,phase-2-write-scripts-pull-models-sh,phase-3-write-the-consumer"
 	if got != want {
@@ -231,7 +231,7 @@ func TestPlanOrderAndDeps(t *testing.T) {
 func TestMigrationTwiceAddsNothing(t *testing.T) {
 	s := newStore(t)
 	add := func() (n int) {
-		for _, sp := range Plan(sample, time.Now(), []string{"Phase 1"}) {
+		for _, sp := range Plan(".", sample, time.Now(), []string{"Phase 1"}) {
 			if ok, _ := s.Ingest(sp); ok {
 				n++
 			}
@@ -246,5 +246,104 @@ func TestMigrationTwiceAddsNothing(t *testing.T) {
 	}
 	if j, _ := s.Next(); j == nil || j.ID != "d0" {
 		t.Fatalf("next = %v", j)
+	}
+}
+
+// queued-sample mimics the "Queued jobs" index format with doc references
+// and dotted IDs including letter suffixes.
+const queuedSample = `# Tasks
+
+## Queued jobs — Oct 21
+
+### J0 — Queue
+- [ ] **J0.9 — Migration reads index** · ` + "`docs/jobs/j0-queue-work-source.md`" + `
+- [ ] **J0.10 — Job rules** · ` + "`docs/jobs/j0-queue-work-source.md`" + `
+
+### D0 — Dashboard
+- [ ] **D0.1 — Fix the poll** · ` + "`docs/jobs/d0-dashboard.md`" + `
+
+### E1 — Activity UI
+- [ ] **E1.1 — Show status** · ` + "`docs/jobs/e-activity-ui.md`" + `
+
+### R1 — Reliability
+
+Context for all R1 jobs: Discord bot comms.
+
+- [ ] **R1.5a — Ack timeout** · ` + "`docs/jobs/r-discord-reliability.md`" + `
+- [ ] **R1.5b — Reconnect** · ` + "`docs/jobs/r-discord-reliability.md`" + `
+
+### Q1 — Upgrade
+- [ ] **Q1.1 — Switch model** · ` + "`docs/jobs/q1-qwen38.md`" + `
+`
+
+func TestPlanDottedIDs(t *testing.T) {
+	sp := Plan(".", queuedSample, time.Unix(0, 0), nil)
+	if len(sp) == 0 {
+		t.Fatal("expected specs")
+	}
+	expectedIDs := []string{"j0.9", "j0.10", "d0.1", "e1.1", "r1.5a", "r1.5b", "q1.1"}
+	got := ids(sp)
+	if len(got) != len(expectedIDs) || !func() bool {
+		for i := range got {
+			if got[i] != expectedIDs[i] {
+				return false
+			}
+		}
+		return true
+	}() {
+		t.Fatalf("\n got %v\nwant %v", got, expectedIDs)
+	}
+	// Verify chain dependencies
+	for i := 1; i < len(sp); i++ {
+		if len(sp[i].DependsOn) != 1 || sp[i].DependsOn[0] != sp[i-1].ID {
+			t.Errorf("%s: depends_on = %v, want [%s]", sp[i].ID, sp[i].DependsOn, sp[i-1].ID)
+		}
+	}
+}
+
+func TestPlanDocInstructions(t *testing.T) {
+	sp := Plan("../..", queuedSample, time.Unix(0, 0), nil)
+	// J0.9 should have instructions from its doc section, not the index line
+	j09 := sp[0]
+	if !strings.Contains(j09.Instructions, "J0.9") {
+		t.Errorf("j0.9 instructions should mention J0.9: %q", j09.Instructions)
+	}
+	if !strings.Contains(j09.Instructions, "Background:") {
+		t.Errorf("j0.9 instructions should have background: %q", j09.Instructions)
+	}
+	if j09.Doc != "docs/jobs/j0-queue-work-source.md" {
+		t.Errorf("j0.9 doc = %q", j09.Doc)
+	}
+	// R1.5a and R1.5b should have different section content
+	r15a := sp[4]
+	r15b := sp[5]
+	if strings.Contains(r15a.Instructions, "R1.5a") && strings.Contains(r15b.Instructions, "R1.5b") {
+		// Good — each has its own section
+	} else {
+		t.Errorf("R1.5a/R1.5b should have distinct sections")
+	}
+}
+
+func TestReadDocSection(t *testing.T) {
+	// Read J0.9 section from the actual doc file
+	instr, doc := readDocSection("../..", "docs/jobs/j0-queue-work-source.md", "j0.9")
+	if instr == "" {
+		t.Fatal("expected instructions for j0.9")
+	}
+	if !strings.Contains(instr, "J0.9") {
+		t.Errorf("missing J0.9: %q", instr)
+	}
+	if doc != "docs/jobs/j0-queue-work-source.md" {
+		t.Errorf("doc = %q", doc)
+	}
+	// Non-existent section returns empty
+	empty, _ := readDocSection("../..", "docs/jobs/j0-queue-work-source.md", "zz999")
+	if empty != "" {
+		t.Errorf("expected empty for missing section, got: %q", empty)
+	}
+	// Non-existent file returns empty
+	empty2, _ := readDocSection("../..", "docs/jobs/no-such-file.md", "j0.9")
+	if empty2 != "" {
+		t.Errorf("expected empty for missing file, got: %q", empty2)
 	}
 }

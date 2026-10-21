@@ -1,6 +1,8 @@
 package agentjob
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,11 +13,69 @@ var (
 	itemRe   = regexp.MustCompile(`^- \[( |x)\] (.*)$`)
 	boldRe   = regexp.MustCompile(`^\*\*(.+?)\*\*`)
 	branchRe = regexp.MustCompile("\\(branch `([^`]+)`\\)")
-	codeRe   = regexp.MustCompile(`^\*{0,2}([A-Z]\d+)\b`)
+	codeRe   = regexp.MustCompile(`^\*{0,2}([A-Z]\d+(?:\.\d+[a-z]?)?)\b`)
 	slugRe   = regexp.MustCompile(`[^a-z0-9]+`)
+	docRe    = regexp.MustCompile("`docs/jobs/([^`]+)`")
 )
 
 const queuedSection = "Queued jobs"
+
+// readDocSection reads a job doc file and extracts the background paragraph
+// (text between H1 and first H2) plus the ## <ID> section for the given job ID.
+// Returns the combined instructions and the doc path. If the file or section
+// cannot be found, returns empty strings.
+func readDocSection(baseDir, docPath, id string) (instructions, doc string) {
+	data, err := os.ReadFile(filepath.Join(baseDir, docPath))
+	if err != nil {
+		return "", ""
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var background, section strings.Builder
+	inBackground := false
+	inSection := false
+	upperID := strings.ToUpper(id)
+
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "# "):
+			// H1 — title; next non-empty lines are background
+			inBackground = true
+			inSection = false
+			background.Reset()
+		case strings.HasPrefix(line, "## "):
+			inBackground = false
+			secID := strings.TrimPrefix(line, "## ")
+			// Match by uppercase ID at the start (e.g. "## J0.9" for id "j0.9")
+			if strings.HasPrefix(strings.ToUpper(secID), upperID) {
+				inSection = true
+				section.Reset()
+				section.WriteString(line + "\n")
+			} else {
+				inSection = false
+			}
+		case inBackground && strings.TrimSpace(line) != "":
+			background.WriteString(line + "\n")
+		case inSection:
+			section.WriteString(line + "\n")
+		}
+	}
+
+	// Only return background if we found a matching section
+	sec := strings.TrimSpace(section.String())
+	if sec == "" {
+		return "", ""
+	}
+
+	var combined strings.Builder
+	bg := strings.TrimSpace(background.String())
+	if bg != "" {
+		combined.WriteString("Background:\n")
+		combined.WriteString(bg + "\n\n")
+	}
+	combined.WriteString(sec)
+	return strings.TrimSpace(combined.String()), docPath
+}
 
 func slug(s string) string {
 	return strings.Trim(slugRe.ReplaceAllString(strings.ToLower(s), "-"), "-")
@@ -83,7 +143,7 @@ func parse(md string) []item {
 // H2 prefixes to leave out (work that is already installed and verified).
 // IDs are stable: the job code (d0, q1) for queued jobs, else a slug of
 // section and title. Earlier jobs get higher priority and earlier created_at.
-func Plan(md string, now time.Time, skipSections []string) []Spec {
+func Plan(baseDir, md string, now time.Time, skipSections []string) []Spec {
 	var queued, bench, rest []item
 	for _, it := range parse(md) {
 		if it.checked {
@@ -136,11 +196,28 @@ func Plan(md string, now time.Time, skipSections []string) []Spec {
 			id = base + "-" + strconv.Itoa(n)
 		}
 		seen[id] = true
-		text := it.text
+		// For queued jobs referencing a job doc, read the ## <ID> section
+		// from that doc file as instructions, instead of the index line.
+		instructions := it.text
 		if it.intro != "" {
-			text = "Section context: " + cut(it.intro, 3000) + "\n\n" + text
+			instructions = "Section context: " + cut(it.intro, 3000) + "\n\n" + instructions
 		}
-		sp := Spec{ID: id, Title: cut(title, 120), Instructions: text, Driver: "local", Source: "migrate"}
+		if dm := docRe.FindStringSubmatch(first); dm != nil && code != "" {
+			docPath := "docs/jobs/" + dm[1]
+			if sec, doc := readDocSection(baseDir, docPath, strings.ToLower(code)); sec != "" {
+				instructions = sec
+				sp := Spec{ID: id, Title: cut(title, 120), Instructions: instructions, Doc: doc, Driver: "local", Source: "migrate"}
+				if m := branchRe.FindStringSubmatch(it.text); m != nil {
+					sp.Branch = m[1]
+				}
+				if chain && len(specs) > 0 {
+					sp.DependsOn = []string{specs[len(specs)-1].ID}
+				}
+				specs = append(specs, sp)
+				return
+			}
+		}
+		sp := Spec{ID: id, Title: cut(title, 120), Instructions: instructions, Driver: "local", Source: "migrate"}
 		if m := branchRe.FindStringSubmatch(it.text); m != nil {
 			sp.Branch = m[1]
 		}

@@ -30,6 +30,7 @@ type Spec struct {
 	ID           string    `json:"id"`
 	Title        string    `json:"title"`
 	Instructions string    `json:"instructions"`
+	Doc          string    `json:"doc,omitempty"`        // path to job doc section
 	Branch       string    `json:"branch,omitempty"`
 	DependsOn    []string  `json:"depends_on,omitempty"`
 	Driver       string    `json:"driver,omitempty"` // local (default) or sonnet
