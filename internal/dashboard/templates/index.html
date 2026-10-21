@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS Queue Dashboard</title>
+<script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --fg: #c9d1d9;
+    --muted: #8b949e;
+    --border: #30363d;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --card: #161b22;
+    --card-hover: #1c2129;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 24px;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.4rem;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-bottom: 24px;
+  }
+  .section {
+    margin-bottom: 32px;
+  }
+  .section-title {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  /* Queue cards */
+  .queue-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  .queue-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .queue-card .name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin-bottom: 4px;
+  }
+  .queue-card .depth {
+    font-size: 2rem;
+    font-weight: 700;
+  }
+  .queue-card .label {
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+  .priority-voice { border-left: 3px solid var(--red); }
+  .priority-coding { border-left: 3px solid var(--yellow); }
+  .priority-background { border-left: 3px solid var(--blue); }
+
+  /* Status indicator */
+  .status-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .status-dot.healthy { background: var(--green); }
+  .status-dot.unhealthy { background: var(--red); }
+
+  /* Jobs table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:hover td { background: var(--card-hover); }
+  .status-completed { color: var(--green); }
+  .status-failed { color: var(--red); }
+  .status-running { color: var(--yellow); }
+  .model-badge {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.8rem;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+  }
+  .local-badge {
+    color: var(--green);
+    font-size: 0.7rem;
+    margin-left: 4px;
+  }
+  .api-badge {
+    color: var(--blue);
+    font-size: 0.7rem;
+    margin-left: 4px;
+  }
+  .error-text {
+    color: var(--red);
+    font-size: 0.75rem;
+    max-width: 200px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .timestamp {
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+  }
+  .empty-state {
+    color: var(--muted);
+    text-align: center;
+    padding: 40px 0;
+    font-size: 0.9rem;
+  }
+  .refresh-info {
+    color: var(--muted);
+    font-size: 0.7rem;
+    text-align: right;
+  }
+</style>
+</head>
+<body hx-get="/api/state" hx-trigger="every 5s" hx-swap="none">
+
+<div hx-get="/api/state" hx-trigger="every 5s" id="dashboard" hx-swap="outerHTML">
+  <h1>JARVIS Queue Dashboard</h1>
+  <p class="subtitle">
+    <span class="status-dot {{ if .OllamaHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
+    Ollama {{ if .OllamaHealthy }}healthy{{ else }}unreachable{{ end }}
+  </p>
+
+  <div class="section">
+    <div class="section-title">Queue Depths</div>
+    <div class="queue-row">
+      {{ range .Queues }}
+      <div class="queue-card priority-{{ .Name }}">
+        <div class="name">{{ .Name }}</div>
+        <div class="depth">{{ .Depth }}</div>
+        <div class="label">pending jobs</div>
+      </div>
+      {{ else }}
+      <div class="queue-card">
+        <div class="name">—</div>
+        <div class="depth">—</div>
+        <div class="label">RabbitMQ unreachable</div>
+      </div>
+      {{ end }}
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Recent Jobs</div>
+    {{ if .RecentJobs }}
+    <table>
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>ID</th>
+          <th>Type</th>
+          <th>Model</th>
+          <th>Queue</th>
+          <th>Started</th>
+          <th>Duration</th>
+          <th>Error</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range .RecentJobs }}
+        <tr>
+          <td class="{{ statusClass .Status }}">{{ .Status }}</td>
+          <td>{{ .ID }}</td>
+          <td>{{ .Type }}</td>
+          <td>
+            <span class="model-badge">{{ .Model }}</span>
+            {{ if .UseLocal }}<span class="local-badge">local</span>{{ else }}<span class="api-badge">api</span>{{ end }}
+          </td>
+          <td>{{ .Queue }}</td>
+          <td class="timestamp">{{ .StartedAt }}</td>
+          <td>{{ .Duration }}</td>
+          <td class="error-text" title="{{ .Error }}">{{ .Error }}</td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+    {{ else }}
+    <div class="empty-state">No jobs recorded yet.</div>
+    {{ end }}
+  </div>
+
+  <div class="refresh-info">Auto-refreshes every 5 seconds</div>
+</div>
+
+</body>
+</html>
