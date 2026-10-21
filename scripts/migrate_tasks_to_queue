@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Enqueue every unchecked TASKS.md item as an agent job (idempotent).
+# Needs the worker running to ingest them. Usage: scripts/migrate_tasks_to_queue [-dry-run]
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec go run ./cmd/jarvis-migrate -file TASKS.md "$@"

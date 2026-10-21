@@ -19,7 +19,19 @@ type Message struct {
 
 	// ModelOverride, when non-empty, overrides pickModel's routing decision.
 	ModelOverride string `json:"model_override,omitempty"`
+
+	// Kind is "" (a text job the worker runs itself) or "agent" (build work
+	// run by the agent-run loop through internal/agentjob).
+	Kind         string   `json:"kind,omitempty"`
+	Title        string   `json:"title,omitempty"`
+	Instructions string   `json:"instructions,omitempty"` // full job text incl. acceptance criteria
+	Branch       string   `json:"branch,omitempty"`
+	DependsOn    []string `json:"depends_on,omitempty"`   // job IDs that must be done first
+	Driver       string   `json:"driver,omitempty"`       // local (default) or sonnet
 }
+
+// KindAgent marks build work run with tools by a Claude Code session.
+const KindAgent = "agent"
 
 // Queue names match the RabbitMQ definitions.
 const (

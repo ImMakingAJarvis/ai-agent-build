@@ -1,5 +1,7 @@
 # Local AI Agent Build — Task List
 
+> **Work now lives in the queue (see the dashboard); this file is history.** Do not read it whole: it is large. Your job text comes from the queue.
+
 Oct 14, 2026 · @Nathan Meyers
 
 Hardware: RTX 4090 (24GB VRAM), 128GB system RAM, Ubuntu 24.04. Architecture: wake-word-triggered light model pinned in VRAM for voice/chat, heavy coding/background model offloaded into system RAM, RabbitMQ + Go listener for the priority task queue, Home Assistant Voice Preview Edition as the voice front end with on-device openWakeWord.

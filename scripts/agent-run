@@ -152,19 +152,39 @@ if (( resume )); then
   m=$([[ "$d" == local ]] && echo local || echo "$M2")
   run_claude "$m" 1 "$(resume_prompt "carry on with what you were doing, following the same rules as before.")"; status=$?
   exit_if_rebooting
+  # The round that rebooted was a queued job: record how it ended.
+  if [[ -f "$CONF/current-job" ]]; then
+    jarvis-jobs finish "$(cat "$CONF/current-job")" "$status" || true
+    rm -f "$CONF/current-job"
+  fi
 fi
 
 summary() {
   local prs
   prs=$(GH_TOKEN=$(ghapp-token 2>/dev/null) gh pr list --state open --limit 5 \
           --json number,title,url --jq '.[] | "#\(.number) \(.title) \(.url)"' 2>/dev/null)
-  printf 'The %s run on %s has ended (exit %s).\nOpen PRs:\n%s\n\nWho takes the next round? You can also type instructions for the local model.' \
+  printf 'The %s run on %s has ended (exit %s).\nOpen PRs:\n%s' \
     "$1" "$(hostname)" "$2" "${prs:-none}"
 }
 
+# Work comes from the queue: each round takes the next ready agent job
+# (jarvis-jobs next: highest priority, then oldest, dependencies done),
+# names it at the checkpoint, and runs it on the driver you choose.
 msg="${checkpoint:-$(summary "$(cat "$DRIVER" 2>/dev/null || echo agent)" "${status:-?}")}"
+round=0
 while :; do
-  if ! answer=$(jarvis-discord ask -choices "Local model,Sonnet,Stop" "$msg"); then
+  job_id=""; job_title=""
+  if next=$(jarvis-jobs next 2>/dev/null); then
+    job_id="${next%%$'\t'*}"; job_title="${next#*$'\t'}"
+    q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
+    choices="Local model,Sonnet,Skip,Stop"
+  else
+    q="No ready jobs in the queue. Type instructions, or Stop."
+    choices="Stop"
+  fi
+  if ! answer=$(jarvis-discord ask -choices "$choices" "$msg
+
+$q"); then
     echo "==> couldn't reach Discord; retrying in 5 minutes"
     sleep 300
     continue
@@ -175,22 +195,27 @@ while :; do
     stop)    shopt -u nocasematch
              notify "Stopped. Run agent-run as $(whoami) on $(hostname) to pick it up again."
              exit 0 ;;
+    skip)    shopt -u nocasematch
+             [[ -n "$job_id" ]] && jarvis-jobs skip "$job_id"
+             msg="Skipped ${job_id:-nothing}."
+             continue ;;
     sonnet)  d=sonnet; note="" ;;
     "local model"|local) d=local; note="" ;;
     *)       d=local; note="$answer" ;;
   esac
   shopt -u nocasematch
 
-  echo "$d" > "$DRIVER"
-  if [[ "$d" == local ]]; then
-    p=$(cat "$CONF/stage3-local.txt")
-    [[ -n "$note" ]] && p+="
-
-Instructions from me for this round (they take priority): $note"
-    run_claude local 0 "$p"; status=$?
-  else
-    run_claude "$M2" 0 "$(cat "$CONF/stage3-sonnet.txt")"; status=$?
+  if [[ -z "$job_id" ]]; then
+    msg="No job to run, and typed instructions need a queued job. Add one with jarvis-enqueue or the migration script."
+    continue
   fi
-  exit_if_rebooting
+
+  echo "$d" > "$DRIVER"
+  echo "$job_id" > "$CONF/current-job"
+  round=$((round + 1))
+  echo "==> $(date '+%F %T') job $job_id on $d (round $round)"
+  jarvis-jobs run "$job_id" -driver "$d" -round "$(date +%s)-$round" -note "$note"; status=$?
+  exit_if_rebooting   # keep current-job: agent-resume records it after the reboot
+  rm -f "$CONF/current-job"
   msg=$(summary "$d" "$status")
 done

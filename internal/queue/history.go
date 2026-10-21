@@ -29,6 +29,12 @@ type JobRecord struct {
 	ActualCost    float64 `json:"actual_cost,omitempty"`      // $ billed after dispatch
 	InputTokens   int     `json:"input_tokens,omitempty"`     // estimated input tokens
 	OutputTokens  int     `json:"output_tokens,omitempty"`    // estimated output tokens
+	// Agent jobs and stored text output.
+	Kind    string `json:"kind,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Driver  string `json:"driver,omitempty"`
+	PRURL   string `json:"pr_url,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // History records job lifecycle events to a JSONL file.
@@ -147,3 +153,6 @@ func (h *History) write(rec JobRecord) {
 func (h *History) Path() string {
 	return filepath.Join(h.dir, "jobs.jsonl")
 }
+
+// Dir returns the data directory (jobs.jsonl and the job store live here).
+func (h *History) Dir() string { return h.dir }

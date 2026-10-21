@@ -1,0 +1,105 @@
+// jarvis-jobs is how the agent-run loop works with queued agent jobs.
+//
+//	jarvis-jobs list
+//	jarvis-jobs next                       print "<id>\t<title>"; exit 1 if none ready
+//	jarvis-jobs run <id> [-driver local|sonnet] [-round N] [-note TEXT]
+//	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
+//	jarvis-jobs skip <id> | requeue <id> | show <id>
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
+)
+
+func die(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "jarvis-jobs: "+format+"\n", a...)
+	os.Exit(2)
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		die("usage: jarvis-jobs list|next|run|finish|skip|requeue|show")
+	}
+	store, err := agentjob.Open(agentjob.DataDir())
+	if err != nil {
+		die("%v", err)
+	}
+	cmd, args := os.Args[1], os.Args[2:]
+	switch cmd {
+	case "list":
+		store.Recover()
+		jobs, _ := store.List()
+		for _, j := range jobs {
+			fmt.Printf("%-10s %-40s %s %s\n", j.Status, j.ID, j.Title, j.PRURL)
+		}
+	case "next":
+		j, err := store.Next()
+		if err != nil {
+			die("%v", err)
+		}
+		if j == nil {
+			os.Exit(1)
+		}
+		fmt.Printf("%s\t%s\n", j.ID, j.Title)
+	case "show":
+		if len(args) != 1 {
+			die("show <id>")
+		}
+		j, err := store.Get(args[0])
+		if err != nil {
+			die("%v", err)
+		}
+		fmt.Printf("%s — %s\nstatus: %s\n\n%s\n", j.ID, j.Title, j.Status, j.Instructions)
+	case "skip", "requeue":
+		if len(args) != 1 {
+			die("%s <id>", cmd)
+		}
+		st := agentjob.State{Status: agentjob.Ready}
+		if cmd == "skip" {
+			st = agentjob.State{Status: agentjob.Skipped}
+		}
+		if err := store.SetStatus(args[0], st); err != nil {
+			die("%v", err)
+		}
+	case "run":
+		fs := flag.NewFlagSet("run", flag.ExitOnError)
+		driver := fs.String("driver", "local", "local or sonnet")
+		round := fs.String("round", "", "round label")
+		note := fs.String("note", "", "typed instructions for this round")
+		if len(args) < 1 {
+			die("run <id> [flags]")
+		}
+		fs.Parse(args[1:])
+		r := runner(store)
+		r.Tee = os.Stdout
+		j, err := r.Run(context.Background(), args[0], *round, *driver, *note)
+		fmt.Printf("\n==> job %s %s %s\n", j.ID, j.Status, j.PRURL)
+		if err != nil {
+			os.Exit(1)
+		}
+	case "finish":
+		if len(args) != 2 {
+			die("finish <id> <exit-code>")
+		}
+		var code int
+		fmt.Sscan(args[1], &code)
+		j, _ := runner(store).Finish(args[0], code, "")
+		fmt.Printf("==> job %s %s %s\n", j.ID, j.Status, j.PRURL)
+	default:
+		die("unknown command %q", cmd)
+	}
+}
+
+func runner(store *agentjob.Store) *agentjob.Runner {
+	h, err := queue.NewHistory()
+	if err != nil {
+		die("history: %v", err)
+	}
+	return &agentjob.Runner{Store: store, History: h}
+}

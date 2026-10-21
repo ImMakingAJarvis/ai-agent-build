@@ -17,6 +17,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
@@ -94,6 +95,7 @@ type DashboardState struct {
 	Queues        []QueueDepth  `json:"queues"`
 	PendingQueues []PendingQueue `json:"pending_queues"`
 	RecentJobs    []JobRecord   `json:"recent_jobs"`
+	AgentJobs     []agentjob.Job `json:"agent_jobs"` // build work: ready, claimed, running, done, failed
 	TotalCost     float64       `json:"total_cost"`     // Running total of estimated costs for API jobs
 	APICount      int           `json:"api_job_count"`  // Number of API-dispatched jobs
 	LocalCount    int           `json:"local_job_count"` // Number of local jobs
@@ -236,7 +238,13 @@ func (s *Server) gatherState() DashboardState {
 		}
 	}
 
+	var agentJobs []agentjob.Job
+	if st, err := agentjob.Open(filepath.Dir(s.historyPath)); err == nil {
+		agentJobs, _ = st.List()
+	}
+
 	return DashboardState{
+		AgentJobs:     agentJobs,
 		OllamaHealthy: healthy,
 		Queues:        depths,
 		PendingQueues: pending,
