@@ -2,7 +2,10 @@ module github.com/ImMakingAJarvis/ai-agent-build
 
 go 1.26.0
 
-require github.com/bwmarrin/discordgo v0.29.0
+require (
+	github.com/bwmarrin/discordgo v0.29.0
+	github.com/rabbitmq/amqp091-go v1.16.0
+)
 
 require (
 	github.com/gorilla/websocket v1.5.3 // indirect
