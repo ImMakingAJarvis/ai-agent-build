@@ -61,7 +61,7 @@ A Sonnet round started at 16:00 on Oct 21 on all of J0. Check `gh pr list --stat
 
 - Branch: `phase-3-queue-agent-jobs` (the J0 PR). First rebase it onto `main`. On the `TASKS.md` conflict, keep main's version: main replaced the long Oct 21 section with this index and ticked J0.1-J0.8.
 - File: `internal/agentjob/migrate.go` and its test only.
-- Change `codeRe` so dotted IDs stay whole: `D0.1` must give ID `d0.1`, not `d0`. Today `^\*{0,2}([A-Z]\d+)\b` stops at the dot, so every job in a group collides.
+- Change `codeRe` so dotted IDs stay whole, including a letter suffix: `D0.1` must give `d0.1` and `R1.5a` must give `r1.5a`. Something like `^\*{0,2}([A-Z]\d+(?:\.\d+[a-z]?)?)\b`. Today `^\*{0,2}([A-Z]\d+)\b` stops at the dot, so every job in a group collides.
 - For index lines that name a job doc (`` · `docs/jobs/<file>.md` ``), set the job's instructions to that job's own `## <ID> — …` section from the doc, plus the doc's background paragraph at the top, instead of the whole index line. Store the doc path in the job.
 - Ticked lines (`- [x]`) are skipped, as today.
 - Done when: a test against main's `TASKS.md` and `docs/jobs/` gives unique IDs (`j0.9` … `e1.1` … `r1.5a`, `r1.5b` … `q1.3`) in index order, each with only its own doc section as instructions; a second run adds nothing; `go test ./...` passes.
