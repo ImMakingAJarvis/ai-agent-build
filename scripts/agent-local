@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#
+# agent-local: run Claude Code on the local Ollama model instead of the
+# Anthropic API. Same tools, same brief, same jarvis-discord/agent-reboot
+# helpers; only the model behind it changes.
+#
+#   agent-local [claude args...]   e.g. agent-local -p "hello"
+#   agent-local check              prove the local model can drive Claude
+#                                  Code's tools (exit 0 = it can)
+#
+# Reads $CONF/local.env, written by the stage-2 (Sonnet) setup run:
+#   LOCAL_MODEL        Ollama model that makes decisions (the "brain")
+#   LOCAL_CODER_MODEL  Ollama model for bulk coding; empty = same as brain
+#   OLLAMA_URL         default http://localhost:11434
+#
+# When the coder differs from the brain, a "coder" subagent is defined
+# that runs on it. Claude Code subagents pick models by tier alias, so the
+# sonnet/opus tiers are mapped to the coder and haiku (quick background
+# calls) to the brain. Nothing here talks to the Anthropic API.
+
+set -euo pipefail
+
+CONF="${JARVIS_CONF:-$HOME/.config/jarvis}"
+[[ -r "$CONF/local.env" ]] || { echo "agent-local: $CONF/local.env not found (stage 2 writes it)" >&2; exit 1; }
+# shellcheck disable=SC1091
+source "$CONF/local.env"
+[[ -n "${LOCAL_MODEL:-}" ]] || { echo "agent-local: LOCAL_MODEL not set in $CONF/local.env" >&2; exit 1; }
+CODER="${LOCAL_CODER_MODEL:-$LOCAL_MODEL}"
+
+if [[ "${1:-}" == "check" ]]; then
+  dir=$(mktemp -d)
+  token="jarvis-$RANDOM$RANDOM"
+  echo "==> asking $LOCAL_MODEL to write $token to $dir/proof.txt via the Bash tool"
+  ( cd "$dir" && timeout 900 "$0" --dangerously-skip-permissions -p \
+      "Use the Bash tool to run exactly this command: echo $token > proof.txt
+Then reply with just the word done." ) || true
+  if [[ "$(cat "$dir/proof.txt" 2>/dev/null)" == "$token" ]]; then
+    echo "==> OK: $LOCAL_MODEL can drive Claude Code"
+    rm -rf "$dir"
+    exit 0
+  fi
+  echo "==> FAILED: no proof file written (left $dir for inspection)" >&2
+  exit 1
+fi
+
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_BASE_URL="${OLLAMA_URL:-http://localhost:11434}"
+export ANTHROPIC_AUTH_TOKEN=ollama
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$LOCAL_MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$CODER"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$CODER"
+
+args=(--model "$LOCAL_MODEL")
+if [[ "$CODER" != "$LOCAL_MODEL" ]]; then
+  args+=(--agents "$(jq -nc --arg m "$CODER" '{coder: {
+    description: "Writes and edits code for a well-specified task (\($m)). Use it for bulk or boilerplate coding; give it the files, the goal and how to test.",
+    prompt: "You are the coding model. Do exactly the coding task you are given, run the relevant build/tests, and report what you changed and the test result. Do not commit, push, or message anyone.",
+    model: "sonnet"}}')")
+fi
+exec claude "${args[@]}" "$@"

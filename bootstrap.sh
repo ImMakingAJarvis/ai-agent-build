@@ -20,9 +20,13 @@
 #   5. Build jarvis-discord (cmd/jarvis-discord in the repo) so the agent
 #      can notify you and ask you questions over Discord DMs while it works.
 #      See docs/discord.md for creating the bot.
-#   6. Run the agent in two stages via agent-run: driver/CUDA on a cheap
-#      model (haiku), escalating to sonnet if that fails, then the rest on
-#      sonnet.
+#   6. Run the agent in stages via agent-run: driver/CUDA on a cheap
+#      model (haiku), escalating to sonnet if that fails; then sonnet sets
+#      up a local "brain" model on Ollama that can drive Claude Code
+#      itself (agent-local) and stops. You get a Discord checkpoint to look
+#      it over, and from then on the local model runs the build (pulling
+#      the coding model, then the queue system) in rounds you approve on
+#      Discord, with sonnet on call when it gets stuck.
 #   7. Install agent-reboot and agent-resume.service so the agent can
 #      reboot (e.g. after the NVIDIA driver install) and pick up its
 #      conversation where it left off once the box is back up.
@@ -248,7 +252,7 @@ as_agent jarvis-discord notify "Bootstrap started on $(hostname). Handing over t
   die "Could not DM you on Discord. Check the token, your user ID, and that the bot shares a server with you."
 
 log "Setting up resume-after-reboot"
-sudo install -m 755 "$PROJECT_DIR/scripts/agent-reboot" "$PROJECT_DIR/scripts/agent-resume" "$PROJECT_DIR/scripts/agent-run" /usr/local/bin/
+sudo install -m 755 "$PROJECT_DIR/scripts/agent-reboot" "$PROJECT_DIR/scripts/agent-resume" "$PROJECT_DIR/scripts/agent-run" "$PROJECT_DIR/scripts/agent-local" /usr/local/bin/
 
 # jarvis-discord ask can block for hours waiting on me; lift the Bash
 # tool's 10-minute cap so those calls aren't killed.
@@ -260,7 +264,7 @@ AGENT_PATH="/usr/local/go/bin:$AGENT_HOME/go/bin:/usr/local/sbin:/usr/local/bin:
 printf 'ANTHROPIC_API_KEY=%s\nPATH=%s\nBASH_MAX_TIMEOUT_MS=%s\nAGENT_STAGE1_MODEL=%s\nAGENT_STAGE2_MODEL=%s\n' \
   "$ANTHROPIC_API_KEY" "$AGENT_PATH" "$BASH_MAX_TIMEOUT_MS" \
   "$AGENT_STAGE1_MODEL" "$AGENT_STAGE2_MODEL" | agent_write "$JCONF/agent.env"
-as_agent rm -f "$JCONF/resume-pending" "$JCONF/resume-count" "$JCONF/stage"
+as_agent rm -f "$JCONF/resume-pending" "$JCONF/resume-count" "$JCONF/stage" "$JCONF/driver"
 as_agent mkdir -p "$AGENT_HOME/.local/state/jarvis"
 
 sudo tee /etc/systemd/system/agent-resume.service >/dev/null <<UNIT_EOF
@@ -359,21 +363,142 @@ printf '%s\n' "$COMMON"
 
 {
 cat <<'STAGE2_EOF'
-You are continuing a local AI agent build on an Ubuntu machine. STAGE 1
-(NVIDIA driver + CUDA) is done and nvidia-smi works; confirm that quickly
-and move on. Read TASKS.md for the full task list. Install Ollama and
-pull the coding model, stand up RabbitMQ, build the Go listener, then
-continue through voice integration and sandboxing. Once Ollama is up,
-delegate bulk/low-stakes coding to it to conserve my API usage.
+You are continuing a local AI agent build on an Ubuntu machine (RTX 4090
+24GB VRAM, 128GB RAM). STAGE 1 (NVIDIA driver + CUDA) is done and
+nvidia-smi works; confirm that quickly and move on. TASKS.md is the full
+task list, for context.
+
+This is STAGE 2, and it is only this: get a local model running that can
+take over your job. From stage 3 on, a local model (the "brain") runs
+this same Claude Code harness through Ollama's Anthropic-compatible API,
+using the same tools, jarvis-discord and agent-reboot, and drives the
+rest of the build, delegating code-writing to a coding model. Your job
+is to set that up and prove it works, so the API is only needed when the
+local model gets stuck.
+
+1. Install Ollama as a systemd service that survives reboots, via
+   scripts/install_ollama.sh as described in TASKS.md Phase 2 (verify it
+   listens on localhost:11434). It must be recent enough to serve the
+   Anthropic Messages API (/v1/messages; v0.14.0 or later).
+2. Choose the brain model. It must: call tools reliably through Claude
+   Code (that is what makes decisions possible), run with a context
+   window of at least 64K tokens (Claude Code's own prompt is large), and
+   fit fully in VRAM at that context, KV cache included. The light model
+   in TASKS.md (qwen3.6:27b) is the first candidate; check what is
+   actually in the Ollama library today.
+3. Decide whether the brain can also be the coding model, or whether a
+   separate coding model (TASKS.md suggests qwen3-coder-next, offloaded to
+   system RAM) is worth it. Recommend one; do not pull a separate coding
+   model, the brain does that in stage 3 after I agree.
+4. Write a Modelfile for the brain in the repo (models/) that sets the
+   context length, create it in Ollama, and keep it loaded in VRAM
+   (keep-alive forever for now; the idle unloader comes later in Phase 3).
+5. Write ~/.config/jarvis/local.env with exactly these lines:
+     LOCAL_MODEL=<the Ollama name of the brain>
+     LOCAL_CODER_MODEL=<coding model's Ollama name, or empty for same>
+6. Run `agent-local check` until it passes. It runs a Claude Code session
+   on the brain and makes it write a file with the Bash tool. If it
+   fails, look at why (context too small, tool-call format, model too
+   weak) and fix it; try another model if you must. If you cannot get it
+   to pass after a few honest attempts, ask me on Discord.
+7. Write docs/local-brain.md for me: what you installed and where, which
+   models and why (including the coding-model recommendation), context
+   length, VRAM use (ollama ps, nvidia-smi), how to run agent-local
+   myself, and how to undo it all. Commit everything on branch
+   phase-2-local-brain and open a PR.
+
+Then stop. Do not start on anything else. agent-run checks the result
+and messages me; I decide when the local model takes over.
 
 STAGE2_EOF
 printf '%s\n' "$COMMON"
 } | agent_write "$JCONF/stage2.txt"
 
+{
+cat <<'STAGE3L_EOF'
+You are the local model running this AI agent build on an Ubuntu machine
+(RTX 4090, 128GB RAM). Sonnet set you up and handed the build over to
+you; I approved it. You make the decisions now. Read docs/local-brain.md
+and TASKS.md, and run `GH_TOKEN=$(ghapp-token) gh pr list --state all`
+to see what is already done or waiting for my review.
+
+Do one round of work, then stop:
+- If ~/.config/jarvis/local.env names a separate LOCAL_CODER_MODEL that
+  `ollama list` doesn't show yet, the round is: write
+  scripts/pull_models.sh (TASKS.md Phase 2), pull it with a Modelfile
+  that lets it offload to system RAM, and confirm it answers a prompt
+  without pushing you out of VRAM.
+- Otherwise, take the next unfinished item in this order (TASKS.md has
+  the detail for each):
+  1. Phase 3: RabbitMQ, the Go worker and the queue. From the very first
+     job, the worker records start, finish, model and duration for every
+     job, so history is viewable later.
+  2. The queue view (first slice of Phase 6) BEFORE any other job is
+     queued: jobs waiting, how long each has run, when done, which model.
+     Past jobs must show up too.
+  3. Only then queue the remaining jobs: the Phase 2 benchmarks and the
+     Phase 2b conversation / always-on benchmark.
+  4. Phase 3b: a slot-capable inference engine (llama.cpp server or
+     vLLM) with a reserved priority slot for my conversation and other
+     slots for background work, driven by the Go worker.
+  5. Everything else in TASKS.md, in order.
+  Skip anything that needs hardware or accounts you don't have, and list
+  it in the PR.
+
+Engine switch rules (Phase 3b): Ollama stays until the new engine has
+proven itself. Only one engine can hold the 27B in VRAM at a time, so
+test the new engine with a small model first, including slot save/restore
+or vLLM's swap, and check current docs rather than assuming a feature
+works. For the real switchover, ask me on Discord first, notify me before
+going quiet, unload Ollama's copy, start the new engine and confirm it
+answers. If it fails, unload it and restart Ollama. This is your own
+brain, so leave a way back that works without you.
+
+How to work:
+- Plan first, then build in small steps. If a "coder" subagent is
+  available, hand it each well-specified coding task (files, goal, how to
+  test) and review what it did; do the planning, reviewing, testing and
+  committing yourself.
+- Build and test as you go (go build ./..., go test ./...). Do not open a
+  PR for code that does not build.
+- Finish the round with a pushed branch, an open PR that says what was
+  done, what was skipped and what to check, and a jarvis-discord notify
+  with the PR link. Then end your run; I pick who does the next round.
+- If you are stuck on the same problem after three tries, say so on
+  Discord with what you tried and end the run. I can hand it to Sonnet.
+
+STAGE3L_EOF
+printf '%s\n' "$COMMON"
+} | agent_write "$JCONF/stage3-local.txt"
+
+{
+cat <<'STAGE3S_EOF'
+You are Sonnet, stepping in on a local AI agent build on an Ubuntu
+machine that a local model (see docs/local-brain.md) normally runs. I
+handed you this round, usually because the local model got stuck.
+
+Find out where things stand: TASKS.md,
+`GH_TOKEN=$(ghapp-token) gh pr list --state all`, the branches in the
+repo, the end of ~/.local/state/jarvis/agent.log if it exists, and my
+recent Discord messages if they explain why. Then do one round: fix what
+the local model got stuck on, or if nothing is stuck, the next
+unfinished phase. Leave it in a state the local model can continue from.
+For bulk boilerplate you may delegate to it with
+`agent-local --dangerously-skip-permissions -p "<task>"` to save API usage.
+
+Finish with a pushed branch, an open PR, and a jarvis-discord notify
+with the link and a line on what the local model should watch out for.
+Then end your run.
+
+STAGE3S_EOF
+printf '%s\n' "$COMMON"
+} | agent_write "$JCONF/stage3-sonnet.txt"
+
 # Run the staged agent as the agent user, with the same environment the
 # resume service gives it after a reboot.
 agent_status=0
-as_agent bash -c 'set -a; source "$1"; set +a; cd "$2" && exec agent-run' \
-  _ "$JCONF/agent.env" "$PROJECT_DIR" || agent_status=$?
+# Output is also appended to agent.log, where a later round can read it.
+as_agent bash -c 'set -o pipefail; set -a; source "$1"; set +a; cd "$2" && agent-run 2>&1 | tee -a "$3"' \
+  _ "$JCONF/agent.env" "$PROJECT_DIR" "$AGENT_HOME/.local/state/jarvis/agent.log" || agent_status=$?
 as_agent jarvis-discord notify "Claude Code finished its bootstrap run on $(hostname) (exit $agent_status)." || true
 exit "$agent_status"

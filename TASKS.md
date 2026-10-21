@@ -21,7 +21,21 @@ Hardware: RTX 4090 (24GB VRAM), 128GB system RAM, Ubuntu 24.04. Architecture: wa
 - [ ] Write `scripts/check_nvme_speed.sh` wrapping `fio` or `dd` to measure sequential read throughput and flag if below a threshold (e.g. 2 GB/s) needed for acceptable swap latency
 - [ ] Write a health-check endpoint/script that confirms both models respond to a trivial prompt via the Ollama API
 
+## Phase 2b — Conversation & always-on benchmark
+
+Goal: decide which model is the always-ready talking agent and Home Assistant brain, and whether a tiny always-on model is needed at all. Idea: keep one model loaded in VRAM but idle, triggered by a wake word, instead of loading it on demand. These are jobs for the queue: queue them after the queue view (Phase 6, first slice) exists.
+
+- [ ] Measure idle power draw of the whole GPU with the candidate model loaded in VRAM but not generating, versus generating. Check whether a separate tiny always-on model is worth the extra complexity
+- [ ] Measure model load time from NVMe to confirm it is too slow to do after the wake word, so the model stays resident
+- [ ] Measure wake-to-first-word latency stage by stage: speech to text, model time to first token (thinking off), and text to speech start. Target roughly one to three seconds
+- [ ] Compare thinking off versus thinking on for conversation, since thinking mode can add many seconds before the first word
+- [ ] Build a set of voice-style test tasks: Home Assistant tool calls, follow-up questions, multi-turn chat, and short answers. Have Claude Sonnet grade each model's responses
+- [ ] Ask whether the best Qwen is close enough to top-tier reasoning to be the primary always-on AI managing Home Assistant, with the heavy coder swapped in only for queued jobs
+- [ ] Keep the wake word source swappable: Home Assistant Voice Preview Edition now, a custom ESP32 mic node with openWakeWord or microWakeWord later, both feeding the same speech to text, model, and text to speech pipeline
+
 ## Phase 3 — Queue & Orchestration (coding tasks for Cursor)
+
+**Build order:** after RabbitMQ and the worker, the very next thing built is the queue view (Phase 6, first slice), before any other job is queued. From the first job, the worker records start time, finish time, model and duration for every job, so history is already there once the view exists. Only after the view is up are the remaining jobs (benchmarks and the rest) added to the queue.
 
 - [ ] Write `docker-compose.yml` for RabbitMQ with a management-plugin image, persistent volume, and a declared `tasks` exchange plus `voice`, `coding`, and `background` queues bound to it
 - [ ] Define the job message schema (JSON): `id`, `type`, `priority`, `payload`, `created_at`, `source` — write it as a Go struct in `internal/queue/message.go`
@@ -37,6 +51,23 @@ Hardware: RTX 4090 (24GB VRAM), 128GB system RAM, Ubuntu 24.04. Architecture: wa
 - [ ] Write `internal/router/cost_estimate.go`: before dispatching any job to a paid API (Sonnet or Opus), estimate token usage/cost from the task description and model
 - [ ] Write an approval gate: if estimated cost exceeds a configurable threshold (env var, default e.g. $1), block dispatch and require explicit approval (CLI prompt or notification) before the job runs
 - [ ] Log every API-dispatched job's estimated vs. actual cost for later review
+
+## Phase 3b — Inference engine & slots
+
+Goal: one loaded model with several slots. One slot is reserved at top priority for my conversation; the other slots run background work (coding and the rest). The Go worker is the traffic cop: it sends each request to a slot, and pauses and restores jobs. No Slurm needed. The engine does the heavy lifting.
+
+How it works: the weights stay in VRAM; what changes per job is the context (KV cache). Pausing a job means moving its KV cache to system RAM (or disk), running something else against the same loaded weights, then restoring it and continuing from the exact token. llama.cpp's server has slots with save/restore; vLLM swaps a paused request's cache to CPU RAM itself, so the worker mostly sets priorities there.
+
+Engine staging: Ollama first, to get Qwen alive during boot. Then, with me in the loop, set up a slot-capable engine (llama.cpp server is lighter and reads the same quantized files; vLLM is heavier to set up but least work to run). Verify current feature support and versions yourself rather than assuming; slot save/restore smoothness in particular is unverified.
+
+- [ ] Research llama.cpp server vs vLLM on the 4090 for this design and report a recommendation on Discord before committing
+- [ ] Test the new engine with a small model first (it fits next to the loaded brain): prove it serves, that slots work, and that a job's cache can be saved/swapped out and restored without recomputing
+- [ ] Swap rule: only one engine can hold the 27B in VRAM at a time. For the real switchover, ask me on Discord first, unload Ollama's copy, start the new engine, confirm it answers. If it fails, unload the new engine and restart Ollama. Keep Ollama installed as the rollback until the new engine has proven itself
+- [ ] Announce the switch on Discord (and a home speaker if available) before going quiet, since the brain is offline during the swap
+- [ ] Reserve slot 0 for my conversation at top priority; the remaining slots take coding and background jobs
+- [ ] Worker: route each job to a slot, pause a background job (save its cache to RAM/disk) when my request needs room, restore and continue it afterwards
+- [ ] Expose slot state (job, model, runtime, queue depth) as metrics from the worker for the dashboard and Grafana
+- [ ] Optional small always-on "front desk" model (a 4B or 8B at 4-bit, or on CPU if VRAM is tight) that answers chat and voice instantly, hands heavy work to the queue, and can see how things are going (queue, jobs per slot, what is loading), fed by the same data as the dashboard. Check the VRAM budget first: the 27B takes about 17-19GB plus KV cache for the slots. Suggestion, not decided: keep its view read-only
 
 ## Phase 4 — Voice / Home Assistant Integration
 
@@ -62,6 +93,7 @@ Hardware: RTX 4090 (24GB VRAM), 128GB system RAM, Ubuntu 24.04. Architecture: wa
 - [ ] Keep Phase 1 (driver/CUDA install) itself as a manual or hosted-model-assisted step, since no local model is loaded yet at that point
 - [x] Discord notify/ask helpers for the bootstrap agent (`cmd/jarvis-discord`, built on `internal/chat`, the start of the Phase 7 bot)
 - [x] Resume-after-reboot for the NVIDIA driver install (`scripts/agent-reboot`, `scripts/agent-resume`, `agent-resume.service`)
+- [x] Local takeover: after the driver stage, Sonnet sets up a local "brain" model on Ollama that can drive Claude Code itself (`scripts/agent-local`), proves it with `agent-local check`, and stops; after a Discord checkpoint the local model runs the rest of the build (pulling the coding model, then the queue system) in rounds approved on Discord, with Sonnet on call (`scripts/agent-run`)
 
 **`bootstrap.sh`** — installs just enough to run Claude Code, then hands it the task list and shell access to build everything else itself (drivers, Ollama, RabbitMQ, the Go listener), delegating bulk/low-stakes coding to the local model once it's up. The script is a separate file, not included in this doc
 
@@ -69,9 +101,11 @@ Hardware: RTX 4090 (24GB VRAM), 128GB system RAM, Ubuntu 24.04. Architecture: wa
 - [ ] Set `ANTHROPIC_API_KEY` and `REPO_URL` before running
 - [ ] Export the task list doc to `TASKS.md` in the repo so Claude has it as its brief
 
-Note: during initial bootstrap (fresh machine → system fully up), the NVIDIA driver/CUDA stage runs on Haiku (escalating to Sonnet in the same conversation if the GPU isn't working afterwards) and everything after runs on Sonnet — no cost-approval gate during this stage, since it's a one-time build cost. The approval gate / cost threshold logic (Phase 3) only applies once the system is live and running steady-state jobs.
+Note: during initial bootstrap (fresh machine → system fully up), the NVIDIA driver/CUDA stage runs on Haiku (escalating to Sonnet in the same conversation if the GPU isn't working afterwards) Sonnet then sets up the local brain model; after that the local model drives the build and Sonnet is only used for rounds you hand it on Discord — no cost-approval gate during this stage, since it's a one-time build cost. The approval gate / cost threshold logic (Phase 3) only applies once the system is live and running steady-state jobs.
 
 ## Phase 6 — Monitoring Dashboard (web)
+
+**First slice, built right after the queue and worker, before any other jobs are queued:** a view of the queue showing the jobs waiting, how long each has been running, when each finished, and which model is handling it (and which slot, once Phase 3b exists). Past jobs must show up too, so job history is recorded by the worker from the very first job rather than at view time. Everything else below comes after.
 
 - [ ] Build a small web dashboard (e.g. a lightweight Go + HTMX or simple React app) served locally on the box
 - [ ] Show current queue contents: pending jobs per queue (voice/coding/background), their priority and status
@@ -79,6 +113,7 @@ Note: during initial bootstrap (fresh machine → system fully up), the NVIDIA d
 - [ ] Show dollar cost for jobs dispatched to the Claude API (estimated vs. actual, per job and running total)
 - [ ] Show estimated token cost / power draw for jobs run on the local model, so local compute cost is visible alongside API spend
 - [ ] Show recent job history (completed/failed) with duration and which model handled each
+- [ ] Show slot state once Phase 3b is in: which job and model is in each slot, runtime, and queue depth
 - [ ] Expose this on the local network so it's reachable from other devices in the house
 
 ## Phase 7 — Notifications, Chat & Observability

@@ -1,29 +1,39 @@
 #!/usr/bin/env bash
 #
-# agent-run: runs the bootstrap agent in two stages, switching models.
+# agent-run: runs the bootstrap agent in stages, switching models.
 #
 #   Stage 1 (cheap model, default "haiku"): NVIDIA driver + CUDA install,
 #     ending with a working nvidia-smi. If it doesn't get there, escalate
 #     to the stronger model (default "sonnet") in the SAME conversation.
-#   Stage 2 (strong model): everything else in TASKS.md, fresh conversation.
+#   Stage 2 (strong model): install Ollama and set up a local "brain"
+#     model that can drive Claude Code itself (see agent-local), then stop.
+#   Checkpoint: DM the owner what got set up and wait for the go-ahead.
+#   Stage 3: supervised rounds through the rest of TASKS.md. Each round is
+#     run by whichever driver the owner picks on Discord: the local model
+#     (default; it pulls the coding model and builds the queue system) or
+#     the strong model when the local one is stuck. Every round ends with
+#     the owner choosing what happens next.
 #
-#   agent-run                         first run (called by bootstrap.sh)
+#   agent-run                         first run, or carry on after "Stop"
 #   agent-run --resume REASON [GPU]   after a reboot (called by agent-resume)
 #
-# The script, not the model, decides whether stage 1 succeeded: it runs
-# nvidia-smi itself once the agent exits.
+# The script, not the model, decides whether a stage succeeded: it runs
+# nvidia-smi after stage 1 and `agent-local check` after stage 2.
 #
 # Env (persisted in agent.env for the post-reboot service):
 #   AGENT_STAGE1_MODEL  default haiku   (set to sonnet to skip the cheap pass)
 #   AGENT_STAGE2_MODEL  default sonnet
 #
-# State: $CONF/stage is "1", "1e" (stage 1, escalated) or "2".
-# Briefs written by bootstrap.sh: $CONF/stage1.txt, $CONF/stage2.txt.
+# State: $CONF/stage is "1", "1e" (stage 1, escalated), "2" or "3".
+#        $CONF/driver is "local" or "sonnet" (who ran the last stage-3 round).
+# Briefs written by bootstrap.sh: $CONF/stage1.txt, stage2.txt,
+#        stage3-local.txt, stage3-sonnet.txt.
 
 set -uo pipefail
 
 CONF="${JARVIS_CONF:-$HOME/.config/jarvis}"
 STATE="$CONF/stage"
+DRIVER="$CONF/driver"
 M1="${AGENT_STAGE1_MODEL:-haiku}"
 M2="${AGENT_STAGE2_MODEL:-sonnet}"
 
@@ -40,12 +50,14 @@ exit_if_rebooting() {
   fi
 }
 
-# run_claude MODEL CONTINUE(0|1) PROMPT
+# run_claude MODEL CONTINUE(0|1) PROMPT    (MODEL "local" = agent-local)
 run_claude() {
-  local model="$1" cont="$2" prompt="$3" args=(--dangerously-skip-permissions --model "$1")
+  local model="$1" cont="$2" prompt="$3" cmd=(claude --model "$1")
+  local args=(--dangerously-skip-permissions)
+  [[ "$model" == local ]] && cmd=(agent-local)
   (( cont )) && args+=(--continue)
-  echo "==> $(date '+%F %T') claude --model $model continue=$cont"
-  claude "${args[@]}" -p "$prompt"
+  echo "==> $(date '+%F %T') $model continue=$cont"
+  "${cmd[@]}" "${args[@]}" -p "$prompt"
 }
 
 resume=0; reason=""; gpu=""
@@ -72,7 +84,7 @@ if [[ "$stage" == "1" ]]; then
 
   if gpu_ok; then
     echo 2 > "$STATE"; stage=2; resume=0
-    notify "Stage 1 done ($M1): GPU works. Starting stage 2 on $M2."
+    notify "Stage 1 done ($M1): GPU works. Starting stage 2 on $M2: setting up the local model."
   else
     echo 1e > "$STATE"; stage=1e
     out=$(nvidia-smi 2>&1 | head -n 5)
@@ -85,7 +97,7 @@ When nvidia-smi works, tell me on Discord and stop. Do not start other tasks."
     exit_if_rebooting
     if gpu_ok; then
       echo 2 > "$STATE"; stage=2; resume=0
-      notify "Stage 1 fixed by $M2: GPU works. Starting stage 2."
+      notify "Stage 1 fixed by $M2: GPU works. Starting stage 2: setting up the local model."
     else
       notify "GPU still not working after escalation to $M2. Stopping so you can look at it."
       exit 1
@@ -100,7 +112,7 @@ if [[ "$stage" == "1e" ]]; then
   exit_if_rebooting
   if gpu_ok; then
     echo 2 > "$STATE"; stage=2; resume=0
-    notify "Stage 1 fixed by $M2: GPU works. Starting stage 2."
+    notify "Stage 1 fixed by $M2: GPU works. Starting stage 2: setting up the local model."
   else
     notify "GPU still not working after escalation to $M2. Stopping so you can look at it."
     exit 1
@@ -108,9 +120,77 @@ if [[ "$stage" == "1e" ]]; then
 fi
 
 # ---------------------------------------------------------------- stage 2
-if (( resume )); then
-  p=$(resume_prompt "carry on with TASKS.md from where you left off, following the same rules as before.")
-  run_claude "$M2" 1 "$p"
-else
-  run_claude "$M2" 0 "$(cat "$CONF/stage2.txt")"
+if [[ "$stage" == "2" ]]; then
+  if (( resume )); then
+    p=$(resume_prompt "carry on with stage 2 from where you left off: the local model must pass \`agent-local check\`. Then stop. Do not start other tasks.")
+    run_claude "$M2" 1 "$p"
+  else
+    run_claude "$M2" 0 "$(cat "$CONF/stage2.txt")"
+  fi
+  exit_if_rebooting
+
+  if agent-local check; then
+    echo 3 > "$STATE"; stage=3; resume=0
+  else
+    notify "Stage 2 ended, but \`agent-local check\` fails: the local model can't drive Claude Code yet. Stopping so you can look. Run agent-run as $(whoami) to retry stage 2."
+    exit 1
+  fi
+
+  # shellcheck disable=SC1091
+  source "$CONF/local.env"
+  checkpoint="Local model is set up and passed the takeover check.
+Brain: ${LOCAL_MODEL}   Coder: ${LOCAL_CODER_MODEL:-same as brain}
+$(ollama ps 2>&1 | head -n 4)
+$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>&1 | sed 's/^/VRAM: /')
+Details are in docs/local-brain.md on the stage-2 PR. Have a look, then pick who runs the build from here. You can also type instructions for the local model instead of pressing a button."
 fi
+
+# ---------------------------------------------------------------- stage 3
+# A reboot mid-round resumes that round's conversation on the same driver.
+if (( resume )); then
+  d=$(cat "$DRIVER" 2>/dev/null || echo local)
+  m=$([[ "$d" == local ]] && echo local || echo "$M2")
+  run_claude "$m" 1 "$(resume_prompt "carry on with what you were doing, following the same rules as before.")"; status=$?
+  exit_if_rebooting
+fi
+
+summary() {
+  local prs
+  prs=$(GH_TOKEN=$(ghapp-token 2>/dev/null) gh pr list --state open --limit 5 \
+          --json number,title,url --jq '.[] | "#\(.number) \(.title) \(.url)"' 2>/dev/null)
+  printf 'The %s run on %s has ended (exit %s).\nOpen PRs:\n%s\n\nWho takes the next round? You can also type instructions for the local model.' \
+    "$1" "$(hostname)" "$2" "${prs:-none}"
+}
+
+msg="${checkpoint:-$(summary "$(cat "$DRIVER" 2>/dev/null || echo agent)" "${status:-?}")}"
+while :; do
+  if ! answer=$(jarvis-discord ask -choices "Local model,Sonnet,Stop" "$msg"); then
+    echo "==> couldn't reach Discord; retrying in 5 minutes"
+    sleep 300
+    continue
+  fi
+
+  shopt -s nocasematch
+  case "$answer" in
+    stop)    shopt -u nocasematch
+             notify "Stopped. Run agent-run as $(whoami) on $(hostname) to pick it up again."
+             exit 0 ;;
+    sonnet)  d=sonnet; note="" ;;
+    "local model"|local) d=local; note="" ;;
+    *)       d=local; note="$answer" ;;
+  esac
+  shopt -u nocasematch
+
+  echo "$d" > "$DRIVER"
+  if [[ "$d" == local ]]; then
+    p=$(cat "$CONF/stage3-local.txt")
+    [[ -n "$note" ]] && p+="
+
+Instructions from me for this round (they take priority): $note"
+    run_claude local 0 "$p"; status=$?
+  else
+    run_claude "$M2" 0 "$(cat "$CONF/stage3-sonnet.txt")"; status=$?
+  fi
+  exit_if_rebooting
+  msg=$(summary "$d" "$status")
+done
