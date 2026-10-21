@@ -88,19 +88,48 @@ func run() error {
 
 		// Check if local model is available.
 		localAvailable := ollama.Healthcheck()
-		modelName, useLocal := router.PickModelWithPayload(msg.Type, msg.Payload, localAvailable)
+		log.Printf("worker: job %s routing: type=%s, forceAPI=%v, modelOverride=%q, localAvailable=%v",
+			msg.ID, msg.Type, msg.ForceAPI, msg.ModelOverride, localAvailable)
+		modelName, useLocal := router.PickModelWithPayload(msg.Type, msg.ForceAPI, msg.ModelOverride, localAvailable)
+		log.Printf("worker: job %s routed to model=%q, useLocal=%v", msg.ID, modelName, useLocal)
+
+		// Estimate cost for API-dispatched jobs before routing.
+		prompt := msg.Payload["prompt"]
+		if prompt == "" {
+			prompt = "(no prompt)"
+		}
+		var costEst router.CostEstimate
+		if !useLocal {
+			costEst = router.EstimateCost(modelName, prompt, msg.Type)
+			log.Printf("worker: job %s → %s estimated cost=$%.4f (in=%d tokens, out=%d tokens)",
+				msg.ID, modelName, costEst.TotalCost, costEst.InputTokens, costEst.OutputTokens)
+
+			// Approval gate: block if estimated cost exceeds threshold.
+			if !router.Approved(useLocal, msg.Payload, costEst) {
+				log.Printf("worker: job %s BLOCKED (estimated cost=$%.4f exceeds threshold)",
+					msg.ID, costEst.TotalCost)
+				// Record start briefly so we can record the denial.
+				rec := history.Start(msg, modelName, useLocal, msg.Type)
+				rec.EstimatedCost = costEst.TotalCost
+				rec.InputTokens = costEst.InputTokens
+				rec.OutputTokens = costEst.OutputTokens
+				history.Denied(rec, costEst.TotalCost)
+				return queue.ErrApprovalDenied
+			}
+		}
 
 		// Record job start.
 		rec := history.Start(msg, modelName, useLocal, msg.Type)
+		if costEst.TotalCost > 0 {
+			rec.EstimatedCost = costEst.TotalCost
+			rec.InputTokens = costEst.InputTokens
+			rec.OutputTokens = costEst.OutputTokens
+		}
 		sched.JobStarted(msg.Type)
 
 		// If local, mark as used (resets idle timer) and generate.
 		if useLocal && localAvailable {
 			idleUnload.MarkUsed()
-			prompt := msg.Payload["prompt"]
-			if prompt == "" {
-				prompt = "(no prompt)"
-			}
 			log.Printf("worker: job %s → %s (prompt: %s)", msg.ID, modelName, prompt)
 			_, err := ollama.Generate(modelName, prompt)
 			if err != nil {

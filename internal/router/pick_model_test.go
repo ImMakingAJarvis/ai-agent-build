@@ -65,18 +65,16 @@ func TestPickModelBackground(t *testing.T) {
 }
 
 func TestPickModelWithPayloadForceAPI(t *testing.T) {
-	payload := map[string]string{"force_api": "true"}
-	_, useLocal := router.PickModelWithPayload("voice", payload, true)
+	_, useLocal := router.PickModelWithPayload("voice", true, "", true)
 	if useLocal {
-		t.Error("force_api in payload should prevent local model use")
+		t.Error("forceAPI should prevent local model use")
 	}
 }
 
 func TestPickModelWithPayloadOverride(t *testing.T) {
-	payload := map[string]string{"model_override": "claude-opus-5-5"}
-	name, _ := router.PickModelWithPayload("coding", payload, true)
+	name, _ := router.PickModelWithPayload("coding", false, "claude-opus-5-5", true)
 	if name != "claude-opus-5-5" {
-		t.Errorf("model_override in payload should set model to claude-opus-5-5, got %s", name)
+		t.Errorf("modelOverride should set model to claude-opus-5-5, got %s", name)
 	}
 }
 

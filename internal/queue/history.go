@@ -22,8 +22,13 @@ type JobRecord struct {
 	StartedAt string `json:"started_at"`
 	FinishedAt string `json:"finished_at,omitempty"`
 	Duration  string `json:"duration,omitempty"`
-	Status    string `json:"status"` // running, completed, failed
+	Status    string `json:"status"` // running, completed, failed, denied
 	Error     string `json:"error,omitempty"`
+	// Cost fields (populated for API-dispatched jobs).
+	EstimatedCost float64 `json:"estimated_cost,omitempty"`   // $ estimated before dispatch
+	ActualCost    float64 `json:"actual_cost,omitempty"`      // $ billed after dispatch
+	InputTokens   int     `json:"input_tokens,omitempty"`     // estimated input tokens
+	OutputTokens  int     `json:"output_tokens,omitempty"`    // estimated output tokens
 }
 
 // History records job lifecycle events to a JSONL file.
@@ -108,6 +113,20 @@ func (h *History) Fail(rec *JobRecord, err error) {
 	h.mu.Unlock()
 	h.write(*rec)
 	log.Printf("history: job %s failed after %s: %v", rec.ID, rec.Duration, err)
+}
+
+// Denied records that a job was blocked by the approval gate due to cost.
+func (h *History) Denied(rec *JobRecord, estimatedCost float64) {
+	h.mu.Lock()
+	rec.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	start, _ := time.Parse(time.RFC3339, rec.StartedAt)
+	rec.Duration = time.Since(start).Round(time.Millisecond).String()
+	rec.Status = "denied"
+	rec.EstimatedCost = estimatedCost
+	rec.Error = "estimated cost exceeds threshold"
+	h.mu.Unlock()
+	h.write(*rec)
+	log.Printf("history: job %s denied (estimated cost=$%.4f)", rec.ID, estimatedCost)
 }
 
 func (h *History) write(rec JobRecord) {
