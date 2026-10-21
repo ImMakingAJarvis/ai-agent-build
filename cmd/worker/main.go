@@ -88,7 +88,10 @@ func run() error {
 
 		// Check if local model is available.
 		localAvailable := ollama.Healthcheck()
-		modelName, useLocal := router.PickModelWithPayload(msg.Type, msg.Payload, localAvailable)
+		log.Printf("worker: job %s routing: type=%s, forceAPI=%v, modelOverride=%q, localAvailable=%v",
+			msg.ID, msg.Type, msg.ForceAPI, msg.ModelOverride, localAvailable)
+		modelName, useLocal := router.PickModelWithPayload(msg.Type, msg.ForceAPI, msg.ModelOverride, localAvailable)
+		log.Printf("worker: job %s routed to model=%q, useLocal=%v", msg.ID, modelName, useLocal)
 
 		// Estimate cost for API-dispatched jobs before routing.
 		prompt := msg.Payload["prompt"]

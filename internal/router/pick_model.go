@@ -36,10 +36,9 @@ func PickModel(jobType string, forceAPI bool, modelOverride string, localAvailab
 	return local, true
 }
 
-// PickModelWithPayload is like PickModel but reads flags from the job payload map.
-func PickModelWithPayload(jobType string, payload map[string]string, localAvailable bool) (modelName string, useLocal bool) {
-	forceAPI := payload["force_api"] == "true" || payload["force_api"] == "1"
-	modelOverride := payload["model_override"]
+// PickModelWithPayload is like PickModel but reads flags from the Message struct
+// and its payload map.
+func PickModelWithPayload(jobType string, forceAPI bool, modelOverride string, localAvailable bool) (modelName string, useLocal bool) {
 	return PickModel(jobType, forceAPI, modelOverride, localAvailable)
 }
 
