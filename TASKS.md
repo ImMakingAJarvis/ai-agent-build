@@ -4,6 +4,13 @@ Oct 14, 2026 · @Nathan Meyers
 
 Hardware: RTX 4090 (24GB VRAM), 128GB system RAM, Ubuntu 24.04. Architecture: wake-word-triggered light model pinned in VRAM for voice/chat, heavy coding/background model offloaded into system RAM, RabbitMQ + Go listener for the priority task queue, Home Assistant Voice Preview Edition as the voice front end with on-device openWakeWord.
 
+## Job rules — read these first, every round
+
+- Keep every job tiny. The local brain has a 64K-token context and Claude Code itself uses a big part of it. A job must be finishable in one round while reading at most about three source files plus its own section of its job doc. On Oct 21 a round died from "Autocompact is thrashing" because the work did not fit.
+- If a job looks bigger than that, split it before writing any code. Add the smaller jobs right after it in the index below, with matching sections and acceptance criteria in its job doc. Commit the split, then do only the first one.
+- Read only what you need: your index line and your section of the job doc. Never read big files whole. `grep -n` first, then read line ranges. For example, don't read `bootstrap.sh` (24 KB); grep for the heredoc you need. Cut long command output with `| tail -n 50` or `| head -c 4000`.
+- One job is one small PR. Tick the job in the index when its PR is open.
+
 ## Phase 1 — Hardware & OS
 
 - [ ] Install Ubuntu 24.04 LTS on the new motherboard/RAM build
@@ -138,113 +145,66 @@ Division of labor: the Phase 6 dashboard owns job-level views (queue, approvals,
 - [ ] Keep Cursor on hosted models (Claude/GPT) for complex multi-file refactors; route only repetitive/boilerplate tasks to the local endpoint
 - [ ] Benchmark local model code quality against hosted models before relying on it as a primary driver
 
-## Queued jobs — Oct 21, 2026 (queue as work source, Discord conversation, dashboard fix, Qwen 3.8)
+## Queued jobs — Oct 21, 2026 (index)
 
-Added by Nathan's request. Do them in this order, one job per round (each on its own `phase-<n>-<slug>` branch and PR, as usual). J0 comes first: it makes the queue the source of all work, as intended, and moves every job below (and every other unchecked item in this file) onto the queue. After J0 is merged, take work from the queue, not from this file. J1 (job records in a database) is the first job on the queue, then D0, which fixes a bug in work already shipped. Q1 comes after the Discord jobs. Every job lists its acceptance criteria; a job is done only when all of them pass and the PR says how each was checked.
+Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. A Sonnet round started on all of J0 at 16:00 on Oct 21. Check open PRs and tick whatever it finished. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context.
 
 ### J0 — Make the queue the source of all work
 
-- [ ] **Run build work from the queue instead of TASKS.md** (branch `phase-3-queue-agent-jobs`)
-    - Intent: once the queue and its view exist, all work (build work included) lives on the queue, and TASKS.md becomes history. Today it doesn't. The stage-3 brief (`STAGE3L` in `bootstrap.sh`, written to `~/.config/jarvis/stage3-local.txt`) still says "Read TASKS.md" and "Everything else in TASKS.md, in order", and `agent-run` starts every round from it. The worker cannot run build work either. In `cmd/worker/main.go` a local job is one tool-less `ollama.Generate` call whose output is discarded (`_, err := ...`). The API path logs "not yet implemented" and still marks the job completed. So the ~41 `bench-*` runs in history measured nothing.
-    - Agent jobs: add a job kind for build work. The message carries `kind: "agent"`, `title`, `instructions` (the full job text including acceptance criteria), `branch`, `depends_on` (job IDs) and `driver` (`local` default, or `sonnet`). Running one means a Claude Code session with tools: `agent-local --dangerously-skip-permissions -p` for `local`, `claude --model "$AGENT_STAGE2_MODEL"` for `sonnet`. The prompt is the stage-3 rules (git, Discord, reboot) plus the job text. Store the transcript and output under `~/.local/share/jarvis/jobs/<id>/`, and record status, duration, model, PR URL (parsed from output or `gh pr list --head <branch>`) and a short summary in history.
-    - Who runs them: the `agent-run` stage-3 loop. Each round, it takes the next ready agent job (highest priority, then oldest, with all `depends_on` done) and names it in the Discord checkpoint ("Next: D0 — Fix the dashboard poll… Local model / Sonnet / Skip / Stop"). Then it runs that job on the chosen driver and records the result. Typed instructions still apply to that round. Keep the Discord checkpoint between rounds, since that is how Nathan approves work. Run one agent job at a time: the GPU serves one sequence (`-np 1`).
-    - Do not hold a RabbitMQ message unacked for a whole round: the broker's consumer ack timeout (30 min by default) closes the channel and redelivers. Claim instead. Take the message, write a `claimed` record (job ID, round, time) to the job store, then ack. A claimed job left without a result (crash or reboot) goes back to ready on the next start and is not run twice at once. Text jobs (`voice`, chat) keep their current fast path.
-    - Fix the worker so nothing lies: store the generated text for text jobs, and mark API-dispatched jobs `failed` with "API dispatch not implemented" until it is. Drop the paused-queue skip path that used to ack and lose jobs if any copy of it remains.
-    - Migration: `scripts/migrate_tasks_to_queue` enqueues, in this order, J0's successors from this section (J1, D0, D1-D8, Q1), then the benchmarks (as agent jobs, because the earlier runs measured nothing), then every other unchecked item in this file in file order. Each gets a stable ID (slug of section and title) and `depends_on` where the text gives an order. It is idempotent: running it twice adds nothing. Then put a note at the top of TASKS.md: "Work now lives in the queue (see the dashboard); this file is history." Tick J0.
-    - Briefs: change `STAGE3L` and `STAGE3S` in `bootstrap.sh` and the live `~/.config/jarvis/stage3-local.txt` and `stage3-sonnet.txt` so a round does the queued job it was handed, instead of picking from TASKS.md. Replace `/usr/local/bin/agent-run` and the brief files atomically (write a temp file, then `mv`), because bash reads a running script as it goes and a round may be in progress. Do not restart or kill a running round.
-    - Dashboard: show agent jobs with title, status (ready, claimed, running, done, failed), driver, PR link and dependencies.
-    - Acceptance criteria:
-        - `go build ./...` and `go test ./...` pass. Tests cover these cases. An agent job with a fake agent command is claimed, run, and recorded with output and PR URL. A failing agent command is recorded `failed` with its error. A job whose `depends_on` is not done is skipped for the next ready one. A claimed job with no result is ready again after a restart and is not run twice. A fake job that runs longer than the ack timeout (shorten the timeout in the test broker) does not get redelivered. A text job's output is stored. An API-routed job is `failed`, not `completed`.
-        - The migration test runs against a copy of this file: the order is J0's successors, then the benchmarks, then the rest. A second run adds nothing.
-        - Manual: after merge and migration, the dashboard lists the queued agent jobs with D0 first. The next Discord checkpoint names D0. That round opens the D0 PR, and the job shows `done` with the PR link. The round after that names D1 without anyone mentioning TASKS.md.
+- [ ] **J0.1 — Worker stops faking results (keeps output; API jobs failed, not completed)** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.2 — Agent job fields in the message and the enqueue CLI** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.3 — Job store with claims (file-backed, behind an interface)** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.4 — `jarvis-jobs` CLI: next, claim, done, fail, list** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.5 — `agent-run` takes the next job from the queue and names it at the checkpoint** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.6 — Briefs say "do the job you were handed" and follow the job rules** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.7 — Migrate this index and the remaining TASKS.md items onto the queue** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.8 — Dashboard shows agent jobs** · `docs/jobs/j0-queue-work-source.md`
 
 ### J1 — Job records in a database Nathan can query
 
-- [ ] **Move job records from `jobs.jsonl` into PostgreSQL** (branch `phase-3-jobs-database`; queue position: right after J0, ahead of D0)
-    - Why: job history lives in `/home/agent/.local/share/jarvis/jobs.jsonl`, which only the `agent` user can read. Nathan can't see it, and a dashboard run as anyone else shows "No jobs recorded yet". All job records (history, J0's claims and agent jobs, costs) belong in one database that Nathan can query directly.
-    - Database: PostgreSQL from apt as a host service (`postgresql.service`, enabled at boot), database `jarvis`, listening on localhost only. Use peer authentication over the Unix socket, so no passwords are needed. Role `agent` owns the schema and reads and writes. Role `nathan` gets `SELECT` only on every table, including future ones (`ALTER DEFAULT PRIVILEGES`), so `psql jarvis` works for Nathan with no setup. Network access stays off unless Nathan asks.
-    - Schema, as versioned SQL migrations embedded in Go and applied on startup:
-        - `jobs`: id (primary key), kind, type/queue, title, source, priority, status (ready, claimed, running, done, failed, denied), driver, model, use_local, created_at, claimed_at, started_at, finished_at, duration_ms, error, estimated and actual cost, input and output tokens, branch, pr_url, depends_on (`text[]`), payload (`jsonb`), output (`text`, or a path for large transcripts), summary.
-        - `job_events` (job_id, at, event, detail) for every state change.
-        - Indexes on status, started_at and queue.
-    - Code: a `internal/store` package (`database/sql` with `pgx`). The worker, enqueue CLI, dashboard, the `agent-run` loop's claim step (J0) and later the Discord status commands (D4) all use it. Claiming uses `SELECT … FOR UPDATE SKIP LOCKED`, which also covers J0's "never run twice" rule. The connection comes from `DATABASE_URL` (default `postgres:///jarvis?host=/var/run/postgresql`) in the systemd units. Stop writing `jobs.jsonl`.
-    - Backfill: a one-time, idempotent import of `jobs.jsonl` (same dedupe as the dashboard: last record per ID wins). Also import any job store J0 created, then rename the file to `jobs.jsonl.imported` rather than deleting it.
-    - Backups: a nightly `pg_dump` (systemd timer) to `/mnt/jarvis/backups/jarvis-db/` if the NAS is mounted, else `~/backups/jarvis-db/`, keeping 14.
-    - Keep the queue text current: make `scripts/migrate_tasks_to_queue` update the instructions of jobs that are still `ready` when their text in TASKS.md has changed (D0 was extended after J0's round started).
-    - Docs: `docs/database.md` covers how to connect (`psql jarvis`), the schema, example queries (last 20 jobs, failures today, cost per day, average duration per model), backups and restore.
-    - Acceptance criteria:
-        - `go test ./...` passes against a real throwaway database (`jarvis_test`, created and dropped by the tests). The tests cover: insert, claim, start, complete and fail; two concurrent claimers never get the same job; a migration from empty works and re-running it is a no-op; a backfill from a fixture `jobs.jsonl` gives one row per unique ID with the latest status, and running it twice adds nothing.
-        - Manual, as Nathan's user: `psql jarvis -c "select id, status, model, duration_ms from jobs order by started_at desc limit 10"` works without a password and shows the backfilled history. `insert`, `update` and `delete` as `nathan` are refused.
-        - The dashboard shows full history no matter which user runs it. A new job enqueued with `jarvis-enqueue` appears in `jobs` within 5s. History survives a worker restart and a reboot. The backup timer is listed in `systemctl list-timers` and one dump exists.
+- [ ] **J1.1 — Install PostgreSQL: `agent` read-write, `nathan` read-only, no passwords** · `docs/jobs/j1-jobs-database.md`
+- [ ] **J1.2 — Schema migrations: `jobs` and `job_events`** · `docs/jobs/j1-jobs-database.md`
+- [ ] **J1.3 — PostgreSQL job store with SKIP LOCKED claims** · `docs/jobs/j1-jobs-database.md`
+- [ ] **J1.4 — Worker, enqueue and `jarvis-jobs` use the database** · `docs/jobs/j1-jobs-database.md`
+- [ ] **J1.5 — Dashboard reads the database** · `docs/jobs/j1-jobs-database.md`
+- [ ] **J1.6 — Backfill `jobs.jsonl` and the J0 store** · `docs/jobs/j1-jobs-database.md`
+- [ ] **J1.7 — Nightly `pg_dump` backups** · `docs/jobs/j1-jobs-database.md`
+- [ ] **J1.8 — `docs/database.md` with example queries** · `docs/jobs/j1-jobs-database.md`
 
-### D0 — Dashboard bug: raw JSON replaces the UI after a few seconds
+### D0 — Dashboard: raw JSON over the UI, and keeping it running
 
-- [ ] **Fix the dashboard poll that swaps JSON into the page** (branch `phase-6-dashboard-poll-fix`)
-    - Root cause: in `internal/dashboard/templates/index.html` (main as of b5e96d7, line 300) the `<div id="dashboard">` has `hx-get="/api/state" hx-trigger="every 5s" hx-swap="outerHTML"`. `/api/state` is `handleState` in `internal/dashboard/dashboard.go` (line 198, route on line 163), which returns `application/json` through `respondJSON` (line 560). htmx swaps any 2xx body in as-is, so on the first poll (about 5s plus the time `gatherState` takes: Ollama health check, RabbitMQ depths, a full read of `jobs.jsonl`) the whole dashboard div is replaced by the JSON text. That text carries no `hx-*` attributes, so polling stops and the raw JSON stays on screen. That also wipes out the nested approvals panel (`<div id="approvals">`, line 393). Also, `<body>` on line 298 polls the same endpoint every 5s with `hx-swap="none"`, which doubles the load and does nothing. Keep `/api/approvals` (which already returns HTML) working.
-    - Fix: keep `/api/state` as JSON for scripts and the Discord bot. Wrap the dashboard markup in `{{define "dashboard"}}...{{end}}` inside `index.html`, render it in place from `handleIndex`, and add `GET /partials/dashboard` (`text/html; charset=utf-8`) that executes only that block from the same `gatherState()` data. Point the div's `hx-get` at `/partials/dashboard`; the returned fragment must be the full `<div id="dashboard" hx-get="/partials/dashboard" hx-trigger="every 5s" hx-swap="outerHTML">…</div>` so polling continues after each swap. Remove the `hx-*` attributes from `<body>`. Parse the template once at startup instead of on every request.
-    - Acceptance criteria:
-        - `go build ./...` and `go test ./...` pass. New `httptest` tests: `/partials/dashboard` returns 200, `Content-Type: text/html`, a body that starts with `<div id="dashboard"` and contains `hx-get="/partials/dashboard"`, and no `{"ollama_healthy"`; `/api/state` still returns valid JSON with `application/json`; `GET /` contains exactly one `hx-trigger="every 5s"` for the dashboard (no body poll).
-        - Manual: open `http://<box>:8080/` and leave it for 60s; no JSON is ever shown. Enqueue a job with `jarvis-enqueue` and it appears within about 10s without a reload.
-        - After Nathan merges, rebuild and restart the dashboard (only the dashboard process) and repeat the manual check. Put the before/after in the PR.
-    - Also in this job: keep the dashboard and worker up. On Oct 21 the dashboard and workers were started by hand from agent sessions (`/tmp/jarvis-dashboard`, `/tmp/jarvis-worker`, two copies of `~/.local/bin/worker`), so the dashboard went down when a round ended (`dashboard: shutting down` at 15:37) and three workers were consuming at once. The 15:32 dashboard build also failed mid-render: `/tmp/dashboard.log` shows `superfluous response.WriteHeader call from ...(*Server).handleIndex (dashboard.go:194)`, which means `tmpl.Execute` failed after it had started writing, so the page was cut off. Find and fix that template error, and render into a buffer before writing so a failure returns a clean 500 instead of half a page.
-        - Install `jarvis-dashboard.service` and `jarvis-worker.service` (systemd, `User=agent`, binaries in `/usr/local/bin` or `~/.local/bin`, not `/tmp`, `Restart=on-failure`, enabled at boot, logs to the journal). Stop the stray hand-started copies so exactly one worker runs. Never start these from an agent session again; use `systemctl restart`.
-        - Acceptance criteria: a test renders `index.html` with fixture state (including empty history, failed jobs and approvals) without error. `systemctl is-active jarvis-dashboard jarvis-worker` is `active` for both, and `pgrep -c -f 'jarvis-worker|bin/worker'` is 1. The dashboard is still up after the round that did this ends, and after a reboot.
+- [ ] **D0.1 — HTML partial for the 5-second poll; remove the body poll** · `docs/jobs/d0-dashboard.md`
+- [ ] **D0.2 — Fix the template error that cuts the page off; buffered render** · `docs/jobs/d0-dashboard.md`
+- [ ] **D0.3 — Dashboard and worker as systemd services; exactly one worker** · `docs/jobs/d0-dashboard.md`
 
-### D1-D8 — Two-way Discord conversation (refines the Phase 7 Discord bot item)
+### D1-D8 — Two-way Discord conversation
 
-Context for all D jobs: today `cmd/jarvis-discord` (`internal/chat/discord.go`, discordgo) is already a bot, not a webhook. `notify` is REST only. `ask` opens a short-lived gateway session with only `IntentsDirectMessages`, sends a DM to `DISCORD_OWNER_ID`, and takes the first reply from the owner in that DM. Config is `DISCORD_BOT_TOKEN` and `DISCORD_OWNER_ID` in `~/.config/jarvis/discord.env` (never log, print or commit them). `agent-run` relies on `jarvis-discord ask` for every round checkpoint, so it must keep working at every step. The conversation stays in Nathan's DM with the bot. Discord sends message content in DMs without the privileged Message Content intent, so no portal change is needed for DMs. An optional guild channel (D1) needs that intent; Nathan has to turn it on by hand.
+- [ ] **D1.1 — Bot daemon with owner-only intake** · `docs/jobs/d-discord.md`
+- [ ] **D1.2 — `jarvis-bot.service`** · `docs/jobs/d-discord.md`
+- [ ] **D1.3 — Optional guild channel and Nathan's manual steps in the docs** · `docs/jobs/d-discord.md`
+- [ ] **D2.1 — Daemon routes answers to open `ask` questions over a local socket** · `docs/jobs/d-discord.md`
+- [ ] **D2.2 — `jarvis-discord ask` uses the socket, with fallback** · `docs/jobs/d-discord.md`
+- [ ] **D3.1 — Command parser and `!help`** · `docs/jobs/d-discord.md`
+- [ ] **D3.2 — `!pause jobs` and `!resume jobs`** · `docs/jobs/d-discord.md`
+- [ ] **D3.3 — `!pause build` and `!resume build`** · `docs/jobs/d-discord.md`
+- [ ] **D3.4 — Confirm buttons for risky commands** · `docs/jobs/d-discord.md`
+- [ ] **D4.1 — Shared status package used by the dashboard and the bot** · `docs/jobs/d-discord.md`
+- [ ] **D4.2 — `!status`** · `docs/jobs/d-discord.md`
+- [ ] **D4.3 — `!queue`, `!jobs`, `!failures`, `!prs`** · `docs/jobs/d-discord.md`
+- [ ] **D5.1 — `!add` with source and reply_to** · `docs/jobs/d-discord.md`
+- [ ] **D5.2 — Job results sent back to Discord** · `docs/jobs/d-discord.md`
+- [ ] **D5.3 — `!cancel`** · `docs/jobs/d-discord.md`
+- [ ] **D5.4 — `!move` (reprioritize)** · `docs/jobs/d-discord.md`
+- [ ] **D6.1 — Free-form chat goes to the brain as a voice job** · `docs/jobs/d-discord.md`
+- [ ] **D6.2 — Status-aware prompt, typing indicator, busy and timeout handling** · `docs/jobs/d-discord.md`
+- [ ] **D7.1 — Conversation store with a token-budget window** · `docs/jobs/d-discord.md`
+- [ ] **D7.2 — Rolling summary of older turns** · `docs/jobs/d-discord.md`
+- [ ] **D7.3 — `!reset`, `!forget`, `!context`** · `docs/jobs/d-discord.md`
+- [ ] **D8.1 — `docs/discord-bot.md` and a smoke script** · `docs/jobs/d-discord.md`
+- [ ] **D8.2 — Live checklist with Nathan** · `docs/jobs/d-discord.md`
 
-- [ ] **D1 — Long-running bot daemon with owner-only intake** (branch `phase-7-discord-daemon`)
-    - Add `cmd/jarvis-bot` (or a `jarvis-discord serve` subcommand) that keeps one gateway connection open, reconnects on drop, and receives every `MessageCreate` in the owner DM. Accept a message only if the author ID equals `DISCORD_OWNER_ID`, the author is not a bot, and the channel is the owner DM (or `DISCORD_CHANNEL_ID` if set, see below). Drop everything else silently, with a debug log line that has no content. Add a simple rate limit (for example 20 messages a minute) and a 4000-character input cap.
-    - Optional channel: if `DISCORD_CHANNEL_ID` is set in `discord.env`, also accept owner messages in that one guild channel. This needs `IntentsGuildMessages | IntentsMessageContent` and is only used when the variable is set.
-    - Install it as `jarvis-bot.service` (systemd, `User=agent`, `EnvironmentFile=~/.config/jarvis/discord.env`, `Restart=on-failure`). For now it only replies "received" with a ✅ reaction; real handling comes in D3-D6.
-    - Update `docs/discord.md` with the manual steps: nothing for DMs; for the optional channel, enable **Message Content Intent** under Bot → Privileged Gateway Intents and give the bot View Channel, Send Messages, Read Message History and Add Reactions in that channel; how to copy the channel ID.
-    - Acceptance criteria: unit tests for the filter (owner DM accepted; other user, bot author, other channel, and over-length message rejected) using fake `MessageCreate` events. `systemctl status jarvis-bot` is active and survives `systemctl restart`. A DM from Nathan gets ✅. A DM from a second account gets nothing. No token appears in logs (`grep` the journal for the first 10 characters of the token: no hits).
+### Q1 — Upgrade the local brain to Qwen 3.8
 
-- [ ] **D2 — Make `jarvis-discord ask` and the daemon share the DM safely** (branch `phase-7-discord-ask-coexist`)
-    - Problem: once the daemon listens, a reply meant for an open `ask` question would also be treated as chat or a command. Fix: the daemon becomes the single owner of incoming DMs. It serves a local Unix socket (`$XDG_RUNTIME_DIR/jarvis-bot.sock` or `~/.local/state/jarvis/bot.sock`, mode 0600). `jarvis-discord ask` registers its question through the socket and blocks for the answer; the daemon routes Discord replies and button clicks to open questions exactly as `internal/chat` does today (Discord reply to the question message, else the oldest open question). Messages that start with the command prefix (D3) are never treated as answers. If the socket is missing, `ask` falls back to today's behaviour so `agent-run` never breaks.
-    - Do not edit `/usr/local/bin/jarvis-discord` in place while `agent-run` may be calling it: install the new binary atomically (`install` to a temp name, then `mv`).
-    - Acceptance criteria: tests for routing (pending question gets the plain reply; `!status` with a question pending goes to the command handler; button click goes to the right question; two open questions plus a Discord reply go to the referenced one). Manual: with the daemon running, `jarvis-discord ask -choices "yes,no" "test?"` returns the clicked button and a typed reply; with the daemon stopped it still works. `agent-run`'s round checkpoint still works end to end.
-
-- [ ] **D3 — Command parser and control commands** (branch `phase-7-discord-commands`)
-    - Commands start with `!` (also accept `/` text). Parse into a typed command with arguments, case-insensitive, with a `!help` listing. Unknown commands reply with help, not an error dump.
-    - Control commands: `!pause [jobs|build|all]` and `!resume [jobs|build|all]`. `jobs` pauses the worker's consumption from RabbitMQ (reuse the scheduler's pause, exposed through a small local control endpoint or a state file the worker watches; in-flight jobs finish, nothing is dropped). `build` writes `~/.config/jarvis/paused`; teach `agent-run` to check that file before starting a new round and to wait (with a Discord notice) until it is removed. It must never kill a running round. Replace `agent-run` atomically, because bash reads scripts while running.
-    - Commands that drop or change work (`!cancel`, `!move`, D5) ask for confirmation with Yes/No buttons first.
-    - Acceptance criteria: table-driven parser tests (every command, aliases, missing or extra args, quoting, unknown command). `!pause jobs` stops new jobs within 5s (enqueue a test job: it waits; `!resume jobs`: it runs). `!pause build` while a round runs: the round finishes and the next one does not start until `!resume build`. State survives a daemon restart.
-
-- [ ] **D4 — Status and progress queries** (branch `phase-7-discord-status`)
-    - Move the dashboard's `gatherState()` and job-history reading into a shared package (for example `internal/status`) used by both the dashboard and the bot, so the numbers always match.
-    - `!status`: build stage (`~/.config/jarvis/stage`), who drives the current round (`driver`) and whether a round is running, paused flags, the current job (started in `jobs.jsonl` with no finish), queue depths for voice, coding and background, Ollama health and the loaded model (`/api/ps`), and VRAM used. `!queue`: pending jobs per queue (id, type, age). `!jobs [n]`: the last n finished jobs with status, model and duration. `!failures [n]`: recent `failed` and `denied` jobs with a one-line error. `!prs`: open PRs (via `ghapp-token` and `gh`). Replies use short Discord embeds or code blocks and are split under 2000 characters.
-    - Acceptance criteria: unit tests feed fixture `jobs.jsonl` and fake queue depths and check the formatted output (including a job that started but did not finish, and the empty case). Manual: each command answers within 3s and matches the dashboard at the same moment.
-
-- [ ] **D5 — Job commands: add, cancel, reprioritize** (branch `phase-7-discord-jobs`)
-    - `!add [voice|coding|background] <prompt>` publishes a job through the existing `internal/queue` code with `source: "discord"` and a `reply_to` holding the DM channel and message ID, and answers with the job ID. `!cancel <id>` removes a pending job. `!move <id> <queue>` (reprioritize) moves a pending job to another queue by taking it off its queue and republishing it with the new type and priority, keeping its ID and `created_at`; other messages are requeued untouched. Running jobs cannot be cancelled or moved, so say so. Cost-gated jobs still go through the approval gate.
-    - When a job with `source: discord` finishes or fails, DM the result (trimmed, with its ID) back to `reply_to`. This is the first piece of "route every reply back to the channel it came from".
-    - Acceptance criteria: tests against a test RabbitMQ vhost (or the docker-compose broker with throwaway queues): add creates a message with the right fields; move keeps the ID and lands in the target queue; cancel on a running or unknown ID returns a clear message and changes nothing; other jobs in the queue are untouched and in order. Manual: `!add background say hi` gets an ID, appears on the dashboard, and the result arrives as a DM.
-
-- [ ] **D6 — Free-form chat with the AI** (branch `phase-7-discord-chat`)
-    - Any owner message that is not a command and not an answer to an open `ask` is chat. Send it as a `voice` job (`source: discord`, top priority, with `reply_to`) so it goes ahead of coding and background work. Use the local brain (`LOCAL_MODEL`), never a paid API unless Nathan writes `!ask-claude ...`, which still goes through the cost gate. The system prompt says who it is (the Jarvis build system), includes a short fresh `!status` snapshot so "how's it going?" gets a real answer, and says it cannot run commands from chat but can point Nathan to the `!` commands.
-    - The GPU runs one sequence at a time (`-np 1`) and the build agent may be mid-request, so show Discord's typing indicator while waiting, send "busy, queued behind the build agent" after 20s, and time out after 5 minutes with a clear message. Strip any thinking output before replying. Split long replies.
-    - Acceptance criteria: tests with a fake model client: chat is routed to a `voice` job and the reply goes to the right channel; command-prefixed text and pending-ask answers are not routed to chat; timeout path. Manual: "hi, what are you working on?" gets a sensible reply that mentions the current stage or job; a long answer arrives in several messages.
-
-- [ ] **D7 — Persistent conversation context** (branch `phase-7-discord-memory`)
-    - Store each turn (role, text, time, related job ID) in `~/.local/share/jarvis/discord/conversation.db` (SQLite) or a JSONL file, mode 0600, outside the repo. Each chat request sends the last N turns that fit a token budget (default 6000 tokens, configurable) plus a rolling summary of older turns, refreshed by a background job when the history grows past the budget. `!reset` starts a new conversation (the old one is kept on disk), `!forget` deletes it after a confirmation button, and `!context` shows how many turns and tokens are in use.
-    - Acceptance criteria: tests for the token-budget windowing, summary insertion, `!reset` and `!forget`, and reload after restart. Manual: tell it "my favourite colour is green", restart `jarvis-bot.service`, ask "what's my favourite colour?" and it answers green; after `!reset` it no longer knows.
-
-- [ ] **D8 — End-to-end check, docs and hand-off** (branch `phase-7-discord-e2e`)
-    - Write `docs/discord-bot.md` (commands, how routing works, where state and history live, how to restart, how to turn the optional channel on) and link it from `docs/discord.md`. Add a scripted smoke test (`scripts/discord_smoke.sh`) that checks the daemon, socket and worker are up and runs the parser and status tests.
-    - Acceptance criteria: a checklist in the PR, done live over Discord: `!help`, `!status`, `!queue`, `!jobs`, `!failures`, `!add` with the result DM'd back, `!move`, `!cancel`, `!pause` and `!resume` for jobs and build, chat with memory across a restart, an `agent-run` round checkpoint answered while the daemon runs, a message from another account ignored. Then notify Nathan with the PR link.
-
-### Q1 — Upgrade the local brain from Qwen 3.6 to Qwen 3.8
-
-- [ ] **Switch the brain to `qwen3.8:27b`, keep 3.6 for rollback** (branch `phase-2-qwen38-brain`)
-    - Current setup: Ollama 0.40.7 (`ollama.service`), brain `jarvis-brain` built from `models/brain.Modelfile` (`FROM qwen3.6:27b`, Q4_K_M, `num_ctx 65536`, `num_gpu 999`, `temperature 0.6`, `top_p 0.95`, `top_k 20`), with MTP drafting (`draft_num_predict 3`) and the vision projector. `~/.config/jarvis/local.env` has `LOCAL_MODEL=jarvis-brain`; `agent-local` sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536`. The worker and the idle unloader refer to `jarvis-brain` by name. VRAM on Oct 21: about 22.3 GB used by Ollama's runner and 23.6 of 24.5 GB on the card.
-    - Target: `qwen3.8:27b` (same as `latest` and `27b-mtp-q4_K_M`: 27B Q4_K_M, 16.8 GB weights plus a 0.93 GB projector, MTP draft enabled, needs Ollama ≥ 0.32.12). Its weights are the same size as 3.6's, so it should fit at 64K context with the same headroom. Fallback if MTP drafting misbehaves: `qwen3.8:27b-q4_K_M` (same weights, no draft params). Q8_0 (30 GB) and BF16 do not fit in 24 GB; the MLX and nvfp4 tags are not for this runtime.
-    - The brain cannot safely test its own replacement while it is loaded (two copies do not fit in VRAM). If you are the local model, do the first two steps, open the PR, and ask Nathan on Discord for a Sonnet round to do the rest. Do not run any of it while a Discord chat or queued job is in flight: `!pause jobs` first (D3) and `!resume jobs` afterwards.
-    - Steps:
-        1. `ollama pull qwen3.8:27b`. Keep `qwen3.6:27b`. `ollama cp jarvis-brain jarvis-brain-qwen36` (the rollback copy).
-        2. Add `models/brain-qwen38.Modelfile`: `FROM qwen3.8:27b`, `PARAMETER num_ctx 65536`, `PARAMETER num_gpu 999`, keeping the registry's sampling defaults unless the smoke test shows tool-call problems (then try `temperature 0.6`). `ollama create jarvis-brain-qwen38 -f models/brain-qwen38.Modelfile`.
-        3. Smoke test, with nothing else using the GPU: `LOCAL_MODEL=jarvis-brain-qwen38 agent-local check` passes; `ollama ps` shows 100% GPU and context 65536; `nvidia-smi` shows at least 0.8 GB free; a `/v1/messages` request with a tool definition returns a well-formed `tool_use`; a voice job through the worker completes; decode speed (`ollama run --verbose`) is not more than 15% slower than 3.6. Record the numbers.
-        4. Ask Nathan on Discord before switching. Switch with `ollama cp jarvis-brain-qwen38 jarvis-brain` (so the worker, idle unloader and `local.env` stay unchanged), then `ollama stop jarvis-brain` so the next request loads the new one, and run `agent-local check` again. Change `models/brain.Modelfile` to `FROM qwen3.8:27b`.
-        5. Rollback, documented in `docs/local-brain.md` and tested once: `ollama cp jarvis-brain-qwen36 jarvis-brain && ollama stop jarvis-brain && agent-local check`. Do not `ollama rm qwen3.6:27b` until Nathan says so.
-    - Acceptance criteria: both smoke tests (step 3 and after step 4) pass with the numbers in the PR; the rollback command was run once and passed, then switched forward again; `docs/local-brain.md` is updated (model, quant, VRAM, context, why, rollback); a Discord notify with the PR link and VRAM before and after.
+- [ ] **Q1.1 — Pull `qwen3.8:27b`, keep a 3.6 rollback copy, add the Modelfile (local model is fine)** · `docs/jobs/q1-qwen38.md`
+- [ ] **Q1.2 — Smoke test the new brain (Sonnet)** · `docs/jobs/q1-qwen38.md`
+- [ ] **Q1.3 — Switch with a tested rollback (Sonnet, ask Nathan first)** · `docs/jobs/q1-qwen38.md`
