@@ -147,18 +147,20 @@ Division of labor: the Phase 6 dashboard owns job-level views (queue, approvals,
 
 ## Queued jobs — Oct 21, 2026 (index)
 
-Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. A Sonnet round started on all of J0 at 16:00 on Oct 21. Check open PRs and tick whatever it finished. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context.
+Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. J0.1-J0.8 were done by a Sonnet round on branch `phase-3-queue-agent-jobs`. J0.9 must land on that branch before the migration is run. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context.
 
 ### J0 — Make the queue the source of all work
 
-- [ ] **J0.1 — Worker stops faking results (keeps output; API jobs failed, not completed)** · `docs/jobs/j0-queue-work-source.md`
-- [ ] **J0.2 — Agent job fields in the message and the enqueue CLI** · `docs/jobs/j0-queue-work-source.md`
-- [ ] **J0.3 — Job store with claims (file-backed, behind an interface)** · `docs/jobs/j0-queue-work-source.md`
-- [ ] **J0.4 — `jarvis-jobs` CLI: next, claim, done, fail, list** · `docs/jobs/j0-queue-work-source.md`
-- [ ] **J0.5 — `agent-run` takes the next job from the queue and names it at the checkpoint** · `docs/jobs/j0-queue-work-source.md`
-- [ ] **J0.6 — Briefs say "do the job you were handed" and follow the job rules** · `docs/jobs/j0-queue-work-source.md`
-- [ ] **J0.7 — Migrate this index and the remaining TASKS.md items onto the queue** · `docs/jobs/j0-queue-work-source.md`
-- [ ] **J0.8 — Dashboard shows agent jobs** · `docs/jobs/j0-queue-work-source.md`
+- [x] **J0.1 — Worker stops faking results (keeps output; API jobs failed, not completed)** · `docs/jobs/j0-queue-work-source.md`
+- [x] **J0.2 — Agent job fields in the message and the enqueue CLI** · `docs/jobs/j0-queue-work-source.md`
+- [x] **J0.3 — Job store with claims (file-backed, behind an interface)** · `docs/jobs/j0-queue-work-source.md`
+- [x] **J0.4 — `jarvis-jobs` CLI: next, claim, done, fail, list** · `docs/jobs/j0-queue-work-source.md`
+- [x] **J0.5 — `agent-run` takes the next job from the queue and names it at the checkpoint** · `docs/jobs/j0-queue-work-source.md`
+- [x] **J0.6 — Briefs say "do the job you were handed" and follow the job rules** · `docs/jobs/j0-queue-work-source.md`
+- [x] **J0.7 — Migrate this index and the remaining TASKS.md items onto the queue** · `docs/jobs/j0-queue-work-source.md`
+- [x] **J0.8 — Dashboard shows agent jobs** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.9 — Migration reads this index: dotted IDs, job doc sections, ticked lines skipped; rebase onto main** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.10 — Put the job rules into the round briefs and the agent-job prompt** · `docs/jobs/j0-queue-work-source.md`
 
 ### J1 — Job records in a database Nathan can query
 

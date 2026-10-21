@@ -56,3 +56,18 @@ A Sonnet round started at 16:00 on Oct 21 on all of J0. Check `gh pr list --stat
 - File: the dashboard template and handler only.
 - Show agent jobs with ID, title, status (ready, claimed, running, done, failed), driver, PR link and dependencies.
 - Done when: a template test with fixture jobs renders every status, and the page shows the migrated jobs with J1.1 first.
+
+## J0.9 — Migration reads the index format (do this before running the migration)
+
+- Branch: `phase-3-queue-agent-jobs` (the J0 PR). First rebase it onto `main`. On the `TASKS.md` conflict, keep main's version: main replaced the long Oct 21 section with this index and ticked J0.1-J0.8.
+- File: `internal/agentjob/migrate.go` and its test only.
+- Change `codeRe` so dotted IDs stay whole: `D0.1` must give ID `d0.1`, not `d0`. Today `^\*{0,2}([A-Z]\d+)\b` stops at the dot, so every job in a group collides.
+- For index lines that name a job doc (`` · `docs/jobs/<file>.md` ``), set the job's instructions to that job's own `## <ID> — …` section from the doc, plus the doc's background paragraph at the top, instead of the whole index line. Store the doc path in the job.
+- Ticked lines (`- [x]`) are skipped, as today.
+- Done when: a test against main's `TASKS.md` and `docs/jobs/` gives unique IDs `j0.9`, `j1.1` … `q1.3` in index order, each with only its own doc section as instructions; a second run adds nothing; `go test ./...` passes.
+
+## J0.10 — Job rules in the briefs and the agent-job prompt
+
+- Rounds no longer read TASKS.md, so the "Job rules" block at the top of TASKS.md has to reach the model another way. Copy it, nearly word for word, into `STAGE3L` and `STAGE3S` in `bootstrap.sh` (grep for the heredocs), the live `~/.config/jarvis/stage3-local.txt` and `stage3-sonnet.txt` (replaced atomically), and the prompt that `internal/agentjob/run.go` builds for each job.
+- Also add: "If the job is too big, split it: add the smaller jobs to the queue with `jarvis-jobs add` (or `jarvis-enqueue -kind agent`) right after this one, with their own acceptance criteria, then do only the first. Mark this job done with a note that it was split."
+- Done when: `bash -n bootstrap.sh` passes, a test checks the job prompt contains the rules, and the next round's prompt (visible in `ps`) contains them.
