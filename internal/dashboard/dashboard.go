@@ -88,6 +88,15 @@ type ApprovalInfo struct {
 	Prompt        string  `json:"prompt,omitempty"`
 }
 
+// SlotQueue represents the state of one queue's processing slot.
+type SlotQueue struct {
+	Name     string `json:"name"`
+	Occupied bool   `json:"occupied"`
+	JobID    string `json:"job_id,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Runtime  string `json:"runtime,omitempty"`
+}
+
 // DashboardState is the full state returned by /api/state.
 type DashboardState struct {
 	OllamaHealthy bool          `json:"ollama_healthy"`
@@ -97,6 +106,7 @@ type DashboardState struct {
 	TotalCost     float64       `json:"total_cost"`     // Running total of estimated costs for API jobs
 	APICount      int           `json:"api_job_count"`  // Number of API-dispatched jobs
 	LocalCount    int           `json:"local_job_count"` // Number of local jobs
+	SlotQueues    []SlotQueue   `json:"slot_queues"`    // Currently-running jobs per slot
 }
 
 // Server holds the dashboard dependencies.
@@ -183,6 +193,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"formatDuration": FormatDuration,
 		"formatCost":     FormatCost,
 		"divCost":        DivCost,
+		"slotRuntime":    SlotRuntime,
 	}
 	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(templatesFS, "templates/index.html")
 	if err != nil {
@@ -244,6 +255,7 @@ func (s *Server) gatherState() DashboardState {
 		TotalCost:     totalCost,
 		APICount:      apiCount,
 		LocalCount:    localCount,
+		SlotQueues:    s.readSlotQueues(),
 	}
 }
 
@@ -285,6 +297,58 @@ func (s *Server) readRecentJobs(limit int) []JobRecord {
 		unique = unique[:limit]
 	}
 	return unique
+}
+
+func (s *Server) readSlotQueues() []SlotQueue {
+	f, err := os.Open(s.historyPath)
+	if err != nil {
+		return makeEmptySlotQueues()
+	}
+	defer f.Close()
+
+	// Build map of running jobs by queue.
+	runningByQueue := map[string]SlotQueue{}
+	scanner := newLineReader(f)
+	for scanner.Scan() {
+		var rec JobRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue
+		}
+		if rec.Status != "running" {
+			continue
+		}
+		start, err := time.Parse(time.RFC3339, rec.StartedAt)
+		if err != nil {
+			continue
+		}
+		elapsed := time.Since(start).Round(time.Second)
+		runningByQueue[rec.Queue] = SlotQueue{
+			Name:     rec.Queue,
+			Occupied: true,
+			JobID:    rec.ID,
+			Model:    rec.Model,
+			Runtime:  elapsed.String(),
+		}
+	}
+
+	return buildSlotQueues(runningByQueue)
+}
+
+func makeEmptySlotQueues() []SlotQueue {
+	return buildSlotQueues(nil)
+}
+
+func buildSlotQueues(running map[string]SlotQueue) []SlotQueue {
+	queues := []string{queue.VoiceQueue, queue.CodingQueue, queue.BackgroundQueue}
+	slots := make([]SlotQueue, 0, len(queues))
+	for _, q := range queues {
+		if rq, ok := running[q]; ok {
+			slots = append(slots, rq)
+		} else {
+			slots = append(slots, SlotQueue{Name: q, Occupied: false})
+		}
+	}
+	return slots
 }
 
 func (s *Server) getQueueDepths() ([]QueueDepth, error) {
@@ -658,6 +722,27 @@ func StatusClass(status string) string {
 	default:
 		return ""
 	}
+}
+
+// SlotRuntime formats a runtime string for the active slots display.
+// Returns a human-readable string like "2m 30s".
+func SlotRuntime(d string) string {
+	t, err := time.ParseDuration(d)
+	if err != nil {
+		return d
+	}
+	if t < time.Second {
+		return t.Round(time.Millisecond).String()
+	}
+	m := int(t.Minutes())
+	s := int(t.Seconds()) % 60
+	if m > 0 && s > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm", m)
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 // DivCost divides a total cost by a count, returning the average.

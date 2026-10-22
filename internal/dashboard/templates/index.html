@@ -242,6 +242,71 @@
     font-size: 0.7rem;
   }
 
+  /* Active slots */
+  .slots-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  .slot-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    position: relative;
+  }
+  .slot-card.occupied {
+    border-color: var(--yellow);
+  }
+  .slot-card .slot-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+    text-transform: capitalize;
+  }
+  .slot-card .slot-status {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .slot-card .slot-status.active {
+    color: var(--yellow);
+  }
+  .slot-card .slot-job {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.8rem;
+    margin-bottom: 2px;
+  }
+  .slot-card .slot-model {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.8rem;
+    color: var(--blue);
+    margin-bottom: 2px;
+  }
+  .slot-card .slot-runtime {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.8rem;
+    color: var(--yellow);
+  }
+  .slot-card .slot-empty {
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-style: italic;
+  }
+  .slot-pulse {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--yellow);
+    margin-right: 4px;
+    animation: pulse 1.5s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
   /* Approval queue */
   .approval-card {
     background: var(--card);
@@ -344,6 +409,27 @@
         <div class="name">—</div>
         <div class="depth">—</div>
         <div class="label">RabbitMQ unreachable</div>
+      </div>
+      {{ end }}
+    </div>
+  </div>
+
+  <!-- Active Slots -->
+  <div class="section">
+    <div class="section-title">Active Slots</div>
+    <div class="slots-row">
+      {{ range .SlotQueues }}
+      <div class="slot-card{{ if .Occupied }} occupied{{ end }}">
+        <div class="slot-name">{{ .Name }}</div>
+        {{ if .Occupied }}
+        <div class="slot-status active"><span class="slot-pulse"></span>running</div>
+        <div class="slot-job">job {{ .JobID }}</div>
+        <div class="slot-model">{{ .Model }}</div>
+        <div class="slot-runtime">{{ slotRuntime .Runtime }}</div>
+        {{ else }}
+        <div class="slot-status">idle</div>
+        <div class="slot-empty">no job in this slot</div>
+        {{ end }}
       </div>
       {{ end }}
     </div>
