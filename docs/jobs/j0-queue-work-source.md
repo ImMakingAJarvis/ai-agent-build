@@ -103,5 +103,5 @@ A Sonnet round started at 16:00 on Oct 21 on all of J0. Check `gh pr list --stat
 ## J0.15 — Skip Phase 2 jobs that are already done
 
 - Oct 22 `jarvis-jobs next` (as `agent`) offered `phase-2-write-an-install-setup-script-scripts-install-ollama`. Ollama is already installed. Those IDs come from migrating unticked Phase 2 lines in TASKS.md.
-- Default `jarvis-migrate -skip` must include `Phase 1` and `Phase 2 —` (not `Phase 2b`). Add `jarvis-jobs skip` for every ready `phase-2-*` id in the store except 2b/benchmarks. Do not delete history.
+- Default `jarvis-migrate -skip` must include `Phase 1` and `Phase 2 —` (not `Phase 2b`). Add `jarvis-jobs skip` for every ready `phase-2-*` id in the store except 2b/benchmarks. Do not delete history. Helper: `sudo -u agent bash scripts/skip_stale_setup_jobs.sh`.
 - Done when: `jarvis-jobs next` as `agent` is an index job (C/N/H/J0), not `phase-2-*`, and a migrate dry-run omits Phase 2 install/pull/modelfile items.
