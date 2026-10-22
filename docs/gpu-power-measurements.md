@@ -74,9 +74,9 @@ A separate tiny always-on model (e.g., 1-3B parameters) would:
 
 ## Conclusion
 
-**No tiny always-on model is needed.** The power cost of keeping `jarvis-brain` warm is negligible (~14 W, ~$14/year). The model loads quickly (~9 seconds) for on-demand use.
+**No tiny always-on model is needed.** The power cost of keeping `jarvis-brain` warm is negligible (~14 W, ~$14/year).
 
-**Recommendation:** Load `jarvis-brain` on-demand when a user message arrives. The 9-second load time is acceptable latency, and the model unloads reliably after use. If `OLLAMA_KEEP_ALIVE` ever works correctly, keeping it warm costs only 4 cents/day in electricity.
+**Recommendation (updated by load-time measurements):** Keep `jarvis-brain` resident in VRAM at all times. Cold-start load time is ~8.6 seconds — far too slow for post-wake-word interaction (see `docs/model-load-time-measurements.md`). The 14 W idle overhead is acceptable. Use `OLLAMA_KEEP_ALIVE` or a systemd timer to prevent unloading.
 
 ## Raw Data
 
