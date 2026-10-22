@@ -5,3 +5,6 @@
 
 # Compiled binaries
 worker
+
+# Temporary files
+tmp/
