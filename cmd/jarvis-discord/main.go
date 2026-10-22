@@ -22,15 +22,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 )
 
 const usage = `usage:
   jarvis-discord notify <message>
-  jarvis-discord ask [-choices a,b,c] [-timeout 2h] <question>`
+  jarvis-discord ask [-choices a,b,c] [-timeout 2h] <question>
+  jarvis-discord watch`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -38,9 +42,14 @@ func main() {
 	}
 	loadEnvFile()
 
+	signalFile := ""
+	if conf := os.Getenv("JARVIS_CONF"); conf != "" {
+		signalFile = conf + "/pause-signal"
+	}
 	d, err := chat.NewDiscord(chat.Config{
-		Token:   os.Getenv("DISCORD_BOT_TOKEN"),
-		OwnerID: os.Getenv("DISCORD_OWNER_ID"),
+		Token:      os.Getenv("DISCORD_BOT_TOKEN"),
+		OwnerID:    os.Getenv("DISCORD_OWNER_ID"),
+		SignalFile: signalFile,
 	})
 	if err != nil {
 		fail(err.Error())
@@ -49,6 +58,20 @@ func main() {
 
 	ctx := context.Background()
 	switch os.Args[1] {
+	case "watch":
+		// Keep the gateway open so onMessage fires for every incoming
+		// DM. When there's no pending Ask, onMessage writes the signal
+		// file to pause the running job.
+		if err := d.Listen(); err != nil {
+			fail(err.Error())
+		}
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
+		select {
+		case <-sig:
+		case <-time.After(24 * time.Hour):
+		}
+
 	case "notify":
 		if err := d.Notify(ctx, message(os.Args[2:])); err != nil {
 			fail(err.Error())

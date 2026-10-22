@@ -24,7 +24,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list|next|run|finish|skip|requeue|show")
+		die("usage: jarvis-jobs list|next|run|finish|skip|requeue|show|pause")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -56,6 +56,13 @@ func main() {
 			die("%v", err)
 		}
 		fmt.Printf("%s — %s\nstatus: %s\n\n%s\n", j.ID, j.Title, j.Status, j.Instructions)
+	case "pause":
+		if len(args) != 1 {
+			die("pause <id>")
+		}
+		if err := store.Pause(args[0]); err != nil {
+			die("%v", err)
+		}
 	case "skip", "requeue":
 		if len(args) != 1 {
 			die("%s <id>", cmd)
@@ -101,5 +108,9 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 	if err != nil {
 		die("history: %v", err)
 	}
-	return &agentjob.Runner{Store: store, History: h}
+	r := &agentjob.Runner{Store: store, History: h}
+	if conf := os.Getenv("JARVIS_CONF"); conf != "" {
+		r.SignalFile = conf + "/pause-signal"
+	}
+	return r
 }

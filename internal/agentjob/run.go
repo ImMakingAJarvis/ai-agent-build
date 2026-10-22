@@ -31,6 +31,11 @@ type Runner struct {
 	Brief func(driver string) string
 	// Tee, if set, also receives the agent's output live (agent.log).
 	Tee io.Writer
+	// SignalFile, if non-empty, is polled during job execution. When it
+	// appears (written by the Discord watcher on an incoming user message),
+	// the running command is cancelled and the job is paused so the agent
+	// can answer the user immediately.
+	SignalFile string
 }
 
 // ModelFor names the model a driver uses.
@@ -136,11 +141,36 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 		w = io.MultiWriter(&buf, r.Tee)
 	}
 	cmd.Stdout, cmd.Stderr = w, w
-	runErr := cmd.Run()
+
+	// Start the command; if SignalFile is set, poll it in a goroutine.
+	if err := cmd.Start(); err != nil {
+		return j, err
+	}
+	if r.SignalFile != "" {
+		go r.signalWatcher(j.ID, cmd)
+	}
+	runErr := cmd.Wait()
 	if ctx.Err() != nil && runErr == nil {
 		runErr = ctx.Err()
 	}
 	return r.finish(j, rec, buf.String(), runErr)
+}
+
+// signalWatcher polls SignalFile every second. When it appears (written by
+// the Discord watcher when the user sends a message), it kills the running
+// command and pauses the job so the agent can answer immediately.
+func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
+	for {
+		if _, err := os.Stat(r.SignalFile); err == nil {
+			// Signal file exists: user wants to talk. Kill the agent and pause.
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+			r.Store.Pause(id)
+			return
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 // Finish records the result of a round that ran outside Run (for example one
