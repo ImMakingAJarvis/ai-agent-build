@@ -1,0 +1,11 @@
+{
+  "domain": "jarvis_voice",
+  "name": "Jarvis Voice",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/ImMakingAJarvis/ai-agent-build",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": ["aiohttp>=3.9.0"],
+  "version": "0.1.0"
+}
