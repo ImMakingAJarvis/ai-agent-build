@@ -22,7 +22,7 @@ ENGINE_PORT=11434
 ENGINE_SLOT_SAVE_PATH=/var/lib/jarvis/slots
 LOGFILE=/var/log/jarvis-engine-switch.log
 
-WORK_SLOT_CTX=65536
+WORK_SLOT_CTX=122880
 CHAT_SLOT_CTX=8192
 
 DRY_RUN=0
@@ -167,7 +167,7 @@ start_engine() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "[DRY-RUN] would start llama.cpp server on :$ENGINE_PORT"
     log "[DRY-RUN]    work slot: ${WORK_SLOT_CTX} ctx, chat slot: ${CHAT_SLOT_CTX} ctx"
-    log "[DRY-RUN]    command: $ENGINE_BIN -m $ENGINE_MODEL --port $ENGINE_PORT --parallel 2 --ctx-size $((WORK_SLOT_CTX + CHAT_SLOT_CTX)) --kv-unified --cache-type-k q4_0 --cache-type-v q4_0 --slot-save-path $ENGINE_SLOT_SAVE_PATH --log-disable"
+    log "[DRY-RUN]    command: $ENGINE_BIN -m $ENGINE_MODEL --port $ENGINE_PORT --parallel 2 -fa --ctx-size $((WORK_SLOT_CTX + CHAT_SLOT_CTX)) --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --slot-save-path $ENGINE_SLOT_SAVE_PATH --log-disable"
     wait_for_health "http://localhost:$ENGINE_PORT/health" "llama.cpp server" 120
     return 0
   fi
@@ -184,10 +184,11 @@ start_engine() {
     -m "$ENGINE_MODEL" \
     --port "$ENGINE_PORT" \
     --parallel 2 \
+    -fa \
     --ctx-size "$total_ctx" \
     --kv-unified \
-    --cache-type-k q4_0 \
-    --cache-type-v q4_0 \
+    --cache-type-k q8_0 \
+    --cache-type-v q8_0 \
     --slot-save-path "$ENGINE_SLOT_SAVE_PATH" \
     --log-disable \
     &
