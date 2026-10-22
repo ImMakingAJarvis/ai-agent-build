@@ -202,6 +202,8 @@ Do these in order, one job per round. Each line names its job doc. Read only tha
 - [ ] **J0.11 — Migration chains jobs only within their group** · `docs/jobs/j0-queue-work-source.md`
 - [ ] **J0.12 — `scripts/deploy_queue.sh`: install the queue tools from main, one worker, migration** · `docs/jobs/j0-queue-work-source.md`
 - [ ] **J0.13 — Deploy, run the migration, hand the loop over (Sonnet, ask Nathan first)** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.14 — Boot does not restart stage 1 and 2 when the box is already built** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.15 — Skip already-done Phase 2 jobs in the store; migrate skips them too** · `docs/jobs/j0-queue-work-source.md`
 
 ### S — Slots: pause the work, talk on Discord, resume
 

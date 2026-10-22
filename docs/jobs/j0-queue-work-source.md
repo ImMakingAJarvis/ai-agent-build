@@ -93,3 +93,15 @@ A Sonnet round started at 16:00 on Oct 21 on all of J0. Check `gh pr list --stat
 - Check `jarvis-jobs list`: the first ready job is the first unticked line of the TASKS.md index, there are no duplicate IDs, and the count is about the number of unticked lines.
 - The running loop only uses the new `agent-run` after it restarts. Don't kill it. Send Nathan the exact one-line restart command: the expanded `as_agent … agent-run` line near the end of `bootstrap.sh`, run with `sudo`. Tell him to answer Stop at the next checkpoint, then run that command.
 - Done when: the next checkpoint names a queue job ("Next: S0.1 — …"), with Skip among the choices.
+
+## J0.14 — Boot does not restart stage 1 and 2
+
+- File: `scripts/agent-run` only (the stage 1 / 2 block at the top).
+- On Oct 22 a systemd start looked like a new build: the first Discord line was "local run ended (exit ?)" because `$status` is unset on the first loop. If `nvidia-smi` works and `$CONF/local.env` exists, write `stage=3` and skip stages 1 and 2. Missing `$CONF/stage` must not default into a driver reinstall. Install the script atomically.
+- Done when: a dry run with those files present prints that it skipped to stage 3, and `bash -n` passes.
+
+## J0.15 — Skip Phase 2 jobs that are already done
+
+- Oct 22 `jarvis-jobs next` (as `agent`) offered `phase-2-write-an-install-setup-script-scripts-install-ollama`. Ollama is already installed. Those IDs come from migrating unticked Phase 2 lines in TASKS.md.
+- Default `jarvis-migrate -skip` must include `Phase 1` and `Phase 2 —` (not `Phase 2b`). Add `jarvis-jobs skip` for every ready `phase-2-*` id in the store except 2b/benchmarks. Do not delete history.
+- Done when: `jarvis-jobs next` as `agent` is an index job (C/N/H/J0), not `phase-2-*`, and a migrate dry-run omits Phase 2 install/pull/modelfile items.
