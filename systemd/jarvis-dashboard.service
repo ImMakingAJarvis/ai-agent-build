@@ -1,0 +1,21 @@
+[Unit]
+Description=Jarvis dashboard (http://0.0.0.0:8080)
+After=network-online.target
+Wants=network-online.target
+# Easy inhibit: touch this file before reboot (undo: rm it). Also: systemctl disable --now jarvis-dashboard.
+ConditionPathExists=!/var/lib/jarvis/dashboard.disabled
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+EnvironmentFile=-/home/agent/.config/jarvis/agent.env
+ExecStart=/usr/local/bin/jarvis-dashboard
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/agent/.local/state/jarvis/dashboard.log
+StandardError=append:/home/agent/.local/state/jarvis/dashboard.log
+SyslogIdentifier=jarvis-dashboard
+
+[Install]
+WantedBy=multi-user.target
