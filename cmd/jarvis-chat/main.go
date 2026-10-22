@@ -96,6 +96,14 @@ func main() {
 			return
 		}
 
+		// !pause is a special command: write the pause-signal file so
+		// agent-run can interrupt the current job, even when jarvis-chat
+		// is active (and the Discord watcher is not running).
+		if content == "!pause" {
+			_ = os.WriteFile(confDir+"/pause-signal", []byte("!pause"), 0o644)
+			return
+		}
+
 		handleMessage(d, ollamaClient, modelName, content, &history)
 	})
 

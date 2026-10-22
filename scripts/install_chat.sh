@@ -27,6 +27,11 @@ sudo mv -f "$BIN_DIR/jarvis-discord.tmp" "$BIN_DIR/jarvis-discord"
 echo "    $BIN_DIR/jarvis-chat installed"
 echo "    $BIN_DIR/jarvis-discord installed"
 
+echo "==> Installing agent-run atomically"
+sudo cp "$REPO_ROOT/scripts/agent-run" "$BIN_DIR/agent-run.tmp"
+sudo mv -f "$BIN_DIR/agent-run.tmp" "$BIN_DIR/agent-run"
+echo "    $BIN_DIR/agent-run installed"
+
 echo "==> Installing systemd unit"
 sudo cp systemd/jarvis-chat.service "$SYSTEMD_DIR/jarvis-chat.service"
 sudo systemctl daemon-reload
