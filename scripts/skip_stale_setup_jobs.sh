@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Skip leftover Phase 1 / Phase 2 jobs only (not 2b, not Phase 3).
+# Skip leftover TASKS.md phase-* setup jobs in the agent store.
+# Skips phase-1, 2 (not 2b), 3, 3b, 4, 5, 6.
+# Keeps C/N/H/J0/D/S/Q/E/R and phase-2b.
 # agent cannot read /home/nathan:
 #   cp scripts/skip_stale_setup_jobs.sh /tmp/skip_stale_setup_jobs.sh
 #   chmod 755 /tmp/skip_stale_setup_jobs.sh
@@ -12,11 +14,13 @@ if [[ ! -d "$dir" ]]; then
 fi
 n=0
 shopt -s nullglob
-for d in "$dir"/phase-1-* "$dir"/phase-2-*; do
+for d in "$dir"/*; do
   [[ -d "$d" ]] || continue
   id=$(basename "$d")
   case "$id" in
     phase-2b-*) continue ;;
+    phase-1-*|phase-2-*|phase-3-*|phase-3b-*|phase-4-*|phase-5-*|phase-6-*) ;;
+    *) continue ;;
   esac
   jarvis-jobs skip "$id"
   echo "skipped $id"
