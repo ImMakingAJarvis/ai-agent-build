@@ -101,6 +101,7 @@ Read only the section for your job. Background, shared by all D jobs:
 
 ## D7.1 — Conversation store
 
+- Note: group N is durable facts (`/var/lib/jarvis/notes`). This job is chat turns, not notes. Do not put system knowledge here.
 - Turns (role, text, time, job ID) go in the J1 database (table `chat_turns`). Each chat request sends the last turns that fit a 6000-token budget.
 - Done when: windowing tests pass, and turns survive a restart.
 
