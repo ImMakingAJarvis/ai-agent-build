@@ -151,7 +151,15 @@ Division of labor: the Phase 6 dashboard owns job-level views (queue, approvals,
 
 ## Queued jobs — Oct 21, 2026 (index)
 
-Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. J0.1-J0.8 were done by a Sonnet round on branch `phase-3-queue-agent-jobs`. J0.9 must land on that branch before the migration is run. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context. Order: J0 (queue), S (slots: pause, talk, resume), J1 (database), D0 (dashboard fix), E (record everything and show it in the UI, so history starts early), D1-D2 (bot daemon), R (reliable, responsive comms), D3-D8 (commands and chat), Q1.
+Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. J0.1-J0.8 were done by a Sonnet round on branch `phase-3-queue-agent-jobs`. J0.9 must land on that branch before the migration is run. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context. Order: C (talk on Discord now, while it works), J0 (queue), S (slots: pause, talk, resume), J1 (database), D0 (dashboard fix), E (record everything and show it in the UI, so history starts early), D1-D2 (bot daemon), R (reliable, responsive comms), D3-D8 (commands and chat), Q1.
+
+### C — Talk to Jarvis on Discord now, while it works
+
+- [ ] **C1.1 — `jarvis-chat` daemon: instant 👀 and typing, brain reply between round steps** · `docs/jobs/c-chat-now.md`
+- [ ] **C1.2 — Checkpoint answers don't get a chat reply (`ask-open` marker)** · `docs/jobs/c-chat-now.md`
+- [ ] **C1.3 — Install `jarvis-chat` as a service** · `docs/jobs/c-chat-now.md`
+- [ ] **C1.4 — Messages no longer kill the round (only `!pause` does)** · `docs/jobs/c-chat-now.md`
+- [ ] **C1.5 — Latency check with Nathan** · `docs/jobs/c-chat-now.md`
 
 ### J0 — Make the queue the source of all work
 

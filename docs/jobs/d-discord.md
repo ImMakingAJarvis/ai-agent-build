@@ -9,6 +9,7 @@ Read only the section for your job. Background, shared by all D jobs:
 
 ## D1.1 — Daemon with owner-only intake
 
+- Note: C1.1-C1.4 built `jarvis-chat` (always-on daemon, typing, brain replies). Extend it rather than starting another daemon or reply path.
 - New `cmd/jarvis-bot`: one gateway connection that reconnects on drop. Accept a `MessageCreate` only if the author ID equals `DISCORD_OWNER_ID`, the author is not a bot, and the channel is the owner DM. Drop everything else, logging no content. Allow 20 messages a minute and 4000 characters per message. For now, reply with a ✅ reaction only.
 - Done when: filter tests with fake events pass (owner DM accepted; other user, bot, other channel and too-long rejected).
 
@@ -89,6 +90,7 @@ Read only the section for your job. Background, shared by all D jobs:
 
 ## D6.1 — Chat goes to the brain as a voice job
 
+- Note: C1.1-C1.4 built `jarvis-chat` (always-on daemon, typing, brain replies). Extend it rather than starting another daemon or reply path.
 - An owner message that is not a command and not an answer becomes a `voice` job with `source: discord` and `reply_to`, on `LOCAL_MODEL`. A paid API is used only for `!ask-claude …`, through the cost gate. Strip thinking output and split long replies.
 - Done when: routing tests with a fake model pass, and live "hi" gets a reply.
 

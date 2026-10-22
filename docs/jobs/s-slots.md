@@ -44,6 +44,7 @@ Read only the section for your job. Background, shared by all S jobs:
 
 ## S1.5 — A light reply path that doesn't start Claude Code
 
+- Note: C1.1-C1.4 built `jarvis-chat` (always-on daemon, typing, brain replies). Extend it rather than starting another daemon or reply path.
 - Files: new `cmd/jarvis-reply/main.go` and its test; one line in `scripts/agent-run` to use it.
 - Today the reply to Nathan starts a full Claude Code session with tools, which is slow and pulls a big prompt through the brain. Replace it with a single chat call: a short system prompt, the job's ID, title and last 20 output lines, and Nathan's message. Send the answer with `jarvis-discord notify`. Time limit 2 minutes; on timeout, say "I'm busy on <job>, I'll answer after it" and go on.
 - The engine URL and model come from `local.env` (`OLLAMA_URL`, `LOCAL_MODEL`), so S4 only changes the URL.

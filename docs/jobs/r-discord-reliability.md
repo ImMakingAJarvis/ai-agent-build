@@ -29,6 +29,7 @@ Read only the section for your job. Background, shared by all R jobs:
 
 ## R1.4 — Instant acknowledgement
 
+- Note: C1.1-C1.4 built `jarvis-chat` (always-on daemon, typing, brain replies). Extend it rather than starting another daemon or reply path.
 - Within 1s of any owner message: add a 👀 reaction and start the typing indicator. Replace the reaction with ✅ when handled, or ❌ with a short reason on failure. This is never blocked by the model or the database: if the database is down, acknowledge anyway and queue the work in memory.
 - Done when: tests check the order of reactions. Live: p95 time from send to reaction is under 1.5s over 20 messages.
 
