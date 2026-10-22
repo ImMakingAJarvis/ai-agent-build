@@ -44,6 +44,11 @@ type Discord struct {
 
 	mu      sync.Mutex
 	pending []*waiter // oldest first
+
+	// messageHook, if non-nil, is called for every owner DM that is not
+	// consumed by a pending Ask waiter. The daemon can use it to process
+	// free-form messages.
+	messageHook func(string)
 }
 
 // waiter is one open question.
@@ -95,6 +100,20 @@ func (d *Discord) Notify(ctx context.Context, text string) error {
 		}
 	}
 	return nil
+}
+
+// Typing sends a typing indicator to the owner's DM channel.
+// Discord ignores rapid repeats, so calling this every few seconds is
+// safe and keeps the indicator alive for long operations.
+func (d *Discord) Typing() error {
+	return d.s.ChannelTyping(d.dmID)
+}
+
+// OnMessage registers a callback that fires for every owner DM that is
+// not consumed by a pending Ask waiter. The callback receives the
+// message content string.
+func (d *Discord) OnMessage(fn func(string)) {
+	d.messageHook = fn
 }
 
 // Ask sends question to the owner and blocks until they answer, either by
@@ -168,8 +187,11 @@ func (d *Discord) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// message there so the agent-run loop can pause the current job.
 	if d.cfg.SignalFile != "" && target == nil {
 		os.WriteFile(d.cfg.SignalFile, []byte(m.Content), 0o644)
+		}
+		if d.messageHook != nil && target == nil {
+			d.messageHook(m.Content)
+		}
 	}
-}
 
 func (d *Discord) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionMessageComponent || i.User == nil || i.User.ID != d.cfg.OwnerID {
