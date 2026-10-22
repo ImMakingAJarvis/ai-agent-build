@@ -1,0 +1,24 @@
+[Unit]
+Description=Jarvis coding rounds (agent-run)
+After=network-online.target ollama.service
+Wants=network-online.target
+# Easy inhibit: touch this file before reboot (undo: rm it). Also: systemctl disable --now agent-run.
+ConditionPathExists=!/var/lib/jarvis/agent-run.disabled
+# agent-resume.service runs agent-run --resume when this marker exists.
+ConditionPathExists=!/home/agent/.config/jarvis/resume-pending
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/home/agent/ai-agent-build
+EnvironmentFile=/home/agent/.config/jarvis/agent.env
+ExecStart=/usr/local/bin/agent-run
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/agent/.local/state/jarvis/agent.log
+StandardError=append:/home/agent/.local/state/jarvis/agent.log
+SyslogIdentifier=agent-run
+
+[Install]
+WantedBy=multi-user.target

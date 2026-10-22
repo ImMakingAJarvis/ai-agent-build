@@ -11,9 +11,9 @@ Read only the section for your job. Background, shared by all H jobs:
 
 ## H1.1 — Seed note and chat prompt: you do not code
 
-- Files: new `docs/notes/seed/chat-schedules-work.md` (under 80 words, tags `core,chat`); `cmd/jarvis-chat/main.go` `buildMessages` only.
-- Note and system prompt both say: you cannot read files or write code; you talk, capture intent, and schedule coding for the worker with `!build` / `!fix` or a `SCHEDULE` block (H2.2). If `/var/lib/jarvis/notes` exists, copy this seed id only when missing.
-- Done when: the prompt string is in a test, and the seed file is in the repo.
+- Files: `cmd/jarvis-chat/system_prompt.txt` (the file the daemon embeds and `$JARVIS_CONF/chat-prompt.txt` overrides), `docs/notes/seed/chat-schedules-work.md` (under 80 words, tags `core,chat`), `cmd/jarvis-chat/main.go` `buildMessages` / `systemPromptText` only.
+- Note and prompt both say: no shell, no file edits, no systemd, no secrets; talk to Nathan and create jobs for agent-run / jarvis-jobs (`!build` / `!fix` or a `SCHEDULE` block). If `/var/lib/jarvis/notes` exists, copy this seed id only when missing.
+- Done when: a test checks the prompt forbids coding and mentions jobs, and the seed file is in the repo. (A Cursor round on Oct 22 wrote the prompt file; re-check it still matches, then tick this job.)
 
 ## H1.2 — `jarvis-jobs add`
 

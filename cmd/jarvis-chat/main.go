@@ -17,7 +17,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	_ "embed"
 	"log"
 	"os"
 	"os/signal"
@@ -29,6 +31,9 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 )
+
+//go:embed system_prompt.txt
+var defaultSystemPrompt string
 
 const (
 	// Typing is refreshed every 8 seconds to keep the indicator alive.
@@ -227,10 +232,24 @@ func typingLoop(ctx context.Context, d sender) {
 
 // buildMessages constructs the Ollama chat messages from the system prompt,
 // status line, and conversation history.
+func systemPromptText() string {
+	confDir := os.Getenv("JARVIS_CONF")
+	if confDir == "" {
+		home, _ := os.UserHomeDir()
+		confDir = filepath.Join(home, ".config", "jarvis")
+	}
+	if b, err := os.ReadFile(filepath.Join(confDir, "chat-prompt.txt")); err == nil {
+		if t := string(bytes.TrimSpace(b)); t != "" {
+			return t
+		}
+	}
+	return strings.TrimSpace(defaultSystemPrompt)
+}
+
 func buildMessages(userMsg string, history []string) []models.ChatMessage {
 	status := getStatusLine()
 
-	systemPrompt := "You are Jarvis, Nathan's home AI. Answer briefly and conversationally."
+	systemPrompt := systemPromptText()
 	if status != "" {
 		systemPrompt += "\n\nCurrent status:\n" + status
 	}

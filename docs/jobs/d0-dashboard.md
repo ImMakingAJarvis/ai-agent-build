@@ -23,5 +23,5 @@ Stopgap until D0 is merged: Nathan runs a proxy on :8081 (`~/.local/share/jarvis
 ## D0.3 — Dashboard and worker as services
 
 - On Oct 21 they were started by hand from agent sessions (`/tmp/jarvis-dashboard`, `/tmp/jarvis-worker`, two `~/.local/bin/worker`). So the dashboard died when a round ended, and three workers consumed at once.
-- Add `jarvis-dashboard.service` and `jarvis-worker.service` (`User=agent`, binaries outside `/tmp`, `Restart=on-failure`, enabled at boot). Stop the stray copies. From then on use `systemctl restart`, never a background process from a session.
+- Add `jarvis-dashboard.service` and `jarvis-worker.service` (`User=agent`, binaries outside `/tmp`, `Restart=on-failure`, enabled at boot). Stop the stray copies. From then on use `systemctl restart`, never a background process from a session. Do not replace `agent-run.service` (coding rounds); that unit is separate.
 - Done when: `systemctl is-active` shows both active, `pgrep -c -f 'jarvis-worker|bin/worker'` is 1, and the dashboard is still up after the round ends and after a reboot.

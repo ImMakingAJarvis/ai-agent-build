@@ -73,7 +73,7 @@ Read only the section for your job. Background, shared by all N jobs:
 ## N5.2 — Seed notes from the inventory
 
 - Files: new files under `docs/notes/seed/` only (one fact per file, each body under 120 words).
-- From N1.1's table, write notes tagged `core` or `system`: hardware (4090 24 GB, 128 GB RAM, Ubuntu 24.04, board ROG STRIX B850-G), who Nathan is, how chat vs a build round works, Ollama traps (`options` reloads the model; one request at a time), dashboard `:8080` / shim `:8081` / Grafana `:3000`, queue (RabbitMQ, `jarvis-jobs`, store still empty until J0.12–J0.13), Discord (owner DM, `jarvis-chat` vs `ask` checkpoints), git (org `ImMakingAJarvis`, never push to main, `GH_TOKEN=$(ghapp-token) gh …`).
+- From N1.1's table, write notes tagged `core` or `system`: hardware (4090 24 GB, 128 GB RAM, Ubuntu 24.04, board ROG STRIX B850-G), who Nathan is, how chat vs a build round works, Ollama traps (`options` reloads the model; one request at a time), dashboard `:8080` / shim `:8081` / Grafana `:3000`, queue (RabbitMQ, `jarvis-jobs`, store still empty until J0.12–J0.13), Discord (owner DM, `jarvis-chat` vs `ask` checkpoints), git (org `ImMakingAJarvis`, never push to main, `GH_TOKEN=$(ghapp-token) gh …`). Keep `docs/notes/seed/chat-schedules-work.md` if it is already there (chat does not code; it schedules jobs).
 - Then run `scripts/seed_notes.sh`.
 - Done when: `jarvis-notes list` shows those ids and Nathan can `cat` one.
 
