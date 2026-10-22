@@ -170,6 +170,24 @@ summary() {
 # Work comes from the queue: each round takes the next ready agent job
 # (jarvis-jobs next: highest priority, then oldest, dependencies done),
 # names it at the checkpoint, and runs it on the driver you choose.
+# discord_watcher_pid tracks the background Discord watcher so we can kill
+# it when a job finishes (or was paused by the user).
+discord_watcher_pid=
+
+stop_watcher() {
+  if [[ -n "$discord_watcher_pid" ]]; then
+    kill "$discord_watcher_pid" 2>/dev/null || true
+    wait "$discord_watcher_pid" 2>/dev/null || true
+    discord_watcher_pid=
+  fi
+}
+
+start_watcher() {
+  rm -f "$CONF/pause-signal"  # clear any stale signal
+  jarvis-discord watch &
+  discord_watcher_pid=$!
+}
+
 msg="${checkpoint:-$(summary "$(cat "$DRIVER" 2>/dev/null || echo agent)" "${status:-?}")}"
 round=0
 while :; do
@@ -214,8 +232,33 @@ $q"); then
   echo "$job_id" > "$CONF/current-job"
   round=$((round + 1))
   echo "==> $(date '+%F %T') job $job_id on $d (round $round)"
+
+  # Start Discord watcher so the user can interrupt this job at any time.
+  start_watcher
   jarvis-jobs run "$job_id" -driver "$d" -round "$(date +%s)-$round" -note "$note"; status=$?
+  stop_watcher
   exit_if_rebooting   # keep current-job: agent-resume records it after the reboot
+
+  # Check if the job was paused (user messaged during the run).
+  job_status=$(jarvis-jobs list 2>/dev/null | awk -v id="$job_id" '$2 == id {print $1}')
+  if [[ "$job_status" == "paused" ]]; then
+    rm -f "$CONF/current-job"
+    # Read the user's message from the signal file.
+    user_msg=""
+    if [[ -f "$CONF/pause-signal" ]]; then
+      user_msg=$(cat "$CONF/pause-signal")
+      rm -f "$CONF/pause-signal"
+    fi
+    # Answer the user directly, then put the job back in the queue.
+    pause_prompt="You were in the middle of working on job $job_id ($job_title) when I messaged you.
+My message was: $user_msg
+Reply to me now. After this you'll be asked what to do next."
+    run_claude local 0 "$pause_prompt"
+    jarvis-jobs requeue "$job_id"
+    msg="You interrupted the job to talk. What's next?"
+    continue
+  fi
+
   rm -f "$CONF/current-job"
   msg=$(summary "$d" "$status")
 done

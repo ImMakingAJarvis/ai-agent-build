@@ -20,6 +20,7 @@ const (
 	Ready   = "ready"
 	Claimed = "claimed"
 	Running = "running"
+	Paused  = "paused"
 	Done    = "done"
 	Failed  = "failed"
 	Skipped = "skipped"
@@ -197,6 +198,12 @@ func (s *Store) Recover() error {
 				return err
 			}
 		}
+		// Paused jobs whose owner is gone are resumed to ready.
+		if j.Status == Paused && !alive(j.PID) {
+			if err := s.setState(j.ID, State{Status: Ready}); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -263,6 +270,24 @@ func (s *Store) Claim(id, round, driver string) (Job, error) {
 
 // SetStatus overwrites a job's state (skip, requeue, results).
 func (s *Store) SetStatus(id string, st State) error { return s.setState(id, st) }
+
+// Pause transitions a running job to paused. It is idempotent: if the job
+// is already paused nothing changes and nil is returned. The paused job can
+// later be resumed back to ready with SetStatus(Ready).
+func (s *Store) Pause(id string) error {
+	j, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if j.Status == Paused {
+		return nil
+	}
+	if j.Status != Running {
+		return fmt.Errorf("job %s is %s, not running", id, j.Status)
+	}
+	j.Status = Paused
+	return s.setState(id, j.State)
+}
 
 // WriteFile stores a named artifact (output.txt, transcript.txt) for a job.
 func (s *Store) WriteFile(id, name string, data []byte) error {
