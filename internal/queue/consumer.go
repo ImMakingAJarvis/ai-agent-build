@@ -1,4 +1,4 @@
-// Package queue provides an AMQP consumer that reads from the voice, coding, and background queues.
+// Package queue provides an AMQP consumer that reads from the voice, fix, coding, and background queues.
 package queue
 
 import (
@@ -25,19 +25,19 @@ var ErrQueuePaused = fmt.Errorf("queue paused")
 // it stays pending until manually approved via the dashboard or Discord.
 var ErrApprovalDenied = fmt.Errorf("approval denied: estimated cost exceeds threshold")
 
-// Consumer manages concurrent consumers on the three queues with manual ack and QoS.
+// Consumer manages concurrent consumers on the managed queues with manual ack and QoS.
 type Consumer struct {
 	conn    *Conn
 	handler Handler
 	// running tracks whether the consumer loop is active.
 	running atomic.Bool
 	// deliveries holds the channels from Queue.Consume per queue.
-	deliveries [3]<-chan amqp.Delivery
+	deliveries map[string]<-chan amqp.Delivery
 }
 
-// NewConsumer creates a consumer that will read from all three queues.
+// NewConsumer creates a consumer that will read from all managed queues.
 func NewConsumer(conn *Conn, handler Handler) *Consumer {
-	return &Consumer{conn: conn, handler: handler}
+	return &Consumer{conn: conn, handler: handler, deliveries: map[string]<-chan amqp.Delivery{}}
 }
 
 // Start declares queues, sets QoS prefetch=1, and begins consuming on each queue.
@@ -57,7 +57,7 @@ func (c *Consumer) Start() error {
 	}
 
 	// Consume each queue with prefetch=1.
-	for i, q := range AllQueues[:] {
+	for _, q := range AllQueues {
 		if err := ch.Qos(1, 0, false); err != nil {
 			return fmt.Errorf("qos on %s: %w", q, err)
 		}
@@ -65,17 +65,17 @@ func (c *Consumer) Start() error {
 		if err != nil {
 			return fmt.Errorf("consume %s: %w", q, err)
 		}
-		c.deliveries[i] = dels
+		c.deliveries[q] = dels
 	}
 
 	c.running.Store(true)
 
 	// Start a goroutine per queue.
-	for i, q := range AllQueues[:] {
-		go c.consumeLoop(q, c.deliveries[i])
+	for _, q := range AllQueues {
+		go c.consumeLoop(q, c.deliveries[q])
 	}
 
-	log.Printf("consumer: listening on %s, %s, %s", AllQueues[0], AllQueues[1], AllQueues[2])
+	log.Printf("consumer: listening on %s, %s, %s, %s", AllQueues[0], AllQueues[1], AllQueues[2], AllQueues[3])
 	return nil
 }
 

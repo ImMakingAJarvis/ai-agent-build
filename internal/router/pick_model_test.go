@@ -105,3 +105,79 @@ func TestPickModelAPIModelEnv(t *testing.T) {
 		t.Errorf("should respect API_MODEL env, got %s", name)
 	}
 }
+
+func TestPickModelVoiceUsesLightModel(t *testing.T) {
+	origLight := os.Getenv("LOCAL_LIGHT_MODEL")
+	origModel := os.Getenv("LOCAL_MODEL")
+	os.Setenv("LOCAL_LIGHT_MODEL", "qwen2.5:7b")
+	os.Setenv("LOCAL_MODEL", "jarvis-brain")
+	defer func() {
+		os.Setenv("LOCAL_LIGHT_MODEL", origLight)
+		os.Setenv("LOCAL_MODEL", origModel)
+	}()
+
+	name, useLocal := router.PickModel("voice", false, "", true)
+	if !useLocal {
+		t.Error("voice job should use local")
+	}
+	if name != "qwen2.5:7b" {
+		t.Errorf("voice should use LOCAL_LIGHT_MODEL, got %s", name)
+	}
+}
+
+func TestPickModelVoiceLightModelDefaultsToLocal(t *testing.T) {
+	origLight := os.Getenv("LOCAL_LIGHT_MODEL")
+	origModel := os.Getenv("LOCAL_MODEL")
+	os.Unsetenv("LOCAL_LIGHT_MODEL")
+	os.Setenv("LOCAL_MODEL", "jarvis-brain")
+	defer func() {
+		os.Setenv("LOCAL_LIGHT_MODEL", origLight)
+		os.Setenv("LOCAL_MODEL", origModel)
+	}()
+
+	name, useLocal := router.PickModel("voice", false, "", true)
+	if !useLocal {
+		t.Error("voice job should use local")
+	}
+	if name != "jarvis-brain" {
+		t.Errorf("voice should fall back to LOCAL_MODEL when LOCAL_LIGHT_MODEL is unset, got %s", name)
+	}
+}
+
+func TestPickModelCodingIgnoresLightModel(t *testing.T) {
+	origLight := os.Getenv("LOCAL_LIGHT_MODEL")
+	origModel := os.Getenv("LOCAL_MODEL")
+	os.Setenv("LOCAL_LIGHT_MODEL", "qwen2.5:7b")
+	os.Setenv("LOCAL_MODEL", "jarvis-brain")
+	defer func() {
+		os.Setenv("LOCAL_LIGHT_MODEL", origLight)
+		os.Setenv("LOCAL_MODEL", origModel)
+	}()
+
+	name, useLocal := router.PickModel("coding", false, "", true)
+	if !useLocal {
+		t.Error("coding job should use local")
+	}
+	if name != "jarvis-brain" {
+		t.Errorf("coding should use LOCAL_MODEL, not LOCAL_LIGHT_MODEL, got %s", name)
+	}
+}
+
+func TestPickModelBackgroundIgnoresLightModel(t *testing.T) {
+	origLight := os.Getenv("LOCAL_LIGHT_MODEL")
+	origModel := os.Getenv("LOCAL_MODEL")
+	os.Setenv("LOCAL_LIGHT_MODEL", "qwen2.5:7b")
+	os.Setenv("LOCAL_MODEL", "jarvis-brain")
+	defer func() {
+		os.Setenv("LOCAL_LIGHT_MODEL", origLight)
+		os.Setenv("LOCAL_MODEL", origModel)
+	}()
+
+	name, useLocal := router.PickModel("background", false, "", true)
+	if !useLocal {
+		t.Error("background job should use local")
+	}
+	if name != "jarvis-brain" {
+		t.Errorf("background should use LOCAL_MODEL, got %s", name)
+	}
+}
