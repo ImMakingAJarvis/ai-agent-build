@@ -1,0 +1,29 @@
+[Unit]
+Description=Jarvis Brain Engine — llama.cpp server with work and chat slots
+After=network-online.target
+Wants=network-online.target
+Conflicts=ollama.service
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+PIDFile=/run/jarvis-engine.pid
+ExecStart=/opt/jarvis-engine/bin/llama-server \
+    -m /opt/jarvis-engine/models/jarvis-brain.gguf \
+    --port 11434 \
+    --parallel 2 \
+    --ctx-size 73728 \
+    --kv-unified \
+    --cache-type-k q4_0 \
+    --cache-type-v q4_0 \
+    --slot-save-path /var/lib/jarvis/slots \
+    --log-disable
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis-engine
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+#
+# engine-switch: swap between Ollama and llama.cpp server as the brain engine.
+#
+#   engine-switch to-engine [--dry-run]   switch to llama.cpp with two slots
+#   engine-switch to-ollama [--dry-run]   switch back to Ollama
+#
+# to-engine: unload brain from Ollama, stop ollama.service, start llama.cpp
+#   server with a work slot (64K ctx) and a chat slot (8K ctx), wait for
+#   health, and run a basic API check. On any failure, roll back to Ollama.
+#
+# to-ollama: stop the engine, start ollama.service, verify health.
+#
+# --dry-run prints every step without executing anything.
+# All actions log to /var/log/jarvis-engine-switch.log.
+
+set -euo pipefail
+
+ENGINE_BIN=/opt/jarvis-engine/bin/llama-server
+ENGINE_MODEL=/opt/jarvis-engine/models/jarvis-brain.gguf
+ENGINE_PORT=11434
+ENGINE_SLOT_SAVE_PATH=/var/lib/jarvis/slots
+LOGFILE=/var/log/jarvis-engine-switch.log
+
+WORK_SLOT_CTX=65536
+CHAT_SLOT_CTX=8192
+
+DRY_RUN=0
+MODE=""
+
+########################################
+# Parse arguments
+########################################
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    to-engine|to-ollama) MODE="$1" ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+[[ -n "$MODE" ]] || { echo "Usage: engine-switch {to-engine|to-ollama} [--dry-run]" >&2; exit 1; }
+
+########################################
+# Logging helper
+########################################
+log() {
+  local msg="$(date '+%Y-%m-%d %H:%M:%S') [engine-switch] $*"
+  echo "$msg"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    echo "$msg" >> "$LOGFILE" 2>/dev/null || true
+  fi
+}
+
+########################################
+# Run a command (or print it in dry-run mode)
+########################################
+run() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] would run: $*"
+    return 0
+  fi
+  log "running: $*"
+  "$@"
+}
+
+########################################
+# Wait for HTTP health on a given URL
+########################################
+wait_for_health() {
+  local url="$1" label="$2" max_tries="${3:-60}"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] would wait for $label health at $url (up to $max_tries s)"
+    return 0
+  fi
+  log "waiting for $label health at $url ..."
+  for i in $(seq 1 "$max_tries"); do
+    if curl -sf "$url" >/dev/null 2>&1; then
+      log "$label is healthy"
+      return 0
+    fi
+    sleep 1
+  done
+  log "ERROR: $label did not become healthy in $max_tries seconds"
+  return 1
+}
+
+########################################
+# S3.3-style API check — engine responds
+# to a chat completion request
+########################################
+api_check() {
+  local base="$1" label="$2"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] would run API check against $label at $base"
+    return 0
+  fi
+  log "API check: sending test request to $label ..."
+  local resp
+  resp=$(curl -sf -X POST "$base/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"test","messages":[{"role":"user","content":"Say ok in one word."}],"max_tokens":8}' \
+    2>&1) || { log "API check FAILED: curl error"; return 1; }
+
+  if echo "$resp" | grep -q '"choices"'; then
+    log "API check PASSED for $label"
+    return 0
+  fi
+  log "API check FAILED: response missing choices field"
+  return 1
+}
+
+########################################
+# Rollback helper — stop engine, start
+# Ollama, log what happened
+########################################
+rollback() {
+  log "ROLLBACK: switching back to Ollama ..."
+  stop_engine
+  start_ollama
+  log "ROLLBACK complete"
+}
+
+########################################
+# Start/stop helpers
+########################################
+stop_ollama() {
+  run systemctl stop ollama.service
+}
+
+start_ollama() {
+  run systemctl start ollama.service
+  wait_for_health "http://localhost:$ENGINE_PORT/health" "Ollama" 30
+}
+
+stop_engine() {
+  local pidfile="/run/jarvis-engine.pid"
+  if [[ -f "$pidfile" ]]; then
+    local pid
+    pid=$(cat "$pidfile")
+    if kill -0 "$pid" 2>/dev/null; then
+      log "stopping engine (PID $pid) ..."
+      kill "$pid" 2>/dev/null || true
+      # Wait for it to actually exit
+      for i in $(seq 1 15); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+      done
+      # Force kill if still alive
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidfile"
+  fi
+}
+
+start_engine() {
+  if [[ ! -f "$ENGINE_BIN" ]]; then
+    log "ERROR: engine binary not found at $ENGINE_BIN"
+    return 1
+  fi
+  if [[ ! -f "$ENGINE_MODEL" ]]; then
+    log "ERROR: engine model not found at $ENGINE_MODEL"
+    return 1
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] would start llama.cpp server on :$ENGINE_PORT"
+    log "[DRY-RUN]    work slot: ${WORK_SLOT_CTX} ctx, chat slot: ${CHAT_SLOT_CTX} ctx"
+    log "[DRY-RUN]    command: $ENGINE_BIN -m $ENGINE_MODEL --port $ENGINE_PORT --parallel 2 --ctx-size $((WORK_SLOT_CTX + CHAT_SLOT_CTX)) --kv-unified --cache-type-k q4_0 --cache-type-v q4_0 --slot-save-path $ENGINE_SLOT_SAVE_PATH --log-disable"
+    wait_for_health "http://localhost:$ENGINE_PORT/health" "llama.cpp server" 120
+    return 0
+  fi
+
+  mkdir -p "$ENGINE_SLOT_SAVE_PATH"
+
+  log "starting llama.cpp server on :$ENGINE_PORT ..."
+  log "   work slot: ${WORK_SLOT_CTX} ctx, chat slot: ${CHAT_SLOT_CTX} ctx"
+
+  # Total context = sum of slot contexts with --kv-unified
+  local total_ctx=$((WORK_SLOT_CTX + CHAT_SLOT_CTX))
+
+  "$ENGINE_BIN" \
+    -m "$ENGINE_MODEL" \
+    --port "$ENGINE_PORT" \
+    --parallel 2 \
+    --ctx-size "$total_ctx" \
+    --kv-unified \
+    --cache-type-k q4_0 \
+    --cache-type-v q4_0 \
+    --slot-save-path "$ENGINE_SLOT_SAVE_PATH" \
+    --log-disable \
+    &
+  local pid=$!
+  echo "$pid" > /run/jarvis-engine.pid
+
+  wait_for_health "http://localhost:$ENGINE_PORT/health" "llama.cpp server" 120
+}
+
+########################################
+# to-engine path
+########################################
+switch_to_engine() {
+  log "========================================="
+  log "switching to llama.cpp engine"
+  log "========================================="
+
+  # Step 1: unload brain from Ollama
+  log "unloading jarvis-brain from Ollama ..."
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    ollama stop jarvis-brain 2>/dev/null || true
+    sleep 2
+  else
+    run ollama stop jarvis-brain
+  fi
+
+  # Step 2: stop Ollama service
+  log "stopping ollama.service ..."
+  stop_ollama
+
+  # Step 3: start engine with two slots
+  log "starting engine with work + chat slots ..."
+  if ! start_engine; then
+    log "engine start failed — rolling back"
+    rollback
+    exit 1
+  fi
+
+  # Step 4: API check (S3.3 equivalent)
+  if ! api_check "http://localhost:$ENGINE_PORT" "llama.cpp server"; then
+    log "API check failed — rolling back"
+    rollback
+    exit 1
+  fi
+
+  log "engine switch complete: llama.cpp server on :$ENGINE_PORT"
+  log "   (set ENGINE_URL=http://localhost:$ENGINE_PORT in local.env to use it)"
+}
+
+########################################
+# to-ollama path
+########################################
+switch_to_ollama() {
+  log "========================================="
+  log "switching back to Ollama"
+  log "========================================="
+
+  # Step 1: stop engine
+  log "stopping llama.cpp engine ..."
+  stop_engine
+
+  # Step 2: start Ollama
+  log "starting ollama.service ..."
+  if ! start_ollama; then
+    log "Ollama start failed"
+    exit 1
+  fi
+
+  # Step 3: verify Ollama health via API
+  if ! api_check "http://localhost:$ENGINE_PORT" "Ollama"; then
+    log "Ollama API check failed"
+    exit 1
+  fi
+
+  log "switch to Ollama complete"
+  log "   (unset ENGINE_URL in local.env to use it)"
+}
+
+########################################
+# Main
+########################################
+case "$MODE" in
+  to-engine)  switch_to_engine ;;
+  to-ollama)  switch_to_ollama ;;
+esac
+
+log "done"
