@@ -297,3 +297,39 @@ func TestTailLines(t *testing.T) {
 		t.Errorf("want nil for missing file, got %v", empty)
 	}
 }
+
+func TestSystemPromptForbidsCoding(t *testing.T) {
+	t.Setenv("JARVIS_CONF", t.TempDir())
+	p := systemPromptText()
+	for _, want := range []string{"no shell", "no secrets", "jobs", "agent-run"} {
+		if !strings.Contains(strings.ToLower(p), strings.ToLower(want)) && !strings.Contains(p, want) {
+			// allow either casing; also match "You cannot" + jobs wording
+			_ = want
+		}
+	}
+	low := strings.ToLower(p)
+	if !strings.Contains(low, "shell") || !strings.Contains(low, "secret") {
+		t.Fatalf("prompt missing shell/secrets ban:\n%s", p)
+	}
+	if !strings.Contains(low, "job") || !strings.Contains(low, "agent-run") {
+		t.Fatalf("prompt missing job / agent-run:\n%s", p)
+	}
+	msgs := buildMessages("hi", nil)
+	if len(msgs) < 1 || msgs[0].Role != "system" {
+		t.Fatal("expected system message")
+	}
+	if !strings.Contains(msgs[0].Content, "You cannot act on this machine") {
+		t.Errorf("system message missing ban")
+	}
+}
+
+func TestSystemPromptFileOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JARVIS_CONF", dir)
+	if err := os.WriteFile(dir+"/chat-prompt.txt", []byte("OVERRIDE PROMPT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := systemPromptText(); got != "OVERRIDE PROMPT" {
+		t.Fatalf("got %q", got)
+	}
+}

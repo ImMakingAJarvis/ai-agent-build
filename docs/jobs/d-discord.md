@@ -70,6 +70,7 @@ Read only the section for your job. Background, shared by all D jobs:
 
 ## D5.1 — `!add [voice|coding|background|agent] <text>`
 
+- Note: group H already enqueues agent jobs from chat (`!build` / `!fix` / `SCHEDULE`, via `Store.Ingest`). `!add agent` must call that same helper, not RabbitMQ. Voice/coding/background may still use `internal/queue`.
 - Publish through `internal/queue` with `source: "discord"` and `reply_to` (DM channel and message ID). Reply with the job ID.
 - Done when: a test checks the message fields, and live the job appears on the dashboard.
 
@@ -101,6 +102,7 @@ Read only the section for your job. Background, shared by all D jobs:
 
 ## D7.1 — Conversation store
 
+- Note: group N is durable facts (`/var/lib/jarvis/notes`). This job is chat turns, not notes. Do not put system knowledge here.
 - Turns (role, text, time, job ID) go in the J1 database (table `chat_turns`). Each chat request sends the last turns that fit a 6000-token budget.
 - Done when: windowing tests pass, and turns survive a restart.
 

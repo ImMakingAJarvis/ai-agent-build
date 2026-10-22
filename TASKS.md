@@ -151,15 +151,41 @@ Division of labor: the Phase 6 dashboard owns job-level views (queue, approvals,
 
 ## Queued jobs — Oct 21, 2026 (index)
 
-Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. J0.1-J0.8 were done by a Sonnet round on branch `phase-3-queue-agent-jobs`. J0.9 must land on that branch before the migration is run. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context. Order: C (talk on Discord now, while it works), J0 (queue), S (slots: pause, talk, resume), J1 (database), D0 (dashboard fix), E (record everything and show it in the UI, so history starts early), D1-D2 (bot daemon), R (reliable, responsive comms), D3-D8 (commands and chat), Q1.
+Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. J0.1-J0.8 were done by a Sonnet round on branch `phase-3-queue-agent-jobs`. J0.9 must land on that branch before the migration is run. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context. Order: C (talk on Discord now, while it works), N (notes for chat and rounds), H (chat schedules coding, does not code), J0 (queue), S (slots: pause, talk, resume), J1 (database), D0 (dashboard fix), E (record everything and show it in the UI, so history starts early), D1-D2 (bot daemon), R (reliable, responsive comms), D3-D8 (commands and chat), Q1.
 
 ### C — Talk to Jarvis on Discord now, while it works
 
-- [ ] **C1.1 — `jarvis-chat` daemon: instant 👀 and typing, brain reply between round steps** · `docs/jobs/c-chat-now.md`
-- [ ] **C1.2 — Checkpoint answers don't get a chat reply (`ask-open` marker)** · `docs/jobs/c-chat-now.md`
-- [ ] **C1.3 — Install `jarvis-chat` as a service** · `docs/jobs/c-chat-now.md`
-- [ ] **C1.4 — Messages no longer kill the round (only `!pause` does)** · `docs/jobs/c-chat-now.md`
+- [x] **C1.1 — `jarvis-chat` daemon: instant 👀 and typing, brain reply between round steps** · `docs/jobs/c-chat-now.md`
+- [x] **C1.2 — Checkpoint answers don't get a chat reply (`ask-open` marker)** · `docs/jobs/c-chat-now.md`
+- [x] **C1.3 — Install `jarvis-chat` as a service** · `docs/jobs/c-chat-now.md`
+- [x] **C1.4 — Messages no longer kill the round (only `!pause` does)** · `docs/jobs/c-chat-now.md`
 - [ ] **C1.5 — Latency check with Nathan** · `docs/jobs/c-chat-now.md`
+
+### N — Notes: a shared memory for chat and build rounds
+
+- [ ] **N1.1 — Inventory what bootstrap injects (no code)** · `docs/jobs/n-notes.md`
+- [ ] **N2.1 — Notes directory and file format** · `docs/jobs/n-notes.md`
+- [ ] **N2.2 — Notes package: get, put, delete, list** · `docs/jobs/n-notes.md`
+- [ ] **N2.3 — Retrieve a few matching notes, capped at 1,500 words** · `docs/jobs/n-notes.md`
+- [ ] **N2.4 — `jarvis-notes` CLI** · `docs/jobs/n-notes.md`
+- [ ] **N3.1 — Chat prompt includes retrieved notes** · `docs/jobs/n-notes.md`
+- [ ] **N3.2 — Round prompt includes retrieved notes** · `docs/jobs/n-notes.md`
+- [ ] **N4.1 — Discord `!note` commands** · `docs/jobs/n-notes.md`
+- [ ] **N4.2 — `remember:` / `forget:` and a line in the briefs** · `docs/jobs/n-notes.md`
+- [ ] **N5.1 — Seed script (copy, never overwrite)** · `docs/jobs/n-notes.md`
+- [ ] **N5.2 — Seed notes from the inventory** · `docs/jobs/n-notes.md`
+- [ ] **N6.1 — Restart and live check with Nathan** · `docs/jobs/n-notes.md`
+- [ ] **N6.2 — `docs/notes.md` how-to** · `docs/jobs/n-notes.md`
+
+### H — Chat schedules coding work; it does not code
+
+- [ ] **H1.1 — Seed note and chat prompt: you do not code** · `docs/jobs/h-handoff.md`
+- [ ] **H1.2 — `jarvis-jobs add` writes an agent job to the store** · `docs/jobs/h-handoff.md`
+- [ ] **H2.1 — `!build` and `!fix` enqueue; confirm in Discord** · `docs/jobs/h-handoff.md`
+- [ ] **H2.2 — Model `SCHEDULE` block; Go enqueues it** · `docs/jobs/h-handoff.md`
+- [ ] **H2.3 — Scheduling does not pause the round** · `docs/jobs/h-handoff.md`
+- [ ] **H3.1 — Live check with Nathan (do not start agent-run)** · `docs/jobs/h-handoff.md`
+- [ ] **H3.2 — Point D5.1 here; `docs/handoff.md`** · `docs/jobs/h-handoff.md`
 
 ### J0 — Make the queue the source of all work
 
