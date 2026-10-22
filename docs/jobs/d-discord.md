@@ -70,6 +70,7 @@ Read only the section for your job. Background, shared by all D jobs:
 
 ## D5.1 — `!add [voice|coding|background|agent] <text>`
 
+- Note: group H already enqueues agent jobs from chat (`!build` / `!fix` / `SCHEDULE`, via `Store.Ingest`). `!add agent` must call that same helper, not RabbitMQ. Voice/coding/background may still use `internal/queue`.
 - Publish through `internal/queue` with `source: "discord"` and `reply_to` (DM channel and message ID). Reply with the job ID.
 - Done when: a test checks the message fields, and live the job appears on the dashboard.
 
