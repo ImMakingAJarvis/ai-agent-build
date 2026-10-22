@@ -404,7 +404,6 @@ func (s *Server) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 		// Reject: purge the message with this ID from its queue.
 		// We search all queues for a message with this ID and nack it.
 		s.rejectJob(id)
-		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "rejected")
 		return
 	}
@@ -412,7 +411,6 @@ func (s *Server) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 	// Approve: re-enqueue the job with auto_approve set.
 	// The worker will pick it up and the approval gate will pass.
 	s.approveJob(id)
-	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "approved")
 }
 

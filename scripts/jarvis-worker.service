@@ -1,0 +1,22 @@
+[Unit]
+Description=Jarvis Worker (RabbitMQ job consumer)
+After=network-online.target rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+ExecStart=/home/agent/ai-agent-build/bin/worker
+WorkingDirectory=/home/agent/ai-agent-build
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/home/agent
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/agent/.local
+
+[Install]
+WantedBy=multi-user.target

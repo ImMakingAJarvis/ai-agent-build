@@ -295,9 +295,9 @@
   .btn-reject:hover { background: rgba(248,81,73,0.1); }
 </style>
 </head>
-<body hx-get="/api/state" hx-trigger="every 5s" hx-swap="none">
+<body>
 
-<div hx-get="/api/state" hx-trigger="every 5s" id="dashboard" hx-swap="outerHTML">
+<div id="dashboard">
   <h1>JARVIS Queue Dashboard</h1>
   <p class="subtitle">
     <span class="status-dot {{ if .OllamaHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
