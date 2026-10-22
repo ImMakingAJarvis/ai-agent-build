@@ -2,6 +2,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -162,6 +163,7 @@ func (s *Server) CloseRabbitMQ() {
 func (s *Server) Serve() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /html/dashboard", s.handleDashboardHTML)
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
 	mux.HandleFunc("GET /api/queues", s.handleQueues)
@@ -186,15 +188,40 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"formatCost":     FormatCost,
 		"divCost":        DivCost,
 	}
-	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(templatesFS, "templates/index.html")
+	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.Execute(w, data); err != nil {
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "index.html", data); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buf.WriteTo(w)
+}
+
+func (s *Server) handleDashboardHTML(w http.ResponseWriter, r *http.Request) {
+	data := s.gatherState()
+	funcMap := template.FuncMap{
+		"statusClass":    StatusClass,
+		"formatDuration": FormatDuration,
+		"formatCost":     FormatCost,
+		"divCost":        DivCost,
+	}
+	tmpl, err := template.New("dashboard-content").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
+	if err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "dashboard-content", data); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buf.WriteTo(w)
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
