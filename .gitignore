@@ -5,6 +5,8 @@
 
 # Compiled binaries
 worker
+jarvis-discord
+jarvis-chat
 
 # Temporary files
 tmp/
