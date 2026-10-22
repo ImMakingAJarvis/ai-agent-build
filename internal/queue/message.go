@@ -8,7 +8,7 @@ import (
 // Message is the canonical job shape published to and consumed from RabbitMQ.
 type Message struct {
 	ID        string            `json:"id"`
-	Type      string            `json:"type"`       // voice, coding, background
+	Type      string            `json:"type"`       // voice, fix, coding, background
 	Priority  int               `json:"priority"`   // higher wins within a queue
 	Payload   map[string]string `json:"payload"`    // free-form key/value for the job
 	CreatedAt time.Time         `json:"created_at"`
@@ -36,18 +36,21 @@ const KindAgent = "agent"
 // Queue names match the RabbitMQ definitions.
 const (
 	VoiceQueue      = "voice"
+	FixQueue        = "fix"
 	CodingQueue     = "coding"
 	BackgroundQueue = "background"
 )
 
-// AllQueues lists the queues in priority order.
-var AllQueues = []string{VoiceQueue, CodingQueue, BackgroundQueue}
+// AllQueues lists the queues in priority order (highest first).
+var AllQueues = []string{VoiceQueue, FixQueue, CodingQueue, BackgroundQueue}
 
 // QueueForType returns the RabbitMQ queue name for a given job type.
 func QueueForType(jobType string) string {
 	switch jobType {
 	case "voice":
 		return VoiceQueue
+	case "fix":
+		return FixQueue
 	case "coding":
 		return CodingQueue
 	default:

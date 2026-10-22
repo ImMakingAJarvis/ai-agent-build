@@ -12,6 +12,8 @@ import (
 //   - If ForceAPI is true, return the API model (default "claude-sonnet-5-5").
 //   - Voice jobs → local light model (from LOCAL_LIGHT_MODEL env, defaults to
 //     LOCAL_MODEL if unset) for fast response times.
+//   - Fix jobs → local model (not the light model; fix tasks may need full
+//     reasoning capability).
 //   - Coding jobs → local coder model if set (LOCAL_CODER_MODEL env),
 //     otherwise falls through to the local model.
 //   - Background jobs → local model by default.

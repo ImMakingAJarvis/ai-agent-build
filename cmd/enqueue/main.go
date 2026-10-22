@@ -3,8 +3,9 @@
 // Usage:
 //
 //	enqueue --type=voice --id=test-001 --prompt="Say hello"
-//	enqueue --type=coding --id=test-002 --prompt="Write a Go hello world"
-//	enqueue --type=background --id=test-003 --prompt="Benchmark the model"
+//	enqueue --type=fix --id=test-002 --prompt="Fix the login bug"
+//	enqueue --type=coding --id=test-003 --prompt="Write a Go hello world"
+//	enqueue --type=background --id=test-004 --prompt="Benchmark the model"
 package main
 
 import (
@@ -18,7 +19,7 @@ import (
 )
 
 func main() {
-	jobType := flag.String("type", "background", "job type: voice, coding, background")
+	jobType := flag.String("type", "background", "job type: voice, fix, coding, background")
 	jobID := flag.String("id", fmt.Sprintf("cli-%d", time.Now().Unix()), "unique job id")
 	prompt := flag.String("prompt", "", "prompt or description for the job")
 	forceAPI := flag.Bool("force-api", false, "force dispatch to Claude API")
@@ -46,6 +47,8 @@ func main() {
 	switch *jobType {
 	case "voice":
 		msg.Priority = 10
+	case "fix":
+		msg.Priority = 7
 	case "coding":
 		msg.Priority = 5
 	default:
