@@ -20,6 +20,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/slots"
 )
 
 //go:embed templates/*.html
@@ -92,20 +93,22 @@ type ApprovalInfo struct {
 
 // DashboardState is the full state returned by /api/state.
 type DashboardState struct {
-	OllamaHealthy bool          `json:"ollama_healthy"`
-	Queues        []QueueDepth  `json:"queues"`
-	PendingQueues []PendingQueue `json:"pending_queues"`
-	RecentJobs    []JobRecord   `json:"recent_jobs"`
-	AgentJobs     []agentjob.Job `json:"agent_jobs"` // build work: ready, claimed, running, done, failed
-	TotalCost     float64       `json:"total_cost"`     // Running total of estimated costs for API jobs
-	APICount      int           `json:"api_job_count"`  // Number of API-dispatched jobs
-	LocalCount    int           `json:"local_job_count"` // Number of local jobs
+	OllamaHealthy bool               `json:"ollama_healthy"`
+	Slots         []slots.SlotInfo   `json:"slots"`        // Engine parallel slots
+	Queues        []QueueDepth       `json:"queues"`
+	PendingQueues []PendingQueue     `json:"pending_queues"`
+	RecentJobs    []JobRecord        `json:"recent_jobs"`
+	AgentJobs     []agentjob.Job     `json:"agent_jobs"` // build work: ready, claimed, running, done, failed
+	TotalCost     float64            `json:"total_cost"`     // Running total of estimated costs for API jobs
+	APICount      int                `json:"api_job_count"`  // Number of API-dispatched jobs
+	LocalCount    int                `json:"local_job_count"` // Number of local jobs
 }
 
 // Server holds the dashboard dependencies.
 type Server struct {
 	addr        string
 	ollama      *models.Client
+	engineClient *slots.Client
 	historyPath string
 	amqpURL     string
 	rabbitConn  *queue.Conn // persistent connection for peeking at pending jobs
@@ -133,11 +136,14 @@ func New() *Server {
 		amqpURL = "amqp://jarvis:jarvis-local@localhost:5672"
 	}
 
+	engineClient := slots.NewClient()
+
 	return &Server{
-		addr:          addr,
-		ollama:        models.NewClient(),
-		historyPath:   historyPath,
-		amqpURL:       amqpURL,
+		addr:         addr,
+		ollama:       models.NewClient(),
+		engineClient: engineClient,
+		historyPath:  historyPath,
+		amqpURL:      amqpURL,
 	}
 }
 
@@ -248,6 +254,7 @@ func (s *Server) gatherState() DashboardState {
 	depths, _ := s.getQueueDepths()
 	pending := s.getPendingQueues()
 	healthy := s.ollama.Healthcheck()
+	engineSlots, _ := s.engineClient.GetSlots()
 
 	// Compute running cost totals from completed/denied API jobs.
 	var totalCost float64
@@ -273,6 +280,7 @@ func (s *Server) gatherState() DashboardState {
 	return DashboardState{
 		AgentJobs:     agentJobs,
 		OllamaHealthy: healthy,
+		Slots:         engineSlots,
 		Queues:        depths,
 		PendingQueues: pending,
 		RecentJobs:    jobs,

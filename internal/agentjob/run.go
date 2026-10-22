@@ -3,8 +3,10 @@ package agentjob
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -36,6 +38,23 @@ type Runner struct {
 	// the running command is cancelled and the job is paused so the agent
 	// can answer the user immediately.
 	SignalFile string
+	// ReplySignalFile, if non-empty, is written by signalWatcher when a
+	// Discord message arrives but the engine slot is free — the round is NOT
+	// paused. After the job completes, agent-run checks for this file and
+	// sends a light reply before continuing.
+	ReplySignalFile string
+	// EngineSlotCheck reports whether the engine's chat slot is currently
+	// busy. When true, an incoming message causes a pause. When false, the
+	// round keeps running and a reply is deferred until it completes.
+	// The default (when nil) always returns true (slot busy).
+	EngineSlotCheck func() bool
+	// EngineURL is the base URL of the llama.cpp engine (e.g.
+	// http://localhost:11434). When set, pause saves the work slot's KV
+	// cache and resume restores it. When empty (Ollama/vLLM), save/restore
+	// are no-ops.
+	EngineURL string
+	// WorkSlotID is the llama.cpp slot ID used for work jobs (default 0).
+	WorkSlotID int
 }
 
 // ModelFor names the model a driver uses.
@@ -107,6 +126,44 @@ func Summary(out string) string {
 	return out
 }
 
+// saveSlot saves the work slot's KV cache to disk via the llama.cpp
+// /slots/<id>?action=save API. No-op when EngineURL is empty (Ollama/vLLM).
+func (r *Runner) saveSlot(jobID string) error {
+	if r.EngineURL == "" {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]string{"filename": jobID + ".bin"})
+	resp, err := http.Post(r.EngineURL+"/slots/"+fmt.Sprint(r.WorkSlotID)+"?action=save",
+		"application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode > 299 {
+		return fmt.Errorf("save slot %d: HTTP %d", r.WorkSlotID, resp.StatusCode)
+	}
+	return nil
+}
+
+// restoreSlot restores the work slot's KV cache from disk. No-op when
+// EngineURL is empty (Ollama/vLLM).
+func (r *Runner) restoreSlot(jobID string) error {
+	if r.EngineURL == "" {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]string{"filename": jobID + ".bin"})
+	resp, err := http.Post(r.EngineURL+"/slots/"+fmt.Sprint(r.WorkSlotID)+"?action=restore",
+		"application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode > 299 {
+		return fmt.Errorf("restore slot %d: HTTP %d", r.WorkSlotID, resp.StatusCode)
+	}
+	return nil
+}
+
 // Run claims job id, runs it on driver and records the outcome in the store
 // and in jobs.jsonl. A nil error means the agent command exited 0.
 func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, error) {
@@ -122,6 +179,11 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	j.Status = Running
 	j.StartedAt = time.Now().UTC().Format(time.RFC3339)
 	r.Store.SetStatus(id, j.State)
+
+	// Restore the work slot's KV cache (no-op when EngineURL is empty).
+	if err := r.restoreSlot(id); err != nil {
+		return j, fmt.Errorf("restore slot: %w", err)
+	}
 
 	var rec *queue.JobRecord
 	if r.History != nil {
@@ -157,12 +219,26 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 }
 
 // signalWatcher polls SignalFile every second. When it appears (written by
-// the Discord watcher when the user sends a message), it kills the running
-// command and pauses the job so the agent can answer immediately.
+// the Discord watcher when the user sends a message), it checks whether the
+// engine's chat slot is free. If free, it writes ReplySignalFile and lets
+// the round finish (agent-run sends a light reply after completion). If the
+// slot is busy, it kills the running command and pauses the job as before.
 func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 	for {
 		if _, err := os.Stat(r.SignalFile); err == nil {
-			// Signal file exists: user wants to talk. Kill the agent and pause.
+			// Signal file exists: user wants to talk.
+			slotBusy := true
+			if r.EngineSlotCheck != nil {
+				slotBusy = r.EngineSlotCheck()
+			}
+			if !slotBusy && r.ReplySignalFile != "" {
+				// Slot is free: defer reply until the round completes.
+				// Write the reply-signal so agent-run knows to answer.
+				_ = os.WriteFile(r.ReplySignalFile, nil, 0o644)
+				return
+			}
+			// Slot busy (or no reply path configured): save cache, kill, and pause.
+			_ = r.saveSlot(id)  // best-effort; don't fail if engine is down
 			if cmd.Process != nil {
 				cmd.Process.Kill()
 			}
@@ -208,7 +284,11 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error) (
 		j.Duration = now.Sub(st).Round(time.Second).String()
 	}
 	j.PRURL, j.Summary, j.PID = pr, Summary(out), 0
-	if runErr != nil {
+	// If signalWatcher already paused the job, don't overwrite Paused → Failed.
+	cur, _ := r.Store.Get(id)
+	if cur.Status == Paused {
+		j.Status = Paused
+	} else if runErr != nil {
 		j.Status, j.Error = Failed, runErr.Error()
 	} else {
 		j.Status, j.Error = Done, ""

@@ -2,6 +2,8 @@ package agentjob
 
 import (
 	"context"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -324,6 +326,82 @@ func TestPlanDocInstructions(t *testing.T) {
 	}
 }
 
+func TestSignalWatcherPausesWhenSlotBusy(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Instructions: "do a"})
+
+	signaled := false
+	signalFile := filepath.Join(t.TempDir(), "signal")
+	replySignalFile := filepath.Join(t.TempDir(), "reply-signal")
+
+	r := runner(t, s, `while sleep 0.1; do :; done`)
+	r.SignalFile = signalFile
+	r.ReplySignalFile = replySignalFile
+	r.EngineSlotCheck = func() bool {
+		return signaled // slot busy when signaled is true
+	}
+
+	// Start the runner in a goroutine — it'll block on the infinite loop.
+	// Run() handles Claim internally, so don't pre-claim the job.
+	go r.Run(context.Background(), "a", "r1", "local", "")
+
+	// Write the signal file to trigger the watcher
+	time.Sleep(200 * time.Millisecond)
+	signaled = true // slot busy
+	_ = os.WriteFile(signalFile, nil, 0o644)
+
+	// Wait for the watcher to act
+	time.Sleep(2 * time.Second)
+
+	// Job should be paused
+	got, _ := s.Get("a")
+	if got.Status != Paused {
+		t.Fatalf("want paused, got %s", got.Status)
+	}
+	// Reply signal should NOT be written
+	if _, err := os.Stat(replySignalFile); err == nil {
+		t.Fatal("reply signal should not exist when slot is busy")
+	}
+}
+
+func TestSignalWatcherDefersReplyWhenSlotFree(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Instructions: "do a"})
+
+	slotBusy := true
+	signalFile := filepath.Join(t.TempDir(), "signal")
+	replySignalFile := filepath.Join(t.TempDir(), "reply-signal")
+
+	r := runner(t, s, `while sleep 0.1; do :; done`)
+	r.SignalFile = signalFile
+	r.ReplySignalFile = replySignalFile
+	r.EngineSlotCheck = func() bool {
+		return slotBusy
+	}
+
+	// Run() handles Claim internally, so don't pre-claim the job.
+	go r.Run(context.Background(), "a", "r1", "local", "")
+
+	time.Sleep(200 * time.Millisecond)
+	slotBusy = false // slot free
+	_ = os.WriteFile(signalFile, nil, 0o644)
+
+	// Wait for the watcher to act
+	time.Sleep(2 * time.Second)
+
+	// Reply signal SHOULD be written
+	if _, err := os.Stat(replySignalFile); err != nil {
+		t.Fatal("reply signal should exist when slot is free")
+	}
+	// Job should NOT be paused (it keeps running)
+	got, _ := s.Get("a")
+	if got.Status == Paused {
+		t.Fatal("job should not be paused when slot is free")
+	}
+}
+
 func TestReadDocSection(t *testing.T) {
 	// Read J0.9 section from the actual doc file
 	instr, doc := readDocSection("../..", "docs/jobs/j0-queue-work-source.md", "j0.9")
@@ -346,4 +424,95 @@ func TestReadDocSection(t *testing.T) {
 	if empty2 != "" {
 		t.Errorf("expected empty for missing file, got: %q", empty2)
 	}
+}
+
+func TestSaveSlotNoOpWhenEngineEmpty(t *testing.T) {
+	r := &Runner{}
+	err := r.saveSlot("any-id")
+	if err != nil {
+		t.Fatal("saveSlot should be no-op when EngineURL is empty")
+	}
+}
+
+func TestRestoreSlotNoOpWhenEngineEmpty(t *testing.T) {
+	r := &Runner{}
+	err := r.restoreSlot("any-id")
+	if err != nil {
+		t.Fatal("restoreSlot should be no-op when EngineURL is empty")
+	}
+}
+
+func TestSaveRestoreSlotHTTP(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+
+	// Mock engine that tracks save/restore calls
+	saveCalled := false
+	restoreCalled := false
+	mockEngine := newMockEngine(t, func(action string) int {
+		if action == "save" {
+			saveCalled = true
+		} else if action == "restore" {
+			restoreCalled = true
+		}
+		return 200
+	})
+	defer mockEngine.Close()
+
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "test-job", Title: "Test", Instructions: "do it"})
+
+	r := runner(t, s, `echo ok`)
+	r.EngineURL = mockEngine.URL
+	r.WorkSlotID = 0
+
+	// Test saveSlot
+	err := r.saveSlot("test-job")
+	if err != nil {
+		t.Fatalf("saveSlot failed: %v", err)
+	}
+	if !saveCalled {
+		t.Fatal("saveSlot should have called the engine")
+	}
+
+	// Test restoreSlot
+	err = r.restoreSlot("test-job")
+	if err != nil {
+		t.Fatalf("restoreSlot failed: %v", err)
+	}
+	if !restoreCalled {
+		t.Fatal("restoreSlot should have called the engine")
+	}
+}
+
+// Signal watcher + saveSlot integration is covered by
+// TestSignalWatcherPausesWhenSlotBusy (pre-existing). When EngineURL is set,
+// saveSlot is called before Pause in signalWatcher (run.go:241).
+
+// mockEngine is a test HTTP server that simulates the llama.cpp slot API.
+type mockEngine struct {
+	*http.Server
+	URL string
+}
+
+// newMockEngine creates an HTTP server that simulates the llama.cpp slot API.
+// The handler receives "save" or "restore" as the action string and returns
+// the status code it should respond with.
+func newMockEngine(t *testing.T, handler func(action string) int) *mockEngine {
+	t.Helper()
+	s := &http.Server{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slots/", func(w http.ResponseWriter, r *http.Request) {
+		action := r.URL.Query().Get("action")
+		code := handler(action)
+		w.WriteHeader(code)
+	})
+	s.Handler = mux
+	sock, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Addr = sock.Addr().String()
+	go s.Serve(sock)
+	t.Cleanup(func() { s.Close() })
+	return &mockEngine{Server: s, URL: "http://" + sock.Addr().String()}
 }
