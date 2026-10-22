@@ -183,6 +183,14 @@ stop_watcher() {
 }
 
 start_watcher() {
+  # When jarvis-chat is active, it already listens for owner DMs and
+  # answers them — no need to run a separate pause watcher. The
+  # !pause command is handled by jarvis-chat itself (it writes the
+  # pause-signal file). Skip the watcher to avoid killing the round
+  # on every normal message.
+  if systemctl is-active --quiet jarvis-chat; then
+    return
+  fi
   rm -f "$CONF/pause-signal"  # clear any stale signal
   jarvis-discord watch &
   discord_watcher_pid=$!
