@@ -2,8 +2,45 @@
 <h1>JARVIS Queue Dashboard</h1>
 <p class="subtitle">
   <span class="status-dot {{ if .OllamaHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
-  Ollama {{ if .OllamaHealthy }}healthy{{ else }}unreachable{{ end }}
+  Engine {{ if .OllamaHealthy }}healthy{{ else }}unreachable{{ end }}
 </p>
+
+<!-- Engine Slots -->
+<div class="section">
+  <div class="section-title">Engine Slots</div>
+  {{ if .Slots }}
+  <table>
+    <thead>
+      <tr>
+        <th>Slot</th>
+        <th>Status</th>
+        <th>Task ID</th>
+        <th>Context</th>
+        <th>Prompt Tokens</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Slots }}
+      <tr>
+        <td>{{ .ID }}</td>
+        <td>
+          {{ if .IsProcessing }}
+          <span class="status-running">processing</span>
+          {{ else }}
+          <span class="status-idle">idle</span>
+          {{ end }}
+        </td>
+        <td>{{ if ge .TaskID 0 }}{{ .TaskID }}{{ else }}-{{ end }}</td>
+        <td>{{ .NContext }}</td>
+        <td>{{ .NPromptTokens }}</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  <div class="empty-state">No slot info (engine may not support /slots).</div>
+  {{ end }}
+</div>
 
 <!-- Cost Summary -->
 <div class="section">
