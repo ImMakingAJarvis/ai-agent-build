@@ -4,6 +4,7 @@ package models
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -159,6 +160,65 @@ func (c *Client) ListRunning() ([]RunningModel, error) {
 		return nil, fmt.Errorf("decode /api/tags: %w", err)
 	}
 	return out.Models, nil
+}
+
+// ChatRequest is the body for a /v1/chat/completions request.
+// Only model, messages, stream and think are sent — extra options
+// (num_ctx etc.) force Ollama to reload the 17 GB model.
+type ChatRequest struct {
+	Model   string             `json:"model"`
+	Messages []ChatMessage      `json:"messages"`
+	Stream  bool               `json:"stream"`
+	Think   bool               `json:"think"`
+}
+
+// ChatMessage is one entry in the chat history.
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// ChatResponse mirrors the relevant fields from /v1/chat/completions.
+type ChatResponse struct {
+	Choices []struct {
+		Message ChatMessage `json:"message"`
+	} `json:"choices"`
+}
+
+// Chat sends a non-streaming chat completion request and returns the
+// assistant's reply text. It only sends model, messages, stream: false
+// and think: false to avoid forcing Ollama to reload the model.
+func (c *Client) Chat(model string, messages []ChatMessage) (string, error) {
+	req := ChatRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   false,
+		Think:    false,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("marshal chat request: %w", err)
+	}
+
+	resp, err := c.http.Post(c.baseURL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("POST /v1/chat/completions: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("/v1/chat/completions returned %d: %s", resp.StatusCode, b)
+	}
+
+	var cr ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		return "", fmt.Errorf("decode chat response: %w", err)
+	}
+	if len(cr.Choices) == 0 {
+		return "", errors.New("chat response had no choices")
+	}
+	return cr.Choices[0].Message.Content, nil
 }
 
 // Healthcheck sends a trivial request and returns whether Ollama responds.
