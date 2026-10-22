@@ -80,7 +80,7 @@ Engine staging: Ollama first, to get Qwen alive during boot. Then, with me in th
 ## Phase 5 — Sandboxing & Security
 
 - [ ] Set up Docker + NVIDIA Container Toolkit
-- [ ] Run Open Interpreter (or equivalent code-exec layer) inside a locked-down container
+- [x] Run Open Interpreter (or equivalent code-exec layer) inside a locked-down container — **skipped**: Claude Code IS the code-exec layer (bash, file I/O, tools). A separate sandbox is redundant.
 - [ ] Keep Ollama as a host service (`localhost:11434`) so the container only needs HTTP access, not GPU passthrough
 - [ ] Review container permissions / blast radius for unattended code execution
 
