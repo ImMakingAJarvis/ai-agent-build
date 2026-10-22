@@ -71,3 +71,25 @@ A Sonnet round started at 16:00 on Oct 21 on all of J0. Check `gh pr list --stat
 - Rounds no longer read TASKS.md, so the "Job rules" block at the top of TASKS.md has to reach the model another way. Copy it, nearly word for word, into `STAGE3L` and `STAGE3S` in `bootstrap.sh` (grep for the heredocs), the live `~/.config/jarvis/stage3-local.txt` and `stage3-sonnet.txt` (replaced atomically), and the prompt that `internal/agentjob/run.go` builds for each job.
 - Also add: "If the job is too big, split it: add the smaller jobs to the queue with `jarvis-jobs add` (or `jarvis-enqueue -kind agent`) right after this one, with their own acceptance criteria, then do only the first. Mark this job done with a note that it was split."
 - Done when: `bash -n bootstrap.sh` passes, a test checks the job prompt contains the rules, and the next round's prompt (visible in `ps`) contains them.
+
+## J0.11 — Chain jobs only within their group
+
+- File: `internal/agentjob/migrate.go` and its test only.
+- Today every queued job depends on the line before it, across groups, and `Next` only counts `done` dependencies. So one job that waits on Nathan, or is skipped, stops every group after it. Set `depends_on` to the previous line only when both lines are under the same `###` heading. The first job of a group has no dependency. Priorities stay in index order, so `Next` still picks the earliest ready job.
+- Done when: a test against main's TASKS.md shows `s0.1` and `j1.1` without dependencies, `s1.1` depending on `s0.1`, and `go test ./...` passes.
+
+## J0.12 — `scripts/deploy_queue.sh`
+
+- State on Oct 21, 20:00: the J0 code is on main, but it isn't live. `jarvis-migrate` was never installed or run, so the store is empty. `/usr/local/bin/agent-run` and `jarvis-jobs` are the 16:05 builds, from before PR #6 and PR #7. Three workers run: `~/.local/bin/worker` twice and `/tmp/jarvis-worker`. Old workers may take `background.agent` messages as text jobs. The loop that's running is the 13:29 copy, held in memory.
+- File: new `scripts/deploy_queue.sh` only.
+- From a clean `origin/main` checkout, build `agent-run`, `jarvis-jobs`, `jarvis-migrate`, `jarvis-discord` (PR #7 added `watch`) and `worker`. Install each atomically into `/usr/local/bin`: copy to a temp name there, then `mv`. Never `cp` over `agent-run`, because the running loop reads it as it goes.
+- Stop the stray workers and start exactly one, from `/usr/local/bin`: as the D0.3 systemd unit if it exists, else with `setsid nohup` and a log file.
+- `--migrate`: run `jarvis-migrate`, then print `jarvis-jobs list | head -n 20`. Without it, run only `jarvis-migrate -dry-run`. `--dry-run`: print every step and change nothing.
+- Done when: `bash -n` passes and `--dry-run` prints the plan.
+
+## J0.13 — Deploy, then hand the loop over (Sonnet, ask Nathan first)
+
+- Ask with `jarvis-discord ask -choices "Deploy,Not now"`. Then run `scripts/deploy_queue.sh --migrate`.
+- Check `jarvis-jobs list`: the first ready job is the first unticked line of the TASKS.md index, there are no duplicate IDs, and the count is about the number of unticked lines.
+- The running loop only uses the new `agent-run` after it restarts. Don't kill it. Send Nathan the exact one-line restart command: the expanded `as_agent … agent-run` line near the end of `bootstrap.sh`, run with `sudo`. Tell him to answer Stop at the next checkpoint, then run that command.
+- Done when: the next checkpoint names a queue job ("Next: S0.1 — …"), with Skip among the choices.

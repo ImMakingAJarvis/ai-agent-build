@@ -69,14 +69,16 @@ How it works: the weights stay in VRAM; what changes per job is the context (KV 
 
 Engine staging: Ollama first, to get Qwen alive during boot. Then, with me in the loop, set up a slot-capable engine (llama.cpp server is lighter and reads the same quantized files; vLLM is heavier to set up but least work to run). Verify current feature support and versions yourself rather than assuming; slot save/restore smoothness in particular is unverified.
 
-- [ ] Research llama.cpp server vs vLLM on the 4090 for this design and report a recommendation on Discord before committing
-- [ ] Test the new engine with a small model first (it fits next to the loaded brain): prove it serves, that slots work, and that a job's cache can be saved/swapped out and restored without recomputing
-- [ ] Swap rule: only one engine can hold the 27B in VRAM at a time. For the real switchover, ask me on Discord first, unload Ollama's copy, start the new engine, confirm it answers. If it fails, unload the new engine and restart Ollama. Keep Ollama installed as the rollback until the new engine has proven itself
-- [ ] Announce the switch on Discord (and a home speaker if available) before going quiet, since the brain is offline during the swap
-- [ ] Reserve slot 0 for my conversation at top priority; the remaining slots take coding and background jobs
-- [ ] Worker: route each job to a slot, pause a background job (save its cache to RAM/disk) when my request needs room, restore and continue it afterwards
-- [ ] Expose slot state (job, model, runtime, queue depth) as metrics from the worker for the dashboard and Grafana
-- [ ] Optional small always-on "front desk" model (a 4B or 8B at 4-bit, or on CPU if VRAM is tight) that answers chat and voice instantly, hands heavy work to the queue, and can see how things are going (queue, jobs per slot, what is loading), fed by the same data as the dashboard. Check the VRAM budget first: the 27B takes about 17-19GB plus KV cache for the slots. Suggestion, not decided: keep its view read-only
+These items are now queue jobs, group S in the index below (`docs/jobs/s-slots.md`). Note: the loaded brain uses about 23.4 GB of 24.5 GB, so nothing else fits next to it on the GPU.
+
+- Research llama.cpp server vs vLLM on the 4090 for this design and report a recommendation on Discord before committing *(queued as S2.1-S2.3)*
+- Test the new engine with a small model first (it fits next to the loaded brain): prove it serves, that slots work, and that a job's cache can be saved/swapped out and restored without recomputing *(queued as S3.1-S3.4)*
+- Swap rule: only one engine can hold the 27B in VRAM at a time. For the real switchover, ask me on Discord first, unload Ollama's copy, start the new engine, confirm it answers. If it fails, unload the new engine and restart Ollama. Keep Ollama installed as the rollback until the new engine has proven itself *(queued as S4.1-S4.4)*
+- Announce the switch on Discord (and a home speaker if available) before going quiet, since the brain is offline during the swap *(queued as S4.4)*
+- Reserve slot 0 for my conversation at top priority; the remaining slots take coding and background jobs *(queued as S5.1)*
+- Worker: route each job to a slot, pause a background job (save its cache to RAM/disk) when my request needs room, restore and continue it afterwards *(queued as S1.1-S1.4, S5.2, S5.3)*
+- Expose slot state (job, model, runtime, queue depth) as metrics from the worker for the dashboard and Grafana *(queued as S5.4)*
+- Optional small always-on "front desk" model (a 4B or 8B at 4-bit, or on CPU if VRAM is tight) that answers chat and voice instantly, hands heavy work to the queue, and can see how things are going (queue, jobs per slot, what is loading), fed by the same data as the dashboard. Check the VRAM budget first: the 27B takes about 17-19GB plus KV cache for the slots. Suggestion, not decided: keep its view read-only *(queued as R1.5a-R1.5b)*
 
 ## Phase 4 — Voice / Home Assistant Integration
 
@@ -149,7 +151,7 @@ Division of labor: the Phase 6 dashboard owns job-level views (queue, approvals,
 
 ## Queued jobs — Oct 21, 2026 (index)
 
-Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. J0.1-J0.8 were done by a Sonnet round on branch `phase-3-queue-agent-jobs`. J0.9 must land on that branch before the migration is run. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context. Order: J (queue, database), D0 (dashboard fix), E (record everything and show it in the UI, so history starts early), D1-D2 (bot daemon), R (reliable, responsive comms), D3-D8 (commands and chat), Q1.
+Do these in order, one job per round. Each line names its job doc. Read only that job's section there, not the whole doc, and nothing else from this list. J0 makes the queue the source of all work; after J0.7, take jobs from the queue instead of this file. J0.1-J0.8 were done by a Sonnet round on branch `phase-3-queue-agent-jobs`. J0.9 must land on that branch before the migration is run. Run J0, J1 and Q1.2-Q1.3 on Sonnet if the local model runs out of context. Order: J0 (queue), S (slots: pause, talk, resume), J1 (database), D0 (dashboard fix), E (record everything and show it in the UI, so history starts early), D1-D2 (bot daemon), R (reliable, responsive comms), D3-D8 (commands and chat), Q1.
 
 ### J0 — Make the queue the source of all work
 
@@ -161,8 +163,38 @@ Do these in order, one job per round. Each line names its job doc. Read only tha
 - [x] **J0.6 — Briefs say "do the job you were handed" and follow the job rules** · `docs/jobs/j0-queue-work-source.md`
 - [x] **J0.7 — Migrate this index and the remaining TASKS.md items onto the queue** · `docs/jobs/j0-queue-work-source.md`
 - [x] **J0.8 — Dashboard shows agent jobs** · `docs/jobs/j0-queue-work-source.md`
-- [ ] **J0.9 — Migration reads this index: dotted IDs, job doc sections, ticked lines skipped; rebase onto main** · `docs/jobs/j0-queue-work-source.md`
+- [x] **J0.9 — Migration reads this index: dotted IDs, job doc sections, ticked lines skipped; rebase onto main** · `docs/jobs/j0-queue-work-source.md`
 - [ ] **J0.10 — Put the job rules into the round briefs and the agent-job prompt** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.11 — Migration chains jobs only within their group** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.12 — `scripts/deploy_queue.sh`: install the queue tools from main, one worker, migration** · `docs/jobs/j0-queue-work-source.md`
+- [ ] **J0.13 — Deploy, run the migration, hand the loop over (Sonnet, ask Nathan first)** · `docs/jobs/j0-queue-work-source.md`
+
+### S — Slots: pause the work, talk on Discord, resume
+
+- [ ] **S0.1 — Measure what a pause costs today (no changes)** · `docs/jobs/s-slots.md`
+- [ ] **S1.1 — Each round gets a Claude Code session ID** · `docs/jobs/s-slots.md`
+- [ ] **S1.2 — Pause stops the round gently (SIGINT, then kill)** · `docs/jobs/s-slots.md`
+- [ ] **S1.3 — Resume continues the same session** · `docs/jobs/s-slots.md`
+- [ ] **S1.4 — `agent-run` goes straight back to the paused job** · `docs/jobs/s-slots.md`
+- [ ] **S1.5 — `jarvis-reply`: a light reply path without Claude Code** · `docs/jobs/s-slots.md`
+- [ ] **S1.6 — Live pause and resume test with Nathan** · `docs/jobs/s-slots.md`
+- [ ] **S2.1 — Engine facts for llama.cpp and vLLM, from current sources** · `docs/jobs/s-slots.md`
+- [ ] **S2.2 — VRAM budget for each engine** · `docs/jobs/s-slots.md`
+- [ ] **S2.3 — Recommendation; Nathan picks the engine** · `docs/jobs/s-slots.md`
+- [ ] **S3.1 — Install script for the chosen engine (Sonnet)** · `docs/jobs/s-slots.md`
+- [ ] **S3.2 — Serve a small model with two slots (Sonnet, brain unloaded)** · `docs/jobs/s-slots.md`
+- [ ] **S3.3 — Claude Code's API works through it (Sonnet)** · `docs/jobs/s-slots.md`
+- [ ] **S3.4 — Slots keep their cache (Sonnet)** · `docs/jobs/s-slots.md`
+- [ ] **S4.1 — Brain weights in the engine's format** · `docs/jobs/s-slots.md`
+- [ ] **S4.2 — `engine-switch` with rollback (Sonnet, dry run only)** · `docs/jobs/s-slots.md`
+- [ ] **S4.3 — Engine service and the `ENGINE_URL` switch** · `docs/jobs/s-slots.md`
+- [ ] **S4.4 — Switch the brain (Sonnet, ask Nathan first)** · `docs/jobs/s-slots.md`
+- [ ] **S5.1 — Chat goes to the chat slot, top priority** · `docs/jobs/s-slots.md`
+- [ ] **S5.2 — Pause only when there's no room** · `docs/jobs/s-slots.md`
+- [ ] **S5.3 — Save and restore the work slot's cache (llama.cpp only)** · `docs/jobs/s-slots.md`
+- [ ] **S5.4 — Slot state for the dashboard and Discord** · `docs/jobs/s-slots.md`
+- [ ] **S5.5 — Update the R1.5 and Q1 job docs for slots** · `docs/jobs/s-slots.md`
+- [ ] **S5.6 — Live check with Nathan, and `docs/slots.md`** · `docs/jobs/s-slots.md`
 
 ### J1 — Job records in a database Nathan can query
 
