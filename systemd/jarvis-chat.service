@@ -1,0 +1,19 @@
+[Unit]
+Description=Jarvis Chat Daemon — replies to owner DMs on Discord using the local brain
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+EnvironmentFile=/home/agent/.config/jarvis/agent.env
+ExecStart=/usr/local/bin/jarvis-chat
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis-chat
+
+[Install]
+WantedBy=multi-user.target
