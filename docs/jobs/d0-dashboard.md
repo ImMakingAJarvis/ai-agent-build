@@ -8,7 +8,7 @@ Root cause, shared by all D0 jobs (main at b5e96d7):
 - htmx swaps any 2xx body in as-is, so the first poll replaces the dashboard with JSON text. That also wipes the nested approvals panel (line 393). The JSON has no `hx-*` attributes, so polling stops.
 - `<body>` on line 298 polls the same URL with `hx-swap="none"`, which only doubles the load.
 
-Stopgap until D0 is merged: Nathan runs a proxy on :8081 (`~/.local/share/jarvis-dashboard-shim/shim.py` in his home) that answers htmx requests for `/api/state` with HTML. Tell him on Discord when D0.1 is merged so he can remove it.
+Stopgap shim on :8081 is obsolete in this build: the page polls `GET /html/dashboard` (HTML). Use :8080. D0.1 is confirming that path, not inventing it.
 
 ## D0.1 — HTML partial for the poll
 
@@ -23,5 +23,5 @@ Stopgap until D0 is merged: Nathan runs a proxy on :8081 (`~/.local/share/jarvis
 ## D0.3 — Dashboard and worker as services
 
 - On Oct 21 they were started by hand from agent sessions (`/tmp/jarvis-dashboard`, `/tmp/jarvis-worker`, two `~/.local/bin/worker`). So the dashboard died when a round ended, and three workers consumed at once.
-- Add `jarvis-dashboard.service` and `jarvis-worker.service` (`User=agent`, binaries outside `/tmp`, `Restart=on-failure`, enabled at boot). Stop the stray copies. From then on use `systemctl restart`, never a background process from a session. Do not replace `agent-run.service` (coding rounds); that unit is separate.
+- `jarvis-dashboard.service` is already in `systemd/` (installed by `scripts/install_dashboard.sh`). Reuse it; do not write a second dashboard unit. Add `jarvis-worker.service` only (`User=agent`, binary outside `/tmp`, `Restart=on-failure`, enabled at boot). Stop the stray worker copies. From then on use `systemctl restart`, never a background process from a session. Do not replace `agent-run.service` (coding rounds).
 - Done when: `systemctl is-active` shows both active, `pgrep -c -f 'jarvis-worker|bin/worker'` is 1, and the dashboard is still up after the round ends and after a reboot.

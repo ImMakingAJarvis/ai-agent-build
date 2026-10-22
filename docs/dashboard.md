@@ -1,0 +1,20 @@
+# Dashboard
+
+Web UI for queue and job history. systemd unit, same shape as `jarvis-chat` and `agent-run`.
+
+- Unit: `/etc/systemd/system/jarvis-dashboard.service` (repo: `systemd/jarvis-dashboard.service`)
+- Binary: `/usr/local/bin/jarvis-dashboard` (`cmd/dashboard`)
+- User: `agent` (so it reads the agent job store, not Nathan's empty one)
+- URL: **http://111.1.2.57:8080/** (or http://localhost:8080 on the box)
+- Polls `GET /html/dashboard` as HTML. `/api/state` stays JSON. The old :8081 shim is not needed for this build.
+
+Does not require `agent-run`.
+
+## Inhibit
+
+1. File: `touch /var/lib/jarvis/dashboard.disabled` then reboot, or `sudo systemctl stop jarvis-dashboard`. Undo: `rm` the file and `sudo systemctl start jarvis-dashboard`.
+2. systemd: `sudo systemctl disable --now jarvis-dashboard`.
+
+Install: `sudo bash scripts/install_dashboard.sh` from a checkout of this repo.
+
+D0.3 should reuse this unit and only add `jarvis-worker.service`.
