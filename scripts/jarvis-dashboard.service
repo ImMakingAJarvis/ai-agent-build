@@ -1,0 +1,24 @@
+[Unit]
+Description=Jarvis Dashboard (job queue web UI)
+After=network-online.target jarvis-worker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+ExecStart=/home/agent/ai-agent-build/bin/dashboard
+WorkingDirectory=/home/agent/ai-agent-build
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/home/agent/.config/jarvis/local.env
+Environment=DASHBOARD_ADDR=:8080
+Environment=HOME=/home/agent
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/agent/.local
+
+[Install]
+WantedBy=multi-user.target

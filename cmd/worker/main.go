@@ -9,15 +9,20 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/metrics"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/notifier"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/notify"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/router"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -52,6 +57,18 @@ func run() error {
 	}
 	defer history.Close()
 	log.Printf("worker: job history → %s", history.Path())
+
+	// Prometheus metrics collector.
+	jobMetrics := metrics.New()
+
+	// Home Assistant notification client.
+	haClient := notify.NewClient()
+	ntf := notifier.New(haClient)
+	if haClient.Configured() {
+		log.Printf("worker: Home Assistant notifications enabled")
+	} else {
+		log.Printf("worker: Home Assistant notifications disabled (no HA_TOKEN)")
+	}
 
 	// Priority scheduler.
 	sched := queue.NewScheduler()
@@ -110,6 +127,8 @@ func run() error {
 			time.Sleep(500 * time.Millisecond)
 		}
 
+		jobStart := time.Now()
+
 		// Check if local model is available.
 		localAvailable := ollama.Healthcheck()
 		log.Printf("worker: job %s routing: type=%s, forceAPI=%v, modelOverride=%q, localAvailable=%v",
@@ -138,6 +157,8 @@ func run() error {
 				rec.InputTokens = costEst.InputTokens
 				rec.OutputTokens = costEst.OutputTokens
 				history.Denied(rec, costEst.TotalCost)
+				ntf.OnDenied(rec, costEst.TotalCost)
+				jobMetrics.ObserveDenied(msg.Type, modelName, costEst.TotalCost)
 				return queue.ErrApprovalDenied
 			}
 		}
@@ -158,6 +179,8 @@ func run() error {
 			err := fmt.Errorf("API dispatch not implemented (model %s)", modelName)
 			log.Printf("worker: job %s failed: %v", msg.ID, err)
 			history.Fail(rec, err)
+			ntf.OnFail(rec, err)
+			jobMetrics.ObserveFailed(msg.Type, modelName)
 			return nil // recorded as failed; ack so it is not redelivered
 		}
 
@@ -166,6 +189,7 @@ func run() error {
 		resp, err := ollama.Generate(modelName, prompt)
 		if err != nil {
 			history.Fail(rec, err)
+			jobMetrics.ObserveFailed(msg.Type, modelName)
 			return fmt.Errorf("generate: %w", err)
 		}
 		out := resp.Response
@@ -174,8 +198,21 @@ func run() error {
 		}
 		rec.Summary = agentjob.Summary(out)
 		history.Complete(rec)
+		jobMetrics.ObserveCompleted(msg.Type, modelName, time.Since(jobStart).Seconds())
+		ntf.OnComplete(rec)
 		return nil
 	}
+
+	// Start Prometheus metrics HTTP server.
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{Addr: ":9101", Handler: metricsMux}
+	go func() {
+		log.Printf("worker: metrics listening on :9101")
+		if err := metricsServer.ListenAndServe(); err != http.ErrServerClosed {
+			log.Printf("worker: metrics server error: %v", err)
+		}
+	}()
 
 	// Start consumer.
 	consumer := queue.NewConsumer(conn, handle)

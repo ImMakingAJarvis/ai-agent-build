@@ -1,0 +1,4 @@
+services:
+  reset_history:
+    name: Reset Conversation History
+    description: Clear the conversation history stored in the Jarvis voice service.

@@ -91,27 +91,39 @@ type ApprovalInfo struct {
 	Prompt        string  `json:"prompt,omitempty"`
 }
 
+// SlotQueue represents the state of one queue's processing slot.
+type SlotQueue struct {
+	Name     string `json:"name"`
+	Occupied bool   `json:"occupied"`
+	JobID    string `json:"job_id,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Runtime  string `json:"runtime,omitempty"`
+}
+
 // DashboardState is the full state returned by /api/state.
 type DashboardState struct {
 	OllamaHealthy bool               `json:"ollama_healthy"`
-	Slots         []slots.SlotInfo   `json:"slots"`        // Engine parallel slots
+	Slots         []slots.SlotInfo   `json:"slots"`           // Engine parallel slots
 	Queues        []QueueDepth       `json:"queues"`
 	PendingQueues []PendingQueue     `json:"pending_queues"`
 	RecentJobs    []JobRecord        `json:"recent_jobs"`
-	AgentJobs     []agentjob.Job     `json:"agent_jobs"` // build work: ready, claimed, running, done, failed
-	TotalCost     float64            `json:"total_cost"`     // Running total of estimated costs for API jobs
-	APICount      int                `json:"api_job_count"`  // Number of API-dispatched jobs
+	AgentJobs     []agentjob.Job     `json:"agent_jobs"`      // build work: ready, claimed, running, done, failed
+	SlotQueues    []SlotQueue        `json:"slot_queues"`     // Currently-running jobs per slot
+	TotalCost     float64            `json:"total_cost"`      // Running total of estimated costs for API jobs
+	APICount      int                `json:"api_job_count"`   // Number of API-dispatched jobs
 	LocalCount    int                `json:"local_job_count"` // Number of local jobs
 }
 
 // Server holds the dashboard dependencies.
 type Server struct {
-	addr        string
-	ollama      *models.Client
+	addr         string
+	ollama       *models.Client
 	engineClient *slots.Client
-	historyPath string
-	amqpURL     string
-	rabbitConn  *queue.Conn // persistent connection for peeking at pending jobs
+	historyPath  string
+	amqpURL      string
+	rabbitConn   *queue.Conn // persistent connection for peeking at pending jobs
+	authUser     string
+	authPass     string
 }
 
 // New creates a dashboard server.
@@ -144,6 +156,8 @@ func New() *Server {
 		engineClient: engineClient,
 		historyPath:  historyPath,
 		amqpURL:      amqpURL,
+		authUser:     os.Getenv("DASHBOARD_USER"),
+		authPass:     os.Getenv("DASHBOARD_PASS"),
 	}
 }
 
@@ -177,13 +191,33 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /api/approvals", s.handleApprovals)
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
 
+	var handler http.Handler = mux
+	if s.authUser != "" && s.authPass != "" {
+		handler = s.basicAuth(handler)
+		fmt.Printf("dashboard: basic auth enabled (user: %s)", s.authUser)
+	}
+
 	server := &http.Server{
 		Addr:    s.addr,
-		Handler: mux,
+		Handler: handler,
 	}
 
 	fmt.Printf("dashboard: listening on %s", s.addr)
 	return server.ListenAndServe()
+}
+
+// basicAuth returns a middleware that requires HTTP Basic Authentication.
+// When enabled, every request must include valid credentials.
+func (s *Server) basicAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != s.authUser || pass != s.authPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Jarvis Dashboard"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +227,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"formatDuration": FormatDuration,
 		"formatCost":     FormatCost,
 		"divCost":        DivCost,
+		"slotRuntime":    SlotRuntime,
 	}
 	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
@@ -330,6 +365,58 @@ func (s *Server) readRecentJobs(limit int) []JobRecord {
 	return unique
 }
 
+func (s *Server) readSlotQueues() []SlotQueue {
+	f, err := os.Open(s.historyPath)
+	if err != nil {
+		return makeEmptySlotQueues()
+	}
+	defer f.Close()
+
+	// Build map of running jobs by queue.
+	runningByQueue := map[string]SlotQueue{}
+	scanner := newLineReader(f)
+	for scanner.Scan() {
+		var rec JobRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue
+		}
+		if rec.Status != "running" {
+			continue
+		}
+		start, err := time.Parse(time.RFC3339, rec.StartedAt)
+		if err != nil {
+			continue
+		}
+		elapsed := time.Since(start).Round(time.Second)
+		runningByQueue[rec.Queue] = SlotQueue{
+			Name:     rec.Queue,
+			Occupied: true,
+			JobID:    rec.ID,
+			Model:    rec.Model,
+			Runtime:  elapsed.String(),
+		}
+	}
+
+	return buildSlotQueues(runningByQueue)
+}
+
+func makeEmptySlotQueues() []SlotQueue {
+	return buildSlotQueues(nil)
+}
+
+func buildSlotQueues(running map[string]SlotQueue) []SlotQueue {
+	queues := []string{queue.VoiceQueue, queue.CodingQueue, queue.BackgroundQueue}
+	slots := make([]SlotQueue, 0, len(queues))
+	for _, q := range queues {
+		if rq, ok := running[q]; ok {
+			slots = append(slots, rq)
+		} else {
+			slots = append(slots, SlotQueue{Name: q, Occupied: false})
+		}
+	}
+	return slots
+}
+
 func (s *Server) getQueueDepths() ([]QueueDepth, error) {
 	conn, err := amqp.Dial(s.amqpURL)
 	if err != nil {
@@ -447,7 +534,6 @@ func (s *Server) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 		// Reject: purge the message with this ID from its queue.
 		// We search all queues for a message with this ID and nack it.
 		s.rejectJob(id)
-		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "rejected")
 		return
 	}
@@ -455,7 +541,6 @@ func (s *Server) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 	// Approve: re-enqueue the job with auto_approve set.
 	// The worker will pick it up and the approval gate will pass.
 	s.approveJob(id)
-	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "approved")
 }
 
@@ -703,6 +788,27 @@ func StatusClass(status string) string {
 	default:
 		return ""
 	}
+}
+
+// SlotRuntime formats a runtime string for the active slots display.
+// Returns a human-readable string like "2m 30s".
+func SlotRuntime(d string) string {
+	t, err := time.ParseDuration(d)
+	if err != nil {
+		return d
+	}
+	if t < time.Second {
+		return t.Round(time.Millisecond).String()
+	}
+	m := int(t.Minutes())
+	s := int(t.Seconds()) % 60
+	if m > 0 && s > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm", m)
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 // DivCost divides a total cost by a count, returning the average.

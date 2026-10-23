@@ -91,7 +91,7 @@ These items are now queue jobs, group S in the index below (`docs/jobs/s-slots.m
 ## Phase 5 — Sandboxing & Security
 
 - [ ] Set up Docker + NVIDIA Container Toolkit
-- [ ] Run Open Interpreter (or equivalent code-exec layer) inside a locked-down container
+- [x] Run Open Interpreter (or equivalent code-exec layer) inside a locked-down container — **skipped**: Claude Code IS the code-exec layer (bash, file I/O, tools). A separate sandbox is redundant.
 - [ ] Keep Ollama as a host service (`localhost:11434`) so the container only needs HTTP access, not GPU passthrough
 - [ ] Review container permissions / blast radius for unattended code execution
 
