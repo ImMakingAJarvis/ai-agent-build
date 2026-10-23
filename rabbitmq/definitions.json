@@ -51,6 +51,15 @@
       }
     }
   ],
+  "permissions": [
+    {
+      "user": "jarvis",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
   "bindings": [
     {
       "source": "tasks",

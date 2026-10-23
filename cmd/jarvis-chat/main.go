@@ -4,8 +4,9 @@
 //
 // On each owner DM it:
 //  1. Adds a 👀 reaction and starts typing (refreshed every 8 s).
-//  2. Calls the brain with a short system prompt, status line, and
-//     conversation history (last 10 turns, ≤3000 words).
+//  2. Passes the message through Hermes, which classifies it as conversational
+//     or an action request. For chat, Hermes returns a brain reply. For
+//     actions, Hermes executes the action and returns the result.
 //  3. Replies with Notify.
 //  4. If no answer after 20 s, sends a busy notice.
 //  5. Gives up after 4 minutes with a timeout message.
@@ -29,7 +30,10 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
 //go:embed system_prompt.txt
@@ -89,6 +93,28 @@ func main() {
 	// Conversation history: alternating user/assistant turns.
 	var history []string // [user1, assistant1, user2, assistant2, ...]
 
+	// Create the Hermes agent for intent classification and action execution.
+	hermesAgent := hermes.New(hermes.Config{
+		Model:       modelName,
+		MaxHistory:  20,
+		AccessLevel: config.AccessFull,
+	})
+	hermesAgent.SetOllamaClient(ollamaClient)
+
+	// Connect to RabbitMQ for job enqueueing.
+	q, err := queue.NewConn()
+	if err != nil {
+		log.Printf("jarvis-chat: queue connection failed (actions that need it will degrade): %v", err)
+	} else {
+		hermesAgent.SetQueueConn(q)
+		defer q.Close()
+	}
+
+	// Register default actions.
+	for _, action := range hermes.DefaultActions() {
+		hermesAgent.Register(action)
+	}
+
 	d.OnMessage(func(content string) {
 		// Skip while a checkpoint question is open.
 		if _, err := os.Stat(confDir + "/ask-open"); err == nil {
@@ -109,7 +135,7 @@ func main() {
 			return
 		}
 
-		handleMessage(d, ollamaClient, modelName, content, &history)
+		handleMessage(d, hermesAgent, content, &history)
 	})
 
 	// Open the gateway so onMessage fires.
@@ -128,29 +154,26 @@ func main() {
 	}
 }
 
-func handleMessage(d sender, client *models.Client, model, content string, history *[]string) {
+func handleMessage(d sender, agent *hermes.Agent, content string, history *[]string) {
 	ctx, cancel := context.WithTimeout(context.Background(), maxTimeout)
 	defer cancel()
-
-	// Add 👀 reaction — we can't get the message ID from the hook,
-	// so we skip the reaction and rely on typing as acknowledgment.
-	// (The reaction requires the incoming message ID, which the
-	//  OnMessage hook doesn't receive. The typing indicator serves
-	//  as immediate acknowledgment.)
 
 	// Start typing indicator.
 	typingCtx, typingCancel := context.WithCancel(context.Background())
 	defer typingCancel()
 	go typingLoop(typingCtx, d)
 
-	// Build the chat messages for the brain.
-	messages := buildMessages(content, *history)
+	// Build the enriched message with status context, then pass it to Hermes.
+	enriched := content
+	if status := getStatusLine(); status != "" {
+		enriched = "Current system status:\n" + status + "\n\n---\n" + content
+	}
 
-	// Call the brain.
+	// Process through Hermes: classifies as chat or action, then executes.
 	answerCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		answer, err := client.Chat(model, messages)
+		answer, err := agent.Process(ctx, enriched)
 		if err != nil {
 			errCh <- err
 			return

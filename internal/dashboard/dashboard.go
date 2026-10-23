@@ -102,16 +102,17 @@ type SlotQueue struct {
 
 // DashboardState is the full state returned by /api/state.
 type DashboardState struct {
-	OllamaHealthy bool               `json:"ollama_healthy"`
-	Slots         []slots.SlotInfo   `json:"slots"`           // Engine parallel slots
-	Queues        []QueueDepth       `json:"queues"`
-	PendingQueues []PendingQueue     `json:"pending_queues"`
-	RecentJobs    []JobRecord        `json:"recent_jobs"`
-	AgentJobs     []agentjob.Job     `json:"agent_jobs"`      // build work: ready, claimed, running, done, failed
-	SlotQueues    []SlotQueue        `json:"slot_queues"`     // Currently-running jobs per slot
-	TotalCost     float64            `json:"total_cost"`      // Running total of estimated costs for API jobs
-	APICount      int                `json:"api_job_count"`   // Number of API-dispatched jobs
-	LocalCount    int                `json:"local_job_count"` // Number of local jobs
+	OllamaHealthy  bool               `json:"ollama_healthy"`
+	RabbitMQHealthy bool              `json:"rabbitmq_healthy"`
+	Slots          []slots.SlotInfo   `json:"slots"`           // Engine parallel slots
+	Queues         []QueueDepth       `json:"queues"`
+	PendingQueues  []PendingQueue     `json:"pending_queues"`
+	RecentJobs     []JobRecord        `json:"recent_jobs"`
+	AgentJobs      []agentjob.Job     `json:"agent_jobs"`      // build work: ready, claimed, running, done, failed
+	SlotQueues     []SlotQueue        `json:"slot_queues"`     // Currently-running jobs per slot
+	TotalCost      float64            `json:"total_cost"`      // Running total of estimated costs for API jobs
+	APICount       int                `json:"api_job_count"`   // Number of API-dispatched jobs
+	LocalCount     int                `json:"local_job_count"` // Number of local jobs
 }
 
 // Server holds the dashboard dependencies.
@@ -250,6 +251,7 @@ func (s *Server) handleDashboardHTML(w http.ResponseWriter, r *http.Request) {
 		"formatDuration": FormatDuration,
 		"formatCost":     FormatCost,
 		"divCost":        DivCost,
+		"slotRuntime":    SlotRuntime,
 	}
 	tmpl, err := template.New("dashboard-content").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
@@ -286,9 +288,13 @@ func (s *Server) handleQueues(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) gatherState() DashboardState {
 	jobs := s.readRecentJobs(100)
-	depths, _ := s.getQueueDepths()
+	depths, err := s.getQueueDepths()
+	if err != nil {
+		fmt.Printf("dashboard: rabbitmq unreachable: %v\n", err)
+	}
 	pending := s.getPendingQueues()
-	healthy := s.ollama.Healthcheck()
+	ollamaHealthy := s.ollama.Healthcheck()
+	rabbitmqHealthy := s.checkRabbitMQ()
 	engineSlots, _ := s.engineClient.GetSlots()
 
 	// Compute running cost totals from completed/denied API jobs.
@@ -313,16 +319,28 @@ func (s *Server) gatherState() DashboardState {
 	}
 
 	return DashboardState{
-		AgentJobs:     agentJobs,
-		OllamaHealthy: healthy,
-		Slots:         engineSlots,
-		Queues:        depths,
-		PendingQueues: pending,
-		RecentJobs:    jobs,
-		TotalCost:     totalCost,
-		APICount:      apiCount,
-		LocalCount:    localCount,
+		OllamaHealthy:   ollamaHealthy,
+		RabbitMQHealthy: rabbitmqHealthy,
+		AgentJobs:       agentJobs,
+		Slots:           engineSlots,
+		Queues:          depths,
+		PendingQueues:   pending,
+		RecentJobs:      jobs,
+		TotalCost:       totalCost,
+		APICount:        apiCount,
+		LocalCount:      localCount,
 	}
+}
+
+// checkRabbitMQ dials RabbitMQ and closes the connection to verify
+// the broker is reachable. Returns true if the connection succeeds.
+func (s *Server) checkRabbitMQ() bool {
+	conn, err := amqp.Dial(s.amqpURL)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 func (s *Server) readRecentJobs(limit int) []JobRecord {
