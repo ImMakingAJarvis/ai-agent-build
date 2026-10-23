@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """Benchmark the live llama.cpp brain (Qwen3.8 27B Q6_K) via /v1/chat/completions.
 
-Usage: benchmark_q6.py [base_url] [runs]
+Usage: benchmark_q6.py [base_url] [runs] [fill_tokens]
+fill_tokens>0 adds a long-context run: a prompt of about that many tokens ending in a question.
 Reports llama-server's own timings (prompt/decode tok/s, draft acceptance), plus
 a tool-call check and a few small correctness tasks.
 """
-import json, sys, time, urllib.request
+import json, sys, time, urllib.error, urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:11434"
 RUNS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+FILL = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+
+Usage: benchmark_q6.py [base_url] [runs]
+Reports llama-server's own timings (prompt/decode tok/s, draft acceptance), plus
+a tool-call check and a few small correctness tasks.
 
 REVIEW = "Review this Python code for bugs, performance and style, and propose a fixed version:\n\n" + '''
 import os, json, threading
@@ -58,7 +64,10 @@ def chat(messages, **kw):
     req = urllib.request.Request(BASE + "/v1/chat/completions", json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})
     t = time.time()
-    r = json.load(urllib.request.urlopen(req, timeout=600))
+    try:
+        r = json.load(urllib.request.urlopen(req, timeout=1800))
+    except urllib.error.HTTPError as e:
+        sys.exit(f"HTTP {e.code}: {e.read().decode()[:300]}")
     return r, time.time() - t
 
 
@@ -78,6 +87,15 @@ def main():
     tc = r["choices"][0]["message"].get("tool_calls") or []
     good = bool(tc) and tc[0]["function"]["name"] == "bash" and "command" in json.loads(tc[0]["function"]["arguments"])
     print(f"tool_call {'PASS' if good else 'FAIL'}: {json.dumps(tc)[:200]}")
+
+    if FILL:
+        # ~10 tokens per line; the needle sits at the very start so the whole context must be attended.
+        lines = ["SECRET CODE: tangerine-4471. Remember it."] + [f"Log line {i}: worker {i % 97} processed batch {i * 7 % 1013} ok." for i in range(FILL // 24)]
+        r, wall = chat([{"role": "user", "content": "\n".join(lines) + "\n\nWhat was the SECRET CODE at the start? Reply with only the code."}], max_tokens=256)
+        t = r["timings"]
+        out = r["choices"][0]["message"].get("content") or ""
+        print(f"\nlong-context: prompt {t['prompt_n']} tok at {t['prompt_per_second']:.0f} tok/s, "
+              f"decode {t['predicted_per_second']:.1f} tok/s, wall {wall:.1f}s, needle {'PASS' if 'tangerine-4471' in out else 'FAIL'}")
 
 
 main()
