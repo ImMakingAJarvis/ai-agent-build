@@ -25,7 +25,11 @@ Rules:
 - If the user asks a question or makes a statement, it is "chat".
 - If the user asks Jarvis to DO something (build, fix, install, check status, start/stop services), it is "action".
 - Keep chat replies brief and conversational.
-- Extract as many parameters as you can from the user's message for actions.`
+- Extract as many parameters as you can from the user's message for actions.
+- For enqueue_job actions, extract an "effort" parameter from urgency cues in the user's message.
+  Valid values are: low, medium, high, xhigh, max. Default to "medium" if not stated.
+  Examples: "urgent" or "critical" or "needs deep thinking" → "xhigh"; "quick fix" → "low";
+  "important" → "high"; nothing special → "medium".`
 
 // buildClassifyPrompt constructs the full message list for intent classification.
 // It fills in the available actions into the system prompt and appends the

@@ -153,6 +153,7 @@ func run() error {
 				ID: msg.ID, Title: msg.Title, Instructions: msg.Instructions,
 				Branch: msg.Branch, DependsOn: msg.DependsOn, Driver: msg.Driver,
 				Priority: msg.Priority, CreatedAt: msg.CreatedAt, Source: msg.Source,
+				ReasoningEffort: msg.ReasoningEffort,
 			})
 			if err != nil {
 				return fmt.Errorf("ingest agent job %s: %w", msg.ID, err)

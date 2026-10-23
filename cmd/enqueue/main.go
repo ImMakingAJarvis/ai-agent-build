@@ -24,6 +24,8 @@ func main() {
 	prompt := flag.String("prompt", "", "prompt or description for the job")
 	forceAPI := flag.Bool("force-api", false, "force dispatch to Claude API")
 	modelOverride := flag.String("model-override", "", "override model selection")
+	effort := flag.String("effort", queue.DefaultEffort,
+		"reasoning effort: low, medium, high, xhigh, max")
 	flag.Parse()
 
 	if *prompt == "" {
@@ -39,8 +41,9 @@ func main() {
 		Payload: map[string]string{
 			"prompt": *prompt,
 		},
-		ForceAPI:      *forceAPI,
-		ModelOverride: *modelOverride,
+		ForceAPI:        *forceAPI,
+		ModelOverride:   *modelOverride,
+		ReasoningEffort: *effort,
 	}
 
 	// Set priority based on type.

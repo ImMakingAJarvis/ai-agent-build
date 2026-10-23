@@ -61,16 +61,18 @@ func runEnqueueJob(_ context.Context, params map[string]string) (string, error) 
 	if instructions == "" {
 		instructions = title
 	}
+	effort := params["effort"]
 
 	msg := queue.Message{
-		ID:           fmt.Sprintf("hermes-%d", time.Now().UnixNano()),
-		Type:         "coding",
-		Priority:     5,
-		Title:        title,
-		Instructions: instructions,
-		Source:       "discord",
-		Kind:         queue.KindAgent,
-		CreatedAt:    time.Now().UTC(),
+		ID:              fmt.Sprintf("hermes-%d", time.Now().UnixNano()),
+		Type:            "coding",
+		Priority:        5,
+		Title:           title,
+		Instructions:    instructions,
+		Source:          "discord",
+		Kind:            queue.KindAgent,
+		ReasoningEffort: effort,
+		CreatedAt:       time.Now().UTC(),
 	}
 
 	// The queue connection must be injected via SetQueueConn before this
