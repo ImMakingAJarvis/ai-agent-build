@@ -48,7 +48,14 @@ type Discord struct {
 	// messageHook, if non-nil, is called for every owner DM that is not
 	// consumed by a pending Ask waiter. The daemon can use it to process
 	// free-form messages.
-	messageHook func(string)
+	messageHook func(Incoming)
+}
+
+// Incoming is an owner DM that was not consumed by Ask.
+type Incoming struct {
+	ChannelID string
+	MessageID string
+	Content   string
 }
 
 // waiter is one open question.
@@ -110,9 +117,8 @@ func (d *Discord) Typing() error {
 }
 
 // OnMessage registers a callback that fires for every owner DM that is
-// not consumed by a pending Ask waiter. The callback receives the
-// message content string.
-func (d *Discord) OnMessage(fn func(string)) {
+// not consumed by a pending Ask waiter.
+func (d *Discord) OnMessage(fn func(Incoming)) {
 	d.messageHook = fn
 }
 
@@ -187,11 +193,11 @@ func (d *Discord) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// message there so the agent-run loop can pause the current job.
 	if d.cfg.SignalFile != "" && target == nil {
 		os.WriteFile(d.cfg.SignalFile, []byte(m.Content), 0o644)
-		}
-		if d.messageHook != nil && target == nil {
-			d.messageHook(m.Content)
-		}
 	}
+	if d.messageHook != nil && target == nil {
+		d.messageHook(Incoming{ChannelID: m.ChannelID, MessageID: m.ID, Content: m.Content})
+	}
+}
 
 func (d *Discord) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionMessageComponent || i.User == nil || i.User.ID != d.cfg.OwnerID {

@@ -38,6 +38,10 @@ type Spec struct {
 	Priority     int       `json:"priority"`
 	CreatedAt    time.Time `json:"created_at"`
 	Source       string    `json:"source,omitempty"`
+	// DiscordChannelID / DiscordMessageID identify the owner message that
+	// scheduled this job. The worker reacts to that message on pickup.
+	DiscordChannelID string `json:"discord_channel_id,omitempty"`
+	DiscordMessageID string `json:"discord_message_id,omitempty"`
 }
 
 // State is the mutable record (state.json).

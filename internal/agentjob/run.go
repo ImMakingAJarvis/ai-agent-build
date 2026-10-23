@@ -55,6 +55,9 @@ type Runner struct {
 	EngineURL string
 	// WorkSlotID is the llama.cpp slot ID used for work jobs (default 0).
 	WorkSlotID int
+	// Pickup is called after a successful Claim (Discord parrot reaction).
+	// Defaults to defaultDiscordPickup, which never fails the job.
+	Pickup func(Job)
 }
 
 // ModelFor names the model a driver uses.
@@ -174,6 +177,11 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	if err != nil {
 		return j, err
 	}
+	pickup := r.Pickup
+	if pickup == nil {
+		pickup = defaultDiscordPickup
+	}
+	pickup(j)
 	j.Model = ModelFor(driver)
 	j.State.Model = j.Model
 	j.Status = Running
