@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/planner"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
@@ -27,7 +28,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list|next|run|finish|skip|requeue|show|pause|add")
+		die("usage: jarvis-jobs list|next|run|finish|skip|requeue|show|pause|add|plan")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -37,6 +38,10 @@ func main() {
 	switch cmd {
 	case "add":
 		if err := cmdAdd(store, args, os.Stdin); err != nil {
+			die("%v", err)
+		}
+	case "plan":
+		if err := cmdPlan(store, args, os.Stdin); err != nil {
 			die("%v", err)
 		}
 	case "list":
@@ -170,5 +175,74 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		return nil
 	}
 	fmt.Println(*id)
+	return nil
+}
+
+func cmdPlan(store *agentjob.Store, args []string, stdin io.Reader) error {
+	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	source := fs.String("source", "planner", "origin label")
+	dryRun := fs.Bool("dry-run", false, "print the plan without enqueueing")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Read task description from remaining args or stdin.
+	var taskDesc string
+	if fs.NArg() > 0 {
+		taskDesc = strings.Join(fs.Args(), " ")
+	} else {
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return err
+		}
+		taskDesc = string(b)
+	}
+	taskDesc = strings.TrimSpace(taskDesc)
+	if taskDesc == "" {
+		return fmt.Errorf("plan: task description required (pass as args or via stdin)")
+	}
+
+	// Create the planner.
+	p := planner.New(planner.Config{
+		Store:  store,
+		Source: *source,
+	})
+
+	fmt.Fprintf(os.Stderr, "Analyzing task...\n")
+	plan, err := p.PlanTask(taskDesc)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "\nPlan: %s\n", plan.Title)
+	if plan.Summary != "" {
+		fmt.Fprintf(os.Stderr, "Summary: %s\n", plan.Summary)
+	}
+	if plan.TotalEst != "" {
+		fmt.Fprintf(os.Stderr, "Estimate: %s\n", plan.TotalEst)
+	}
+	fmt.Fprintf(os.Stderr, "Chunks: %d\n\n", len(plan.Chunks))
+
+	for i, c := range plan.Chunks {
+		driver, effort := planner.DifficultyToDriver(c.Difficulty)
+		fmt.Fprintf(os.Stderr, "  %d. [%s] %s (difficulty: %d, driver: %s, effort: %s)\n",
+			i+1, c.Type, c.Title, c.Difficulty, driver, effort)
+	}
+
+	if *dryRun {
+		fmt.Fprintln(os.Stderr, "\n(Dry run — not enqueueing)")
+		return nil
+	}
+
+	fmt.Fprintln(os.Stderr, "\nEnqueuing chunks...")
+	jobIDs, err := p.EnqueuePlan(plan)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintln(os.Stderr, "\nEnqueued jobs:")
+	for _, id := range jobIDs {
+		fmt.Println(id)
+	}
 	return nil
 }

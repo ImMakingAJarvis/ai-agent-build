@@ -11,6 +11,7 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/planner"
 )
 
 const chatJobPriority = 80
@@ -27,6 +28,8 @@ func cutBuildFix(content string) (kind, rest string, ok bool) {
 		return "build", strings.TrimSpace(content[len("!build"):]), true
 	case strings.HasPrefix(low, "!fix"):
 		return "fix", strings.TrimSpace(content[len("!fix"):]), true
+	case strings.HasPrefix(low, "!plan"):
+		return "plan", strings.TrimSpace(content[len("!plan"):]), true
 	default:
 		return "", "", false
 	}
@@ -199,4 +202,42 @@ func pauseSignalPath() string {
 		return ""
 	}
 	return conf + "/pause-signal"
+}
+
+// planFromChat sends the task description through the planner, which
+// breaks it into difficulty-scored chunks and enqueues each as an agent
+// job. Returns the list of enqueued job IDs.
+func planFromChat(taskDescription string) ([]string, error) {
+	store, err := agentjob.Open(agentjob.DataDir())
+	if err != nil {
+		return nil, fmt.Errorf("open job store: %w", err)
+	}
+	p := planner.New(planner.Config{
+		Store:  store,
+		Source: "discord",
+	})
+	plan, err := p.PlanTask(taskDescription)
+	if err != nil {
+		return nil, fmt.Errorf("analyze: %w", err)
+	}
+	ids, err := p.EnqueuePlan(plan)
+	if err != nil {
+		return nil, fmt.Errorf("enqueue chunks: %w", err)
+	}
+	return ids, nil
+}
+
+// planConfirm formats a confirmation message for a planned set of jobs.
+func planConfirm(ids []string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Planned %d chunk(s):", len(ids)))
+	for i, id := range ids {
+		b.WriteString(fmt.Sprintf("\n  %d. %s", i+1, id))
+	}
+	agentStatus := "agent-run is up; it will pick these up."
+	if !agentRunUp() {
+		agentStatus = "queued; agent-run is not running, so they will wait."
+	}
+	b.WriteString("\n\n" + agentStatus)
+	return b.String()
 }

@@ -109,10 +109,25 @@ func main() {
 			return
 		}
 
-		if _, rest, ok := cutBuildFix(content); ok {
-			title, body := titleAndBody(rest)
+		if kind, rest, ok := cutBuildFix(content); ok {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
+			if kind == "plan" {
+				// Plan: analyze the task and enqueue as multiple chunks.
+				if strings.TrimSpace(rest) == "" {
+					_ = d.Notify(ctx, "Need a task description after !plan.")
+					return
+				}
+				ids, err := planFromChat(rest)
+				if err != nil {
+					_ = d.Notify(ctx, "Could not plan: "+err.Error())
+					return
+				}
+				_ = d.Notify(ctx, planConfirm(ids))
+				return
+			}
+			// Build / fix: enqueue a single job.
+			title, body := titleAndBody(rest)
 			if title == "" {
 				_ = d.Notify(ctx, "Need a title after !build / !fix.")
 				return
