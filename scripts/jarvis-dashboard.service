@@ -11,6 +11,7 @@ ExecStart=/home/agent/ai-agent-build/bin/dashboard
 WorkingDirectory=/home/agent/ai-agent-build
 Restart=on-failure
 RestartSec=5
+EnvironmentFile=/home/agent/.config/jarvis/local.env
 Environment=DASHBOARD_ADDR=:8080
 Environment=HOME=/home/agent
 

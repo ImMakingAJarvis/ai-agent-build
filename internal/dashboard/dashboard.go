@@ -116,6 +116,8 @@ type Server struct {
 	historyPath string
 	amqpURL     string
 	rabbitConn  *queue.Conn // persistent connection for peeking at pending jobs
+	authUser    string
+	authPass    string
 }
 
 // New creates a dashboard server.
@@ -141,10 +143,12 @@ func New() *Server {
 	}
 
 	return &Server{
-		addr:          addr,
-		ollama:        models.NewClient(),
-		historyPath:   historyPath,
-		amqpURL:       amqpURL,
+		addr:     addr,
+		ollama:   models.NewClient(),
+		historyPath: historyPath,
+		amqpURL:  amqpURL,
+		authUser: os.Getenv("DASHBOARD_USER"),
+		authPass: os.Getenv("DASHBOARD_PASS"),
 	}
 }
 
@@ -177,13 +181,33 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /api/approvals", s.handleApprovals)
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
 
+	var handler http.Handler = mux
+	if s.authUser != "" && s.authPass != "" {
+		handler = s.basicAuth(handler)
+		fmt.Printf("dashboard: basic auth enabled (user: %s)", s.authUser)
+	}
+
 	server := &http.Server{
 		Addr:    s.addr,
-		Handler: mux,
+		Handler: handler,
 	}
 
 	fmt.Printf("dashboard: listening on %s", s.addr)
 	return server.ListenAndServe()
+}
+
+// basicAuth returns a middleware that requires HTTP Basic Authentication.
+// When enabled, every request must include valid credentials.
+func (s *Server) basicAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != s.authUser || pass != s.authPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Jarvis Dashboard"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {

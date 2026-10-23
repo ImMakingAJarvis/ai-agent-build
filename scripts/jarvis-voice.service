@@ -1,0 +1,26 @@
+[Unit]
+Description=Jarvis Voice Service (STT + LLM + TTS pipeline)
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+ExecStart=/usr/bin/python3 /home/agent/ai-agent-build/scripts/voice_service.py
+WorkingDirectory=/home/agent/ai-agent-build
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/home/agent/.config/jarvis/local.env
+Environment=LISTEN_PORT=8100
+Environment=WHISPER_MODEL=small
+Environment=PYTHONPATH=/home/agent/.local/lib/python3.14/site-packages
+Environment=HOME=/home/agent
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/agent/.cache /home/agent/ai-agent-build/scripts
+
+[Install]
+WantedBy=multi-user.target
