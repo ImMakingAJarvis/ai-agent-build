@@ -181,3 +181,82 @@ func TestPickModelBackgroundIgnoresLightModel(t *testing.T) {
 		t.Errorf("background should use LOCAL_MODEL, got %s", name)
 	}
 }
+
+func TestPickModelCodingUsesCoderModel(t *testing.T) {
+	origCoder := os.Getenv("LOCAL_CODER_MODEL")
+	origModel := os.Getenv("LOCAL_MODEL")
+	os.Setenv("LOCAL_CODER_MODEL", "jarvis-coder")
+	os.Setenv("LOCAL_MODEL", "jarvis-brain")
+	defer func() {
+		os.Setenv("LOCAL_CODER_MODEL", origCoder)
+		os.Setenv("LOCAL_MODEL", origModel)
+	}()
+
+	name, useLocal := router.PickModel("coding", false, "", true)
+	if !useLocal {
+		t.Error("coding job should use local")
+	}
+	if name != "jarvis-coder" {
+		t.Errorf("coding should use LOCAL_CODER_MODEL, got %s", name)
+	}
+}
+
+func TestPickModelCodingFallsBackToLocal(t *testing.T) {
+	origCoder := os.Getenv("LOCAL_CODER_MODEL")
+	origModel := os.Getenv("LOCAL_MODEL")
+	os.Unsetenv("LOCAL_CODER_MODEL")
+	os.Setenv("LOCAL_MODEL", "jarvis-brain")
+	defer func() {
+		os.Setenv("LOCAL_CODER_MODEL", origCoder)
+		os.Setenv("LOCAL_MODEL", origModel)
+	}()
+
+	name, useLocal := router.PickModel("coding", false, "", true)
+	if !useLocal {
+		t.Error("coding job should use local")
+	}
+	if name != "jarvis-brain" {
+		t.Errorf("coding should fall back to LOCAL_MODEL when LOCAL_CODER_MODEL is unset, got %s", name)
+	}
+}
+
+func TestPickModelVoiceIgnoresCoderModel(t *testing.T) {
+	origCoder := os.Getenv("LOCAL_CODER_MODEL")
+	origLight := os.Getenv("LOCAL_LIGHT_MODEL")
+	origModel := os.Getenv("LOCAL_MODEL")
+	os.Setenv("LOCAL_CODER_MODEL", "jarvis-coder")
+	os.Setenv("LOCAL_LIGHT_MODEL", "qwen2.5:7b")
+	os.Setenv("LOCAL_MODEL", "jarvis-brain")
+	defer func() {
+		os.Setenv("LOCAL_CODER_MODEL", origCoder)
+		os.Setenv("LOCAL_LIGHT_MODEL", origLight)
+		os.Setenv("LOCAL_MODEL", origModel)
+	}()
+
+	name, useLocal := router.PickModel("voice", false, "", true)
+	if !useLocal {
+		t.Error("voice job should use local")
+	}
+	if name != "qwen2.5:7b" {
+		t.Errorf("voice should use LOCAL_LIGHT_MODEL, not LOCAL_CODER_MODEL, got %s", name)
+	}
+}
+
+func TestPickModelBackgroundIgnoresCoderModel(t *testing.T) {
+	origCoder := os.Getenv("LOCAL_CODER_MODEL")
+	origModel := os.Getenv("LOCAL_MODEL")
+	os.Setenv("LOCAL_CODER_MODEL", "jarvis-coder")
+	os.Setenv("LOCAL_MODEL", "jarvis-brain")
+	defer func() {
+		os.Setenv("LOCAL_CODER_MODEL", origCoder)
+		os.Setenv("LOCAL_MODEL", origModel)
+	}()
+
+	name, useLocal := router.PickModel("background", false, "", true)
+	if !useLocal {
+		t.Error("background job should use local")
+	}
+	if name != "jarvis-brain" {
+		t.Errorf("background should use LOCAL_MODEL, not LOCAL_CODER_MODEL, got %s", name)
+	}
+}

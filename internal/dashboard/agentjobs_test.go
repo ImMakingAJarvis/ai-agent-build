@@ -10,7 +10,7 @@ import (
 )
 
 func TestIndexRendersAgentJobs(t *testing.T) {
-	funcs := template.FuncMap{"statusClass": StatusClass, "formatDuration": FormatDuration, "formatCost": FormatCost, "divCost": DivCost}
+	funcs := template.FuncMap{"statusClass": StatusClass, "formatDuration": FormatDuration, "formatCost": FormatCost, "divCost": DivCost, "slotRuntime": SlotRuntime}
 	tmpl, err := template.New("index.html").Funcs(funcs).ParseFS(templatesFS, "templates/index.html")
 	if err != nil {
 		t.Fatal(err)

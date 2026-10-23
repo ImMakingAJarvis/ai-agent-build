@@ -20,11 +20,11 @@ var prRe = regexp.MustCompile(`https://github\.com/[\w.-]+/[\w.-]+/pull/\d+`)
 
 // Runner runs claimed jobs and records the result.
 type Runner struct {
-	Store   *Store
+	Store *Store
 	History *queue.History
-	// Command builds the agent command for a driver and full prompt. The
-	// default is agent-local (local) or claude --model $AGENT_STAGE2_MODEL.
-	Command func(driver, prompt string) *exec.Cmd
+	// Command builds the agent command for a driver, full prompt, and reasoning
+	// effort level. The default is agent-local (local) or claude --model $AGENT_STAGE2_MODEL.
+	Command func(driver, prompt, effort string) *exec.Cmd
 	// PRLookup finds a PR URL for a branch when the output has none. The
 	// default asks gh. Return "" if there is none.
 	PRLookup func(branch string) string
@@ -74,11 +74,17 @@ func ModelFor(driver string) string {
 	return "jarvis-brain"
 }
 
-func defaultCommand(driver, prompt string) *exec.Cmd {
+func defaultCommand(driver, prompt, effort string) *exec.Cmd {
 	if driver == "sonnet" {
-		return exec.Command("claude", "--model", ModelFor(driver), "--dangerously-skip-permissions", "-p", prompt)
+		return exec.Command("claude", "--model", ModelFor(driver),
+			"--dangerously-skip-permissions",
+			"--reasoning-effort", effort,
+			"-p", prompt)
 	}
-	return exec.Command("agent-local", "--dangerously-skip-permissions", "-p", prompt)
+	return exec.Command("agent-local",
+		"--dangerously-skip-permissions",
+		"--reasoning-effort", effort,
+		"-p", prompt)
 }
 
 func defaultPRLookup(branch string) string {
@@ -200,11 +206,15 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	}
 
 	prompt := r.Prompt(j, driver, note)
+	effort := j.ReasoningEffort
+	if effort == "" {
+		effort = queue.DefaultEffort
+	}
 	cmdf := r.Command
 	if cmdf == nil {
 		cmdf = defaultCommand
 	}
-	cmd := cmdf(driver, prompt)
+	cmd := cmdf(driver, prompt, effort)
 	var buf bytes.Buffer
 	var w io.Writer = &buf
 	if r.Tee != nil {

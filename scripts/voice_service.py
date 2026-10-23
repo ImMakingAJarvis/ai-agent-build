@@ -5,10 +5,12 @@ voice_service.py — FastAPI service that turns Home Assistant audio into Jarvis
 Endpoints:
   POST /voice        Full pipeline: audio file in → WAV audio out (STT → LLM → TTS)
   POST /voice/json   Full pipeline via JSON: {"text": "..."} → WAV audio out
+  GET  /voice/chat   Real-time 2-way voice chat web interface (WebSocket)
   POST /stt          Speech-to-Text only: audio file in → {"text": "..."}
   POST /tts          Text-to-Speech only: {"text": "..."} → WAV audio out
   POST /history/reset  Clear conversation memory
   GET  /health       Health check (verifies Ollama + whisper model are ready)
+  WS   /voice/ws     WebSocket for real-time 2-way audio communication
 
 Designed to sit between Home Assistant and the local LLM.  Home Assistant
 sends an audio clip (wav/ogg/mp3); the service transcribes it with
@@ -40,9 +42,10 @@ import numpy as np
 import soundfile as sf
 import uvicorn
 
-from fastapi import FastAPI, File, UploadFile, Request, HTTPException, status
-from fastapi.responses import Response, JSONResponse
+from fastapi import FastAPI, File, UploadFile, Request, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import Response, JSONResponse, HTMLResponse
 from fastapi.security import HTTPBasic
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -359,6 +362,131 @@ async def reset_history():
     """Clear conversation history."""
     chat_history.clear()
     return JSONResponse(content={"status": "history cleared"})
+
+@app.get("/voice/chat")
+async def voice_chat_page():
+    """Serve the real-time voice chat web interface."""
+    from fastapi.responses import FileResponse
+    import os
+    html_path = os.path.join(os.path.dirname(__file__), "voice_chat.html")
+    return FileResponse(html_path)
+
+# ---------------------------------------------------------------------------
+# WebSocket endpoint for real-time 2-way audio communication
+# ---------------------------------------------------------------------------
+# Protocol:
+#   Client → Server:
+#     - Binary frames: 16-bit PCM audio at 16kHz, mono (chunks of ~200ms = 6400 bytes)
+#     - JSON: {"type": "start"}  — begin speaking
+#     - JSON: {"type": "end"}    — finished speaking, process the buffer
+#   Server → Client:
+#     - JSON: {"type": "status", "state": "listening|processing|speaking|idle", "text": "..."}
+#     - Binary frames: TTS audio chunks (raw 16-bit PCM at 24kHz, mono)
+#     - JSON: {"type": "error", "message": "..."}
+
+async def voice_websocket(ws: WebSocket):
+    await ws.accept()
+
+    # Send initial idle state
+    await ws.send_json({"type": "status", "state": "idle"})
+
+    audio_buffer = bytearray()
+    processing = False
+
+    try:
+        while True:
+            data = await ws.receive()
+
+            if data.get("type") == "websocket.disconnect":
+                break
+
+            # Handle JSON control messages
+            if data.get("type") == "websocket.receive" and isinstance(data["text"], str):
+                try:
+                    msg = json.loads(data["text"])
+                except json.JSONDecodeError:
+                    continue
+
+                if msg.get("type") == "start":
+                    audio_buffer.clear()
+                    await ws.send_json({"type": "status", "state": "listening"})
+
+                elif msg.get("type") == "end":
+                    if processing:
+                        continue  # already processing a previous utterance
+
+                    if len(audio_buffer) < 3200:  # <100ms of audio, ignore
+                        await ws.send_json({"type": "status", "state": "idle"})
+                        continue
+
+                    processing = True
+                    await ws.send_json({"type": "status", "state": "processing"})
+
+                    try:
+                        # STT
+                        text = await transcribe(bytes(audio_buffer))
+                        if not text:
+                            await ws.send_json({
+                                "type": "status", "state": "idle",
+                                "text": "",
+                            })
+                            processing = False
+                            audio_buffer.clear()
+                            continue
+
+                        logger.info("WebSocket STT: %s", text)
+                        await ws.send_json({
+                            "type": "status", "state": "processing",
+                            "text": text,
+                        })
+
+                        # LLM
+                        reply = await ask_ollama(text)
+
+                        # TTS - stream audio chunks as they arrive
+                        await ws.send_json({"type": "status", "state": "speaking", "text": reply})
+                        communicate = edge_tts.Communicate(reply, TTS_VOICE)
+
+                        # Collect all audio first, then convert to raw PCM and stream
+                        audio_bytes = io.BytesIO()
+                        async for chunk in communicate.stream():
+                            if chunk["type"] == "audio":
+                                audio_bytes.write(chunk["data"])
+
+                        audio_bytes.seek(0)
+                        tts_wav = audio_bytes.read()
+
+                        # Convert WAV to raw PCM (edge-tts produces 24kHz 16-bit mono)
+                        _, tts_pcm = sf.read(io.BytesIO(tts_wav), dtype="int16")
+                        raw_pcm = tts_pcm.tobytes()
+
+                        # Stream in chunks of ~200ms (4800 bytes at 24kHz 16-bit)
+                        chunk_size = 4800
+                        for i in range(0, len(raw_pcm), chunk_size):
+                            chunk = raw_pcm[i:i + chunk_size]
+                            await ws.send_bytes(chunk)
+
+                        await ws.send_json({"type": "status", "state": "idle", "text": reply})
+
+                    except Exception as e:
+                        logger.exception("WebSocket pipeline error")
+                        await ws.send_json({"type": "error", "message": str(e)})
+                        await ws.send_json({"type": "status", "state": "idle"})
+
+                    finally:
+                        processing = False
+                        audio_buffer.clear()
+
+            # Handle binary audio frames
+            elif data.get("type") == "websocket.receive" and isinstance(data.get("bytes"), bytes):
+                audio_buffer.extend(data["bytes"])
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
+    except Exception as e:
+        logger.exception("WebSocket error")
+
+app.websocket("/voice/ws")(voice_websocket)
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":

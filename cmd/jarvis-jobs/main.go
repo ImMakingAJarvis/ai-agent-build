@@ -86,10 +86,20 @@ func main() {
 		driver := fs.String("driver", "local", "local or sonnet")
 		round := fs.String("round", "", "round label")
 		note := fs.String("note", "", "typed instructions for this round")
+		effort := fs.String("effort", queue.DefaultEffort,
+			"reasoning effort: low, medium, high, xhigh, max")
 		if len(args) < 1 {
 			die("run <id> [flags]")
 		}
 		fs.Parse(args[1:])
+		// Inject effort into the job spec so the runner picks it up.
+		if *effort != "" {
+			j, err := store.Get(args[0])
+			if err == nil {
+				j.ReasoningEffort = *effort
+				store.Ingest(j.Spec)
+			}
+		}
 		r := runner(store)
 		r.Tee = os.Stdout
 		j, err := r.Run(context.Background(), args[0], *round, *driver, *note)
