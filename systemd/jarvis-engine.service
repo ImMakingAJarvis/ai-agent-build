@@ -13,7 +13,7 @@ ExecStart=/opt/jarvis-engine/bin/llama-server \
     -m /opt/jarvis-engine/models/jarvis-brain.gguf \
     --port 11434 \
     --parallel 2 \
-    --ctx-size 65536 \
+    --ctx-size 131072 \
     --kv-unified \
     --jinja \
     --chat-template-file /opt/jarvis-engine/templates/qwen3.8-chat-template.jinja \
