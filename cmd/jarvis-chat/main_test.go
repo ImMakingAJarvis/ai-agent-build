@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 )
 
@@ -123,7 +124,7 @@ func TestHandleMessage_Reply(t *testing.T) {
 	d := &testDiscord{}
 	var history []string
 
-	handleMessage(d, client, "jarvis-brain", "Hi Jarvis!", &history)
+	handleMessage(d, client, "jarvis-brain", chat.Incoming{Content: "Hi Jarvis!"}, &history)
 
 	// Should have typed at least once.
 	if d.typingCount() < 1 {
@@ -171,7 +172,7 @@ func TestHandleMessage_BusyNotice(t *testing.T) {
 	d := &testDiscord{}
 	var history []string
 
-	handleMessage(d, client, "jarvis-brain", "What are you doing?", &history)
+	handleMessage(d, client, "jarvis-brain", chat.Incoming{Content: "What are you doing?"}, &history)
 
 	// Should have sent busy notice then the actual reply.
 	if n := d.notifyCount(); n != 2 {
@@ -215,7 +216,7 @@ func TestHandleMessage_Timeout(t *testing.T) {
 	d := &testDiscord{}
 	var history []string
 
-	handleMessage(d, client, "jarvis-brain", "Hello?", &history)
+	handleMessage(d, client, "jarvis-brain", chat.Incoming{Content: "Hello?"}, &history)
 
 	// Should have sent busy notice then timeout message.
 	if n := d.notifyCount(); n != 2 {

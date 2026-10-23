@@ -34,7 +34,8 @@ import (
 const usage = `usage:
   jarvis-discord notify <message>
   jarvis-discord ask [-choices a,b,c] [-timeout 2h] <question>
-  jarvis-discord watch`
+  jarvis-discord watch
+  jarvis-discord parrot <channelID> <messageID>`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -70,6 +71,14 @@ func main() {
 		select {
 		case <-sig:
 		case <-time.After(24 * time.Hour):
+		}
+
+	case "parrot":
+		if len(os.Args) != 4 {
+			fail("usage: jarvis-discord parrot <channelID> <messageID>")
+		}
+		if err := d.ReactRainbowParrot(ctx, os.Args[2], os.Args[3]); err != nil {
+			fail(err.Error())
 		}
 
 	case "notify":

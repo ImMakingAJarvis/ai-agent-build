@@ -89,17 +89,17 @@ func main() {
 	// Conversation history: alternating user/assistant turns.
 	var history []string // [user1, assistant1, user2, assistant2, ...]
 
-	d.OnMessage(func(content string) {
+	d.OnMessage(func(in chat.Incoming) {
 		// Skip while a checkpoint question is open.
 		if _, err := os.Stat(confDir + "/ask-open"); err == nil {
 			return
 		}
 
-		// Skip empty messages.
-		content = strings.TrimSpace(content)
+		content := strings.TrimSpace(in.Content)
 		if content == "" {
 			return
 		}
+		in.Content = content
 
 		// !pause is a special command: write the pause-signal file so
 		// agent-run can interrupt the current job, even when jarvis-chat
@@ -109,7 +109,24 @@ func main() {
 			return
 		}
 
-		handleMessage(d, ollamaClient, modelName, content, &history)
+		if _, rest, ok := cutBuildFix(content); ok {
+			title, body := titleAndBody(rest)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if title == "" {
+				_ = d.Notify(ctx, "Need a title after !build / !fix.")
+				return
+			}
+			id, err := enqueueFromChat(in, title, body)
+			if err != nil {
+				_ = d.Notify(ctx, "Could not enqueue: "+err.Error())
+				return
+			}
+			_ = d.Notify(ctx, enqueueConfirm(id))
+			return
+		}
+
+		handleMessage(d, ollamaClient, modelName, in, &history)
 	})
 
 	// Open the gateway so onMessage fires.
@@ -128,7 +145,8 @@ func main() {
 	}
 }
 
-func handleMessage(d sender, client *models.Client, model, content string, history *[]string) {
+func handleMessage(d sender, client *models.Client, model string, in chat.Incoming, history *[]string) {
+	content := in.Content
 	ctx, cancel := context.WithTimeout(context.Background(), maxTimeout)
 	defer cancel()
 
@@ -205,6 +223,15 @@ func handleMessage(d sender, client *models.Client, model, content string, histo
 
 	// Got an answer.
 	typingCancel()
+
+	visible, extra := applySchedule(answer, in)
+	if extra != "" {
+		if strings.TrimSpace(visible) != "" {
+			answer = strings.TrimSpace(visible) + "\n\n" + extra
+		} else {
+			answer = extra
+		}
+	}
 
 	// Update history: append user message + assistant reply.
 	*history = append(*history, content, answer)
