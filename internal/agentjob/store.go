@@ -28,17 +28,21 @@ const (
 
 // Spec is the immutable job definition (job.json).
 type Spec struct {
-	ID            string    `json:"id"`
-	Title         string    `json:"title"`
-	Instructions  string    `json:"instructions"`
-	Doc           string    `json:"doc,omitempty"`        // path to job doc section
-	Branch        string    `json:"branch,omitempty"`
-	DependsOn     []string  `json:"depends_on,omitempty"`
-	Driver        string    `json:"driver,omitempty"`     // local (default) or sonnet
-	Priority      int       `json:"priority"`
-	CreatedAt     time.Time `json:"created_at"`
-	Source        string    `json:"source,omitempty"`
-	ReasoningEffort string  `json:"reasoning_effort,omitempty"` // low, medium, high, xhigh, max
+	ID              string    `json:"id"`
+	Title           string    `json:"title"`
+	Instructions    string    `json:"instructions"`
+	Doc             string    `json:"doc,omitempty"` // path to job doc section
+	Branch          string    `json:"branch,omitempty"`
+	DependsOn       []string  `json:"depends_on,omitempty"`
+	Driver          string    `json:"driver,omitempty"` // local (default) or sonnet
+	Priority        int       `json:"priority"`
+	CreatedAt       time.Time `json:"created_at"`
+	Source          string    `json:"source,omitempty"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"` // low, medium, high, xhigh, max
+	// DiscordChannelID / DiscordMessageID identify the owner message that
+	// scheduled this job. The worker reacts to that message on pickup.
+	DiscordChannelID string `json:"discord_channel_id,omitempty"`
+	DiscordMessageID string `json:"discord_message_id,omitempty"`
 }
 
 // State is the mutable record (state.json).

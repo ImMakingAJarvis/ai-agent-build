@@ -5,13 +5,16 @@
 //	jarvis-jobs run <id> [-driver local|sonnet] [-round N] [-note TEXT]
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
+//	jarvis-jobs add -id ID -title T [-driver local|sonnet] [-source S] [-priority N]
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
@@ -24,7 +27,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list|next|run|finish|skip|requeue|show|pause")
+		die("usage: jarvis-jobs list|next|run|finish|skip|requeue|show|pause|add")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -32,6 +35,10 @@ func main() {
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	switch cmd {
+	case "add":
+		if err := cmdAdd(store, args, os.Stdin); err != nil {
+			die("%v", err)
+		}
 	case "list":
 		store.Recover()
 		jobs, _ := store.List()
@@ -123,4 +130,45 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 		r.SignalFile = conf + "/pause-signal"
 	}
 	return r
+}
+
+func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
+	fs := flag.NewFlagSet("add", flag.ContinueOnError)
+	id := fs.String("id", "", "job id")
+	title := fs.String("title", "", "job title")
+	driver := fs.String("driver", "local", "local or sonnet")
+	source := fs.String("source", "", "origin (discord, migrate, …)")
+	priority := fs.Int("priority", 0, "higher runs first")
+	instructions := fs.String("instructions", "", "job body (default: stdin)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *id == "" || *title == "" {
+		return fmt.Errorf("add -id ID -title T")
+	}
+	body := *instructions
+	if body == "" {
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return err
+		}
+		body = string(b)
+	}
+	added, err := store.Ingest(agentjob.Spec{
+		ID:           *id,
+		Title:        *title,
+		Instructions: strings.TrimSpace(body),
+		Driver:       *driver,
+		Source:       *source,
+		Priority:     *priority,
+	})
+	if err != nil {
+		return err
+	}
+	if !added {
+		fmt.Println("exists")
+		return nil
+	}
+	fmt.Println(*id)
+	return nil
 }

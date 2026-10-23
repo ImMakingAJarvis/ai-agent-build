@@ -14,7 +14,9 @@ Group=agent
 WorkingDirectory=/home/agent/ai-agent-build
 EnvironmentFile=/home/agent/.config/jarvis/agent.env
 ExecStart=/usr/local/bin/agent-run
-Restart=on-failure
+# Come back after crash, kill, or a clean Stop (exit 0). Park it with
+# ~/disable-agent-run (touches /var/lib/jarvis/agent-run.disabled).
+Restart=always
 RestartSec=10
 StandardOutput=append:/home/agent/.local/state/jarvis/agent.log
 StandardError=append:/home/agent/.local/state/jarvis/agent.log
