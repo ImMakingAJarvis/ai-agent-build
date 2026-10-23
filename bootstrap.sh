@@ -248,6 +248,10 @@ as_agent bash -c 'cd "$1" && /usr/local/go/bin/go build -o "$2" ./cmd/jarvis-dis
   _ "$PROJECT_DIR" "$AGENT_HOME/jarvis-discord"
 sudo install -m 755 "$AGENT_HOME/jarvis-discord" /usr/local/bin/jarvis-discord
 as_agent rm "$AGENT_HOME/jarvis-discord"
+as_agent bash -c 'cd "$1" && /usr/local/go/bin/go build -o "$2" ./cmd/jarvis-jobs' \
+  _ "$PROJECT_DIR" "$AGENT_HOME/jarvis-jobs"
+sudo install -m 755 "$AGENT_HOME/jarvis-jobs" /usr/local/bin/jarvis-jobs
+as_agent rm "$AGENT_HOME/jarvis-jobs"
 as_agent jarvis-discord notify "Bootstrap started on $(hostname). Handing over to Claude Code." ||
   die "Could not DM you on Discord. Check the token, your user ID, and that the bot shares a server with you."
 
@@ -418,41 +422,22 @@ printf '%s\n' "$COMMON"
 cat <<'STAGE3L_EOF'
 You are the local model running this AI agent build on an Ubuntu machine
 (RTX 4090, 128GB RAM). Sonnet set you up and handed the build over to
-you; I approved it. You make the decisions now. Read docs/local-brain.md
-and TASKS.md, and run `GH_TOKEN=$(ghapp-token) gh pr list --state all`
-to see what is already done or waiting for my review.
+you; I approved it. You make the decisions now.
 
-Do one round of work, then stop:
-- If ~/.config/jarvis/local.env names a separate LOCAL_CODER_MODEL that
-  `ollama list` doesn't show yet, the round is: write
-  scripts/pull_models.sh (TASKS.md Phase 2), pull it with a Modelfile
-  that lets it offload to system RAM, and confirm it answers a prompt
-  without pushing you out of VRAM.
-- Otherwise, take the next unfinished item in this order (TASKS.md has
-  the detail for each):
-  1. Phase 3: RabbitMQ, the Go worker and the queue. From the very first
-     job, the worker records start, finish, model and duration for every
-     job, so history is viewable later.
-  2. The queue view (first slice of Phase 6) BEFORE any other job is
-     queued: jobs waiting, how long each has run, when done, which model.
-     Past jobs must show up too.
-  3. Only then queue the remaining jobs: the Phase 2 benchmarks and the
-     Phase 2b conversation / always-on benchmark.
-  4. Phase 3b: a slot-capable inference engine (llama.cpp server or
-     vLLM) with a reserved priority slot for my conversation and other
-     slots for background work, driven by the Go worker.
-  5. Everything else in TASKS.md, in order.
-  Skip anything that needs hardware or accounts you don't have, and list
-  it in the PR.
+Work now comes from the queue. This round you do ONE job, given below
+after the "YOUR JOB THIS ROUND" line, and then stop. Do not pick other
+work, and do not read TASKS.md (it is history and far too big for your
+context window). If no job text follows (an older loop
+started this round), run `jarvis-jobs next`, read it with
+`jarvis-jobs show <id>`, do that job, and record the result at the end
+with `jarvis-jobs finish <id> <0 if done, 1 if not>`. Docs: docs/local-brain.md. Run
+`GH_TOKEN=$(ghapp-token) gh pr list --state all` to see what is already
+merged or waiting for review. If the job's work is already on main, say
+so with evidence in the job's PR or Discord note instead of redoing it.
 
-Engine switch rules (Phase 3b): Ollama stays until the new engine has
-proven itself. Only one engine can hold the 27B in VRAM at a time, so
-test the new engine with a small model first, including slot save/restore
-or vLLM's swap, and check current docs rather than assuming a feature
-works. For the real switchover, ask me on Discord first, notify me before
-going quiet, unload Ollama's copy, start the new engine and confirm it
-answers. If it fails, unload it and restart Ollama. This is your own
-brain, so leave a way back that works without you.
+Keep your context small, it is 64K tokens: read files in parts (offset
+and limit), grep instead of cat for big files, pipe long command output
+through head or tail, and never print a whole log.
 
 How to work:
 - Plan first, then build in small steps. If a "coder" subagent is
@@ -461,9 +446,11 @@ How to work:
   committing yourself.
 - Build and test as you go (go build ./..., go test ./...). Do not open a
   PR for code that does not build.
-- Finish the round with a pushed branch, an open PR that says what was
-  done, what was skipped and what to check, and a jarvis-discord notify
-  with the PR link. Then end your run; I pick who does the next round.
+- A job is done only when every acceptance criterion in it passes. The PR
+  says how each was checked and what was skipped.
+- Finish the round with a pushed branch, an open PR, and a jarvis-discord
+  notify with the PR link. Then end your run; the loop records the result
+  and I pick what happens next.
 - If you are stuck on the same problem after three tries, say so on
   Discord with what you tried and end the run. I can hand it to Sonnet.
 
@@ -477,18 +464,21 @@ You are Sonnet, stepping in on a local AI agent build on an Ubuntu
 machine that a local model (see docs/local-brain.md) normally runs. I
 handed you this round, usually because the local model got stuck.
 
-Find out where things stand: TASKS.md,
-`GH_TOKEN=$(ghapp-token) gh pr list --state all`, the branches in the
-repo, the end of ~/.local/state/jarvis/agent.log if it exists, and my
-recent Discord messages if they explain why. Then do one round: fix what
-the local model got stuck on, or if nothing is stuck, the next
-unfinished phase. Leave it in a state the local model can continue from.
-For bulk boilerplate you may delegate to it with
+Work now comes from the queue. This round you do ONE job, given below
+after the "YOUR JOB THIS ROUND" line, and then stop. Do not read TASKS.md
+(it is history). If no job text follows (an older loop started this
+round), run `jarvis-jobs next`, read it with `jarvis-jobs show <id>`, do
+that job, and record it at the end with `jarvis-jobs finish <id> <0 or 1>`. Check `GH_TOKEN=$(ghapp-token) gh pr list --state all`,
+the branches, and the end of ~/.local/state/jarvis/agent.log if the job
+was handed to you after the local model got stuck on it. Leave it in a
+state the local model can continue from. For bulk boilerplate you may
+delegate to the local model with
 `agent-local --dangerously-skip-permissions -p "<task>"` to save API usage.
 
-Finish with a pushed branch, an open PR, and a jarvis-discord notify
-with the link and a line on what the local model should watch out for.
-Then end your run.
+A job is done only when every acceptance criterion in it passes; the PR
+says how each was checked. Finish with a pushed branch, an open PR, and a
+jarvis-discord notify with the link and a line on what the local model
+should watch out for. Then end your run.
 
 STAGE3S_EOF
 printf '%s\n' "$COMMON"

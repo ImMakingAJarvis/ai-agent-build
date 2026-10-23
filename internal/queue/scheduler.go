@@ -1,4 +1,4 @@
-// Package queue implements a priority scheduler: voice > coding > background.
+// Package queue implements a priority scheduler: voice > fix > coding > background.
 //
 // The scheduler does not consume messages itself; it tells the consumer which
 // queues are active. The consumer only pulls from the highest-priority
@@ -13,21 +13,24 @@ import (
 )
 
 // Scheduler tracks which queues are allowed to process jobs.
-// Voice always runs. Coding runs when voice is idle. Background runs when both are idle.
+// Voice always runs. Fix runs when voice is idle. Coding runs when voice and fix are idle. Background runs when all are idle.
 type Scheduler struct {
 	voiceActive      atomic.Int32
+	fixActive        atomic.Int32
 	codingActive     atomic.Int32
 	backgroundActive atomic.Int32
 	mu               sync.Mutex
 	paused           map[string]bool
 }
 
-// NewScheduler creates a scheduler. Voice starts active; coding and background are paused.
+// NewScheduler creates a scheduler. Voice starts active; fix, coding and background are paused.
 func NewScheduler() *Scheduler {
 	s := &Scheduler{paused: map[string]bool{}}
 	s.voiceActive.Store(1)
+	s.fixActive.Store(0)
 	s.codingActive.Store(0)
 	s.backgroundActive.Store(0)
+	s.paused[FixQueue] = true
 	s.paused[CodingQueue] = true
 	s.paused[BackgroundQueue] = true
 	return s
@@ -45,34 +48,51 @@ func (s *Scheduler) SetDepths(depths map[string]int) {
 	defer s.mu.Unlock()
 
 	voiceDepth := depths[VoiceQueue]
+	fixDepth := depths[FixQueue]
 	codingDepth := depths[CodingQueue]
 	bgDepth := depths[BackgroundQueue]
 
 	// Voice is always active if there's work.
 	if voiceDepth > 0 {
 		s.voiceActive.Store(1)
+		s.fixActive.Store(0)
 		s.codingActive.Store(0)
 		s.backgroundActive.Store(0)
+		s.paused[FixQueue] = true
+		s.paused[CodingQueue] = true
+		s.paused[BackgroundQueue] = true
+	} else if fixDepth > 0 {
+		s.voiceActive.Store(0)
+		s.fixActive.Store(1)
+		s.codingActive.Store(0)
+		s.backgroundActive.Store(0)
+		s.paused[VoiceQueue] = false
 		s.paused[CodingQueue] = true
 		s.paused[BackgroundQueue] = true
 	} else if codingDepth > 0 {
 		s.voiceActive.Store(0)
+		s.fixActive.Store(0)
 		s.codingActive.Store(1)
 		s.backgroundActive.Store(0)
 		s.paused[VoiceQueue] = false
+		s.paused[FixQueue] = false
 		s.paused[BackgroundQueue] = true
 	} else if bgDepth > 0 {
 		s.voiceActive.Store(0)
+		s.fixActive.Store(0)
 		s.codingActive.Store(0)
 		s.backgroundActive.Store(1)
 		s.paused[VoiceQueue] = false
+		s.paused[FixQueue] = false
 		s.paused[CodingQueue] = false
 	} else {
 		// All idle — un-pause everything so the next job can run.
 		s.voiceActive.Store(0)
+		s.fixActive.Store(0)
 		s.codingActive.Store(0)
 		s.backgroundActive.Store(0)
 		s.paused[VoiceQueue] = false
+		s.paused[FixQueue] = false
 		s.paused[CodingQueue] = false
 		s.paused[BackgroundQueue] = false
 	}

@@ -9,16 +9,20 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/metrics"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/notifier"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/notify"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/router"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -53,6 +57,9 @@ func run() error {
 	}
 	defer history.Close()
 	log.Printf("worker: job history → %s", history.Path())
+
+	// Prometheus metrics collector.
+	jobMetrics := metrics.New()
 
 	// Home Assistant notification client.
 	haClient := notify.NewClient()
@@ -90,12 +97,37 @@ func run() error {
 	initialDepths := getQueueDepths(conn)
 	sched.SetDepths(initialDepths)
 
+	jobStore, err := agentjob.Open(history.Dir())
+	if err != nil {
+		return fmt.Errorf("job store: %w", err)
+	}
+
 	handle := func(msg queue.Message) error {
-		// Check if this queue is paused by the scheduler.
-		if sched.IsPaused(msg.Type) {
-			log.Printf("worker: queue %s is paused by scheduler, leaving unacked", msg.Type)
-			return queue.ErrQueuePaused
+		// Agent jobs are build work run by the agent-run loop. Claim means
+		// write the job to the store (ready, idempotent), then ack right
+		// away: never hold a message unacked for a whole round, the broker's
+		// ack timeout would close the channel and redeliver it.
+		if msg.Kind == queue.KindAgent {
+			added, err := jobStore.Ingest(agentjob.Spec{
+				ID: msg.ID, Title: msg.Title, Instructions: msg.Instructions,
+				Branch: msg.Branch, DependsOn: msg.DependsOn, Driver: msg.Driver,
+				Priority: msg.Priority, CreatedAt: msg.CreatedAt, Source: msg.Source,
+			})
+			if err != nil {
+				return fmt.Errorf("ingest agent job %s: %w", msg.ID, err)
+			}
+			log.Printf("worker: agent job %s ingested (new=%v)", msg.ID, added)
+			return nil
 		}
+
+		// Priority: a lower-priority queue waits (bounded, well under the
+		// ack timeout) while a higher one has work, then goes ahead anyway.
+		// A job is never skipped or acked without running.
+		for waited := 0; sched.IsPaused(msg.Type) && waited < 120; waited++ {
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		jobStart := time.Now()
 
 		// Check if local model is available.
 		localAvailable := ollama.Healthcheck()
@@ -126,6 +158,7 @@ func run() error {
 				rec.OutputTokens = costEst.OutputTokens
 				history.Denied(rec, costEst.TotalCost)
 				ntf.OnDenied(rec, costEst.TotalCost)
+				jobMetrics.ObserveDenied(msg.Type, modelName, costEst.TotalCost)
 				return queue.ErrApprovalDenied
 			}
 		}
@@ -138,27 +171,48 @@ func run() error {
 			rec.OutputTokens = costEst.OutputTokens
 		}
 		sched.JobStarted(msg.Type)
+		defer sched.JobFinished(msg.Type)
 
-		// If local, mark as used (resets idle timer) and generate.
-		if useLocal && localAvailable {
-			idleUnload.MarkUsed()
-			log.Printf("worker: job %s → %s (prompt: %s)", msg.ID, modelName, prompt)
-			_, err := ollama.Generate(modelName, prompt)
-			if err != nil {
-				history.Fail(rec, err)
-				ntf.OnFail(rec, err)
-				return fmt.Errorf("generate: %w", err)
-			}
-		} else {
-			log.Printf("worker: job %s → %s (API dispatch; not yet implemented)", msg.ID, modelName)
+		if !useLocal || !localAvailable {
+			// Nothing dispatches to a paid API yet: say so instead of
+			// recording a fake success.
+			err := fmt.Errorf("API dispatch not implemented (model %s)", modelName)
+			log.Printf("worker: job %s failed: %v", msg.ID, err)
+			history.Fail(rec, err)
+			ntf.OnFail(rec, err)
+			jobMetrics.ObserveFailed(msg.Type, modelName)
+			return nil // recorded as failed; ack so it is not redelivered
 		}
 
-		// Record job completion.
+		idleUnload.MarkUsed()
+		log.Printf("worker: job %s → %s (prompt: %s)", msg.ID, modelName, prompt)
+		resp, err := ollama.Generate(modelName, prompt)
+		if err != nil {
+			history.Fail(rec, err)
+			jobMetrics.ObserveFailed(msg.Type, modelName)
+			return fmt.Errorf("generate: %w", err)
+		}
+		out := resp.Response
+		if err := jobStore.WriteFile(msg.ID, "output.txt", []byte(out)); err != nil {
+			log.Printf("worker: job %s: store output: %v", msg.ID, err)
+		}
+		rec.Summary = agentjob.Summary(out)
 		history.Complete(rec)
+		jobMetrics.ObserveCompleted(msg.Type, modelName, time.Since(jobStart).Seconds())
 		ntf.OnComplete(rec)
-		sched.JobFinished(msg.Type)
 		return nil
 	}
+
+	// Start Prometheus metrics HTTP server.
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{Addr: ":9101", Handler: metricsMux}
+	go func() {
+		log.Printf("worker: metrics listening on :9101")
+		if err := metricsServer.ListenAndServe(); err != http.ErrServerClosed {
+			log.Printf("worker: metrics server error: %v", err)
+		}
+	}()
 
 	// Start consumer.
 	consumer := queue.NewConsumer(conn, handle)

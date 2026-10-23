@@ -22,15 +22,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 )
 
 const usage = `usage:
   jarvis-discord notify <message>
-  jarvis-discord ask [-choices a,b,c] [-timeout 2h] <question>`
+  jarvis-discord ask [-choices a,b,c] [-timeout 2h] <question>
+  jarvis-discord watch`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -38,9 +42,14 @@ func main() {
 	}
 	loadEnvFile()
 
+	signalFile := ""
+	if conf := os.Getenv("JARVIS_CONF"); conf != "" {
+		signalFile = conf + "/pause-signal"
+	}
 	d, err := chat.NewDiscord(chat.Config{
-		Token:   os.Getenv("DISCORD_BOT_TOKEN"),
-		OwnerID: os.Getenv("DISCORD_OWNER_ID"),
+		Token:      os.Getenv("DISCORD_BOT_TOKEN"),
+		OwnerID:    os.Getenv("DISCORD_OWNER_ID"),
+		SignalFile: signalFile,
 	})
 	if err != nil {
 		fail(err.Error())
@@ -49,6 +58,20 @@ func main() {
 
 	ctx := context.Background()
 	switch os.Args[1] {
+	case "watch":
+		// Keep the gateway open so onMessage fires for every incoming
+		// DM. When there's no pending Ask, onMessage writes the signal
+		// file to pause the running job.
+		if err := d.Listen(); err != nil {
+			fail(err.Error())
+		}
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
+		select {
+		case <-sig:
+		case <-time.After(24 * time.Hour):
+		}
+
 	case "notify":
 		if err := d.Notify(ctx, message(os.Args[2:])); err != nil {
 			fail(err.Error())
@@ -69,7 +92,28 @@ func main() {
 		if *choices != "" {
 			opts = strings.Split(*choices, ",")
 		}
+
+		// Write marker so jarvis-chat skips messages while checkpoint is open.
+		markerCleanup, err := writeAskOpenMarker()
+		if err != nil {
+			fail(err.Error())
+		}
+
+		// On signal, clean up marker and exit.
+		if markerCleanup != nil {
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
+			go func() {
+				<-sig
+				markerCleanup()
+				os.Exit(1)
+			}()
+		}
+
 		answer, err := d.Ask(ctx, message(fs.Args()), opts)
+		if markerCleanup != nil {
+			markerCleanup()
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			fmt.Fprintln(os.Stderr, "no answer before timeout")
 			os.Exit(3)
@@ -123,4 +167,19 @@ func loadEnvFile() {
 func fail(msg string) {
 	fmt.Fprintln(os.Stderr, "jarvis-discord:", msg)
 	os.Exit(1)
+}
+
+// writeAskOpenMarker writes the ask-open marker file so jarvis-chat knows a
+// checkpoint question is pending. Returns a cleanup function (or nil when
+// JARVIS_CONF is not set).
+func writeAskOpenMarker() (cleanup func(), err error) {
+	conf := os.Getenv("JARVIS_CONF")
+	if conf == "" {
+		return nil, nil
+	}
+	path := filepath.Join(conf, "ask-open")
+	if err := os.WriteFile(path, []byte("checkpoint question open"), 0o644); err != nil {
+		return nil, err
+	}
+	return func() { os.Remove(path) }, nil
 }

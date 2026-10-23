@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -26,6 +27,11 @@ const maxMessageLen = 1900
 type Config struct {
 	Token   string // bot token
 	OwnerID string // the only Discord user ID the bot will talk to
+	// SignalFile, if non-empty, is written whenever the owner sends a
+	// message and there is no pending Ask waiting for a reply. The agent-
+	// run loop monitors this file and pauses the current job when it
+	// appears, so the agent can answer the user immediately.
+	SignalFile string
 }
 
 type Discord struct {
@@ -38,6 +44,11 @@ type Discord struct {
 
 	mu      sync.Mutex
 	pending []*waiter // oldest first
+
+	// messageHook, if non-nil, is called for every owner DM that is not
+	// consumed by a pending Ask waiter. The daemon can use it to process
+	// free-form messages.
+	messageHook func(string)
 }
 
 // waiter is one open question.
@@ -73,6 +84,13 @@ func (d *Discord) Close() error {
 	return d.s.Close()
 }
 
+// Listen opens the Discord gateway and blocks until context cancellation.
+// It is used by the watch command to keep a persistent connection that
+// fires onMessage for every incoming DM.
+func (d *Discord) Listen() error {
+	return d.listen()
+}
+
 // Notify sends text to the owner. It uses REST only, so it doesn't need a
 // gateway connection.
 func (d *Discord) Notify(ctx context.Context, text string) error {
@@ -82,6 +100,20 @@ func (d *Discord) Notify(ctx context.Context, text string) error {
 		}
 	}
 	return nil
+}
+
+// Typing sends a typing indicator to the owner's DM channel.
+// Discord ignores rapid repeats, so calling this every few seconds is
+// safe and keeps the indicator alive for long operations.
+func (d *Discord) Typing() error {
+	return d.s.ChannelTyping(d.dmID)
+}
+
+// OnMessage registers a callback that fires for every owner DM that is
+// not consumed by a pending Ask waiter. The callback receives the
+// message content string.
+func (d *Discord) OnMessage(fn func(string)) {
+	d.messageHook = fn
 }
 
 // Ask sends question to the owner and blocks until they answer, either by
@@ -149,8 +181,17 @@ func (d *Discord) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	if target != nil && deliver(target, m.Content) {
 		s.MessageReactionAdd(m.ChannelID, m.ID, "✅")
+		return
 	}
-}
+	// No pending waiter: if signal file is configured, write the user's
+	// message there so the agent-run loop can pause the current job.
+	if d.cfg.SignalFile != "" && target == nil {
+		os.WriteFile(d.cfg.SignalFile, []byte(m.Content), 0o644)
+		}
+		if d.messageHook != nil && target == nil {
+			d.messageHook(m.Content)
+		}
+	}
 
 func (d *Discord) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionMessageComponent || i.User == nil || i.User.ID != d.cfg.OwnerID {

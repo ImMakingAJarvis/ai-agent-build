@@ -2,6 +2,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -17,7 +18,9 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/slots"
 )
 
 //go:embed templates/*.html
@@ -99,25 +102,28 @@ type SlotQueue struct {
 
 // DashboardState is the full state returned by /api/state.
 type DashboardState struct {
-	OllamaHealthy bool          `json:"ollama_healthy"`
-	Queues        []QueueDepth  `json:"queues"`
-	PendingQueues []PendingQueue `json:"pending_queues"`
-	RecentJobs    []JobRecord   `json:"recent_jobs"`
-	TotalCost     float64       `json:"total_cost"`     // Running total of estimated costs for API jobs
-	APICount      int           `json:"api_job_count"`  // Number of API-dispatched jobs
-	LocalCount    int           `json:"local_job_count"` // Number of local jobs
-	SlotQueues    []SlotQueue   `json:"slot_queues"`    // Currently-running jobs per slot
+	OllamaHealthy bool               `json:"ollama_healthy"`
+	Slots         []slots.SlotInfo   `json:"slots"`           // Engine parallel slots
+	Queues        []QueueDepth       `json:"queues"`
+	PendingQueues []PendingQueue     `json:"pending_queues"`
+	RecentJobs    []JobRecord        `json:"recent_jobs"`
+	AgentJobs     []agentjob.Job     `json:"agent_jobs"`      // build work: ready, claimed, running, done, failed
+	SlotQueues    []SlotQueue        `json:"slot_queues"`     // Currently-running jobs per slot
+	TotalCost     float64            `json:"total_cost"`      // Running total of estimated costs for API jobs
+	APICount      int                `json:"api_job_count"`   // Number of API-dispatched jobs
+	LocalCount    int                `json:"local_job_count"` // Number of local jobs
 }
 
 // Server holds the dashboard dependencies.
 type Server struct {
-	addr        string
-	ollama      *models.Client
-	historyPath string
-	amqpURL     string
-	rabbitConn  *queue.Conn // persistent connection for peeking at pending jobs
-	authUser    string
-	authPass    string
+	addr         string
+	ollama       *models.Client
+	engineClient *slots.Client
+	historyPath  string
+	amqpURL      string
+	rabbitConn   *queue.Conn // persistent connection for peeking at pending jobs
+	authUser     string
+	authPass     string
 }
 
 // New creates a dashboard server.
@@ -142,13 +148,16 @@ func New() *Server {
 		amqpURL = "amqp://jarvis:jarvis-local@localhost:5672"
 	}
 
+	engineClient := slots.NewClient()
+
 	return &Server{
-		addr:     addr,
-		ollama:   models.NewClient(),
-		historyPath: historyPath,
-		amqpURL:  amqpURL,
-		authUser: os.Getenv("DASHBOARD_USER"),
-		authPass: os.Getenv("DASHBOARD_PASS"),
+		addr:         addr,
+		ollama:       models.NewClient(),
+		engineClient: engineClient,
+		historyPath:  historyPath,
+		amqpURL:      amqpURL,
+		authUser:     os.Getenv("DASHBOARD_USER"),
+		authPass:     os.Getenv("DASHBOARD_PASS"),
 	}
 }
 
@@ -174,6 +183,7 @@ func (s *Server) CloseRabbitMQ() {
 func (s *Server) Serve() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /html/dashboard", s.handleDashboardHTML)
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
 	mux.HandleFunc("GET /api/queues", s.handleQueues)
@@ -219,15 +229,40 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"divCost":        DivCost,
 		"slotRuntime":    SlotRuntime,
 	}
-	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(templatesFS, "templates/index.html")
+	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.Execute(w, data); err != nil {
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "index.html", data); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buf.WriteTo(w)
+}
+
+func (s *Server) handleDashboardHTML(w http.ResponseWriter, r *http.Request) {
+	data := s.gatherState()
+	funcMap := template.FuncMap{
+		"statusClass":    StatusClass,
+		"formatDuration": FormatDuration,
+		"formatCost":     FormatCost,
+		"divCost":        DivCost,
+	}
+	tmpl, err := template.New("dashboard-content").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
+	if err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "dashboard-content", data); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buf.WriteTo(w)
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +289,7 @@ func (s *Server) gatherState() DashboardState {
 	depths, _ := s.getQueueDepths()
 	pending := s.getPendingQueues()
 	healthy := s.ollama.Healthcheck()
+	engineSlots, _ := s.engineClient.GetSlots()
 
 	// Compute running cost totals from completed/denied API jobs.
 	var totalCost float64
@@ -271,15 +307,21 @@ func (s *Server) gatherState() DashboardState {
 		}
 	}
 
+	var agentJobs []agentjob.Job
+	if st, err := agentjob.Open(filepath.Dir(s.historyPath)); err == nil {
+		agentJobs, _ = st.List()
+	}
+
 	return DashboardState{
+		AgentJobs:     agentJobs,
 		OllamaHealthy: healthy,
+		Slots:         engineSlots,
 		Queues:        depths,
 		PendingQueues: pending,
 		RecentJobs:    jobs,
 		TotalCost:     totalCost,
 		APICount:      apiCount,
 		LocalCount:    localCount,
-		SlotQueues:    s.readSlotQueues(),
 	}
 }
 

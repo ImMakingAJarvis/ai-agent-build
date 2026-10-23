@@ -10,7 +10,10 @@ import (
 // Routing rules:
 //   - If the message has a ModelOverride, use it and set useLocal=true.
 //   - If ForceAPI is true, return the API model (default "claude-sonnet-5-5").
-//   - Voice jobs → local model (from LOCAL_MODEL env, default "jarvis-brain").
+//   - Voice jobs → local light model (from LOCAL_LIGHT_MODEL env, defaults to
+//     LOCAL_MODEL if unset) for fast response times.
+//   - Fix jobs → local model (not the light model; fix tasks may need full
+//     reasoning capability).
 //   - Coding jobs → local coder model if set (LOCAL_CODER_MODEL env),
 //     otherwise falls through to the local model.
 //   - Background jobs → local model by default.
@@ -32,6 +35,11 @@ func PickModel(jobType string, forceAPI bool, modelOverride string, localAvailab
 		return apiModel(), false
 	}
 
+	// Voice jobs use the light model for fast response times.
+	if jobType == "voice" {
+		return localLightModel(), true
+	}
+
 	local := localModel()
 	return local, true
 }
@@ -46,6 +54,17 @@ func localModel() string {
 	m := os.Getenv("LOCAL_MODEL")
 	if m == "" {
 		m = "jarvis-brain"
+	}
+	return m
+}
+
+// localLightModel returns the model for voice jobs.
+// Reads LOCAL_LIGHT_MODEL; falls back to LOCAL_MODEL if unset,
+// so voice routing still works when only the default model is configured.
+func localLightModel() string {
+	m := os.Getenv("LOCAL_LIGHT_MODEL")
+	if m == "" {
+		m = localModel()
 	}
 	return m
 }

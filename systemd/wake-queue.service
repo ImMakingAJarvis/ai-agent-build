@@ -1,0 +1,19 @@
+[Unit]
+Description=Jarvis Wake-Queue — bridges wake-word events to RabbitMQ job pipeline
+After=network-online.target rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+EnvironmentFile=/home/agent/.config/jarvis/agent.env
+ExecStart=/usr/local/bin/wake-queue
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wake-queue
+
+[Install]
+WantedBy=multi-user.target

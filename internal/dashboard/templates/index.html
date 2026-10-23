@@ -141,6 +141,7 @@
   .status-failed { color: var(--red); }
   .status-running { color: var(--yellow); }
   .status-denied { color: var(--purple); }
+  .status-idle { color: var(--muted); }
   .model-badge {
     background: var(--card);
     border: 1px solid var(--border);
@@ -362,7 +363,7 @@
 </head>
 <body>
 
-<div id="dashboard">
+<div id="dashboard" hx-get="/html/dashboard" hx-trigger="every 5s" hx-swap="innerHTML">
   <h1>JARVIS Queue Dashboard</h1>
   <p class="subtitle">
     <span class="status-dot {{ if .OllamaHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>

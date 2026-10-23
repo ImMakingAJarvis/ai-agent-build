@@ -44,6 +44,7 @@ type CostEstimate struct {
 // Input token estimation is based on the prompt length (4 chars ≈ 1 token).
 // Output token estimation uses a multiplier based on job type:
 //   - voice: 1.0x (short responses)
+//   - fix: 2.0x (moderate responses)
 //   - coding: 3.0x (long code outputs)
 //   - background: 2.0x (moderate responses)
 //
@@ -108,6 +109,8 @@ func estimateOutputTokens(inputTokens int, jobType string) int {
 	switch jobType {
 	case "voice":
 		multiplier = 1.0 // short conversational responses
+	case "fix":
+		multiplier = 2.0 // moderate responses
 	case "coding":
 		multiplier = 3.0 // code generation can be long
 	}

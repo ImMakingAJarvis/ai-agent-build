@@ -12,6 +12,7 @@
 #   LOCAL_MODEL        Ollama model that makes decisions (the "brain")
 #   LOCAL_CODER_MODEL  Ollama model for bulk coding; empty = same as brain
 #   OLLAMA_URL         default http://localhost:11434
+#   ENGINE_URL         when set, overrides OLLAMA_URL (llama.cpp engine)
 #
 # When the coder differs from the brain, a "coder" subagent is defined
 # that runs on it. Claude Code subagents pick models by tier alias, so the
@@ -44,7 +45,7 @@ Then reply with just the word done." ) || true
 fi
 
 unset ANTHROPIC_API_KEY
-export ANTHROPIC_BASE_URL="${OLLAMA_URL:-http://localhost:11434}"
+export ANTHROPIC_BASE_URL="${ENGINE_URL:-${OLLAMA_URL:-http://localhost:11434}}"
 export ANTHROPIC_AUTH_TOKEN=ollama
 # Tell Claude Code the real window (matches num_ctx in models/brain.Modelfile) so it compacts in time.
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${LOCAL_CONTEXT_TOKENS:-65536}"
