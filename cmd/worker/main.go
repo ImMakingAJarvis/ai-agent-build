@@ -12,16 +12,19 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/engine"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/metrics"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/notifier"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/notify"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/router"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/streamwatcher"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -49,6 +52,44 @@ func run() error {
 	idleUnload := models.NewIdleUnload(ollama, "jarvis-brain")
 	idleUnload.Start()
 	defer idleUnload.Stop()
+
+	// Stream watcher detects active Sunshine/Steam streams so we can free
+	// GPU memory while a stream is active.
+	streamCh := make(chan streamwatcher.StateChange, 1)
+	streamWatcher := streamwatcher.New(streamwatcher.Config{
+		SunshineEndpoint: os.Getenv("SUNSHINE_ENDPOINT"),
+		SteamEndpoint:    os.Getenv("STEAM_ENDPOINT"),
+	})
+	streamWatcher.Start(streamCh)
+
+	// Engine manager controls the jarvis-engine systemd service.
+	engMgr := engine.New("jarvis-engine.service")
+
+	// streamBlocked is true while a stream is active and the engine is
+	// stopped to free VRAM.  The healthcheck below reads it atomically.
+	var streamBlocked atomic.Bool
+
+	// Handle stream state transitions in the background.
+	go func() {
+		for change := range streamCh {
+			if change.Stream != streamwatcher.NoStream {
+				// Stream started — stop the engine to free ~22GB VRAM.
+				log.Printf("worker: stream %s started — stopping engine", change.Stream)
+				if err := engMgr.StopService(); err != nil {
+					log.Printf("worker: stop engine: %v", err)
+				} else {
+					streamBlocked.Store(true)
+				}
+			} else {
+				// Stream ended — restart the engine.
+				log.Printf("worker: stream ended — restarting engine")
+				streamBlocked.Store(false)
+				if err := engMgr.StartService(); err != nil {
+					log.Printf("worker: start engine: %v", err)
+				}
+			}
+		}
+	}()
 
 	// Job history recorder.
 	history, err := queue.NewHistory()
@@ -112,6 +153,7 @@ func run() error {
 				ID: msg.ID, Title: msg.Title, Instructions: msg.Instructions,
 				Branch: msg.Branch, DependsOn: msg.DependsOn, Driver: msg.Driver,
 				Priority: msg.Priority, CreatedAt: msg.CreatedAt, Source: msg.Source,
+				ReasoningEffort: msg.ReasoningEffort,
 			})
 			if err != nil {
 				return fmt.Errorf("ingest agent job %s: %w", msg.ID, err)
@@ -129,8 +171,10 @@ func run() error {
 
 		jobStart := time.Now()
 
-		// Check if local model is available.
-		localAvailable := ollama.Healthcheck()
+		// Check if local model is available.  streamBlocked is true while
+		// a Sunshine/Steam stream is active and we've stopped the engine
+		// to free VRAM.
+		localAvailable := ollama.Healthcheck() && !streamBlocked.Load()
 		log.Printf("worker: job %s routing: type=%s, forceAPI=%v, modelOverride=%q, localAvailable=%v",
 			msg.ID, msg.Type, msg.ForceAPI, msg.ModelOverride, localAvailable)
 		modelName, useLocal := router.PickModelWithPayload(msg.Type, msg.ForceAPI, msg.ModelOverride, localAvailable)
@@ -229,6 +273,8 @@ func run() error {
 
 	log.Printf("worker: shutting down")
 	close(stopDepth)
+	streamWatcher.Stop()
+	close(streamCh)
 	consumer.Stop()
 	return nil
 }

@@ -1,0 +1,8 @@
+# Local MoE brain: Qwen3 Mixture-of-Experts for faster inference.
+# ~18 GB Q4 quantized, fits on RTX 4090 with 49K context.
+FROM qwen3:30b-a3b
+PARAMETER num_ctx 49152
+PARAMETER num_gpu 999
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
+PARAMETER top_k 20

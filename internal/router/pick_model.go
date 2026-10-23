@@ -40,6 +40,14 @@ func PickModel(jobType string, forceAPI bool, modelOverride string, localAvailab
 		return localLightModel(), true
 	}
 
+	// Coding jobs use the dedicated coder model if configured.
+	if jobType == "coding" {
+		coder := localCoderModel()
+		if coder != "" {
+			return coder, true
+		}
+	}
+
 	local := localModel()
 	return local, true
 }
@@ -67,6 +75,13 @@ func localLightModel() string {
 		m = localModel()
 	}
 	return m
+}
+
+// localCoderModel returns the dedicated coding model.
+// Reads LOCAL_CODER_MODEL; returns "" if unset, in which case
+// the caller falls back to the general local model.
+func localCoderModel() string {
+	return os.Getenv("LOCAL_CODER_MODEL")
 }
 
 func apiModel() string {

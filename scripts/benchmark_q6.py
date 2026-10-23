@@ -11,6 +11,10 @@ import json, sys, time, urllib.error, urllib.request
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:11434"
 RUNS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 FILL = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+=======
+Usage: benchmark_q6.py [base_url] [runs]
+Reports llama-server's own timings (prompt/decode tok/s, draft acceptance), plus
+a tool-call check and a few small correctness tasks.
 
 REVIEW = "Review this Python code for bugs, performance and style, and propose a fixed version:\n\n" + '''
 import os, json, threading

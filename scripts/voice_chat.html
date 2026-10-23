@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS Voice Chat</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --fg: #c9d1d9;
+    --muted: #8b949e;
+    --border: #30363d;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --card: #161b22;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 1.4rem;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-bottom: 32px;
+  }
+  .container {
+    max-width: 500px;
+    width: 100%;
+    text-align: center;
+  }
+  /* Connection status */
+  .conn-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    margin-bottom: 24px;
+    border: 1px solid var(--border);
+    background: var(--card);
+  }
+  .conn-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  .conn-dot.connected { background: var(--green); }
+  .conn-dot.error { background: var(--red); }
+  /* Main button */
+  .mic-btn {
+    width: 120px; height: 120px;
+    border-radius: 50%;
+    border: 3px solid var(--border);
+    background: var(--card);
+    color: var(--fg);
+    font-size: 2.5rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .mic-btn:hover { border-color: var(--blue); background: #1c2129; }
+  .mic-btn.listening {
+    border-color: var(--red);
+    box-shadow: 0 0 20px rgba(248, 81, 73, 0.3);
+    animation: pulse-red 1.5s infinite;
+  }
+  .mic-btn.speaking {
+    border-color: var(--green);
+    box-shadow: 0 0 20px rgba(63, 184, 80, 0.3);
+    animation: pulse-green 1.5s infinite;
+  }
+  .mic-btn.processing {
+    border-color: var(--yellow);
+    box-shadow: 0 0 20px rgba(210, 153, 34, 0.3);
+  }
+  @keyframes pulse-red {
+    0%, 100% { box-shadow: 0 0 20px rgba(248, 81, 73, 0.3); }
+    50% { box-shadow: 0 0 30px rgba(248, 81, 73, 0.5); }
+  }
+  @keyframes pulse-green {
+    0%, 100% { box-shadow: 0 0 20px rgba(63, 184, 80, 0.3); }
+    50% { box-shadow: 0 0 30px rgba(63, 184, 80, 0.5); }
+  }
+  /* State label */
+  .state-label {
+    font-size: 1rem;
+    margin-bottom: 16px;
+    min-height: 1.5em;
+    color: var(--muted);
+  }
+  .state-label.active { color: var(--fg); }
+  /* Transcript display */
+  .transcript-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+    min-height: 60px;
+    text-align: left;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .transcript-entry {
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .transcript-entry:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+  .transcript-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+  .transcript-user { color: var(--blue); }
+  .transcript-jarvis { color: var(--green); }
+  .transcript-text { color: var(--fg); }
+  /* Visualizer */
+  .visualizer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    height: 40px;
+    margin-bottom: 16px;
+  }
+  .viz-bar {
+    width: 4px;
+    background: var(--blue);
+    border-radius: 2px;
+    transition: height 0.05s;
+    min-height: 4px;
+  }
+  /* Instructions */
+  .instructions {
+    color: var(--muted);
+    font-size: 0.75rem;
+    line-height: 1.6;
+    margin-top: 24px;
+  }
+  /* Audio level meter */
+  .level-meter {
+    width: 100%;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-bottom: 16px;
+    overflow: hidden;
+  }
+  .level-fill {
+    height: 100%;
+    background: var(--blue);
+    transition: width 0.05s;
+    width: 0%;
+  }
+  .level-fill.hot { background: var(--yellow); }
+  .level-fill.clipping { background: var(--red); }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>JARVIS Voice Chat</h1>
+  <p class="subtitle">Real-time bidirectional audio via WebSocket</p>
+
+  <div class="conn-status">
+    <span class="conn-dot" id="connDot"></span>
+    <span id="connText">Disconnected</span>
+  </div>
+
+  <div class="visualizer" id="visualizer">
+    <!-- Bars injected by JS -->
+  </div>
+
+  <div class="level-meter">
+    <div class="level-fill" id="levelFill"></div>
+  </div>
+
+  <button class="mic-btn" id="micBtn" title="Hold to speak, release to send">
+    <span id="micIcon">🎙</span>
+  </button>
+
+  <div class="state-label" id="stateLabel">Click microphone to start</div>
+
+  <div class="transcript-box" id="transcriptBox">
+    <div style="color: var(--muted); text-align: center; font-style: italic;">
+      No conversation yet
+    </div>
+  </div>
+
+  <div class="instructions">
+    <strong>How to use:</strong><br>
+    1. Click the microphone button to start speaking<br>
+    2. Speak your question or command<br>
+    3. Click again when done — Jarvis will think and reply<br>
+    4. Listen to the reply, then repeat<br>
+    <br>
+    <em>Tip: You can also hold the button while speaking and release to send.</em>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const WS_BASE = location.protocol.replace('http', 'ws') + '//' + location.host;
+const WS_URL = WS_BASE + '/voice/ws';
+
+// Audio constants
+const SAMPLE_RATE = 16000;
+const CHUNK_DURATION_MS = 200;
+const CHUNK_SIZE = Math.floor(SAMPLE_RATE * (CHUNK_DURATION_MS / 1000)) * 2; // 2 bytes per sample
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let ws = null;
+let state = 'disconnected'; // disconnected | connected | listening | processing | speaking
+let audioCtx = null;
+let mediaStream = null;
+let scriptProcessor = null;
+let playbackQueue = [];
+let playbackActive = false;
+let transcript = [];
+
+// ---------------------------------------------------------------------------
+// DOM refs
+// ---------------------------------------------------------------------------
+const connDot = document.getElementById('connDot');
+const connText = document.getElementById('connText');
+const micBtn = document.getElementById('micBtn');
+const micIcon = document.getElementById('micIcon');
+const stateLabel = document.getElementById('stateLabel');
+const transcriptBox = document.getElementById('transcriptBox');
+const levelFill = document.getElementById('levelFill');
+const visualizer = document.getElementById('visualizer');
+
+// Build visualizer bars
+const NUM_BARS = 32;
+for (let i = 0; i < NUM_BARS; i++) {
+  const bar = document.createElement('div');
+  bar.className = 'viz-bar';
+  bar.style.height = '4px';
+  visualizer.appendChild(bar);
+}
+const vizBars = visualizer.querySelectorAll('.viz-bar');
+
+// ---------------------------------------------------------------------------
+// WebSocket
+// ---------------------------------------------------------------------------
+function connect() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    state = 'connected';
+    updateUI();
+    console.log('WebSocket connected');
+  };
+
+  ws.onclose = () => {
+    state = 'disconnected';
+    updateUI();
+    // Auto-reconnect after 3s
+    setTimeout(connect, 3000);
+  };
+
+  ws.onerror = (e) => {
+    console.error('WebSocket error', e);
+    state = 'error';
+    updateUI();
+  };
+
+  ws.onmessage = (e) => {
+    if (e.data instanceof Blob) {
+      // Binary audio data from Jarvis - play it
+      handleAudioChunk(e.data);
+    } else {
+      // JSON control message
+      const msg = JSON.parse(e.data);
+      handleJsonMessage(msg);
+    }
+  };
+}
+
+function handleJsonMessage(msg) {
+  if (msg.type === 'status') {
+    const prevState = state;
+    state = msg.state;
+    updateUI();
+
+    if (msg.text && msg.state !== 'listening') {
+      if (msg.state === 'processing' && prevState === 'processing') {
+        // Update the last user entry text if it changed
+        if (transcript.length > 0) {
+          const last = transcript[transcript.length - 1];
+          if (last.role === 'user' && last.text !== msg.text) {
+            last.text = msg.text;
+            renderTranscript();
+          }
+        }
+      }
+    }
+  } else if (msg.type === 'error') {
+    console.error('Server error:', msg.message);
+    addTranscriptEntry('system', 'Error: ' + msg.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Audio playback
+// ---------------------------------------------------------------------------
+async function handleAudioChunk(blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  playbackQueue.push(arrayBuffer);
+  if (!playbackActive) {
+    playNext();
+  }
+}
+
+async function playNext() {
+  if (playbackQueue.length === 0) {
+    playbackActive = false;
+    return;
+  }
+  playbackActive = true;
+
+  const chunk = playbackQueue.shift();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+
+  try {
+    // edge-tts produces 24kHz 16-bit mono PCM
+    const audioBuffer = await audioCtx.decodeAudioData(chunk);
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioCtx.destination);
+    source.start();
+    await new Promise(r => source.onended = r);
+  } catch (e) {
+    console.warn('Playback decode failed, trying raw PCM:', e);
+    // Fallback: treat as raw PCM at 24kHz
+    playRawPCM(chunk);
+  }
+
+  setTimeout(playNext, 50);
+}
+
+function playRawPCM(arrayBuffer) {
+  if (!audioCtx) return;
+  const samples = new Int16Array(arrayBuffer);
+  const audioBuffer = audioCtx.createBuffer(1, samples.length, 24000);
+  const channel = audioBuffer.getChannelData(0);
+  for (let i = 0; i < samples.length; i++) {
+    channel[i] = samples[i] / 32768;
+  }
+  const source = audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(audioCtx.destination);
+  source.start();
+}
+
+// ---------------------------------------------------------------------------
+// Audio capture
+// ---------------------------------------------------------------------------
+async function startListening() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: SAMPLE_RATE,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    const source = audioCtx.createMediaStreamSource(mediaStream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+
+    // Script processor for sending audio chunks to WebSocket
+    const bufferSize = SAMPLE_RATE * (CHUNK_DURATION_MS / 1000);
+    scriptProcessor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+
+    scriptProcessor.onaudioprocess = (e) => {
+      const inputData = e.inputBuffer.getChannelData(0);
+
+      // Update level meter
+      const rms = Math.sqrt(Array.from(inputData).reduce((s, v) => s + v * v, 0) / inputData.length);
+      const level = Math.min(100, rms * 300);
+      levelFill.style.width = level + '%';
+      levelFill.className = 'level-fill' + (level > 90 ? ' clipping' : level > 70 ? ' hot' : '');
+
+      // Update visualizer
+      const freqData = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(freqData);
+      for (let i = 0; i < vizBars.length; i++) {
+        const idx = Math.floor(i * freqData.length / vizBars.length);
+        const h = Math.max(4, (freqData[idx] / 255) * 40);
+        vizBars[i].style.height = h + 'px';
+      }
+
+      // Send if WebSocket is open
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        // Convert float32 to int16 PCM
+        const int16 = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          int16[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+        }
+        ws.send(int16.buffer);
+      }
+    };
+
+    source.connect(analyser);
+    analyser.connect(scriptProcessor);
+    scriptProcessor.connect(audioCtx.destination); // needed to prevent GC
+
+    // Signal start of speech
+    ws.send(JSON.stringify({ type: 'start' }));
+    state = 'listening';
+    updateUI();
+
+  } catch (err) {
+    console.error('Microphone access denied:', err);
+    stateLabel.textContent = 'Microphone access denied';
+  }
+}
+
+function stopListening() {
+  if (scriptProcessor) {
+    scriptProcessor.disconnect();
+    scriptProcessor = null;
+  }
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(t => t.stop());
+    mediaStream = null;
+  }
+  levelFill.style.width = '0%';
+  vizBars.forEach(b => b.style.height = '4px');
+
+  // Signal end of speech
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'end' }));
+  }
+  state = 'connected';
+  updateUI();
+}
+
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
+function updateUI() {
+  // Connection status
+  connDot.className = 'conn-dot';
+  switch (state) {
+    case 'connected':
+      connDot.classList.add('connected');
+      connText.textContent = 'Connected';
+      break;
+    case 'disconnected':
+      connText.textContent = 'Reconnecting...';
+      break;
+    case 'error':
+      connDot.classList.add('error');
+      connText.textContent = 'Error';
+      break;
+    default:
+      connDot.classList.add('connected');
+      connText.textContent = 'Connected';
+  }
+
+  // Mic button state
+  micBtn.className = 'mic-btn';
+  if (state === 'listening') {
+    micBtn.classList.add('listening');
+    micIcon.textContent = '⏹';
+    stateLabel.textContent = 'Listening... click to stop';
+    stateLabel.className = 'state-label active';
+  } else if (state === 'processing') {
+    micBtn.classList.add('processing');
+    micIcon.textContent = '💭';
+    stateLabel.textContent = 'Jarvis is thinking...';
+    stateLabel.className = 'state-label active';
+  } else if (state === 'speaking') {
+    micBtn.classList.add('speaking');
+    micIcon.textContent = '🔊';
+    stateLabel.textContent = 'Jarvis is speaking';
+    stateLabel.className = 'state-label active';
+  } else {
+    micIcon.textContent = '🎙';
+    stateLabel.textContent = 'Click microphone to speak';
+    stateLabel.className = 'state-label';
+  }
+}
+
+function addTranscriptEntry(role, text) {
+  transcript.push({ role, text, time: new Date() });
+  if (transcript.length > 50) transcript.shift();
+  renderTranscript();
+}
+
+function renderTranscript() {
+  if (transcript.length === 0) {
+    transcriptBox.innerHTML = '<div style="color: var(--muted); text-align: center; font-style: italic;">No conversation yet</div>';
+    return;
+  }
+
+  transcriptBox.innerHTML = transcript.map(entry => {
+    const labels = { user: 'You', jarvis: 'Jarvis', system: 'System' };
+    const cls = { user: 'transcript-user', jarvis: 'transcript-jarvis', system: 'transcript-text' };
+    const time = entry.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return `
+      <div class="transcript-entry">
+        <div class="transcript-label ${cls[entry.role] || ''}">
+          ${labels[entry.role] || entry.role} <span style="color: var(--muted);">· ${time}</span>
+        </div>
+        <div class="transcript-text">${escapeHtml(entry.text)}</div>
+      </div>`;
+  }).join('');
+
+  // Scroll to bottom
+  transcriptBox.scrollTop = transcriptBox.scrollHeight;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ---------------------------------------------------------------------------
+// Mic button handler - toggle behavior
+// ---------------------------------------------------------------------------
+let isRecording = false;
+
+micBtn.addEventListener('click', async () => {
+  if (state === 'processing' || state === 'speaking') {
+    return; // Don't interrupt Jarvis
+  }
+
+  if (!isRecording) {
+    isRecording = true;
+    await startListening();
+  } else {
+    isRecording = false;
+    stopListening();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Track transcript updates from server status messages
+// ---------------------------------------------------------------------------
+const origHandleJson = handleJsonMessage;
+handleJsonMessage = function(msg) {
+  origHandleJson(msg);
+  if (msg.type === 'status' && msg.text) {
+    if (state === 'processing' && transcript.length === 0) {
+      // First processing message with text = user transcription
+      addTranscriptEntry('user', msg.text);
+    } else if (state === 'idle' && msg.text && transcript.length > 0) {
+      // Back to idle with text = Jarvis's last reply (add if not already there)
+      const last = transcript[transcript.length - 1];
+      if (last.role !== 'jarvis' || last.text !== msg.text) {
+        addTranscriptEntry('jarvis', msg.text);
+      }
+    } else if (state === 'speaking' && msg.text) {
+      // Speaking state with text = Jarvis's reply preview
+      const last = transcript[transcript.length - 1];
+      if (last.role !== 'jarvis') {
+        addTranscriptEntry('jarvis', msg.text);
+      }
+    }
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+connect();
+</script>
+
+</body>
+</html>

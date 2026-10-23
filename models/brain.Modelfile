@@ -1,6 +1,6 @@
 # Local "brain": drives Claude Code through Ollama's Anthropic API.
-FROM qwen3.6:27b
-PARAMETER num_ctx 65536
+FROM qwen3.8:27b
+PARAMETER num_ctx 131072
 PARAMETER num_gpu 999
 PARAMETER temperature 0.6
 PARAMETER top_p 0.95

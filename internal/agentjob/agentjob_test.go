@@ -38,7 +38,7 @@ func runner(t *testing.T, s *Store, script string) *Runner {
 	t.Cleanup(h.Close)
 	return &Runner{
 		Store: s, History: h,
-		Command:  func(driver, prompt string) *exec.Cmd { return exec.Command("sh", "-c", script) },
+		Command:  func(driver, prompt, effort string) *exec.Cmd { return exec.Command("sh", "-c", script) },
 		PRLookup: func(string) string { return "" },
 		Brief:    func(string) string { return "RULES" },
 	}
