@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/notifier"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/notify"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/router"
 )
@@ -51,6 +53,15 @@ func run() error {
 	}
 	defer history.Close()
 	log.Printf("worker: job history → %s", history.Path())
+
+	// Home Assistant notification client.
+	haClient := notify.NewClient()
+	ntf := notifier.New(haClient)
+	if haClient.Configured() {
+		log.Printf("worker: Home Assistant notifications enabled")
+	} else {
+		log.Printf("worker: Home Assistant notifications disabled (no HA_TOKEN)")
+	}
 
 	// Priority scheduler.
 	sched := queue.NewScheduler()
@@ -114,6 +125,7 @@ func run() error {
 				rec.InputTokens = costEst.InputTokens
 				rec.OutputTokens = costEst.OutputTokens
 				history.Denied(rec, costEst.TotalCost)
+				ntf.OnDenied(rec, costEst.TotalCost)
 				return queue.ErrApprovalDenied
 			}
 		}
@@ -134,6 +146,7 @@ func run() error {
 			_, err := ollama.Generate(modelName, prompt)
 			if err != nil {
 				history.Fail(rec, err)
+				ntf.OnFail(rec, err)
 				return fmt.Errorf("generate: %w", err)
 			}
 		} else {
@@ -142,6 +155,7 @@ func run() error {
 
 		// Record job completion.
 		history.Complete(rec)
+		ntf.OnComplete(rec)
 		sched.JobFinished(msg.Type)
 		return nil
 	}
