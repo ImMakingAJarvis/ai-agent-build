@@ -132,6 +132,37 @@ func run() error {
 		}
 	}()
 
+	// Periodic model info poller: queries Ollama /api/ps every 30 seconds
+	// and updates model info gauges for the Grafana dashboard.
+	stopModelInfo := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopModelInfo:
+				return
+			case <-ticker.C:
+				models, err := ollama.ModelPS()
+				if err != nil {
+					log.Printf("worker: model info poll: %v", err)
+					jobMetrics.ObserveModelInfo("", 0, 0, "", "", 0, 0, false)
+					continue
+				}
+				if len(models) == 0 {
+					jobMetrics.ObserveModelInfo("", 0, 0, "", "", 0, 0, false)
+					continue
+				}
+				mi := models[0] // Use the first loaded model
+				paramsBillions := parseParamCount(mi.Details.ParameterSize)
+				jobMetrics.ObserveModelInfo(
+					mi.Name, mi.SizeVRAM, mi.Size,
+					mi.Details.Family, mi.Details.Quantization,
+					paramsBillions, mi.ContextLength, true)
+			}
+		}
+	}()
+
 	// Consumer handler: processes one job.
 	// Evaluate queue depths once before starting, so the scheduler is in the
 	// right state from the first message.
@@ -236,6 +267,10 @@ func run() error {
 			jobMetrics.ObserveFailed(msg.Type, modelName)
 			return fmt.Errorf("generate: %w", err)
 		}
+		// Record model run metrics: request count, token counts, and eval times.
+		jobMetrics.ObserveRequest()
+		jobMetrics.ObserveTokens(resp.PromptEvalCount, resp.EvalCount,
+			time.Duration(resp.PromptEvalDuration), time.Duration(resp.EvalDuration))
 		out := resp.Response
 		if err := jobStore.WriteFile(msg.ID, "output.txt", []byte(out)); err != nil {
 			log.Printf("worker: job %s: store output: %v", msg.ID, err)
@@ -273,6 +308,7 @@ func run() error {
 
 	log.Printf("worker: shutting down")
 	close(stopDepth)
+	close(stopModelInfo)
 	streamWatcher.Stop()
 	close(streamCh)
 	consumer.Stop()
@@ -292,4 +328,31 @@ func getQueueDepths(conn *queue.Conn) map[string]int {
 		depths[q] = get.Messages
 	}
 	return depths
+}
+
+// parseParamCount converts a parameter size string like "27.3B" or "7B"
+// into a float64 representing billions of parameters.
+func parseParamCount(s string) float64 {
+	if len(s) == 0 {
+		return 0
+	}
+	suffix := string(s[len(s)-1])
+	var multiplier float64
+	switch suffix {
+	case "B", "b":
+		multiplier = 1.0
+		s = s[:len(s)-1]
+	case "M", "m":
+		multiplier = 0.001
+		s = s[:len(s)-1]
+	default:
+		// No recognized suffix — treat as billions directly.
+		multiplier = 1.0
+	}
+	var n float64
+	_, err := fmt.Sscanf(s, "%f", &n)
+	if err != nil {
+		return 0
+	}
+	return n * multiplier
 }

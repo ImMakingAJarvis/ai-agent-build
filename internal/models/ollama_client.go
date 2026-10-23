@@ -162,6 +162,43 @@ func (c *Client) ListRunning() ([]RunningModel, error) {
 	return out.Models, nil
 }
 
+// ModelInfo holds detailed information about a loaded model from /api/ps.
+type ModelInfo struct {
+	Name          string `json:"name"`
+	Model         string `json:"model"`
+	Size          int64  `json:"size"`
+	SizeVRAM      int64  `json:"size_vram"`
+	ContextLength int    `json:"context_length"`
+	Runner        string `json:"runner"`
+	Details       struct {
+		Family        string `json:"family"`
+		ParameterSize string `json:"parameter_size"`
+		Quantization  string `json:"quantization_level"`
+	} `json:"details"`
+}
+
+// ModelPS queries /api/ps and returns detailed info about currently loaded models.
+func (c *Client) ModelPS() ([]ModelInfo, error) {
+	resp, err := c.http.Get(c.baseURL + "/api/ps")
+	if err != nil {
+		return nil, fmt.Errorf("GET /api/ps: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("/api/ps returned %d: %s", resp.StatusCode, b)
+	}
+
+	var out struct {
+		Models []ModelInfo `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode /api/ps: %w", err)
+	}
+	return out.Models, nil
+}
+
 // ChatRequest is the body for a /v1/chat/completions request.
 // Only model, messages, stream and think are sent — extra options
 // (num_ctx etc.) force Ollama to reload the 17 GB model.
