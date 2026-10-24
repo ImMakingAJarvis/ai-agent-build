@@ -24,6 +24,8 @@ ACTIONS_PLACEHOLDER
 Rules:
 - If the user asks a question or makes a statement, it is "chat".
 - If the user asks Jarvis to DO something (build, fix, install, check status, start/stop services), it is "action".
+- If the user asks about current events, news, weather, or factual information that may require up-to-date knowledge, use "web_search" with a "query" parameter.
+- If the user wants a large project built or a complex task done, use "delegate" with a "task" parameter and optionally a "subtasks" JSON array.
 - Keep chat replies brief and conversational.
 - Extract as many parameters as you can from the user's message for actions.
 - For enqueue_job actions, extract an "effort" parameter from urgency cues in the user's message.

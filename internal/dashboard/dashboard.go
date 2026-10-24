@@ -141,6 +141,7 @@ type Server struct {
 	rabbitConn   *queue.Conn // persistent connection for peeking at pending jobs
 	authUser     string
 	authPass     string
+	kanban       *kanbanState
 
 	// Pre-compiled templates (parsed once at startup).
 	tmpl *template.Template
@@ -199,6 +200,7 @@ func New() *Server {
 		authUser:     os.Getenv("DASHBOARD_USER"),
 		authPass:     os.Getenv("DASHBOARD_PASS"),
 		tmpl:         tmpl,
+		kanban:       initKanban(historyDir),
 	}
 }
 
@@ -236,6 +238,22 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
 	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
+
+	// Kanban board routes.
+	mux.HandleFunc("GET /kanban", s.kanban.handleKanbanBoardPage(s))
+	mux.HandleFunc("GET /html/kanban-board", s.kanban.handleKanbanBoardContentPage(s))
+	mux.HandleFunc("POST /api/kanban/epics", s.kanban.apiCreateEpic)
+	mux.HandleFunc("GET /api/kanban/epics", s.kanban.apiListEpics)
+	mux.HandleFunc("DELETE /api/kanban/epics/{id}", s.kanban.apiDeleteEpic)
+	mux.HandleFunc("PATCH /api/kanban/epics/{id}", s.kanban.apiUpdateEpic)
+	mux.HandleFunc("POST /api/kanban/tasks", s.kanban.apiCreateTask)
+	mux.HandleFunc("GET /api/kanban/tasks", s.kanban.apiListTasks)
+	mux.HandleFunc("DELETE /api/kanban/tasks/{id}", s.kanban.apiDeleteTask)
+	mux.HandleFunc("PATCH /api/kanban/tasks/{id}", s.kanban.apiUpdateTask)
+	mux.HandleFunc("POST /api/kanban/subtasks", s.kanban.apiCreateSubTask)
+	mux.HandleFunc("PATCH /api/kanban/subtasks/{id}", s.kanban.apiToggleSubTask)
+	mux.HandleFunc("GET /api/kanban/subtasks", s.kanban.apiListSubTasks)
+	mux.HandleFunc("GET /api/kanban/models", s.kanban.apiListModels)
 
 	var handler http.Handler = mux
 	if s.authUser != "" && s.authPass != "" {
