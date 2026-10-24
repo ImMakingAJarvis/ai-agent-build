@@ -3,8 +3,8 @@ package dashboard
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"html/template"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -39,6 +39,7 @@ type JobLog struct {
 	ReadError   string
 	Empty       bool
 	Live        bool
+	Truncated   bool
 	SourceLabel string
 }
 
@@ -63,13 +64,8 @@ func JobPath(id string) string {
 
 func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 	page := s.loadJobLog(r.PathValue("id"))
-	tmpl, err := template.New("job-log.html").Funcs(jobLogFuncs()).ParseFS(templatesFS, "templates/*.html")
-	if err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
-	}
 	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "job-log.html", page); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&buf, "job-log.html", page); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 		return
 	}
@@ -86,13 +82,22 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleJobLogHTML(w http.ResponseWriter, r *http.Request) {
 	page := s.loadJobLog(r.PathValue("id"))
-	tmpl, err := template.New("job-log-content").Funcs(jobLogFuncs()).ParseFS(templatesFS, "templates/*.html")
-	if err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
+	if !page.Missing && page.ReadError == "" {
+		// Formatted view is on demand and bounded: parse only the log's tail.
+		if st, err := agentjob.Open(filepath.Dir(s.historyPath)); err == nil {
+			if raw, label, trunc, err := readJobTail(st, page.ID, maxFormatBytes); err == nil {
+				page.Events = ParseTranscript(raw)
+				page.SourceLabel = label
+				page.Truncated = trunc
+				page.Empty = len(page.Events) == 0 && strings.TrimSpace(page.Summary) == ""
+			}
+		}
+	}
+	if len(page.Events) == 0 && strings.TrimSpace(page.Summary) != "" {
+		page.Events = []LogEvent{{Kind: "output", Title: "Summary", Body: page.Summary}}
 	}
 	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "job-log-content", page); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&buf, "job-log-content", page); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 		return
 	}
@@ -149,44 +154,50 @@ func (s *Server) loadJobLog(id string) JobLog {
 		page.Live = rec.Status == "running"
 	}
 
-	raw, src, err := readJobTrace(st, id)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		page.ReadError = "Could not read this job's log from disk."
-		return page
-	}
-	if !found && errors.Is(err, os.ErrNotExist) {
+	if !found {
 		page.Missing = true
 		return page
 	}
 
-	page.SourceLabel = src
-	page.Events = ParseTranscript(raw)
-	if len(page.Events) == 0 && strings.TrimSpace(page.Summary) != "" {
-		page.Events = []LogEvent{{Kind: "output", Title: "Summary", Body: page.Summary}}
-		if page.SourceLabel == "" {
-			page.SourceLabel = "jobs.jsonl summary"
-		}
-	}
-	page.Empty = len(page.Events) == 0
+	// Don't load the transcript here — the page streams it from /api/jobs/{id}/log/stream.
+	// Just check if a log file exists so we can warn if not.
+	page.Empty = jobLogPath(st, id) == "" && strings.TrimSpace(page.Summary) == ""
 	return page
 }
 
-func readJobTrace(st *agentjob.Store, id string) (raw, label string, err error) {
-	b, err := st.ReadFile(id, "transcript.txt")
-	if err == nil && strings.TrimSpace(string(b)) != "" {
-		return string(b), "transcript.txt", nil
+// readJobTail reads at most the last max bytes of the job's transcript for
+// the formatted view, dropping a partial leading line. truncated reports
+// whether older output was left out.
+func readJobTail(st *agentjob.Store, id string, max int64) (raw, label string, truncated bool, err error) {
+	path := jobLogPath(st, id)
+	if path == "" {
+		return "", "", false, os.ErrNotExist
 	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", "", err
+	f, err := os.Open(path)
+	if err != nil {
+		return "", "", false, err
 	}
-	b, err = st.ReadFile(id, "output.txt")
-	if err == nil && strings.TrimSpace(string(b)) != "" {
-		return string(b), "output.txt", nil
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", "", false, err
 	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", "", err
+	if fi.Size() > max {
+		truncated = true
+		if _, err := f.Seek(fi.Size()-max, io.SeekStart); err != nil {
+			return "", "", false, err
+		}
 	}
-	return "", "", os.ErrNotExist
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return "", "", false, err
+	}
+	if truncated {
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			b = b[i+1:]
+		}
+	}
+	return string(b), filepath.Base(path), truncated, nil
 }
 
 func (s *Server) historyRecord(id string) (JobRecord, bool) {

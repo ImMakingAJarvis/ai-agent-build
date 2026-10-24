@@ -77,7 +77,11 @@ func TestJobLogPages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := &Server{historyPath: filepath.Join(dir, "jobs.jsonl")}
+	tmpl, err := template.New("").Funcs(jobLogFuncs()).ParseFS(templatesFS, "templates/*.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{historyPath: filepath.Join(dir, "jobs.jsonl"), tmpl: tmpl}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
@@ -111,7 +115,7 @@ func TestJobLogPages(t *testing.T) {
 			t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		for _, w := range []string{"d0.1 — Show logs", "Loading this job's log", `hx-get="/html/jobs/d0.1"`} {
+		for _, w := range []string{"d0.1 — Show logs", "/api/jobs/d0.1/log/stream"} {
 			if !strings.Contains(body, w) {
 				t.Errorf("page lacks %q", w)
 			}
@@ -145,8 +149,8 @@ func TestJobLogPages(t *testing.T) {
 	})
 }
 
-func TestDashboardContentHasLogLinks(t *testing.T) {
-	tmpl, err := template.New("dashboard-content").Funcs(jobLogFuncs()).ParseFS(templatesFS, "templates/*.html")
+func TestSectionsHaveLogLinks(t *testing.T) {
+	tmpl, err := template.New("").Funcs(jobLogFuncs()).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,13 +162,62 @@ func TestDashboardContentHasLogLinks(t *testing.T) {
 		RecentJobs: []JobRecord{{ID: "cli-1", Status: "completed"}},
 	}
 	var buf strings.Builder
-	if err := tmpl.ExecuteTemplate(&buf, "dashboard-content", st); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"agent-jobs-section", "jobs-section"} {
+		if err := tmpl.ExecuteTemplate(&buf, name, st); err != nil {
+			t.Fatal(err)
+		}
 	}
 	out := buf.String()
 	for _, w := range []string{`href="/jobs/d0"`, `href="/jobs/cli-1"`, ">Log<"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("content lacks %q", w)
+		}
+	}
+}
+
+func TestLogStreamTail(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := agentjob.Open(dir)
+	if _, err := st.Ingest(agentjob.Spec{ID: "big"}); err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	for i := 0; i < 20000; i++ {
+		sb.WriteString("line of log output number x\n")
+	}
+	if err := st.WriteFile("big", "transcript.txt", []byte(sb.String())); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{historyPath: filepath.Join(dir, "jobs.jsonl")}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/big/log/stream", nil))
+	if rec.Header().Get("X-Log-Truncated") != "true" || rec.Body.Len() > defaultLogTail {
+		t.Fatalf("expected truncated tail, got %d bytes, header %q", rec.Body.Len(), rec.Header().Get("X-Log-Truncated"))
+	}
+	if !strings.HasPrefix(rec.Body.String(), "line of log") {
+		t.Fatalf("partial first line not dropped: %.30q", rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/big/log/stream?tail=0", nil))
+	if rec.Body.Len() != sb.Len() {
+		t.Fatalf("full stream %d != %d", rec.Body.Len(), sb.Len())
+	}
+}
+
+func TestIndexIsStaticShell(t *testing.T) {
+	tmpl, err := template.New("").Funcs(jobLogFuncs()).ParseFS(templatesFS, "templates/*.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{tmpl: tmpl} // no backends: index must not touch them
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, httptest.NewRequest("GET", "/", nil))
+	for _, w := range []string{`hx-get="/html/lightweight"`, `hx-get="/html/jobs-section"`, `hx-get="/html/agent-jobs-section"`} {
+		if !strings.Contains(rec.Body.String(), w) {
+			t.Errorf("index lacks %q", w)
 		}
 	}
 }

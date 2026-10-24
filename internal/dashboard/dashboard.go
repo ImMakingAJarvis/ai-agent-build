@@ -2,6 +2,7 @@
 package dashboard
 
 import (
+	"bufio"
 	"bytes"
 	"embed"
 	"encoding/json"
@@ -12,13 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
+	"strconv"
+	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/slots"
 )
@@ -27,8 +29,8 @@ import (
 var templatesFS embed.FS
 
 const (
-	defaultAddr       = ":8080"
-	defaultHistoryDir = ""
+	defaultAddr         = ":8080"
+	defaultHistoryDir   = ""
 	defaultPollInterval = 5 // seconds
 )
 
@@ -64,22 +66,22 @@ type QueueDepth struct {
 
 // PendingJob represents a single message sitting in a queue.
 type PendingJob struct {
-	ID          string `json:"id"`
-	Type        string `json:"type"`
-	Priority    int    `json:"priority"`
-	Queue       string `json:"queue"`
-	Source      string `json:"source"`
-	CreatedAt   string `json:"created_at"`
-	Prompt      string `json:"prompt,omitempty"`
-	ForceAPI    bool   `json:"force_api"`
+	ID            string `json:"id"`
+	Type          string `json:"type"`
+	Priority      int    `json:"priority"`
+	Queue         string `json:"queue"`
+	Source        string `json:"source"`
+	CreatedAt     string `json:"created_at"`
+	Prompt        string `json:"prompt,omitempty"`
+	ForceAPI      bool   `json:"force_api"`
 	ModelOverride string `json:"model_override,omitempty"`
 }
 
 // PendingQueue holds the pending messages for one queue.
 type PendingQueue struct {
-	Name    string       `json:"name"`
-	Depth   int          `json:"depth"`
-	Jobs    []PendingJob `json:"jobs"`
+	Name  string       `json:"name"`
+	Depth int          `json:"depth"`
+	Jobs  []PendingJob `json:"jobs"`
 }
 
 // ApprovalInfo describes a job denied by the cost approval gate.
@@ -107,17 +109,26 @@ type SlotQueue struct {
 
 // DashboardState is the full state returned by /api/state.
 type DashboardState struct {
-	OllamaHealthy  bool               `json:"ollama_healthy"`
-	RabbitMQHealthy bool              `json:"rabbitmq_healthy"`
-	Slots          []slots.SlotInfo   `json:"slots"`           // Engine parallel slots
-	Queues         []QueueDepth       `json:"queues"`
-	PendingQueues  []PendingQueue     `json:"pending_queues"`
-	RecentJobs     []JobRecord        `json:"recent_jobs"`
-	AgentJobs      []agentjob.Job     `json:"agent_jobs"`      // build work: ready, claimed, running, done, failed
-	SlotQueues     []SlotQueue        `json:"slot_queues"`     // Currently-running jobs per slot
-	TotalCost      float64            `json:"total_cost"`      // Running total of estimated costs for API jobs
-	APICount       int                `json:"api_job_count"`   // Number of API-dispatched jobs
-	LocalCount     int                `json:"local_job_count"` // Number of local jobs
+	OllamaHealthy   bool             `json:"ollama_healthy"`
+	RabbitMQHealthy bool             `json:"rabbitmq_healthy"`
+	Slots           []slots.SlotInfo `json:"slots"` // Engine parallel slots
+	Queues          []QueueDepth     `json:"queues"`
+	RecentJobs      []JobRecord      `json:"recent_jobs"`
+	AgentJobs       []agentjob.Job   `json:"agent_jobs"`      // build work: ready, claimed, running, done, failed
+	SlotQueues      []SlotQueue      `json:"slot_queues"`     // Currently-running jobs per slot
+	TotalCost       float64          `json:"total_cost"`      // Running total of estimated costs for API jobs
+	APICount        int              `json:"api_job_count"`   // Number of API-dispatched jobs
+	LocalCount      int              `json:"local_job_count"` // Number of local jobs
+}
+
+// LightweightState is returned for the initial page load.
+// It skips expensive JSONL reads and pending queue peeks,
+// allowing the page to render immediately while sections
+// load their data asynchronously via HTMX.
+type LightweightState struct {
+	OllamaHealthy   bool         `json:"ollama_healthy"`
+	RabbitMQHealthy bool         `json:"rabbitmq_healthy"`
+	Queues          []QueueDepth `json:"queues"`
 }
 
 // Server holds the dashboard dependencies.
@@ -130,6 +141,14 @@ type Server struct {
 	rabbitConn   *queue.Conn // persistent connection for peeking at pending jobs
 	authUser     string
 	authPass     string
+
+	// Pre-compiled templates (parsed once at startup).
+	tmpl *template.Template
+
+	// State cache: avoid re-reading the JSONL file on every refresh.
+	stateMu    sync.Mutex
+	stateCache DashboardState
+	stateTime  time.Time
 }
 
 // New creates a dashboard server.
@@ -156,6 +175,21 @@ func New() *Server {
 
 	engineClient := slots.NewClient()
 
+	// Pre-compile templates once at startup.
+	funcMap := template.FuncMap{
+		"statusClass":    StatusClass,
+		"formatDuration": FormatDuration,
+		"formatCost":     FormatCost,
+		"divCost":        DivCost,
+		"slotRuntime":    SlotRuntime,
+		"jobPath":        JobPath,
+	}
+	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dashboard: template parse error: %v\n", err)
+		os.Exit(1)
+	}
+
 	return &Server{
 		addr:         addr,
 		ollama:       models.NewClient(),
@@ -164,6 +198,7 @@ func New() *Server {
 		amqpURL:      amqpURL,
 		authUser:     os.Getenv("DASHBOARD_USER"),
 		authPass:     os.Getenv("DASHBOARD_PASS"),
+		tmpl:         tmpl,
 	}
 }
 
@@ -189,7 +224,9 @@ func (s *Server) CloseRabbitMQ() {
 func (s *Server) Serve() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
-	mux.HandleFunc("GET /html/dashboard", s.handleDashboardHTML)
+	mux.HandleFunc("GET /html/lightweight", s.handleLightweightHTML)
+	mux.HandleFunc("GET /html/jobs-section", s.handleJobsSectionHTML)
+	mux.HandleFunc("GET /html/agent-jobs-section", s.handleAgentJobsSectionHTML)
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
 	mux.HandleFunc("GET /api/queues", s.handleQueues)
@@ -198,6 +235,7 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
+	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
 
 	var handler http.Handler = mux
 	if s.authUser != "" && s.authPass != "" {
@@ -228,23 +266,15 @@ func (s *Server) basicAuth(next http.Handler) http.Handler {
 	})
 }
 
+// handleIndex serves the static shell. It touches no backend so the first
+// paint is instant; every section loads itself via HTMX.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	data := s.gatherState()
-	funcMap := template.FuncMap{
-		"statusClass":    StatusClass,
-		"formatDuration": FormatDuration,
-		"formatCost":     FormatCost,
-		"divCost":        DivCost,
-		"slotRuntime":    SlotRuntime,
-		"jobPath":        JobPath,
-	}
-	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
-	if err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
 		return
 	}
 	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "index.html", data); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&buf, "index.html", nil); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 		return
 	}
@@ -252,23 +282,61 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	buf.WriteTo(w)
 }
 
-func (s *Server) handleDashboardHTML(w http.ResponseWriter, r *http.Request) {
-	data := s.gatherState()
-	funcMap := template.FuncMap{
-		"statusClass":    StatusClass,
-		"formatDuration": FormatDuration,
-		"formatCost":     FormatCost,
-		"divCost":        DivCost,
-		"slotRuntime":    SlotRuntime,
-		"jobPath":        JobPath,
-	}
-	tmpl, err := template.New("dashboard-content").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
-	if err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
+// gatherLightweight collects only fast, always-fresh data (health + queue depths).
+// It skips the expensive JSONL scan and pending queue peek.
+func (s *Server) gatherLightweight() LightweightState {
+	var st LightweightState
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		depths, err := s.getQueueDepths()
+		if err != nil {
+			fmt.Printf("dashboard: rabbitmq unreachable: %v\n", err)
+		}
+		st.Queues = depths
+	}()
+	go func() { defer wg.Done(); st.OllamaHealthy = s.ollama.Healthcheck() }()
+	go func() { defer wg.Done(); st.RabbitMQHealthy = s.checkRabbitMQ() }()
+	wg.Wait()
+	return st
+}
+
+func (s *Server) handleLightweightHTML(w http.ResponseWriter, r *http.Request) {
+	data := s.gatherLightweight()
+	var buf bytes.Buffer
+	if err := s.tmpl.ExecuteTemplate(&buf, "lightweight-content", data); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buf.WriteTo(w)
+}
+
+func (s *Server) handleJobsSectionHTML(w http.ResponseWriter, r *http.Request) {
+	cached := s.getCachedJobData()
+	data := DashboardState{
+		RecentJobs: cached.jobs,
+		TotalCost:  cached.totalCost,
+		APICount:   cached.apiCount,
+		LocalCount: cached.localCount,
+	}
 	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "dashboard-content", data); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&buf, "jobs-section", data); err != nil {
+		http.Error(w, "render error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buf.WriteTo(w)
+}
+
+func (s *Server) handleAgentJobsSectionHTML(w http.ResponseWriter, r *http.Request) {
+	cached := s.getCachedJobData()
+	data := DashboardState{
+		AgentJobs: cached.agentJobs,
+	}
+	var buf bytes.Buffer
+	if err := s.tmpl.ExecuteTemplate(&buf, "agent-jobs-section", data); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 		return
 	}
@@ -296,17 +364,64 @@ func (s *Server) handleQueues(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) gatherState() DashboardState {
-	jobs := s.readRecentJobs(100)
+	// Fetch lightweight, always-fresh data.
 	depths, err := s.getQueueDepths()
 	if err != nil {
 		fmt.Printf("dashboard: rabbitmq unreachable: %v\n", err)
 	}
-	pending := s.getPendingQueues()
 	ollamaHealthy := s.ollama.Healthcheck()
 	rabbitmqHealthy := s.checkRabbitMQ()
 	engineSlots, _ := s.engineClient.GetSlots()
 
-	// Compute running cost totals from completed/denied API jobs.
+	// Get cached JSONL-based data (jobs, costs, agent jobs).
+	cached := s.getCachedJobData()
+
+	return DashboardState{
+		OllamaHealthy:   ollamaHealthy,
+		RabbitMQHealthy: rabbitmqHealthy,
+		AgentJobs:       cached.agentJobs,
+		Slots:           engineSlots,
+		Queues:          depths,
+		RecentJobs:      cached.jobs,
+		TotalCost:       cached.totalCost,
+		APICount:        cached.apiCount,
+		LocalCount:      cached.localCount,
+	}
+}
+
+// cachedJobData holds the expensive-to-compute parts of the dashboard state.
+type cachedJobData struct {
+	jobs       []JobRecord
+	agentJobs  []agentjob.Job
+	totalCost  float64
+	apiCount   int
+	localCount int
+}
+
+const jobDataCacheTTL = 5 * time.Second
+
+// getCachedJobData returns job data from cache if fresh enough,
+// otherwise recomputes it. This avoids re-reading the JSONL file
+// and reopening the agent job store on every dashboard refresh.
+// Pending queues are NOT included here — they are fetched lazily
+// via the /api/pending endpoint to keep page loads fast.
+func (s *Server) getCachedJobData() cachedJobData {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
+	if time.Since(s.stateTime) < jobDataCacheTTL {
+		return cachedJobData{
+			jobs:       s.stateCache.RecentJobs,
+			agentJobs:  s.stateCache.AgentJobs,
+			totalCost:  s.stateCache.TotalCost,
+			apiCount:   s.stateCache.APICount,
+			localCount: s.stateCache.LocalCount,
+		}
+	}
+
+	// Recompute.
+	jobs := s.readRecentJobs(100)
+
 	var totalCost float64
 	var apiCount, localCount int
 	for _, rec := range jobs {
@@ -327,23 +442,36 @@ func (s *Server) gatherState() DashboardState {
 		agentJobs, _ = st.List()
 	}
 
-	return DashboardState{
-		OllamaHealthy:   ollamaHealthy,
-		RabbitMQHealthy: rabbitmqHealthy,
-		AgentJobs:       agentJobs,
-		Slots:           engineSlots,
-		Queues:          depths,
-		PendingQueues:   pending,
-		RecentJobs:      jobs,
-		TotalCost:       totalCost,
-		APICount:        apiCount,
-		LocalCount:      localCount,
+	// Update cache.
+	s.stateCache.RecentJobs = jobs
+	s.stateCache.AgentJobs = agentJobs
+	s.stateCache.TotalCost = totalCost
+	s.stateCache.APICount = apiCount
+	s.stateCache.LocalCount = localCount
+	s.stateTime = time.Now()
+
+	return cachedJobData{
+		jobs:       jobs,
+		agentJobs:  agentJobs,
+		totalCost:  totalCost,
+		apiCount:   apiCount,
+		localCount: localCount,
 	}
 }
 
-// checkRabbitMQ dials RabbitMQ and closes the connection to verify
-// the broker is reachable. Returns true if the connection succeeds.
+// checkRabbitMQ verifies the broker is reachable using the persistent connection.
+// Falls back to a dial-only check if the persistent connection is unavailable.
 func (s *Server) checkRabbitMQ() bool {
+	if s.rabbitConn != nil && !s.rabbitConn.IsClosed() {
+		ch := s.rabbitConn.Channel()
+		if ch != nil {
+			// Try a lightweight operation to confirm the connection is alive.
+			_, err := ch.QueueInspect(queue.VoiceQueue)
+			return err == nil
+		}
+		return true // connection exists but channel is nil; assume healthy
+	}
+	// Fallback: dial and close.
 	conn, err := amqp.Dial(s.amqpURL)
 	if err != nil {
 		return false
@@ -359,20 +487,16 @@ func (s *Server) readRecentJobs(limit int) []JobRecord {
 	}
 	defer f.Close()
 
-	// Read all lines, then take the last N.
-	var all []JobRecord
-	scanner := newLineReader(f)
-	for scanner.Scan() {
-		var rec JobRecord
-		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
-			continue
-		}
-		all = append(all, rec)
-	}
+	// Read only the tail of the file to avoid scanning a huge JSONL.
+	lines := readJSONLTail(f, limit*3) // read a few extra to account for parse failures
 
 	// Deduplicate by ID, keeping the last (completed/failed) record for each job.
 	byID := make(map[string]JobRecord)
-	for _, rec := range all {
+	for _, line := range lines {
+		var rec JobRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			continue
+		}
 		byID[rec.ID] = rec
 	}
 
@@ -392,6 +516,57 @@ func (s *Server) readRecentJobs(limit int) []JobRecord {
 	return unique
 }
 
+// readJSONLTail reads the last ~targetLines lines from the file by seeking
+// from the end. It grows the read window exponentially until it has enough
+// lines or reaches the beginning of the file. This avoids scanning a
+// multi-megabyte JSONL on every dashboard refresh.
+func readJSONLTail(f *os.File, targetLines int) [][]byte {
+	stat, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	fileSize := stat.Size()
+	if fileSize == 0 {
+		return nil
+	}
+
+	// Start with a window sized for ~targetLines at an estimated 256 bytes/line.
+	windowSize := int64(targetLines * 256)
+	if windowSize <= 0 {
+		windowSize = 4096
+	}
+
+	for {
+		offset := fileSize - windowSize
+		if offset < 0 {
+			offset = 0
+		}
+
+		f.Seek(offset, 0)
+		var lines [][]byte
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 0, 1<<20), 1<<20) // 1 MB max line
+		for scanner.Scan() {
+			lines = append(lines, scanner.Bytes())
+		}
+
+		if len(lines) >= targetLines || offset == 0 {
+			// If we read from the middle of the file (not offset==0),
+			// the first line may be partial — drop it.
+			if offset > 0 && len(lines) > 0 {
+				lines = lines[1:]
+			}
+			return lines
+		}
+
+		// Need more lines; double the window.
+		windowSize *= 2
+		if windowSize > fileSize {
+			windowSize = fileSize
+		}
+	}
+}
+
 func (s *Server) readSlotQueues() []SlotQueue {
 	f, err := os.Open(s.historyPath)
 	if err != nil {
@@ -401,7 +576,7 @@ func (s *Server) readSlotQueues() []SlotQueue {
 
 	// Build map of running jobs by queue.
 	runningByQueue := map[string]SlotQueue{}
-	scanner := newLineReader(f)
+	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		var rec JobRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
@@ -445,17 +620,13 @@ func buildSlotQueues(running map[string]SlotQueue) []SlotQueue {
 }
 
 func (s *Server) getQueueDepths() ([]QueueDepth, error) {
-	conn, err := amqp.Dial(s.amqpURL)
-	if err != nil {
-		return nil, fmt.Errorf("dial rabbitmq: %w", err)
+	if s.rabbitConn == nil || s.rabbitConn.IsClosed() {
+		return nil, fmt.Errorf("rabbitmq connection not available")
 	}
-	defer conn.Close()
-
-	ch, err := conn.Channel()
-	if err != nil {
-		return nil, fmt.Errorf("open channel: %w", err)
+	ch := s.rabbitConn.Channel()
+	if ch == nil {
+		return nil, fmt.Errorf("rabbitmq channel not available")
 	}
-	defer ch.Close()
 
 	var depths []QueueDepth
 	for _, q := range queue.AllQueues {
@@ -474,17 +645,13 @@ func (s *Server) getQueueDepths() ([]QueueDepth, error) {
 // getPendingQueues peeks at pending messages in each queue.
 // Uses a temporary consumer to read up to 50 messages per queue without acking.
 func (s *Server) getPendingQueues() []PendingQueue {
-	conn, err := amqp.Dial(s.amqpURL)
-	if err != nil {
+	if s.rabbitConn == nil || s.rabbitConn.IsClosed() {
 		return nil
 	}
-	defer conn.Close()
-
-	ch, err := conn.Channel()
-	if err != nil {
+	ch := s.rabbitConn.Channel()
+	if ch == nil {
 		return nil
 	}
-	defer ch.Close()
 
 	var pending []PendingQueue
 	for _, qname := range queue.AllQueues {
@@ -538,14 +705,8 @@ func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
 	approvals := s.getDeniedJobs()
-	funcMap := template.FuncMap{"formatCost": FormatCost}
-	tmpl, err := template.New("approvals.html").Funcs(funcMap).ParseFS(templatesFS, "templates/approvals.html")
-	if err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl.Execute(w, approvals)
+	s.tmpl.ExecuteTemplate(w, "approvals.html", approvals)
 }
 
 func (s *Server) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
@@ -580,7 +741,7 @@ func (s *Server) getDeniedJobs() []ApprovalInfo {
 	defer f.Close()
 
 	var denied []ApprovalInfo
-	scanner := newLineReader(f)
+	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		var rec JobRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
@@ -618,7 +779,7 @@ func (s *Server) approveJob(id string) {
 	defer f.Close()
 
 	var target JobRecord
-	scanner := newLineReader(f)
+	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		var rec JobRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
@@ -663,7 +824,7 @@ func (s *Server) rejectJob(id string) {
 	defer f.Close()
 
 	var queueName string
-	scanner := newLineReader(f)
+	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		var rec JobRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
@@ -715,64 +876,6 @@ func (s *Server) rejectJob(id string) {
 func respondJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
-}
-
-// lineReader reads lines from an io.Reader, handling potentially large files.
-type lineReader struct {
-	r       io.Reader
-	buf     []byte
-	line    []byte
-	err     error
-	maxLine int
-}
-
-func newLineReader(r io.Reader) *lineReader {
-	return &lineReader{r: r, maxLine: 1 << 20} // 1 MB max line
-}
-
-func (lr *lineReader) Scan() bool {
-	var line []byte
-	var err error
-	for {
-		line, err = lr.readLine()
-		if err != nil || len(line) == 0 {
-			lr.err = err
-			return false
-		}
-		// Skip empty lines.
-		if len(strings.TrimSpace(string(line))) > 0 {
-			lr.line = line
-			return true
-		}
-	}
-}
-
-func (lr *lineReader) Bytes() []byte { return lr.line }
-
-func (lr *lineReader) Err() error { return lr.err }
-
-func (lr *lineReader) readLine() ([]byte, error) {
-	lr.buf = lr.buf[:0]
-	for {
-		b := make([]byte, 1)
-		n, err := lr.r.Read(b)
-		if n == 0 {
-			if err != nil {
-				return lr.buf, err
-			}
-			continue
-		}
-		if lr.buf == nil && err != nil {
-			return nil, err
-		}
-		if b[0] == '\n' {
-			return lr.buf, err
-		}
-		lr.buf = append(lr.buf, b[0])
-		if len(lr.buf) > lr.maxLine {
-			return lr.buf, nil
-		}
-	}
 }
 
 // FormatDuration formats a duration string for display.
@@ -845,4 +948,103 @@ func DivCost(total float64, count int) float64 {
 		return 0
 	}
 	return total / float64(count)
+}
+
+const (
+	defaultLogTail = 256 << 10 // bytes sent when ?tail is not given
+	maxFormatBytes = 1 << 20   // bytes parsed for the formatted view
+)
+
+// jobLogPath returns the transcript (or output) file for a job, if any.
+func jobLogPath(st *agentjob.Store, id string) string {
+	for _, name := range []string{"transcript.txt", "output.txt"} {
+		f := filepath.Join(st.JobDir(id), name)
+		if fi, err := os.Stat(f); err == nil && fi.Size() > 0 {
+			return f
+		}
+	}
+	return ""
+}
+
+// handleJobLogStream streams the raw transcript of a job without loading it
+// into memory. By default only the last 256 KB are sent (?tail=N bytes;
+// tail=0 sends everything), so a huge log never blocks reading.
+func (s *Server) handleJobLogStream(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !agentjob.ValidID(id) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	st, err := agentjob.Open(filepath.Dir(s.historyPath))
+	if err != nil {
+		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	filePath := jobLogPath(st, id)
+	if filePath == "" {
+		http.Error(w, "no log found", http.StatusNotFound)
+		return
+	}
+	f, err := os.Open(filePath)
+	if err != nil {
+		http.Error(w, "could not open log", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		http.Error(w, "could not open log", http.StatusInternalServerError)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusServiceUnavailable)
+		return
+	}
+
+	tail := int64(defaultLogTail)
+	if v := r.URL.Query().Get("tail"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			tail = n
+		}
+	}
+	size := fi.Size()
+	truncated := tail > 0 && size > tail
+	if truncated {
+		if _, err := f.Seek(size-tail, io.SeekStart); err != nil {
+			http.Error(w, "could not seek log", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	h := w.Header()
+	h.Set("Content-Type", "text/plain; charset=utf-8")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("X-Accel-Buffering", "no")
+	h.Set("X-Log-Size", strconv.FormatInt(size, 10))
+	h.Set("X-Log-Truncated", strconv.FormatBool(truncated))
+
+	buf := make([]byte, 32*1024)
+	first := truncated // drop the partial first line after a seek
+	for {
+		n, err := f.Read(buf)
+		chunk := buf[:n]
+		if first && n > 0 {
+			if i := bytes.IndexByte(chunk, '\n'); i >= 0 {
+				chunk = chunk[i+1:]
+				first = false
+			} else {
+				chunk = nil
+			}
+		}
+		if len(chunk) > 0 {
+			if _, werr := w.Write(chunk); werr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if err != nil || r.Context().Err() != nil {
+			return
+		}
+	}
 }
