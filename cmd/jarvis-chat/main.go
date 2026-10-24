@@ -22,9 +22,7 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	_ "embed"
 	"log"
 	"os"
 	"os/signal"
@@ -35,11 +33,10 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
-
-//go:embed system_prompt.txt
-var defaultSystemPrompt string
 
 const (
 	// Typing is refreshed every 8 seconds to keep the indicator alive.
@@ -53,6 +50,9 @@ const (
 
 	// Default model for chat.
 	defaultModel = "jarvis-brain"
+
+	// Default voice key.
+	defaultVoice = "jarvis"
 )
 
 // Timeouts are variables so tests can shorten them.
@@ -107,7 +107,28 @@ func main() {
 		modelName = defaultModel
 	}
 
-	// Conversation history for the primary bot.
+	// Select voice (personality) from config.
+	voiceKey := os.Getenv("BOT_N_VOICE")
+	if voiceKey == "" {
+		voiceKey = defaultVoice
+	}
+	voice := voices.Get(voiceKey)
+	log.Printf("jarvis-chat: using voice %q (%s)", voiceKey, voice.Name)
+
+	// Create the Hermes agent for intent classification and action execution.
+	hermesAgent := hermes.New(hermes.Config{
+		Model:       modelName,
+		MaxHistory:  20,
+		AccessLevel: config.AccessFull,
+	})
+	hermesAgent.SetOllamaClient(ollamaClient)
+
+	// Register default actions.
+	for _, action := range hermes.DefaultActions() {
+		hermesAgent.Register(action)
+	}
+
+	// Conversation history: alternating user/assistant turns.
 	var history []string // [user1, assistant1, user2, assistant2, ...]
 
 	// Start each bot in a goroutine.
@@ -165,7 +186,7 @@ func main() {
 					return
 				}
 
-				handleMessage(d, ollamaClient, modelName, in, &history)
+				handleMessage(d, hermesAgent, voice, in, &history)
 			})
 		} else {
 			// Additional bots: Hermes runner with enhanced capabilities.
@@ -223,7 +244,7 @@ func pickOwnerID(bCfg config.BotConfig, confDir string) string {
 	return ""
 }
 
-func handleMessage(d sender, client *models.Client, model string, in chat.Incoming, history *[]string) {
+func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, in chat.Incoming, history *[]string) {
 	content := in.Content
 	ctx, cancel := context.WithTimeout(context.Background(), maxTimeout)
 	defer cancel()
@@ -239,22 +260,7 @@ func handleMessage(d sender, client *models.Client, model string, in chat.Incomi
 	defer typingCancel()
 	go typingLoop(typingCtx, d)
 
-	// Build the chat messages for the brain.
-	messages := buildMessages(content, *history)
-
-	// Call the brain.
-	answerCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		answer, err := client.Chat(model, messages)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		answerCh <- answer
-	}()
-
-	// Busy notice after 20s.
+	// Busy notice state.
 	busySent := false
 	var job string
 	if b, err := os.ReadFile(os.Getenv("JARVIS_CONF") + "/current-job"); err == nil {
@@ -264,25 +270,34 @@ func handleMessage(d sender, client *models.Client, model string, in chat.Incomi
 		job = "an unknown task"
 	}
 
-	var answer string
+	// Step 1: Use Hermes to classify the message.
+	resultCh := make(chan *hermes.Result, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, err := hAgent.Classify(ctx, content)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	var result *hermes.Result
 	select {
-	case answer = <-answerCh:
+	case result = <-resultCh:
 	case err := <-errCh:
-		log.Printf("jarvis-chat: brain error: %v", err)
-		// Still try to reply with what we have.
-		time.Sleep(2 * time.Second) // brief pause before error reply
+		log.Printf("jarvis-chat: classify error: %v", err)
+		time.Sleep(2 * time.Second)
 		typingCancel()
-		reply := "Sorry, my brain stumbled; try again in a moment."
-		_ = d.Notify(ctx, reply)
+		_ = d.Notify(ctx, "Sorry, my brain stumbled; try again in a moment.")
 		return
 	case <-time.After(busyTimeout):
 		_ = d.Notify(ctx, "Busy on "+job+", my answer is coming")
 		busySent = true
-		// Wait for the answer or timeout.
 		select {
-		case answer = <-answerCh:
+		case result = <-resultCh:
 		case err := <-errCh:
-			log.Printf("jarvis-chat: brain error: %v", err)
+			log.Printf("jarvis-chat: classify error: %v", err)
 			typingCancel()
 			_ = d.Notify(ctx, "Sorry, the brain is tied up; ask me again in a bit")
 			return
@@ -299,15 +314,90 @@ func handleMessage(d sender, client *models.Client, model string, in chat.Incomi
 		return
 	}
 
+	var answer string
+
+	switch result.Type {
+	case hermes.TypeAction:
+		// Step 2a: Execute the action via Hermes.
+		status, err := hAgent.Execute(ctx, result)
+		if err != nil {
+			log.Printf("jarvis-chat: execute error: %v", err)
+			typingCancel()
+			_ = d.Notify(ctx, "Sorry, that action failed; try again.")
+			return
+		}
+		answer = status
+
+	case hermes.TypeChat:
+		// Step 2b: Conversational — route through Hermes with full
+		// conversation history and voice system prompt.
+		systemPrompt := voice.SystemPrompt
+		if status := getStatusLine(); status != "" {
+			systemPrompt += "\n\nCurrent status:\n" + status
+		}
+
+		answerCh := make(chan string, 1)
+		errCh2 := make(chan error, 1)
+		go func() {
+			a, err := hAgent.Chat(ctx, systemPrompt, *history, content)
+			if err != nil {
+				errCh2 <- err
+				return
+			}
+			answerCh <- a
+		}()
+
+		select {
+		case answer = <-answerCh:
+		case err := <-errCh2:
+			log.Printf("jarvis-chat: brain error: %v", err)
+			typingCancel()
+			_ = d.Notify(ctx, "Sorry, my brain stumbled; try again in a moment.")
+			return
+		case <-time.After(busyTimeout):
+			if !busySent {
+				_ = d.Notify(ctx, "Busy on "+job+", my answer is coming")
+				busySent = true
+			}
+			select {
+			case answer = <-answerCh:
+			case err := <-errCh2:
+				log.Printf("jarvis-chat: brain error: %v", err)
+				typingCancel()
+				_ = d.Notify(ctx, "Sorry, the brain is tied up; ask me again in a bit")
+				return
+			case <-ctx.Done():
+				typingCancel()
+				_ = d.Notify(ctx, "Sorry, the brain is tied up; ask me again in a bit")
+				return
+			}
+		case <-ctx.Done():
+			typingCancel()
+			if !busySent {
+				_ = d.Notify(ctx, "Sorry, the brain is tied up; ask me again in a bit")
+			}
+			return
+		}
+
+	default:
+		log.Printf("jarvis-chat: unknown result type %q", result.Type)
+		typingCancel()
+		_ = d.Notify(ctx, "Sorry, I didn't understand that classification.")
+		return
+	}
+
 	// Got an answer.
 	typingCancel()
 
-	visible, extra := applySchedule(answer, in)
-	if extra != "" {
-		if strings.TrimSpace(visible) != "" {
-			answer = strings.TrimSpace(visible) + "\n\n" + extra
-		} else {
-			answer = extra
+	// For chat replies, check for SCHEDULE blocks to enqueue jobs.
+	if result.Type == hermes.TypeChat {
+		visible, extra := applySchedule(answer, in)
+		if extra != "" {
+			if strings.TrimSpace(visible) != "" {
+				answer = strings.TrimSpace(visible) + "\n\n" + extra
+			} else {
+				answer = extra
+			}
 		}
 	}
 
@@ -336,25 +426,18 @@ func typingLoop(ctx context.Context, d sender) {
 }
 
 // buildMessages constructs the Ollama chat messages from the system prompt,
-// status line, and conversation history.
-func systemPromptText() string {
-	confDir := os.Getenv("JARVIS_CONF")
-	if confDir == "" {
-		home, _ := os.UserHomeDir()
-		confDir = filepath.Join(home, ".config", "jarvis")
-	}
-	if b, err := os.ReadFile(filepath.Join(confDir, "chat-prompt.txt")); err == nil {
-		if t := string(bytes.TrimSpace(b)); t != "" {
-			return t
-		}
-	}
-	return strings.TrimSpace(defaultSystemPrompt)
+// status line, and conversation history. Uses the default "jarvis" voice.
+func buildMessages(userMsg string, history []string) []models.ChatMessage {
+	return buildMessagesWithVoice(userMsg, history, voices.Get(""))
 }
 
-func buildMessages(userMsg string, history []string) []models.ChatMessage {
+// buildMessagesWithVoice constructs the Ollama chat messages using the
+// given voice's system prompt, the current status line, and conversation
+// history.
+func buildMessagesWithVoice(userMsg string, history []string, voice *voices.Voice) []models.ChatMessage {
 	status := getStatusLine()
 
-	systemPrompt := systemPromptText()
+	systemPrompt := voice.SystemPrompt
 	if status != "" {
 		systemPrompt += "\n\nCurrent status:\n" + status
 	}

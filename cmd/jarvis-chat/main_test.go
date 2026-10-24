@@ -17,7 +17,10 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
 
 // testDiscord mimics *chat.Discord for tests.
@@ -71,8 +74,14 @@ func (d *testDiscord) typingCount() int {
 // fakeOllamaServer creates an httptest.Server that responds to
 // /v1/chat/completions. delay controls how long before it responds.
 // reply is the assistant text to return.
+//
+// The server handles two phases: the first call is a Hermes classify
+// request (returns a JSON "chat" result), and subsequent calls are
+// Hermes Chat requests (return the reply text).
 func fakeOllamaServer(t *testing.T, reply string, delay time.Duration) *httptest.Server {
 	t.Helper()
+	var callCount int
+	var mu sync.Mutex
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -82,13 +91,35 @@ func fakeOllamaServer(t *testing.T, reply string, delay time.Duration) *httptest
 			time.Sleep(delay)
 		}
 		var req struct {
-			Model    string        `json:"model"`
+			Model    string           `json:"model"`
 			Messages []models.ChatMessage `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+
+		mu.Lock()
+		callCount++
+		isFirst := callCount == 1
+		mu.Unlock()
+
+		// First call: Hermes classify — return JSON chat result.
+		if isFirst {
+			classifyReply := fmt.Sprintf(`{"type":"chat","reply":"%s"}`, reply)
+			resp := models.ChatResponse{
+				Choices: []struct {
+					Message models.ChatMessage `json:"message"`
+				}{
+					{Message: models.ChatMessage{Role: "assistant", Content: classifyReply}},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// Subsequent calls: Hermes Chat — return the reply.
 		resp := models.ChatResponse{
 			Choices: []struct {
 				Message models.ChatMessage `json:"message"`
@@ -99,6 +130,22 @@ func fakeOllamaServer(t *testing.T, reply string, delay time.Duration) *httptest
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}))
+}
+
+// newTestHermesAgent creates a Hermes agent wired to the Ollama client
+// for use in tests. Default actions are registered so fast-classified
+// action messages (like "check status") have handlers.
+func newTestHermesAgent(client *models.Client) *hermes.Agent {
+	agent := hermes.New(hermes.Config{
+		Model:       "jarvis-brain",
+		MaxHistory:  10,
+		AccessLevel: config.AccessFull,
+	})
+	agent.SetOllamaClient(client)
+	for _, a := range hermes.DefaultActions() {
+		agent.Register(a)
+	}
+	return agent
 }
 
 func TestHandleMessage_Reply(t *testing.T) {
@@ -115,16 +162,14 @@ func TestHandleMessage_Reply(t *testing.T) {
 	server := fakeOllamaServer(t, "Hello! How can I help?", 100*time.Millisecond)
 	defer server.Close()
 
-	client := models.NewClient()
-	client = &models.Client{} // reset to use our server
-	// We can't set baseURL directly (it's private), so we use env.
 	t.Setenv("OLLAMA_URL", server.URL)
-	client = models.NewClient()
+	client := models.NewClient()
+	hAgent := newTestHermesAgent(client)
 
 	d := &testDiscord{}
 	var history []string
 
-	handleMessage(d, client, "jarvis-brain", chat.Incoming{Content: "Hi Jarvis!"}, &history)
+	handleMessage(d, hAgent, voices.Get(""), chat.Incoming{Content: "Hi Jarvis!"}, &history)
 
 	// Should have typed at least once.
 	if d.typingCount() < 1 {
@@ -164,6 +209,7 @@ func TestHandleMessage_BusyNotice(t *testing.T) {
 
 	t.Setenv("OLLAMA_URL", server.URL)
 	client := models.NewClient()
+	hAgent := newTestHermesAgent(client)
 
 	confDir := t.TempDir()
 	t.Setenv("JARVIS_CONF", confDir)
@@ -172,7 +218,9 @@ func TestHandleMessage_BusyNotice(t *testing.T) {
 	d := &testDiscord{}
 	var history []string
 
-	handleMessage(d, client, "jarvis-brain", chat.Incoming{Content: "What are you doing?"}, &history)
+	// "What are you working on?" is fast-classified as check_status action,
+	// so use a message that's clearly conversational to exercise the chat path.
+	handleMessage(d, hAgent, voices.Get(""), chat.Incoming{Content: "Tell me a fun fact about robots"}, &history)
 
 	// Should have sent busy notice then the actual reply.
 	if n := d.notifyCount(); n != 2 {
@@ -208,6 +256,7 @@ func TestHandleMessage_Timeout(t *testing.T) {
 
 	t.Setenv("OLLAMA_URL", server.URL)
 	client := models.NewClient()
+	hAgent := newTestHermesAgent(client)
 
 	confDir := t.TempDir()
 	t.Setenv("JARVIS_CONF", confDir)
@@ -216,7 +265,7 @@ func TestHandleMessage_Timeout(t *testing.T) {
 	d := &testDiscord{}
 	var history []string
 
-	handleMessage(d, client, "jarvis-brain", chat.Incoming{Content: "Hello?"}, &history)
+	handleMessage(d, hAgent, voices.Get(""), chat.Incoming{Content: "Hello?"}, &history)
 
 	// Should have sent busy notice then timeout message.
 	if n := d.notifyCount(); n != 2 {
@@ -300,14 +349,9 @@ func TestTailLines(t *testing.T) {
 }
 
 func TestSystemPromptForbidsCoding(t *testing.T) {
-	t.Setenv("JARVIS_CONF", t.TempDir())
-	p := systemPromptText()
-	for _, want := range []string{"no shell", "no secrets", "jobs", "agent-run"} {
-		if !strings.Contains(strings.ToLower(p), strings.ToLower(want)) && !strings.Contains(p, want) {
-			// allow either casing; also match "You cannot" + jobs wording
-			_ = want
-		}
-	}
+	// The system prompt comes from the voice registry.
+	voice := voices.Get("")
+	p := voice.SystemPrompt
 	low := strings.ToLower(p)
 	if !strings.Contains(low, "shell") || !strings.Contains(low, "secret") {
 		t.Fatalf("prompt missing shell/secrets ban:\n%s", p)
@@ -324,13 +368,30 @@ func TestSystemPromptForbidsCoding(t *testing.T) {
 	}
 }
 
-func TestSystemPromptFileOverride(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("JARVIS_CONF", dir)
-	if err := os.WriteFile(dir+"/chat-prompt.txt", []byte("OVERRIDE PROMPT"), 0o644); err != nil {
-		t.Fatal(err)
+func TestSystemPromptVoiceSelection(t *testing.T) {
+	// Verify that different voices return different system prompts.
+	jarvis := voices.Get("jarvis")
+	if jarvis == nil {
+		t.Fatal("jarvis voice not found")
 	}
-	if got := systemPromptText(); got != "OVERRIDE PROMPT" {
-		t.Fatalf("got %q", got)
+	if !strings.Contains(jarvis.SystemPrompt, "Jarvis") {
+		t.Errorf("jarvis voice missing 'Jarvis' in prompt")
+	}
+
+	glados := voices.Get("glados")
+	if glados == nil {
+		t.Fatal("glados voice not found")
+	}
+	if !strings.Contains(glados.SystemPrompt, "GLaDOS") {
+		t.Errorf("glados voice missing 'GLaDOS' in prompt")
+	}
+
+	// Unknown key falls back to default.
+	unknown := voices.Get("nonexistent")
+	if unknown == nil {
+		t.Fatal("unknown voice returned nil")
+	}
+	if unknown.Key != jarvis.Key {
+		t.Errorf("fallback voice key = %q, want %q", unknown.Key, jarvis.Key)
 	}
 }
