@@ -1,0 +1,131 @@
+# Jarvis HomeAI Home Assistant Configuration
+#
+# Copy these settings into your Home Assistant configuration.
+# See README.md for installation instructions.
+#
+# === 1. Input Booleans (switches) ===
+#
+# Add to configuration.yaml:
+#
+# input_boolean:
+#   job_announce:
+#     name: "Jarvis Job Announcements"
+#     initial: on
+#     icon: "mdi:volume-source"
+#
+# This switch controls whether Jarvis announces job completions
+# via TTS to all speakers when you are home.
+#
+# === 2. REST Sensors (poll Jarvis metrics) ===
+#
+# These sensors pull real-time data from the Jarvis system.
+# Add to configuration.yaml:
+#
+# rest:
+#   resource: "http://localhost:9101/metrics"
+#   method: GET
+#   scan_interval: 30
+#   sensor:
+#     - name: "Jarvis Jobs Completed"
+#       unique_id: "jarvis_jobs_completed"
+#       value_template: "{{ value | regex_findall_index('jarvis_jobs_completed\\s+([0-9]+)', 1) | default('0') }}"
+#       device_class: "timestamp"
+#       unit_of_measurement: "jobs"
+#     - name: "Jarvis Jobs Failed"
+#       unique_id: "jarvis_jobs_failed"
+#       value_template: "{{ value | regex_findall_index('jarvis_jobs_failed\\s+([0-9]+)', 1) | default('0') }}"
+#       unit_of_measurement: "jobs"
+#     - name: "Jarvis Requests Total"
+#       unique_id: "jarvis_requests_total"
+#       value_template: "{{ value | regex_findall_index('jarvis_requests_total\\s+([0-9]+)', 1) | default('0') }}"
+#       unit_of_measurement: "requests"
+#
+# === 3. Command Line Sensors (system metrics) ===
+#
+# These sensors pull GPU and system info.
+# Add to configuration.yaml:
+#
+# sensor:
+#   - platform: command_line
+#     name: "Jarvis GPU Memory Used"
+#     unique_id: "jarvis_gpu_mem_used"
+#     command: "nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null || echo 0"
+#     scan_interval: 15
+#     unit_of_measurement: "MiB"
+#     device_class: "data_size"
+#
+#   - platform: command_line
+#     name: "Jarvis GPU Memory Total"
+#     unique_id: "jarvis_gpu_mem_total"
+#     command: "nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null || echo 0"
+#     scan_interval: 60
+#     unit_of_measurement: "MiB"
+#     device_class: "data_size"
+#
+#   - platform: command_line
+#     name: "Jarvis GPU Temperature"
+#     unique_id: "jarvis_gpu_temp"
+#     command: "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null || echo 0"
+#     scan_interval: 30
+#     unit_of_measurement: "°C"
+#     device_class: "temperature"
+#
+#   - platform: command_line
+#     name: "Jarvis GPU Power Draw"
+#     unique_id: "jarvis_gpu_power"
+#     command: "nvidia-smi --query-gpu=power.draw --format=csv,noheader 2>/dev/null || echo 0"
+#     scan_interval: 15
+#     unit_of_measurement: "W"
+#     device_class: "power"
+#
+#   - platform: command_line
+#     name: "Jarvis GPU Utilization"
+#     unique_id: "jarvis_gpu_util"
+#     command: "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader 2>/dev/null || echo 0"
+#     scan_interval: 15
+#     unit_of_measurement: "%"
+#
+#   - platform: command_line
+#     name: "Jarvis Current Job"
+#     unique_id: "jarvis_current_job"
+#     command: "cat /home/agent/.config/jarvis/current-job 2>/dev/null || echo 'idle'"
+#     scan_interval: 10
+#
+#   - platform: command_line
+#     name: "Jarvis Engine Status"
+#     unique_id: "jarvis_engine_status"
+#     command: "systemctl is-active jarvis-engine.service 2>/dev/null || echo 'inactive'"
+#     scan_interval: 30
+#
+#   - platform: command_line
+#     name: "Jarvis Worker Status"
+#     unique_id: "jarvis_worker_status"
+#     command: "systemctl is-active worker.service 2>/dev/null || echo 'inactive'"
+#     scan_interval: 30
+#
+#   - platform: command_line
+#     name: "Jarvis Chat Status"
+#     unique_id: "jarvis_chat_status"
+#     command: "systemctl is-active jarvis-chat 2>/dev/null || echo 'inactive'"
+#     scan_interval: 30
+#
+#   - platform: command_line
+#     name: "Jarvis Loaded Model"
+#     unique_id: "jarvis_loaded_model"
+#     command: "curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"models\":[0],{}).get(\"name\",\"none\"))' 2>/dev/null || echo 'unknown'"
+#     scan_interval: 60
+#
+# === 4. Automations ===
+#
+# Add to configuration.yaml or create as YAML automations:
+#
+# automation:
+#   - alias: "Jarvis Job Completed Notification"
+#     trigger:
+#       - platform: state
+#         entity_id: sensor.jarvis_current_job
+#         from: "idle"
+#         to: "idle"
+#     condition: []
+#     action: []
+#     # The TTS announcement is handled by agent-run calling jarvis-homeai.
