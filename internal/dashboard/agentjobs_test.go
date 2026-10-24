@@ -9,9 +9,9 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 )
 
-func TestIndexRendersAgentJobs(t *testing.T) {
+func TestAgentJobsSection(t *testing.T) {
 	funcs := template.FuncMap{"statusClass": StatusClass, "formatDuration": FormatDuration, "formatCost": FormatCost, "divCost": DivCost, "slotRuntime": SlotRuntime, "jobPath": JobPath}
-	tmpl, err := template.New("index.html").Funcs(funcs).ParseFS(templatesFS, "templates/index.html")
+	tmpl, err := template.New("").Funcs(funcs).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,7 +20,7 @@ func TestIndexRendersAgentJobs(t *testing.T) {
 		State: agentjob.State{Status: agentjob.Done, RanWith: "sonnet", PRURL: "https://github.com/o/r/pull/9"},
 	}}}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, st); err != nil {
+	if err := tmpl.ExecuteTemplate(&buf, "agent-jobs-section", st); err != nil {
 		t.Fatal(err)
 	}
 	for _, w := range []string{"d0 — Fix poll", "done", "sonnet", "pull/9", "j0", `href="/jobs/d0"`, ">Log<"} {

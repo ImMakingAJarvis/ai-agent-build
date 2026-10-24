@@ -1,0 +1,200 @@
+{{define "lightweight-content"}}
+<p class="subtitle">
+  <span class="status-dot {{ if .OllamaHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
+  Engine {{ if .OllamaHealthy }}healthy{{ else }}unreachable{{ end }}
+  &nbsp;&nbsp;&middot;&nbsp;&nbsp;
+  <span class="status-dot {{ if .RabbitMQHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
+  RabbitMQ {{ if .RabbitMQHealthy }}healthy{{ else }}unreachable{{ end }}
+  &nbsp;&nbsp;&middot;&nbsp;&nbsp;
+  <a href="http://localhost:8100/voice/chat" target="_blank" style="color: var(--blue); text-decoration: none;">Voice Chat</a>
+</p>
+
+<!-- Queue Depths (rendered inline) -->
+<div class="section">
+  <div class="section-title">Queue Depths</div>
+  <div class="queue-row">
+    {{ range .Queues }}
+    <div class="queue-card priority-{{ .Name }}">
+      <div class="name">{{ .Name }}</div>
+      <div class="depth">{{ .Depth }}</div>
+      <div class="label">pending jobs</div>
+    </div>
+    {{ else }}
+    <div class="queue-card">
+      <div class="name">—</div>
+      <div class="depth">—</div>
+      <div class="label">RabbitMQ unreachable</div>
+    </div>
+    {{ end }}
+  </div>
+</div>
+
+{{end}}
+
+{{define "pending-section"}}
+<!-- Pending Jobs Detail -->
+<div class="section">
+  <div class="section-title">
+    Pending Jobs
+    <button class="btn" id="pending-refresh-btn" onclick="refreshPending()">Refresh</button>
+  </div>
+  <div id="pending-content">
+    <div class="empty-state">Click Refresh to load pending jobs from queues.</div>
+  </div>
+</div>
+
+<script>
+async function refreshPending() {
+  const container = document.getElementById('pending-content');
+  const btn = document.getElementById('pending-refresh-btn');
+  container.innerHTML = '<div class="empty-state">Loading&hellip;</div>';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/pending');
+    if (!resp.ok) {
+      container.innerHTML = '<div class="error-state">Failed to load: ' + resp.status + '</div>';
+      btn.disabled = false;
+      return;
+    }
+    const data = await resp.json();
+    if (!data || data.length === 0) {
+      container.innerHTML = '<div class="empty-state">No pending queues.</div>';
+      btn.disabled = false;
+      return;
+    }
+    let html = '';
+    for (const pq of data) {
+      html += '<div class="pending-detail">';
+      html += '<div class="pending-header" onclick="this.nextElementSibling.classList.toggle(\'open\')">';
+      html += '<span class="name">' + esc(pq.name) + '</span>';
+      html += '<span class="count">' + pq.depth + ' message' + (pq.depth !== 1 ? 's' : '') + '</span>';
+      html += '</div>';
+      html += '<div class="pending-body">';
+      if (pq.jobs && pq.jobs.length > 0) {
+        for (const job of pq.jobs) {
+          html += '<div class="pending-row">';
+          html += '<div><span class="pending-id">' + esc(job.id) + '</span>';
+          html += '<span class="pending-meta"> &middot; ' + esc(job.type) + ' &middot; ' + esc(job.source) + '</span></div>';
+          if (job.prompt) html += '<div class="pending-prompt" title="' + esc(job.prompt) + '">' + esc(job.prompt) + '</div>';
+          html += '<div class="pending-meta">priority=' + job.priority;
+          if (job.force_api) html += ' force-api';
+          if (job.model_override) html += ' override=' + esc(job.model_override);
+          if (job.created_at) html += ' &middot; ' + job.created_at;
+          html += '</div></div>';
+        }
+      } else {
+        html += '<div class="pending-row" style="color: var(--muted);">No messages to preview.</div>';
+      }
+      html += '</div></div>';
+    }
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = '<div class="error-state">Error: ' + esc(e.message) + '</div>';
+  }
+  btn.disabled = false;
+}
+function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+</script>
+
+{{end}}
+
+{{define "jobs-section"}}
+<!-- Cost Summary -->
+<div class="section">
+  <div class="section-title">Cost Tracking</div>
+  <div class="cost-row">
+    <div class="cost-card">
+      <div class="value cost-total">{{ formatCost .TotalCost }}</div>
+      <div class="label">Total Estimated Cost</div>
+    </div>
+    <div class="cost-card">
+      <div class="value cost-api">{{ .APICount }}</div>
+      <div class="label">API Jobs</div>
+    </div>
+    <div class="cost-card">
+      <div class="value cost-local">{{ .LocalCount }}</div>
+      <div class="label">Local Jobs</div>
+    </div>
+    <div class="cost-card">
+      <div class="value cost-rate">
+        {{ if and .APICount (ne .APICount 0) }}{{ formatCost (divCost .TotalCost .APICount) }}{{ else }}-{{ end }}
+      </div>
+      <div class="label">Avg Cost / API Job</div>
+    </div>
+  </div>
+</div>
+
+<!-- Recent Jobs -->
+<div class="section">
+  <div class="section-title">Recent Jobs</div>
+  {{ if .RecentJobs }}
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Status</th>
+        <th>ID</th>
+        <th>Type</th>
+        <th>Model</th>
+        <th>Queue</th>
+        <th>Cost</th>
+        <th>Started</th>
+        <th>Duration</th>
+        <th>Log</th>
+        <th>Error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .RecentJobs }}
+      <tr>
+        <td class="{{ statusClass .Status }}">{{ .Status }}</td>
+        <td>{{ .ID }}</td>
+        <td>{{ .Type }}</td>
+        <td>
+          <span class="model-badge">{{ .Model }}</span>
+          {{ if .UseLocal }}<span class="local-badge">local</span>{{ else }}<span class="api-badge">api</span>{{ end }}
+        </td>
+        <td>{{ .Queue }}</td>
+        <td class="cost-cell">{{ formatCost .EstimatedCost }}</td>
+        <td class="timestamp">{{ .StartedAt }}</td>
+        <td>{{ .Duration }}</td>
+        <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
+        <td class="error-text" title="{{ .Error }}">{{ .Error }}</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  </div>
+  {{ else }}
+  <div class="empty-state">No jobs recorded yet.</div>
+  {{ end }}
+</div>
+{{end}}
+
+{{define "agent-jobs-section"}}
+<!-- Agent Jobs (build work) -->
+<div class="section">
+  <div class="section-title">Agent Jobs</div>
+  {{ if .AgentJobs }}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Job</th><th>Status</th><th>Driver</th><th>Log</th><th>PR</th><th>Depends on</th></tr></thead>
+    <tbody>
+      {{ range .AgentJobs }}
+      <tr>
+        <td title="{{ .ID }}">{{ .ID }} — {{ .Title }}</td>
+        <td>{{ .Status }}</td>
+        <td>{{ if .RanWith }}{{ .RanWith }}{{ else }}{{ .Spec.Driver }}{{ end }}</td>
+        <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
+        <td>{{ if .PRURL }}<a href="{{ .PRURL }}">PR</a>{{ end }}</td>
+        <td>{{ range .DependsOn }}{{ . }} {{ end }}</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  </div>
+  {{ else }}
+  <div class="empty-state">No agent jobs.</div>
+  {{ end }}
+</div>
+{{end}}
