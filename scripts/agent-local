@@ -47,10 +47,10 @@ fi
 unset ANTHROPIC_API_KEY
 export ANTHROPIC_BASE_URL="${ENGINE_URL:-${OLLAMA_URL:-http://localhost:11434}}"
 export ANTHROPIC_AUTH_TOKEN=ollama
-# Tell Claude Code the real window (matches jarvis-engine --ctx-size / LOCAL_CONTEXT_TOKENS) so it compacts in time.
+# Match live jarvis-engine --ctx-size 131072 (128k). Override with LOCAL_CONTEXT_TOKENS / LOCAL_OUTPUT_TOKENS.
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${LOCAL_CONTEXT_TOKENS:-131072}"
-# Default Claude Code output cap is 32k; Qwen thinking + tools overflow it. 64k is half of the 128k engine window.
-export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${LOCAL_OUTPUT_TOKENS:-${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-65536}}"
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${LOCAL_OUTPUT_TOKENS:-${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-131072}}"
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW="${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-${LOCAL_CONTEXT_TOKENS:-131072}}"
 # jarvis-brain is not an Anthropic ID; skip SDK model-name validation (telemetry: unrecognized_model).
 export ANTHROPIC_CUSTOM_MODEL_OPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION:-$LOCAL_MODEL}"
 export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="${ANTHROPIC_CUSTOM_MODEL_OPTION_NAME:-$LOCAL_MODEL}"
