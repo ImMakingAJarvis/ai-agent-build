@@ -1,4 +1,33 @@
-{{- if . }}
+{{define "approvals"}}
+<div id="approvals">
+  {{ if eq .Total 0 }}
+  <div class="empty-state">No jobs waiting for cost approval.</div>
+  {{ else }}
+  <p class="list-meta">{{ .Total }} denied in history. Showing the newest {{ .Shown }}{{ if .HasMore }} — older stay in jobs.jsonl{{ end }}.</p>
+  <div id="approval-list">
+    {{ template "approval-cards" .Items }}
+  </div>
+  {{ if .HasMore }}
+  <div id="approval-more" class="more-wrap">
+    <button class="btn" hx-get="/html/approvals?offset={{ .NextOffset }}" hx-target="#approval-more" hx-swap="outerHTML">Load {{ if gt .Hidden 25 }}25{{ else }}{{ .Hidden }}{{ end }} more ({{ .Hidden }} older on disk)</button>
+  </div>
+  {{ end }}
+  {{ end }}
+</div>
+{{end}}
+
+{{define "approvals-more"}}
+{{ template "approval-cards" .Items }}
+{{ if .HasMore }}
+<div id="approval-more" class="more-wrap">
+  <button class="btn" hx-get="/html/approvals?offset={{ .NextOffset }}" hx-target="#approval-more" hx-swap="outerHTML">Load {{ if gt .Hidden 25 }}25{{ else }}{{ .Hidden }}{{ end }} more ({{ .Hidden }} older on disk)</button>
+</div>
+{{ else }}
+<p class="list-meta">All {{ .Total }} denied jobs are on this page. History is still in jobs.jsonl.</p>
+{{ end }}
+{{end}}
+
+{{define "approval-cards"}}
 {{ range . }}
 <div class="approval-card">
   <div class="approval-top">
@@ -6,15 +35,13 @@
       <div class="approval-info">
         <strong>{{ .ID }}</strong> · {{ .Type }} · {{ .Source }}
       </div>
-      <div class="approval-info">
-        {{ if .Prompt }}<em>"{{ .Prompt }}"</em>{{ end }}
-      </div>
     </div>
     <div class="approval-cost">{{ formatCost .EstimatedCost }}</div>
   </div>
   <div class="approval-info">
     Model: {{ .Model }} · Queue: {{ .Queue }} · {{ .StartedAt }}
     {{ if .InputTokens }} · {{ .InputTokens }} in / {{ .OutputTokens }} out tokens{{ end }}
+    · <a class="log-link" href="{{ jobPath .ID }}">Log</a>
   </div>
   <div class="approval-actions">
     <button class="btn btn-approve" hx-post="/api/approvals?id={{ .ID }}&action=approve" hx-swap="outerHTML" hx-target="closest .approval-card">Approve</button>
@@ -22,6 +49,4 @@
   </div>
 </div>
 {{ end }}
-{{- else }}
-<div style="color: var(--muted); font-size: 0.85rem;">No denied jobs.</div>
-{{- end }}
+{{end}}

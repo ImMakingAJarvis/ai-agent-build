@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -118,6 +119,29 @@ type DashboardState struct {
 	TotalCost      float64            `json:"total_cost"`      // Running total of estimated costs for API jobs
 	APICount       int                `json:"api_job_count"`   // Number of API-dispatched jobs
 	LocalCount     int                `json:"local_job_count"` // Number of local jobs
+	AgentJobTotal  int                `json:"agent_job_total,omitempty"`
+	RecentJobTotal int                `json:"recent_job_total,omitempty"`
+}
+
+// ApprovalPage is one window of the denied-job list.
+type ApprovalPage struct {
+	Items []ApprovalInfo
+	ListPage
+}
+
+// AgentJobsPage is one window of the agent job store.
+type AgentJobsPage struct {
+	Items []agentjob.Job
+	ListPage
+}
+
+// RecentJobsPage is cost cards plus one window of jobs.jsonl.
+type RecentJobsPage struct {
+	Items     []JobRecord
+	TotalCost float64
+	APICount  int
+	LocalCount int
+	ListPage
 }
 
 // Server holds the dashboard dependencies.
@@ -130,6 +154,12 @@ type Server struct {
 	rabbitConn   *queue.Conn // persistent connection for peeking at pending jobs
 	authUser     string
 	authPass     string
+
+	listMu      sync.Mutex
+	deniedCache []ApprovalInfo
+	deniedAt    time.Time
+	recentCache []JobRecord
+	recentAt    time.Time
 }
 
 // New creates a dashboard server.
@@ -198,6 +228,11 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
+	mux.HandleFunc("GET /html/lightweight", s.handleLightweight)
+	mux.HandleFunc("GET /html/jobs-section", s.handleJobsSection)
+	mux.HandleFunc("GET /html/recent-jobs", s.handleRecentJobsMore)
+	mux.HandleFunc("GET /html/agent-jobs-section", s.handleAgentJobsSection)
+	mux.HandleFunc("GET /html/approvals", s.handleApprovals)
 
 	var handler http.Handler = mux
 	if s.authUser != "" && s.authPass != "" {
@@ -229,22 +264,18 @@ func (s *Server) basicAuth(next http.Handler) http.Handler {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	data := s.gatherState()
-	funcMap := template.FuncMap{
-		"statusClass":    StatusClass,
-		"formatDuration": FormatDuration,
-		"formatCost":     FormatCost,
-		"divCost":        DivCost,
-		"slotRuntime":    SlotRuntime,
-		"jobPath":        JobPath,
-	}
-	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
+	// Shell only — lists load in fragments so first paint stays small.
+	s.renderTmpl(w, "index.html", DashboardState{})
+}
+
+func (s *Server) renderTmpl(w http.ResponseWriter, name string, data any) {
+	tmpl, err := template.New("root").Funcs(jobLogFuncs()).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "index.html", data); err != nil {
+	if err := tmpl.ExecuteTemplate(&buf, name, data); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 		return
 	}
@@ -253,27 +284,38 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDashboardHTML(w http.ResponseWriter, r *http.Request) {
-	data := s.gatherState()
-	funcMap := template.FuncMap{
-		"statusClass":    StatusClass,
-		"formatDuration": FormatDuration,
-		"formatCost":     FormatCost,
-		"divCost":        DivCost,
-		"slotRuntime":    SlotRuntime,
-		"jobPath":        JobPath,
+	s.renderTmpl(w, "dashboard-content", s.gatherState())
+}
+
+func (s *Server) handleLightweight(w http.ResponseWriter, r *http.Request) {
+	s.renderTmpl(w, "lightweight-content", DashboardState{
+		OllamaHealthy:   s.ollama.Healthcheck(),
+		RabbitMQHealthy: s.checkRabbitMQ(),
+		Queues:          mustQueues(s),
+	})
+}
+
+func mustQueues(s *Server) []QueueDepth {
+	d, _ := s.getQueueDepths()
+	return d
+}
+
+func (s *Server) handleJobsSection(w http.ResponseWriter, r *http.Request) {
+	s.renderTmpl(w, "jobs-section", s.recentJobsPage(0))
+}
+
+func (s *Server) handleRecentJobsMore(w http.ResponseWriter, r *http.Request) {
+	s.renderTmpl(w, "recent-jobs-more", s.recentJobsPage(parseOffset(r)))
+}
+
+func (s *Server) handleAgentJobsSection(w http.ResponseWriter, r *http.Request) {
+	off := parseOffset(r)
+	page := s.agentJobsPage(off)
+	name := "agent-jobs-section"
+	if off > 0 {
+		name = "agent-jobs-more"
 	}
-	tmpl, err := template.New("dashboard-content").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
-	if err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
-	}
-	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "dashboard-content", data); err != nil {
-		http.Error(w, "render error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	buf.WriteTo(w)
+	s.renderTmpl(w, name, page)
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +324,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
-	jobs := s.readRecentJobs(50)
+	jobs := s.readRecentJobs(listPageSize)
 	respondJSON(w, jobs)
 }
 
@@ -296,7 +338,7 @@ func (s *Server) handleQueues(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) gatherState() DashboardState {
-	jobs := s.readRecentJobs(100)
+	jobs := s.uniqueRecentJobs()
 	depths, err := s.getQueueDepths()
 	if err != nil {
 		fmt.Printf("dashboard: rabbitmq unreachable: %v\n", err)
@@ -326,15 +368,23 @@ func (s *Server) gatherState() DashboardState {
 	if st, err := agentjob.Open(filepath.Dir(s.historyPath)); err == nil {
 		agentJobs, _ = st.List()
 	}
+	agentJobs = orderAgentJobs(agentJobs)
+	agentTotal := len(agentJobs)
+	agentPage, _ := window(agentJobs, 0, listPageSize)
+
+	recentTotal := len(jobs)
+	recentPage, _ := window(jobs, 0, listPageSize)
 
 	return DashboardState{
 		OllamaHealthy:   ollamaHealthy,
 		RabbitMQHealthy: rabbitmqHealthy,
-		AgentJobs:       agentJobs,
+		AgentJobs:       agentPage,
+		AgentJobTotal:   agentTotal,
 		Slots:           engineSlots,
 		Queues:          depths,
 		PendingQueues:   pending,
-		RecentJobs:      jobs,
+		RecentJobs:      recentPage,
+		RecentJobTotal:  recentTotal,
 		TotalCost:       totalCost,
 		APICount:        apiCount,
 		LocalCount:      localCount,
@@ -537,15 +587,14 @@ func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
-	approvals := s.getDeniedJobs()
-	funcMap := template.FuncMap{"formatCost": FormatCost}
-	tmpl, err := template.New("approvals.html").Funcs(funcMap).ParseFS(templatesFS, "templates/approvals.html")
-	if err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
+	off := parseOffset(r)
+	items, info := window(s.listDeniedJobs(), off, listPageSize)
+	page := ApprovalPage{Items: items, ListPage: info}
+	name := "approvals"
+	if off > 0 {
+		name = "approvals-more"
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl.Execute(w, approvals)
+	s.renderTmpl(w, name, page)
 }
 
 func (s *Server) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
@@ -571,15 +620,21 @@ func (s *Server) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "approved")
 }
 
-// getDeniedJobs reads the most recent denied jobs from the history file.
-func (s *Server) getDeniedJobs() []ApprovalInfo {
+// listDeniedJobs returns unique denied jobs, newest first. The jsonl file is
+// not modified — older rows stay on disk and load via ?offset=.
+func (s *Server) listDeniedJobs() []ApprovalInfo {
+	s.listMu.Lock()
+	defer s.listMu.Unlock()
+	if s.deniedCache != nil && time.Since(s.deniedAt) < 10*time.Second {
+		return s.deniedCache
+	}
 	f, err := os.Open(s.historyPath)
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
 
-	var denied []ApprovalInfo
+	byID := make(map[string]ApprovalInfo)
 	scanner := newLineReader(f)
 	for scanner.Scan() {
 		var rec JobRecord
@@ -589,9 +644,7 @@ func (s *Server) getDeniedJobs() []ApprovalInfo {
 		if rec.Status != "denied" {
 			continue
 		}
-		// Find the corresponding "running" record to get the prompt.
-		// Denied records don't have the prompt, but we can include the cost info.
-		ai := ApprovalInfo{
+		byID[rec.ID] = ApprovalInfo{
 			ID:            rec.ID,
 			Type:          rec.Type,
 			Queue:         rec.Queue,
@@ -602,9 +655,63 @@ func (s *Server) getDeniedJobs() []ApprovalInfo {
 			Source:        rec.Source,
 			StartedAt:     rec.StartedAt,
 		}
+	}
+	denied := make([]ApprovalInfo, 0, len(byID))
+	for _, ai := range byID {
 		denied = append(denied, ai)
 	}
+	sort.Slice(denied, func(i, j int) bool {
+		if denied[i].StartedAt != denied[j].StartedAt {
+			return denied[i].StartedAt > denied[j].StartedAt
+		}
+		return denied[i].ID < denied[j].ID
+	})
+	s.deniedCache, s.deniedAt = denied, time.Now()
 	return denied
+}
+
+func (s *Server) uniqueRecentJobs() []JobRecord {
+	s.listMu.Lock()
+	if s.recentCache != nil && time.Since(s.recentAt) < 10*time.Second {
+		out := s.recentCache
+		s.listMu.Unlock()
+		return out
+	}
+	s.listMu.Unlock()
+	all := s.readRecentJobs(1 << 20)
+	s.listMu.Lock()
+	s.recentCache, s.recentAt = all, time.Now()
+	s.listMu.Unlock()
+	return all
+}
+
+func (s *Server) recentJobsPage(offset int) RecentJobsPage {
+	all := s.uniqueRecentJobs()
+	var totalCost float64
+	var apiCount, localCount int
+	for _, rec := range all {
+		if rec.UseLocal {
+			localCount++
+		} else {
+			apiCount++
+			if rec.EstimatedCost > 0 {
+				totalCost += rec.EstimatedCost
+			} else if rec.ActualCost > 0 {
+				totalCost += rec.ActualCost
+			}
+		}
+	}
+	items, info := window(all, offset, listPageSize)
+	return RecentJobsPage{Items: items, TotalCost: totalCost, APICount: apiCount, LocalCount: localCount, ListPage: info}
+}
+
+func (s *Server) agentJobsPage(offset int) AgentJobsPage {
+	var jobs []agentjob.Job
+	if st, err := agentjob.Open(filepath.Dir(s.historyPath)); err == nil {
+		jobs, _ = st.List()
+	}
+	items, info := window(orderAgentJobs(jobs), offset, listPageSize)
+	return AgentJobsPage{Items: items, ListPage: info}
 }
 
 // approveJob re-enqueues a denied job with auto_approve set, so the worker

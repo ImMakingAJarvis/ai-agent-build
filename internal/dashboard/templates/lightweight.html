@@ -1,0 +1,29 @@
+{{define "lightweight-content"}}
+<p class="subtitle">
+  <span class="status-dot {{ if .OllamaHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
+  Engine {{ if .OllamaHealthy }}healthy{{ else }}unreachable{{ end }}
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <span class="status-dot {{ if .RabbitMQHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
+  RabbitMQ {{ if .RabbitMQHealthy }}healthy{{ else }}unreachable{{ end }}
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="http://localhost:8100/voice/chat" target="_blank" style="color: var(--blue); text-decoration: none;">Voice Chat</a>
+</p>
+<div class="section">
+  <div class="section-title">Queue Depths</div>
+  <div class="queue-row">
+    {{ range .Queues }}
+    <div class="queue-card priority-{{ .Name }}">
+      <div class="name">{{ .Name }}</div>
+      <div class="depth">{{ .Depth }}</div>
+      <div class="label">pending jobs</div>
+    </div>
+    {{ else }}
+    <div class="queue-card">
+      <div class="name">—</div>
+      <div class="depth">—</div>
+      <div class="label">RabbitMQ unreachable</div>
+    </div>
+    {{ end }}
+  </div>
+</div>
+{{end}}

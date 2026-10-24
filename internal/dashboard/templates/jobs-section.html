@@ -1,0 +1,78 @@
+{{define "jobs-section"}}
+<div class="section">
+  <div class="section-title">Cost Tracking</div>
+  <div class="cost-row">
+    <div class="cost-card">
+      <div class="value cost-total">{{ formatCost .TotalCost }}</div>
+      <div class="label">Total Estimated Cost</div>
+    </div>
+    <div class="cost-card">
+      <div class="value cost-api">{{ .APICount }}</div>
+      <div class="label">API Jobs</div>
+    </div>
+    <div class="cost-card">
+      <div class="value cost-local">{{ .LocalCount }}</div>
+      <div class="label">Local Jobs</div>
+    </div>
+    <div class="cost-card">
+      <div class="value cost-rate">
+        {{ if and .APICount (ne .APICount 0) }}{{ formatCost (divCost .TotalCost .APICount) }}{{ else }}-{{ end }}
+      </div>
+      <div class="label">Avg Cost / API Job</div>
+    </div>
+  </div>
+</div>
+<div class="section">
+  <div class="section-title">Recent Jobs</div>
+  {{ if eq .Total 0 }}
+  <div class="empty-state">No jobs recorded yet.</div>
+  {{ else }}
+  <p class="list-meta">{{ .Total }} distinct jobs in history. Showing the newest {{ .Shown }}{{ if .HasMore }} — older stay in jobs.jsonl{{ end }}.</p>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Status</th><th>ID</th><th>Type</th><th>Model</th><th>Queue</th>
+        <th>Cost</th><th>Started</th><th>Duration</th><th>Log</th><th>Error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Items }}{{ template "recent-job-row" . }}{{ end }}
+      {{ if .HasMore }}{{ template "recent-jobs-more-row" . }}{{ end }}
+    </tbody>
+  </table>
+  </div>
+  {{ end }}
+</div>
+{{end}}
+
+{{define "recent-jobs-more"}}
+{{ range .Items }}{{ template "recent-job-row" . }}{{ end }}
+{{ if .HasMore }}{{ template "recent-jobs-more-row" . }}{{ end }}
+{{end}}
+
+{{define "recent-jobs-more-row"}}
+<tr id="recent-jobs-more">
+  <td colspan="10">
+    <button class="btn" hx-get="/html/recent-jobs?offset={{ .NextOffset }}" hx-target="#recent-jobs-more" hx-swap="outerHTML">Load {{ if gt .Hidden 25 }}25{{ else }}{{ .Hidden }}{{ end }} more ({{ .Hidden }} older on disk)</button>
+  </td>
+</tr>
+{{end}}
+
+{{define "recent-job-row"}}
+<tr>
+  <td class="{{ statusClass .Status }}">{{ .Status }}</td>
+  <td>{{ .ID }}</td>
+  <td>{{ .Type }}</td>
+  <td>
+    <span class="model-badge">{{ .Model }}</span>
+    {{ if .UseLocal }}<span class="local-badge">local</span>{{ else }}<span class="api-badge">api</span>{{ end }}
+  </td>
+  <td>{{ .Queue }}</td>
+  <td class="cost-cell">{{ formatCost .EstimatedCost }}</td>
+  <td class="timestamp">{{ .StartedAt }}</td>
+  <td>{{ .Duration }}</td>
+  <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
+  <td class="error-text" title="{{ .Error }}">{{ .Error }}</td>
+</tr>
+{{end}}

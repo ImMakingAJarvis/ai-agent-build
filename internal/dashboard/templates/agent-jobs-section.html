@@ -1,0 +1,43 @@
+{{define "agent-jobs-section"}}
+<div class="section">
+  <div class="section-title">Agent Jobs</div>
+  {{ if eq .Total 0 }}
+  <div class="empty-state">No agent jobs.</div>
+  {{ else }}
+  <p class="list-meta">{{ .Total }} jobs in the store. Showing {{ .Shown }}{{ if .HasMore }} — older stay on disk{{ end }}.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Job</th><th>Status</th><th>Driver</th><th>Log</th><th>PR</th><th>Depends on</th></tr></thead>
+    <tbody>
+      {{ range .Items }}{{ template "agent-job-row" . }}{{ end }}
+      {{ if .HasMore }}{{ template "agent-jobs-more-row" . }}{{ end }}
+    </tbody>
+  </table>
+  </div>
+  {{ end }}
+</div>
+{{end}}
+
+{{define "agent-jobs-more"}}
+{{ range .Items }}{{ template "agent-job-row" . }}{{ end }}
+{{ if .HasMore }}{{ template "agent-jobs-more-row" . }}{{ end }}
+{{end}}
+
+{{define "agent-jobs-more-row"}}
+<tr id="agent-jobs-more">
+  <td colspan="6">
+    <button class="btn" hx-get="/html/agent-jobs-section?offset={{ .NextOffset }}" hx-target="#agent-jobs-more" hx-swap="outerHTML">Load {{ if gt .Hidden 25 }}25{{ else }}{{ .Hidden }}{{ end }} more ({{ .Hidden }} older on disk)</button>
+  </td>
+</tr>
+{{end}}
+
+{{define "agent-job-row"}}
+<tr>
+  <td title="{{ .ID }}">{{ .ID }} — {{ .Title }}</td>
+  <td>{{ .Status }}</td>
+  <td>{{ if .RanWith }}{{ .RanWith }}{{ else }}{{ .Spec.Driver }}{{ end }}</td>
+  <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
+  <td>{{ if .PRURL }}<a href="{{ .PRURL }}">PR</a>{{ end }}</td>
+  <td>{{ range .DependsOn }}{{ . }} {{ end }}</td>
+</tr>
+{{end}}

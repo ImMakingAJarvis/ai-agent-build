@@ -363,6 +363,9 @@
   a.log-link { color: var(--blue); text-decoration: none; font-weight: 500; }
   a.log-link:hover { text-decoration: underline; }
   .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .list-meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 10px; }
+  .more-wrap { margin-top: 12px; }
+  .error-state { color: var(--red); text-align: center; padding: 24px 12px; }
   @media (max-width: 640px) {
     body { padding: 12px; }
     .cost-row, .queue-row, .slots-row { grid-template-columns: 1fr 1fr; }
@@ -373,203 +376,68 @@
 </head>
 <body>
 
-<div id="dashboard" hx-get="/html/dashboard" hx-trigger="every 5s" hx-swap="innerHTML">
+<div id="dashboard">
   <h1>JARVIS Queue Dashboard</h1>
-  <p class="subtitle">
-    <span class="status-dot {{ if .OllamaHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
-    Ollama {{ if .OllamaHealthy }}healthy{{ else }}unreachable{{ end }}
-    &nbsp;&nbsp;·&nbsp;&nbsp;
-    <span class="status-dot {{ if .RabbitMQHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
-    RabbitMQ {{ if .RabbitMQHealthy }}healthy{{ else }}unreachable{{ end }}
-    &nbsp;&nbsp;·&nbsp;&nbsp;
-    <a href="http://localhost:8100/voice/chat" target="_blank" style="color: var(--blue); text-decoration: none;">🎙 Voice Chat</a>
-  </p>
-
-  <!-- Cost Summary -->
+  <div id="status" hx-get="/html/lightweight" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    <div class="empty-state">Loading queue status…</div>
+  </div>
+  <div id="jobs-section" hx-get="/html/jobs-section" hx-trigger="load" hx-swap="innerHTML">
+    <div class="section"><div class="section-title">Recent Jobs</div><div class="empty-state">Loading…</div></div>
+  </div>
+  <div id="agent-jobs-section" hx-get="/html/agent-jobs-section" hx-trigger="load" hx-swap="innerHTML">
+    <div class="section"><div class="section-title">Agent Jobs</div><div class="empty-state">Loading…</div></div>
+  </div>
   <div class="section">
-    <div class="section-title">Cost Tracking</div>
-    <div class="cost-row">
-      <div class="cost-card">
-        <div class="value cost-total">{{ formatCost .TotalCost }}</div>
-        <div class="label">Total Estimated Cost</div>
-      </div>
-      <div class="cost-card">
-        <div class="value cost-api">{{ .APICount }}</div>
-        <div class="label">API Jobs</div>
-      </div>
-      <div class="cost-card">
-        <div class="value cost-local">{{ .LocalCount }}</div>
-        <div class="label">Local Jobs</div>
-      </div>
-      <div class="cost-card">
-        <div class="value cost-rate">
-          {{ if and .APICount (ne .APICount 0) }}{{ formatCost (divCost .TotalCost .APICount) }}{{ else }}-{{ end }}
-        </div>
-        <div class="label">Avg Cost / API Job</div>
-      </div>
+    <div class="section-title">Pending Jobs <button class="btn" type="button" onclick="refreshPending()">Load</button></div>
+    <div id="pending-content">
+      <div class="empty-state">Click Load to peek at queues. This is off the first paint so scrolling stays usable.</div>
     </div>
   </div>
-
-  <!-- Queue Depths -->
-  <div class="section">
-    <div class="section-title">Queue Depths</div>
-    <div class="queue-row">
-      {{ range .Queues }}
-      <div class="queue-card priority-{{ .Name }}">
-        <div class="name">{{ .Name }}</div>
-        <div class="depth">{{ .Depth }}</div>
-        <div class="label">pending jobs</div>
-      </div>
-      {{ else }}
-      <div class="queue-card">
-        <div class="name">—</div>
-        <div class="depth">—</div>
-        <div class="label">RabbitMQ unreachable</div>
-      </div>
-      {{ end }}
-    </div>
-  </div>
-
-  <!-- Active Slots -->
-  <div class="section">
-    <div class="section-title">Active Slots</div>
-    <div class="slots-row">
-      {{ range .SlotQueues }}
-      <div class="slot-card{{ if .Occupied }} occupied{{ end }}">
-        <div class="slot-name">{{ .Name }}</div>
-        {{ if .Occupied }}
-        <div class="slot-status active"><span class="slot-pulse"></span>running</div>
-        <div class="slot-job">job {{ .JobID }}</div>
-        <div class="slot-model">{{ .Model }}</div>
-        <div class="slot-runtime">{{ slotRuntime .Runtime }}</div>
-        {{ else }}
-        <div class="slot-status">idle</div>
-        <div class="slot-empty">no job in this slot</div>
-        {{ end }}
-      </div>
-      {{ end }}
-    </div>
-  </div>
-
-  <!-- Pending Jobs Detail -->
-  <div class="section">
-    <div class="section-title">Pending Jobs</div>
-    {{ if .PendingQueues }}
-    {{ range .PendingQueues }}
-    <div class="pending-detail">
-      <div class="pending-header" onclick="this.nextElementSibling.classList.toggle('open')">
-        <span class="name">{{ .Name }}</span>
-        <span class="count">{{ .Depth }} message{{ if ne .Depth 1 }}s{{ end }}</span>
-      </div>
-      <div class="pending-body">
-        {{ if .Jobs }}
-        {{ range .Jobs }}
-        <div class="pending-row">
-          <div>
-            <span class="pending-id">{{ .ID }}</span>
-            <span class="pending-meta"> · {{ .Type }} · {{ .Source }}</span>
-          </div>
-          <div class="pending-prompt" title="{{ .Prompt }}">{{ .Prompt }}</div>
-          <div class="pending-meta">
-            priority={{ .Priority }}
-            {{ if .ForceAPI }} force-api{{ end }}
-            {{ if .ModelOverride }} override={{ .ModelOverride }}{{ end }}
-            {{ if .CreatedAt }} · {{ .CreatedAt }}{{ end }}
-          </div>
-        </div>
-        {{ end }}
-        {{ else }}
-        <div class="pending-row" style="color: var(--muted);">No messages to preview.</div>
-        {{ end }}
-      </div>
-    </div>
-    {{ end }}
-    {{ else }}
-    <div class="empty-state">No pending queues.</div>
-    {{ end }}
-  </div>
-
-  <!-- Approval Queue -->
+  <script>
+  async function refreshPending() {
+    const el = document.getElementById('pending-content');
+    el.innerHTML = '<div class="empty-state">Loading…</div>';
+    try {
+      const resp = await fetch('/api/pending');
+      if (!resp.ok) { el.innerHTML = '<div class="error-state">Could not load pending jobs.</div>'; return; }
+      const data = await resp.json();
+      if (!data || data.length === 0) { el.innerHTML = '<div class="empty-state">No pending queues.</div>'; return; }
+      let html = '';
+      for (const pq of data) {
+        html += '<div class="pending-detail"><div class="pending-header" onclick="this.nextElementSibling.classList.toggle(\'open\')">';
+        html += '<span class="name"></span><span class="count"></span></div><div class="pending-body"></div></div>';
+      }
+      el.innerHTML = html;
+      const cards = el.querySelectorAll('.pending-detail');
+      data.forEach((pq, i) => {
+        cards[i].querySelector('.name').textContent = pq.name || '';
+        cards[i].querySelector('.count').textContent = (pq.depth||0) + ' message' + (pq.depth===1?'':'s');
+        const body = cards[i].querySelector('.pending-body');
+        if (pq.jobs && pq.jobs.length) {
+          body.innerHTML = pq.jobs.slice(0, 20).map(job => {
+            const row = document.createElement('div');
+            row.className = 'pending-row';
+            row.innerHTML = '<div><span class="pending-id"></span><span class="pending-meta"></span></div>';
+            row.querySelector('.pending-id').textContent = job.id || '';
+            row.querySelector('.pending-meta').textContent = ' · ' + (job.type||'') + ' · ' + (job.source||'');
+            return row.outerHTML;
+          }).join('');
+        } else {
+          body.innerHTML = '<div class="pending-row" style="color:var(--muted)">No messages to preview.</div>';
+        }
+      });
+    } catch (e) {
+      el.innerHTML = '<div class="error-state">Could not load pending jobs.</div>';
+    }
+  }
+  </script>
   <div class="section">
     <div class="section-title">Approval Queue</div>
-    <div id="approvals" hx-get="/api/approvals" hx-trigger="every 5s" hx-swap="outerHTML">
-      {{/* Filled by HTMX on load */}}
+    <div id="approvals" hx-get="/html/approvals" hx-trigger="load" hx-swap="outerHTML">
+      <div class="empty-state">Loading approvals…</div>
     </div>
   </div>
-
-  <!-- Agent Jobs (build work) -->
-  <div class="section">
-    <div class="section-title">Agent Jobs</div>
-    {{ if .AgentJobs }}
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Job</th><th>Status</th><th>Driver</th><th>Log</th><th>PR</th><th>Depends on</th></tr></thead>
-      <tbody>
-        {{ range .AgentJobs }}
-        <tr>
-          <td title="{{ .ID }}">{{ .ID }} — {{ .Title }}</td>
-          <td>{{ .Status }}</td>
-          <td>{{ if .RanWith }}{{ .RanWith }}{{ else }}{{ .Spec.Driver }}{{ end }}</td>
-          <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
-          <td>{{ if .PRURL }}<a href="{{ .PRURL }}">PR</a>{{ end }}</td>
-          <td>{{ range .DependsOn }}{{ . }} {{ end }}</td>
-        </tr>
-        {{ end }}
-      </tbody>
-    </table>
-    </div>
-    {{ else }}
-    <div class="empty-state">No agent jobs.</div>
-    {{ end }}
-  </div>
-
-  <!-- Recent Jobs -->
-  <div class="section">
-    <div class="section-title">Recent Jobs</div>
-    {{ if .RecentJobs }}
-    <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Status</th>
-          <th>ID</th>
-          <th>Type</th>
-          <th>Model</th>
-          <th>Queue</th>
-          <th>Cost</th>
-          <th>Started</th>
-          <th>Duration</th>
-          <th>Log</th>
-          <th>Error</th>
-        </tr>
-      </thead>
-      <tbody>
-        {{ range .RecentJobs }}
-        <tr>
-          <td class="{{ statusClass .Status }}">{{ .Status }}</td>
-          <td>{{ .ID }}</td>
-          <td>{{ .Type }}</td>
-          <td>
-            <span class="model-badge">{{ .Model }}</span>
-            {{ if .UseLocal }}<span class="local-badge">local</span>{{ else }}<span class="api-badge">api</span>{{ end }}
-          </td>
-          <td>{{ .Queue }}</td>
-          <td class="cost-cell">{{ formatCost .EstimatedCost }}</td>
-          <td class="timestamp">{{ .StartedAt }}</td>
-          <td>{{ .Duration }}</td>
-          <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
-          <td class="error-text" title="{{ .Error }}">{{ .Error }}</td>
-        </tr>
-        {{ end }}
-      </tbody>
-    </table>
-    </div>
-    {{ else }}
-    <div class="empty-state">No jobs recorded yet.</div>
-    {{ end }}
-  </div>
-
-  <div class="refresh-info">Auto-refreshes every 5 seconds</div>
+  <div class="refresh-info">Status refreshes every 5s. Lists load a page of 25; older rows stay on disk.</div>
 </div>
 
 </body>
