@@ -95,7 +95,20 @@ func (a *Agent) Register(action Action) {
 // Classify sends the user message through the LLM intent classifier and
 // returns a Result indicating whether the message is conversational or
 // an action request.
+//
+// It first attempts fast keyword-based classification, which handles ~80%
+// of messages instantly. Ambiguous messages fall through to the LLM.
 func (a *Agent) Classify(ctx context.Context, userMessage string) (*Result, error) {
+	// Fast path: keyword-based classification avoids an LLM call.
+	if res, actionKey := fastClassify(userMessage); res != fastUnknown {
+		switch res {
+		case fastChat:
+			return &Result{Type: TypeChat}, nil
+		case fastAction:
+			return &Result{Type: TypeAction, ActionName: actionKey}, nil
+		}
+	}
+
 	a.mu.Lock()
 	ollama := a.ollama
 	history := make([]HistoryEntry, len(a.history))
@@ -201,6 +214,47 @@ func (a *Agent) AddHistory(role, content string) {
 	for len(a.history) > a.maxHistory {
 		a.history = a.history[1:]
 	}
+}
+
+// Chat generates a conversational reply using the provided system prompt
+// (which should include the voice's system prompt plus any status context),
+// conversation history, and user message. This replaces the direct
+// client.Chat() call in the chat handler, routing all LLM interactions
+// through Hermes.
+//
+// The history slice should contain alternating user/assistant turns:
+// [user1, assistant1, user2, assistant2, ...].
+func (a *Agent) Chat(ctx context.Context, systemPrompt string, history []string, userMessage string) (string, error) {
+	a.mu.Lock()
+	ollama := a.ollama
+	a.mu.Unlock()
+
+	if ollama == nil {
+		return "", fmt.Errorf("hermes: Ollama client not set")
+	}
+
+	messages := []models.ChatMessage{
+		{Role: "system", Content: systemPrompt},
+	}
+	// Interleave history: even indices are user, odd are assistant.
+	for i := 0; i < len(history); i += 2 {
+		messages = append(messages, models.ChatMessage{
+			Role:    "user",
+			Content: history[i],
+		})
+		if i+1 < len(history) {
+			messages = append(messages, models.ChatMessage{
+				Role:    "assistant",
+				Content: history[i+1],
+			})
+		}
+	}
+	messages = append(messages, models.ChatMessage{
+		Role:    "user",
+		Content: userMessage,
+	})
+
+	return ollama.Chat(a.model, messages)
 }
 
 // listActions returns a snapshot of the registered actions.

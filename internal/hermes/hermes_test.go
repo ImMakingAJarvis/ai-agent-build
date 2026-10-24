@@ -61,7 +61,9 @@ func TestClassify_Conversational(t *testing.T) {
 	})
 	agent.SetOllamaClient(mock)
 
-	result, err := agent.Classify(context.Background(), "Hey Jarvis, how are you?")
+	// Use a message that doesn't match the fast classifier (long/ambiguous).
+	result, err := agent.Classify(context.Background(),
+		"I was wondering if you could help me think through an approach for handling the situation where multiple agents might try to modify the same resource concurrently and we need to ensure consistency without blocking everything")
 	if err != nil {
 		t.Fatalf("Classify returned error: %v", err)
 	}
@@ -85,7 +87,9 @@ func TestClassify_ActionRequest(t *testing.T) {
 	})
 	agent.SetOllamaClient(mock)
 
-	result, err := agent.Classify(context.Background(), "What is the current status?")
+	// Use a long/ambiguous message that falls through to the LLM.
+	result, err := agent.Classify(context.Background(),
+		"I need you to go ahead and check on what the current status of everything is because I'm not sure if the engine is still running properly or if something broke overnight and I really need to know")
 	if err != nil {
 		t.Fatalf("Classify returned error: %v", err)
 	}
@@ -186,7 +190,9 @@ func TestProcess_ChatPassthrough(t *testing.T) {
 	})
 	agent.SetOllamaClient(mock)
 
-	reply, err := agent.Process(context.Background(), "Tell me a fun fact")
+	// Use a long/ambiguous message that falls through to the LLM.
+	reply, err := agent.Process(context.Background(),
+		"I was thinking about whether it would be possible to have a system where multiple intelligent agents could collaborate on solving complex problems by dividing the work among themselves based on their individual strengths and capabilities")
 	if err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
@@ -335,5 +341,95 @@ func TestNew_DefaultMaxHistory(t *testing.T) {
 	agent := New(Config{Model: "jarvis-brain"})
 	if agent.maxHistory != defaultMaxHistory {
 		t.Errorf("expected maxHistory %d, got %d", defaultMaxHistory, agent.maxHistory)
+	}
+}
+
+// TestClassify_FastPathChat verifies that the fast classifier handles
+// obvious chat messages without calling the LLM.
+func TestClassify_FastPathChat(t *testing.T) {
+	mock := &mockOllamaClient{} // no responses configured — should not be called
+
+	agent := New(Config{
+		Model:       "jarvis-brain",
+		MaxHistory:  10,
+		AccessLevel: config.AccessFull,
+	})
+	agent.SetOllamaClient(mock)
+
+	result, err := agent.Classify(context.Background(), "Hey, how are you?")
+	if err != nil {
+		t.Fatalf("Classify returned error: %v", err)
+	}
+	if result.Type != TypeChat {
+		t.Errorf("expected type %q, got %q", TypeChat, result.Type)
+	}
+	// Fast path returns empty reply; the actual reply comes from the
+	// second LLM call in the chat handler.
+	if result.Reply != "" {
+		t.Errorf("fast path reply should be empty, got %q", result.Reply)
+	}
+}
+
+// TestClassify_FastPathAction verifies that the fast classifier handles
+// obvious action requests without calling the LLM.
+func TestClassify_FastPathAction(t *testing.T) {
+	mock := &mockOllamaClient{} // no responses configured — should not be called
+
+	agent := New(Config{
+		Model:       "jarvis-brain",
+		MaxHistory:  10,
+		AccessLevel: config.AccessFull,
+	})
+	agent.SetOllamaClient(mock)
+
+	result, err := agent.Classify(context.Background(), "Check the status")
+	if err != nil {
+		t.Fatalf("Classify returned error: %v", err)
+	}
+	if result.Type != TypeAction {
+		t.Errorf("expected type %q, got %q", TypeAction, result.Type)
+	}
+	if result.ActionName != "check_status" {
+		t.Errorf("expected action %q, got %q", "check_status", result.ActionName)
+	}
+}
+
+// TestProcess_FastPathChat verifies Process works with fast-classified chat.
+func TestProcess_FastPathChat(t *testing.T) {
+	// No mock responses needed — fast path skips the LLM.
+	agent := New(Config{
+		Model:       "jarvis-brain",
+		MaxHistory:  5,
+		AccessLevel: config.AccessFull,
+	})
+
+	reply, err := agent.Process(context.Background(), "Hi there!")
+	if err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	// Fast path chat returns empty reply (the chat handler generates the actual reply).
+	if reply != "" {
+		t.Errorf("fast path chat reply should be empty, got %q", reply)
+	}
+}
+
+// TestProcess_FastPathAction verifies Process works with fast-classified actions.
+func TestProcess_FastPathAction(t *testing.T) {
+	agent := New(Config{
+		Model:       "jarvis-brain",
+		MaxHistory:  5,
+		AccessLevel: config.AccessFull,
+	})
+	for _, a := range DefaultActions() {
+		agent.Register(a)
+	}
+
+	// "Check the status" is fast-classified as check_status action.
+	reply, err := agent.Process(context.Background(), "Check the status")
+	if err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	if reply == "" {
+		t.Error("expected non-empty reply from action execution")
 	}
 }
