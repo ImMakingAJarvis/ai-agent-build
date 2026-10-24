@@ -13,6 +13,7 @@ SYSTEMD_DIR=/etc/systemd/system
 NOTES_DIR=/var/lib/jarvis
 
 cd "$REPO_ROOT"
+export PATH="/usr/local/go/bin:${PATH}"
 
 echo "==> Building jarvis-dashboard"
 TMP="$(mktemp -d)"
