@@ -49,6 +49,11 @@ type JobRecord struct {
 	ActualCost    float64 `json:"actual_cost,omitempty"`
 	InputTokens   int     `json:"input_tokens,omitempty"`
 	OutputTokens  int     `json:"output_tokens,omitempty"`
+	Kind          string  `json:"kind,omitempty"`
+	Title         string  `json:"title,omitempty"`
+	Driver        string  `json:"driver,omitempty"`
+	PRURL         string  `json:"pr_url,omitempty"`
+	Summary       string  `json:"summary,omitempty"`
 }
 
 // QueueDepth holds the pending message count for one queue.
@@ -191,6 +196,8 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /api/pending", s.handlePending)
 	mux.HandleFunc("GET /api/approvals", s.handleApprovals)
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
+	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
+	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
 
 	var handler http.Handler = mux
 	if s.authUser != "" && s.authPass != "" {
@@ -229,6 +236,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"formatCost":     FormatCost,
 		"divCost":        DivCost,
 		"slotRuntime":    SlotRuntime,
+		"jobPath":        JobPath,
 	}
 	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
@@ -252,6 +260,7 @@ func (s *Server) handleDashboardHTML(w http.ResponseWriter, r *http.Request) {
 		"formatCost":     FormatCost,
 		"divCost":        DivCost,
 		"slotRuntime":    SlotRuntime,
+		"jobPath":        JobPath,
 	}
 	tmpl, err := template.New("dashboard-content").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {

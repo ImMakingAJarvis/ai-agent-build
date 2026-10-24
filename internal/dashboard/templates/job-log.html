@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ if .Title }}{{ .ID }} — {{ .Title }}{{ else }}{{ .ID }}{{ end }} · Job log</title>
+<script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --fg: #c9d1d9;
+    --muted: #8b949e;
+    --border: #30363d;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --card: #161b22;
+    --card-hover: #1c2129;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 24px;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; word-break: break-word; }
+  .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 16px; }
+  .back { color: var(--blue); text-decoration: none; font-size: 0.85rem; display: inline-block; margin-bottom: 16px; }
+  .back:hover { text-decoration: underline; }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    margin-bottom: 24px;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .meta strong { color: var(--fg); font-weight: 600; }
+  a { color: var(--blue); }
+  .empty-state, .error-state, .loading-state {
+    color: var(--muted);
+    text-align: center;
+    padding: 40px 12px;
+    font-size: 0.95rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .error-state { color: var(--red); border-color: var(--red); }
+  .htmx-request .loading-state { display: block; }
+  .htmx-request .log-list { opacity: 0.5; }
+  .log-list { display: flex; flex-direction: column; gap: 12px; }
+  .event {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    border-left: 3px solid var(--border);
+  }
+  .event-thought { border-left-color: var(--purple); }
+  .event-command { border-left-color: var(--yellow); }
+  .event-result { border-left-color: var(--green); }
+  .event-output { border-left-color: var(--blue); }
+  .event-kind {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .event-title { font-weight: 600; margin-bottom: 6px; }
+  .event-body {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--fg);
+  }
+  .source { color: var(--muted); font-size: 0.75rem; margin-bottom: 12px; }
+  .live { color: var(--yellow); }
+  @media (max-width: 640px) {
+    body { padding: 12px; }
+    .event { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+  <a class="back" href="/">← Dashboard</a>
+  {{ if .Missing }}
+  <h1>Job not found</h1>
+  <p class="subtitle">ID <strong>{{ .ID }}</strong></p>
+  <div class="error-state">No job with this ID is on disk. It may never have been ingested, or the dashboard is reading a different store than agent-run.</div>
+  {{ else }}
+  <h1>{{ if .Title }}{{ .ID }} — {{ .Title }}{{ else }}{{ .ID }}{{ end }}</h1>
+  <p class="subtitle">
+    Human-readable run log
+    {{ if .Live }}<span class="live"> · still running — refreshes every 5s</span>{{ end }}
+  </p>
+  <div class="meta">
+    {{ if .Status }}<span>Status <strong class="{{ statusClass .Status }}">{{ .Status }}</strong></span>{{ end }}
+    {{ if .Driver }}<span>Driver <strong>{{ .Driver }}</strong></span>{{ end }}
+    {{ if .Model }}<span>Model <strong>{{ .Model }}</strong></span>{{ end }}
+    {{ if .Duration }}<span>Duration <strong>{{ .Duration }}</strong></span>{{ end }}
+    {{ if .StartedAt }}<span>Started <strong>{{ .StartedAt }}</strong></span>{{ end }}
+    {{ if .PRURL }}<span><a href="{{ .PRURL }}">Pull request</a></span>{{ end }}
+  </div>
+  {{ if .Error }}<p class="subtitle" style="color: var(--red);">{{ .Error }}</p>{{ end }}
+  <div id="log"
+       hx-get="/html/jobs/{{ .ID }}"
+       hx-trigger="load{{ if .Live }}, every 5s{{ end }}"
+       hx-swap="innerHTML">
+    <div class="loading-state">Loading this job's log…</div>
+  </div>
+  {{ end }}
+</body>
+</html>

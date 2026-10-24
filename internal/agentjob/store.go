@@ -301,3 +301,19 @@ func (s *Store) WriteFile(id, name string, data []byte) error {
 	}
 	return os.WriteFile(filepath.Join(s.JobDir(id), name), data, 0o644)
 }
+
+// ReadFile loads a named artifact from a job directory. It returns
+// os.ErrNotExist when the file is missing.
+func (s *Store) ReadFile(id, name string) ([]byte, error) {
+	if !safeJobID(id) || filepath.Base(name) != name {
+		return nil, os.ErrNotExist
+	}
+	return os.ReadFile(filepath.Join(s.JobDir(id), name))
+}
+
+// ValidID is true when id is a single path segment (no traversal).
+func ValidID(id string) bool {
+	return id != "" && filepath.Base(id) == id && id != "." && id != ".."
+}
+
+func safeJobID(id string) bool { return ValidID(id) }
