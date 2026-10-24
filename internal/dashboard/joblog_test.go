@@ -199,19 +199,23 @@ func TestSectionsHaveLogLinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := DashboardState{
-		AgentJobs: []agentjob.Job{{
+	var buf strings.Builder
+	agentPage := AgentJobsPage{
+		Items: []agentjob.Job{{
 			Spec:  agentjob.Spec{ID: "d0", Title: "Fix poll"},
 			State: agentjob.State{Status: agentjob.Done},
 		}},
-		RecentJobs: []JobRecord{{ID: "cli-1", Status: "completed"}},
+		ListPage: ListPage{Total: 1, Shown: 1},
 	}
-	st.InProgress, st.Waiting, st.WaitingMore, st.Finished, st.FinishedTotal = splitAgentJobs(st.AgentJobs)
-	var buf strings.Builder
-	for _, name := range []string{"agent-jobs-section", "jobs-section"} {
-		if err := tmpl.ExecuteTemplate(&buf, name, st); err != nil {
-			t.Fatal(err)
-		}
+	if err := tmpl.ExecuteTemplate(&buf, "agent-jobs-section", agentPage); err != nil {
+		t.Fatal(err)
+	}
+	jobsPage := RecentJobsPage{
+		Items:    []JobRecord{{ID: "cli-1", Status: "completed"}},
+		ListPage: ListPage{Total: 1, Shown: 1},
+	}
+	if err := tmpl.ExecuteTemplate(&buf, "jobs-section", jobsPage); err != nil {
+		t.Fatal(err)
 	}
 	out := buf.String()
 	for _, w := range []string{`href="/jobs/d0"`, `href="/jobs/cli-1"`, ">Log<"} {
