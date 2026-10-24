@@ -19,6 +19,16 @@ sudo cp "$REPO_ROOT/scripts/agent-run" "$BIN_DIR/agent-run.tmp"
 sudo mv -f "$BIN_DIR/agent-run.tmp" "$BIN_DIR/agent-run"
 sudo chmod 755 "$BIN_DIR/agent-run"
 
+echo "==> Installing agent-local atomically"
+sudo cp "$REPO_ROOT/scripts/agent-local" "$BIN_DIR/agent-local.tmp"
+sudo mv -f "$BIN_DIR/agent-local.tmp" "$BIN_DIR/agent-local"
+sudo chmod 755 "$BIN_DIR/agent-local"
+
+echo "==> Installing agent-run output-token drop-in (no restart)"
+sudo mkdir -p "$SYSTEMD_DIR/agent-run.service.d"
+sudo cp systemd/agent-run.service.d/output-tokens.conf \
+  "$SYSTEMD_DIR/agent-run.service.d/output-tokens.conf"
+
 echo "==> Notes/inhibit dir (agent owns, nathan can touch the disable file)"
 sudo mkdir -p "$NOTES_DIR"
 sudo chown agent:nathan "$NOTES_DIR"
