@@ -13,6 +13,11 @@
 // It skips messages while a checkpoint question is open
 // ($CONF/ask-open exists) and skips Discord replies to bot questions
 // (those belong to Ask).
+//
+// Multi-bot support:
+// The primary bot (DISCORD_BOT_TOKEN) uses the basic chat handler.
+// Additional bots (BOT_N_TOKEN) use the Hermes runner, which can
+// search the web, enqueue jobs, and delegate complex tasks.
 package main
 
 import (
@@ -29,6 +34,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 )
 
@@ -65,20 +71,35 @@ type sender interface {
 func main() {
 	loadEnvFile()
 
+	cfg, err := config.Load()
+	if err != nil {
+		log.Printf("jarvis-chat: config load warning: %v", err)
+	}
+
 	confDir := os.Getenv("JARVIS_CONF")
 	if confDir == "" {
 		home, _ := os.UserHomeDir()
 		confDir = filepath.Join(home, ".config", "jarvis")
 	}
 
-	d, err := chat.NewDiscord(chat.Config{
-		Token:   os.Getenv("DISCORD_BOT_TOKEN"),
-		OwnerID: os.Getenv("DISCORD_OWNER_ID"),
-	})
-	if err != nil {
-		log.Fatalf("jarvis-chat: %v", err)
+	// If no bots configured via the config package, fall back to env vars.
+	if cfg == nil || len(cfg.Bots) == 0 {
+		primaryToken := os.Getenv("DISCORD_BOT_TOKEN")
+		if primaryToken != "" {
+			cfg = &config.Config{Bots: []config.BotConfig{
+				{
+					Name:         "primary",
+					Token:        primaryToken,
+					AllowedUsers: []string{os.Getenv("DISCORD_OWNER_ID")},
+					AccessLevel:  config.AccessFull,
+				},
+			}}
+		}
 	}
-	defer d.Close()
+
+	if cfg == nil || len(cfg.Bots) == 0 {
+		log.Fatal("jarvis-chat: no Discord bot configured (set DISCORD_BOT_TOKEN or BOT_1_TOKEN)")
+	}
 
 	ollamaClient := models.NewClient()
 	modelName := os.Getenv("LOCAL_MODEL")
@@ -86,55 +107,88 @@ func main() {
 		modelName = defaultModel
 	}
 
-	// Conversation history: alternating user/assistant turns.
+	// Conversation history for the primary bot.
 	var history []string // [user1, assistant1, user2, assistant2, ...]
 
-	d.OnMessage(func(in chat.Incoming) {
-		// Skip while a checkpoint question is open.
-		if _, err := os.Stat(confDir + "/ask-open"); err == nil {
-			return
+	// Start each bot in a goroutine.
+	bots := make([]*chat.Discord, 0, len(cfg.Bots))
+	for i, botCfg := range cfg.Bots {
+		botIndex := i
+		bCfg := botCfg // capture for closure
+
+		d, err := chat.NewDiscord(chat.Config{
+			Token:    bCfg.Token,
+			OwnerID: pickOwnerID(bCfg, confDir),
+		})
+		if err != nil {
+			log.Printf("jarvis-chat: bot %q: %v", bCfg.Name, err)
+			continue
 		}
+		bots = append(bots, d)
 
-		content := strings.TrimSpace(in.Content)
-		if content == "" {
-			return
+		if botIndex == 0 {
+			// Primary bot: basic chat handler.
+			d.OnMessage(func(in chat.Incoming) {
+				// Skip while a checkpoint question is open.
+				if _, err := os.Stat(confDir + "/ask-open"); err == nil {
+					return
+				}
+
+				content := strings.TrimSpace(in.Content)
+				if content == "" {
+					return
+				}
+				in.Content = content
+
+				// !pause is a special command: write the pause-signal file so
+				// agent-run can interrupt the current job, even when jarvis-chat
+				// is active (and the Discord watcher is not running).
+				if content == "!pause" {
+					_ = os.WriteFile(confDir+"/pause-signal", []byte("!pause"), 0o644)
+					return
+				}
+
+				if _, rest, ok := cutBuildFix(content); ok {
+					title, body := titleAndBody(rest)
+					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+					defer cancel()
+					if title == "" {
+						_ = d.Notify(ctx, "Need a title after !build / !fix.")
+						return
+					}
+					id, err := enqueueFromChat(in, title, body)
+					if err != nil {
+						_ = d.Notify(ctx, "Could not enqueue: "+err.Error())
+						return
+					}
+					_ = d.Notify(ctx, enqueueConfirm(id))
+					return
+				}
+
+				handleMessage(d, ollamaClient, modelName, in, &history)
+			})
+		} else {
+			// Additional bots: Hermes runner with enhanced capabilities.
+			runner := newHermesRunner(bCfg)
+			runner.SetDiscord(d)
+			d.OnMessage(runner.handleMessage)
+			log.Printf("jarvis-chat: bot %q started with Hermes runner (access: %v)",
+				bCfg.Name, bCfg.AccessLevel)
 		}
-		in.Content = content
-
-		// !pause is a special command: write the pause-signal file so
-		// agent-run can interrupt the current job, even when jarvis-chat
-		// is active (and the Discord watcher is not running).
-		if content == "!pause" {
-			_ = os.WriteFile(confDir+"/pause-signal", []byte("!pause"), 0o644)
-			return
-		}
-
-		if _, rest, ok := cutBuildFix(content); ok {
-			title, body := titleAndBody(rest)
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			if title == "" {
-				_ = d.Notify(ctx, "Need a title after !build / !fix.")
-				return
-			}
-			id, err := enqueueFromChat(in, title, body)
-			if err != nil {
-				_ = d.Notify(ctx, "Could not enqueue: "+err.Error())
-				return
-			}
-			_ = d.Notify(ctx, enqueueConfirm(id))
-			return
-		}
-
-		handleMessage(d, ollamaClient, modelName, in, &history)
-	})
-
-	// Open the gateway so onMessage fires.
-	if err := d.Listen(); err != nil {
-		log.Fatalf("jarvis-chat: listen: %v", err)
 	}
 
-	log.Println("jarvis-chat: listening for messages")
+	if len(bots) == 0 {
+		log.Fatal("jarvis-chat: no bots could be started")
+	}
+
+	// Open all gateway connections.
+	for _, d := range bots {
+		if err := d.Listen(); err != nil {
+			log.Fatalf("jarvis-chat: listen: %v", err)
+		}
+	}
+
+	log.Printf("jarvis-chat: %d bot(s) listening for messages", len(bots))
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
@@ -143,6 +197,30 @@ func main() {
 		log.Println("jarvis-chat: shutting down")
 	case <-time.After(24 * time.Hour):
 	}
+
+	// Cleanup.
+	for _, d := range bots {
+		d.Close()
+	}
+}
+
+// pickOwnerID returns the owner ID for a bot. For the primary bot, it uses
+// DISCORD_OWNER_ID. For additional bots, it uses the first allowed user.
+// Falls back to reading from the signal file config.
+func pickOwnerID(bCfg config.BotConfig, confDir string) string {
+	// Try the first allowed user.
+	if len(bCfg.AllowedUsers) > 0 {
+		return bCfg.AllowedUsers[0]
+	}
+	// Fall back to env var.
+	if id := os.Getenv("DISCORD_OWNER_ID"); id != "" {
+		return id
+	}
+	// Fall back to reading from config.
+	if b, err := os.ReadFile(filepath.Join(confDir, "owner-id")); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return ""
 }
 
 func handleMessage(d sender, client *models.Client, model string, in chat.Incoming, history *[]string) {
@@ -376,12 +454,21 @@ func pruneHistory(history *[]string, maxWords int) {
 }
 
 // loadEnvFile fills in unset variables from the env file, if it exists.
-// Reuses the same logic as jarvis-discord.
+// Tries secrets.env first (new format), then discord.env (legacy).
 func loadEnvFile() {
 	path := os.Getenv("JARVIS_DISCORD_ENV")
 	if path == "" {
 		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, ".config", "jarvis", "discord.env")
+		// Try secrets.env first (new multi-bot format).
+		secretsPath := filepath.Join(home, ".config", "jarvis", "secrets.env")
+		legacyPath := filepath.Join(home, ".config", "jarvis", "discord.env")
+		if _, err := os.Stat(secretsPath); err == nil {
+			path = secretsPath
+		} else if _, err := os.Stat(legacyPath); err == nil {
+			path = legacyPath
+		} else {
+			return
+		}
 	}
 	f, err := os.Open(path)
 	if err != nil {

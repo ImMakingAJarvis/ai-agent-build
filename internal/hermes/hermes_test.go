@@ -303,15 +303,15 @@ func TestParseResult_UnknownType(t *testing.T) {
 
 func TestDefaultActions(t *testing.T) {
 	actions := DefaultActions()
-	if len(actions) != 5 {
-		t.Errorf("expected 5 default actions, got %d", len(actions))
+	if len(actions) != 7 {
+		t.Errorf("expected 7 default actions, got %d", len(actions))
 	}
 
 	keys := make(map[string]bool)
 	for _, a := range actions {
 		keys[a.Key] = true
 	}
-	expected := []string{"enqueue_job", "check_status", "list_jobs", "start_engine", "stop_engine"}
+	expected := []string{"enqueue_job", "check_status", "list_jobs", "start_engine", "stop_engine", "web_search", "delegate"}
 	for _, k := range expected {
 		if !keys[k] {
 			t.Errorf("missing expected action %q", k)
