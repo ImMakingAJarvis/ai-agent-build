@@ -1,0 +1,20 @@
+{{define "job-log-content"}}
+{{ if .ReadError }}
+<div class="error-state">{{ .ReadError }}</div>
+{{ else if .Missing }}
+<div class="error-state">No job with this ID is on disk.</div>
+{{ else if .Empty }}
+<div class="empty-state">No log for this job. The agent has not written a transcript yet — usual for jobs that never ran, or older runs before transcripts were saved on the job.</div>
+{{ else }}
+{{ if .SourceLabel }}<div class="source">From {{ .SourceLabel }} in the job store</div>{{ end }}
+<div class="log-list">
+  {{ range .Events }}
+  <article class="event event-{{ .Kind }}">
+    <div class="event-kind">{{ .Kind }}</div>
+    <div class="event-title">{{ .Title }}</div>
+    {{ if .Body }}<pre class="event-body">{{ .Body }}</pre>{{ end }}
+  </article>
+  {{ end }}
+</div>
+{{ end }}
+{{end}}

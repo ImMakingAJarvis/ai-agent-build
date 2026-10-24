@@ -359,6 +359,16 @@
     color: var(--red);
   }
   .btn-reject:hover { background: rgba(248,81,73,0.1); }
+
+  a.log-link { color: var(--blue); text-decoration: none; font-weight: 500; }
+  a.log-link:hover { text-decoration: underline; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  @media (max-width: 640px) {
+    body { padding: 12px; }
+    .cost-row, .queue-row, .slots-row { grid-template-columns: 1fr 1fr; }
+    table { font-size: 0.8rem; }
+    th, td { padding: 8px; }
+  }
 </style>
 </head>
 <body>
@@ -487,10 +497,37 @@
     </div>
   </div>
 
+  <!-- Agent Jobs (build work) -->
+  <div class="section">
+    <div class="section-title">Agent Jobs</div>
+    {{ if .AgentJobs }}
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Job</th><th>Status</th><th>Driver</th><th>Log</th><th>PR</th><th>Depends on</th></tr></thead>
+      <tbody>
+        {{ range .AgentJobs }}
+        <tr>
+          <td title="{{ .ID }}">{{ .ID }} — {{ .Title }}</td>
+          <td>{{ .Status }}</td>
+          <td>{{ if .RanWith }}{{ .RanWith }}{{ else }}{{ .Spec.Driver }}{{ end }}</td>
+          <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
+          <td>{{ if .PRURL }}<a href="{{ .PRURL }}">PR</a>{{ end }}</td>
+          <td>{{ range .DependsOn }}{{ . }} {{ end }}</td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+    </div>
+    {{ else }}
+    <div class="empty-state">No agent jobs.</div>
+    {{ end }}
+  </div>
+
   <!-- Recent Jobs -->
   <div class="section">
     <div class="section-title">Recent Jobs</div>
     {{ if .RecentJobs }}
+    <div class="table-wrap">
     <table>
       <thead>
         <tr>
@@ -502,6 +539,7 @@
           <th>Cost</th>
           <th>Started</th>
           <th>Duration</th>
+          <th>Log</th>
           <th>Error</th>
         </tr>
       </thead>
@@ -519,11 +557,13 @@
           <td class="cost-cell">{{ formatCost .EstimatedCost }}</td>
           <td class="timestamp">{{ .StartedAt }}</td>
           <td>{{ .Duration }}</td>
+          <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
           <td class="error-text" title="{{ .Error }}">{{ .Error }}</td>
         </tr>
         {{ end }}
       </tbody>
     </table>
+    </div>
     {{ else }}
     <div class="empty-state">No jobs recorded yet.</div>
     {{ end }}

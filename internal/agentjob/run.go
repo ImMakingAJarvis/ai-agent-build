@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -219,6 +220,11 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	var w io.Writer = &buf
 	if r.Tee != nil {
 		w = io.MultiWriter(&buf, r.Tee)
+	}
+	// Stream the same bytes into transcript.txt so a running job has a log.
+	if tf, err := os.OpenFile(filepath.Join(r.Store.JobDir(id), "transcript.txt"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+		defer tf.Close()
+		w = io.MultiWriter(w, tf)
 	}
 	cmd.Stdout, cmd.Stderr = w, w
 
