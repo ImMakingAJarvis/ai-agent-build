@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
 
 func TestParseSchedulePrefix(t *testing.T) {
@@ -136,14 +140,39 @@ func TestHandleMessageScheduleEnqueues(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", dir)
 	t.Setenv("JARVIS_CONF", dir)
 
-	server := fakeOllamaServer(t, "On it.\nSCHEDULE:\ntitle: tiny health\ninstructions: add /health\n", 50*time.Millisecond)
+	// "add a health endpoint" is fast-classified as chat, so the
+	// classify LLM call is skipped. The server only receives the
+	// Chat call, which should return the SCHEDULE response.
+	scheduleReply := "On it.\nSCHEDULE:\ntitle: tiny health\ninstructions: add /health\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model    string             `json:"model"`
+			Messages []models.ChatMessage `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+
+		time.Sleep(50 * time.Millisecond)
+
+		// Return the SCHEDULE response.
+		resp := models.ChatResponse{
+			Choices: []struct {
+				Message models.ChatMessage `json:"message"`
+			}{
+				{Message: models.ChatMessage{Role: "assistant", Content: scheduleReply}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
 	defer server.Close()
+
 	t.Setenv("OLLAMA_URL", server.URL)
 	client := models.NewClient()
+	hAgent := newTestHermesAgent(client)
 
 	d := &testDiscord{}
 	var history []string
-	handleMessage(d, client, "jarvis-brain", chat.Incoming{
+	handleMessage(d, hAgent, voices.Get(""), chat.Incoming{
 		ChannelID: "ch", MessageID: "msg", Content: "add a health endpoint",
 	}, &history)
 
