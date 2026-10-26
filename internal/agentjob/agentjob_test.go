@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
@@ -84,12 +85,31 @@ func TestFailingAgentRecordedFailed(t *testing.T) {
 }
 
 func TestPromptHasRulesJobAndNote(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir()) // don't drain the real inbox
 	r := &Runner{Brief: func(string) string { return "RULES" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT", Branch: "br"}}, "local", "NOTE")
 	for _, w := range []string{"RULES", "d0", "TEXT", "br", "NOTE"} {
 		if !strings.Contains(p, w) {
 			t.Errorf("prompt lacks %q", w)
 		}
+	}
+}
+
+func TestPromptIncludesIdleOwnerMessages(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	if _, err := inbox.Send("hello from the owner"); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Brief: func(string) string { return "RULES" }}
+	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
+	if !strings.Contains(p, "hello from the owner") ||
+		!strings.Contains(p, "while the agent was idle") {
+		t.Fatalf("prompt lacks idle message:\n%s", p)
+	}
+	// Drained: the next round does not repeat it.
+	p2 := r.Prompt(Job{Spec: Spec{ID: "d1", Title: "T", Instructions: "TEXT"}}, "local", "")
+	if strings.Contains(p2, "hello from the owner") {
+		t.Fatal("idle message repeated in next prompt")
 	}
 }
 
