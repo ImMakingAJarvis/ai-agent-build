@@ -150,7 +150,14 @@ fi
 if (( resume )); then
   d=$(cat "$DRIVER" 2>/dev/null || echo local)
   m=$([[ "$d" == local ]] && echo local || echo "$M2")
-  run_claude "$m" 1 "$(resume_prompt "carry on with what you were doing, following the same rules as before.")"; status=$?
+  # Tag the session with the job id (as jarvis-jobs run does) so the
+  # owner-message hook injects queue-site messages into this round too.
+  resume_p="$(resume_prompt "carry on with what you were doing, following the same rules as before.")"
+  if [[ -f "$CONF/current-job" ]]; then
+    JARVIS_JOB_ID="$(cat "$CONF/current-job")" run_claude "$m" 1 "$resume_p"; status=$?
+  else
+    run_claude "$m" 1 "$resume_p"; status=$?
+  fi
   exit_if_rebooting
   # The round that rebooted was a queued job: record how it ended.
   if [[ -f "$CONF/current-job" ]]; then
