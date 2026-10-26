@@ -9,6 +9,8 @@
 //  3. Replies with Notify.
 //  4. If no answer after 20 s, sends a busy notice.
 //  5. Gives up after 4 minutes with a timeout message.
+//  6. Appends the exchange to the daily conversation log
+//     (notes/conversations/discord-YYYY-MM-DD.md).
 //
 // It skips messages while a checkpoint question is open
 // ($CONF/ask-open exists) and skips Discord replies to bot questions
@@ -23,6 +25,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -30,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"sync"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
@@ -419,9 +423,52 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, in chat.
 	*history = append(*history, content, answer)
 	pruneHistory(history, maxHistoryWords)
 
+	// Leave a written record of the exchange.
+	logConversation(content, answer)
+
 	if err := d.Notify(ctx, answer); err != nil {
 		log.Printf("jarvis-chat: notify: %v", err)
 	}
+}
+
+// logConversation appends one exchange to the daily conversation log
+// (discord-YYYY-MM-DD.md) so the coding agent can read back what was
+// talked about. Directory comes from $JARVIS_NOTES_DIR; when the var is
+// unset it defaults to <home>/ai-agent-build/notes/conversations, and an
+// explicitly empty var disables logging (tests rely on that).
+//
+// Logging is best-effort: any failure is logged and chat goes on.
+var conversationLogMu sync.Mutex
+
+func logConversation(content, answer string) {
+	dir, ok := os.LookupEnv("JARVIS_NOTES_DIR")
+	if !ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, "ai-agent-build", "notes", "conversations")
+		}
+	}
+	if dir == "" {
+		return
+	}
+
+	now := time.Now()
+	ts := now.Format("2006-01-02 15:04:05")
+	name := filepath.Join(dir, "discord-"+now.Format("2006-01-02")+".md")
+
+	conversationLogMu.Lock()
+	defer conversationLogMu.Unlock()
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("jarvis-chat: conversation log: %v", err)
+		return
+	}
+	f, err := os.OpenFile(name, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("jarvis-chat: conversation log: %v", err)
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "[%s] Nathan: %s\n\n[%s] Jarvis:\n%s\n\n", ts, content, ts, answer)
 }
 
 func typingLoop(ctx context.Context, d sender) {
