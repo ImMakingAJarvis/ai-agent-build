@@ -182,20 +182,24 @@ async def ask_ollama(user_text: str) -> str:
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
-            f"{OLLAMA_URL}/api/chat",
+            f"{OLLAMA_URL}/v1/chat/completions",
             json={
                 "model": LOCAL_MODEL,
                 "messages": messages,
                 "stream": False,
-                "options": {
-                    "temperature": 0.7,
-                    "num_ctx": 8192,
-                },
+                "temperature": 0.7,
+                # Voice replies are one or two sentences; cap the output.
+                "max_tokens": 300,
+                # The brain thinks by default; thinking burns the token cap
+                # (empty replies) and adds latency. Voice does not need it.
+                "chat_template_kwargs": {"enable_thinking": False},
             },
         )
         resp.raise_for_status()
         result = resp.json()
-        reply = result.get("message", {}).get("content", "(no reply)")
+        reply = result.get("choices", [{}])[0].get("message", {}).get(
+            "content", "(no reply)"
+        )
 
     chat_history.append({"role": "user", "content": user_text})
     chat_history.append({"role": "assistant", "content": reply})
@@ -214,6 +218,10 @@ async def synthesize(text: str) -> bytes:
             audio_bytes.write(chunk["data"])
     audio_bytes.seek(0)
     return audio_bytes.read()
+
+def ascii_header(value: str) -> str:
+    """Make a string safe for use in an HTTP header (latin-1)."""
+    return value.encode("latin-1", "replace").decode("latin-1")
 
 # ---------------------------------------------------------------------------
 # Request models
@@ -255,27 +263,29 @@ app.dependencies = [require_auth]
 
 @app.get("/health")
 async def health():
-    """Check that whisper is loaded and Ollama is reachable."""
-    ollama_ok = False
+    """Check that whisper is loaded and the brain is reachable."""
+    llm_ok = False
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{OLLAMA_URL}/api/tags")
+            resp = await client.get(f"{OLLAMA_URL}/v1/models")
             if resp.status_code == 200:
-                models = [m["name"].split(":", 1)[0]
+                # llama.cpp reports the GGUF path; Ollama reports e.g.
+                # "jarvis-brain:latest" — match by substring.
+                models = [m.get("name", "")
                           for m in resp.json().get("models", [])]
-                ollama_ok = LOCAL_MODEL.split(":", 1)[0] in models
+                llm_ok = any(LOCAL_MODEL in m for m in models) or bool(models)
     except Exception:
         pass
 
-    status = "ok" if (whisper_ready and ollama_ok) else "degraded"
+    status = "ok" if (whisper_ready and llm_ok) else "degraded"
     code = 200 if status == "ok" else 503
     return JSONResponse(
         status_code=code,
         content={
             "status": status,
             "whisper": whisper_ready,
-            "ollama": ollama_ok,
-            "ollama_url": OLLAMA_URL,
+            "llm": llm_ok,
+            "llm_url": OLLAMA_URL,
             "model": LOCAL_MODEL,
         },
     )
@@ -324,8 +334,8 @@ async def voice_endpoint(file: UploadFile = File(...)):
             content=reply_audio,
             media_type="audio/wav",
             headers={
-                "X-Transcript": text,
-                "X-Reply": reply,
+                "X-Transcript": ascii_header(text),
+                "X-Reply": ascii_header(reply),
                 "X-Elapsed": f"{elapsed:.1f}",
             },
         )
@@ -351,7 +361,7 @@ async def voice_json_endpoint(req: TextRequest):
         return Response(
             content=reply_audio,
             media_type="audio/wav",
-            headers={"X-Reply": reply, "X-Elapsed": f"{elapsed:.1f}"},
+            headers={"X-Reply": ascii_header(reply), "X-Elapsed": f"{elapsed:.1f}"},
         )
     except Exception as e:
         logger.exception("Voice JSON pipeline error")
