@@ -128,9 +128,24 @@ The Jarvis voice service exposes these endpoints:
 | `POST` | `/stt` | Audio file | `{"text": "..."}` |
 | `POST` | `/tts` | `{"text": "..."}` | WAV audio |
 | `POST` | `/history/reset` | — | `{"status": "history cleared"}` |
-| `GET`  | `/health` | — | `{"status":"ok","whisper":true,"ollama":true}` |
+| `GET`  | `/health` | — | `{"status":"ok","whisper":true,"llm":true,"voice":"glados",...}` |
 
 Response headers on `/voice` and `/voice/json`:
 - `X-Transcript` — what was transcribed
 - `X-Reply` — what the LLM replied
 - `X-Elapsed` — total pipeline time in seconds
+
+## Voice profiles
+
+The voice service runs one of the personas defined in
+`scripts/voice_prompts/`, selected by the `JARVIS_VOICE` env var on the
+`jarvis-voice` systemd unit:
+
+| Profile | Persona | edge-tts voice | Notes |
+|---------|---------|----------------|-------|
+| `jarvis` | Jarvis, the helpful home AI | `en-US-GuyNeural` | the stock voice |
+| `glados` | GLaDOS from Portal: dry, sarcastic, unenthusiastic | `en-US-EmmaNeural` at -10% rate, -2Hz pitch | flat, deadpan delivery |
+
+Overrides (env vars on the unit): `VOICE_PROMPT` (prompt file),
+`TTS_VOICE`, `TTS_RATE`, `TTS_PITCH` (edge-tts settings). After changing
+any of them: `sudo systemctl restart jarvis-voice`.

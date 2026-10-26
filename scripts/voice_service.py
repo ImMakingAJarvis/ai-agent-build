@@ -18,12 +18,15 @@ faster-whisper, sends the text to Ollama's jarvis-brain, synthesizes a
 reply with edge-tts, and streams the audio back.
 
 Environment:
-  OLLAMA_URL      default http://localhost:11434
+  OLLAMA_URL      LLM base URL, OpenAI-compatible (default http://localhost:11434;
+                  works with the llama.cpp jarvis-engine or real Ollama)
   LOCAL_MODEL     default jarvis-brain
-  WHISPER_MODEL   default medium  (tiny/base/small/medium/large)
-  TTS_VOICE       default en-US-GuyNeural
-  TTS_LANG        default en-US
-  VOICE_PROMPT    path to system prompt (default ~/.config/jarvis/voice-prompt.txt)
+  WHISPER_MODEL   default small   (tiny/base/small/medium/large)
+  JARVIS_VOICE    persona profile: "jarvis" (default) or "glados"
+  VOICE_PROMPT    override: path to system prompt file
+  TTS_VOICE       override: edge-tts voice (e.g. en-US-EmmaNeural)
+  TTS_RATE        override: edge-tts rate (e.g. -10%)
+  TTS_PITCH       override: edge-tts pitch (e.g. -2Hz)
   LISTEN_PORT     default 8100
 """
 
@@ -54,11 +57,7 @@ from pydantic import BaseModel
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 LOCAL_MODEL = os.getenv("LOCAL_MODEL", "jarvis-brain")
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "small")
-TTS_VOICE = os.getenv("TTS_VOICE", "en-US-GuyNeural")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8100"))
-VOICE_PROMPT_PATH = os.getenv(
-    "VOICE_PROMPT", os.path.expanduser("~/.config/jarvis/voice-prompt.txt")
-)
 VOICE_USER = os.getenv("VOICE_USER", "")
 VOICE_PASS = os.getenv("VOICE_PASS", "")
 
@@ -66,21 +65,78 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [voice] %(message)s"
 logger = logging.getLogger("voice")
 
 # ---------------------------------------------------------------------------
-# Voice system prompt
+# Voice profiles (JARVIS_VOICE)
 # ---------------------------------------------------------------------------
-def load_voice_prompt() -> str:
-    if os.path.exists(VOICE_PROMPT_PATH):
-        with open(VOICE_PROMPT_PATH) as f:
-            return f.read().strip()
-    return (
-        "You are Jarvis, Nathan's home AI, speaking to him by voice. "
-        "Keep replies brief and conversational — one or two sentences max. "
-        "Do not use markdown, code blocks, or lists. "
-        "You cannot act on the machine directly; if Nathan asks you to do something, "
-        "tell him you'll have the coding worker handle it."
+# Each profile pairs a persona prompt with an edge-tts voice. Prompt files
+# live in scripts/voice_prompts/ next to this file. Global overrides:
+# VOICE_PROMPT (prompt file), TTS_VOICE / TTS_RATE / TTS_PITCH (TTS).
+PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_prompts")
+
+VOICE_PROFILES = {
+    "jarvis": {
+        "name": "Jarvis",
+        "prompt": "jarvis.txt",
+        "tts_voice": "en-US-GuyNeural",
+        "tts_rate": "+0%",
+        "tts_pitch": "+0Hz",
+    },
+    "glados": {
+        "name": "GLaDOS",
+        "prompt": "glados.txt",
+        # Flat, dry delivery: a measured news-anchor voice, slowed down and
+        # pitched down slightly for the deadpan.
+        "tts_voice": "en-US-EmmaNeural",
+        "tts_rate": "-10%",
+        "tts_pitch": "-2Hz",
+    },
+}
+
+ACTIVE_PROFILE_KEY = os.getenv("JARVIS_VOICE", "jarvis").strip().lower()
+if ACTIVE_PROFILE_KEY not in VOICE_PROFILES:
+    logger.warning(
+        "Unknown JARVIS_VOICE=%r; falling back to %r",
+        os.getenv("JARVIS_VOICE"), "jarvis",
+    )
+    ACTIVE_PROFILE_KEY = "jarvis"
+ACTIVE_PROFILE = VOICE_PROFILES[ACTIVE_PROFILE_KEY]
+
+
+def resolve_prompt() -> tuple[str, str]:
+    """Return (prompt_text, source_path) for the active profile."""
+    override = os.getenv("VOICE_PROMPT")
+    if override and os.path.exists(override):
+        with open(override) as f:
+            return f.read().strip(), override
+    path = os.path.join(PROMPT_DIR, ACTIVE_PROFILE["prompt"])
+    if os.path.exists(path):
+        with open(path) as f:
+            return f.read().strip(), path
+    # Legacy fallback for the stock profile.
+    if ACTIVE_PROFILE_KEY == "jarvis":
+        legacy = os.path.expanduser("~/.config/jarvis/voice-prompt.txt")
+        if os.path.exists(legacy):
+            with open(legacy) as f:
+                return f.read().strip(), legacy
+    raise RuntimeError(
+        f"No system prompt for voice {ACTIVE_PROFILE_KEY!r} in {PROMPT_DIR}"
     )
 
-VOICE_SYSTEM_PROMPT = load_voice_prompt()
+
+def tts_settings() -> tuple[str, str, str]:
+    """Return (voice, rate, pitch); env overrides beat the profile."""
+    return (
+        os.getenv("TTS_VOICE") or ACTIVE_PROFILE["tts_voice"],
+        os.getenv("TTS_RATE") or ACTIVE_PROFILE["tts_rate"],
+        os.getenv("TTS_PITCH") or ACTIVE_PROFILE["tts_pitch"],
+    )
+
+
+VOICE_SYSTEM_PROMPT, VOICE_PROMPT_SOURCE = resolve_prompt()
+logger.info(
+    "Voice profile: %s (key %s), prompt from %s, TTS %s",
+    ACTIVE_PROFILE["name"], ACTIVE_PROFILE_KEY,
+    VOICE_PROMPT_SOURCE, tts_settings()[0],
+)
 
 # ---------------------------------------------------------------------------
 # Whisper model (loaded once at startup on GPU)
@@ -173,7 +229,7 @@ chat_history: list[dict] = []
 MAX_HISTORY = 20
 
 async def ask_ollama(user_text: str) -> str:
-    """Send text to Ollama and get a reply."""
+    """Send text to the brain (OpenAI-compatible API) and get a reply."""
     messages = [
         {"role": "system", "content": VOICE_SYSTEM_PROMPT},
         *chat_history[-MAX_HISTORY:],
@@ -210,8 +266,9 @@ async def ask_ollama(user_text: str) -> str:
 # TTS
 # ---------------------------------------------------------------------------
 async def synthesize(text: str) -> bytes:
-    """Synthesize text to speech using edge-tts, return WAV bytes."""
-    communicate = edge_tts.Communicate(text, TTS_VOICE)
+    """Synthesize text to speech using edge-tts, return audio bytes (MP3)."""
+    voice, rate, pitch = tts_settings()
+    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
     audio_bytes = io.BytesIO()
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
@@ -287,6 +344,8 @@ async def health():
             "llm": llm_ok,
             "llm_url": OLLAMA_URL,
             "model": LOCAL_MODEL,
+            "voice": ACTIVE_PROFILE_KEY,
+            "tts_voice": tts_settings()[0],
         },
     )
 
@@ -455,7 +514,8 @@ async def voice_websocket(ws: WebSocket):
 
                         # TTS - stream audio chunks as they arrive
                         await ws.send_json({"type": "status", "state": "speaking", "text": reply})
-                        communicate = edge_tts.Communicate(reply, TTS_VOICE)
+                        voice, rate, pitch = tts_settings()
+                        communicate = edge_tts.Communicate(reply, voice, rate=rate, pitch=pitch)
 
                         # Collect all audio first, then convert to raw PCM and stream
                         audio_bytes = io.BytesIO()
