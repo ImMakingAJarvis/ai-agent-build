@@ -123,6 +123,67 @@ func TestTodayAPISpendStopsAtOldRecords(t *testing.T) {
 	}
 }
 
+// --- TodayPowerCost ---
+
+func recPower(started, finished string, kwh, cost float64) string {
+	b, _ := json.Marshal(map[string]any{
+		"id": "x", "type": "agent", "queue": "background",
+		"started_at": started, "finished_at": finished, "status": "completed",
+		"kwh": kwh, "power_cost": cost,
+	})
+	return string(b)
+}
+
+func TestTodayPowerCost(t *testing.T) {
+	today := time.Now().UTC().Format("2006-01-02")
+	yest := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	path := filepath.Join(t.TempDir(), "jobs.jsonl")
+	writeJSONL(t, path,
+		recPower(yest+"T23:00:00Z", yest+"T23:30:00Z", 9.9, 1.485), // yesterday: excluded
+		recPower(today+"T01:00:00Z", "", 0.5, 0.075),               // today: +0.5 kWh / +$0.075
+		recPower(today+"T02:00:00Z", "", 1.5, 0.225),               // today: +1.5 kWh / +$0.225
+	)
+	kwh, cost, err := TodayPowerCost(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%.3f", kwh) != "2.000" {
+		t.Errorf("kwh = %v, want 2.000", kwh)
+	}
+	if fmt.Sprintf("%.4f", cost) != "0.3000" {
+		t.Errorf("cost = %v, want 0.3000", cost)
+	}
+}
+
+func TestTodayPowerCostNoFile(t *testing.T) {
+	if _, _, err := TodayPowerCost(filepath.Join(t.TempDir(), "missing.jsonl")); err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+func TestTodayPowerCostStopsAtOldRecords(t *testing.T) {
+	today := time.Now().UTC().Format("2006-01-02")
+	yest := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	path := filepath.Join(t.TempDir(), "jobs.jsonl")
+	// Everything old except one today record: scan must sum only today's.
+	lines := make([]string, 0, 50)
+	for i := 0; i < 20; i++ {
+		lines = append(lines, recPower(yest+"T08:00:00Z", yest+"T09:00:00Z", 9.9, 1.485))
+	}
+	lines = append(lines, recPower(today+"T10:00:00Z", "", 2.0, 0.3))
+	for i := 0; i < 20; i++ {
+		lines = append(lines, recPower(yest+"T10:00:00Z", yest+"T11:00:00Z", 9.9, 1.485))
+	}
+	writeJSONL(t, path, lines...)
+	kwh, cost, err := TodayPowerCost(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%.3f", kwh) != "2.000" || fmt.Sprintf("%.4f", cost) != "0.3000" {
+		t.Errorf("kwh=%v cost=%v, want 2.000 / 0.3000", kwh, cost)
+	}
+}
+
 // --- GPUStats ---
 
 func TestGPUStats(t *testing.T) {
@@ -252,8 +313,8 @@ func TestCurrentJobIdle(t *testing.T) {
 
 func TestDefaultEntities(t *testing.T) {
 	ents := DefaultEntities("jarvis")
-	if len(ents) != 9 {
-		t.Fatalf("want 9 entities, got %d", len(ents))
+	if len(ents) != 11 {
+		t.Fatalf("want 11 entities, got %d", len(ents))
 	}
 	seen := map[string]bool{}
 	for _, e := range ents {

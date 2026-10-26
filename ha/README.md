@@ -14,6 +14,8 @@ Grafana keeps the hardware dashboards. HA gets:
 | `sensor.jarvis_current_job` | title of the job the agent is running now (`idle` when none) |
 | `sensor.jarvis_loaded_model` | model loaded in the local engine |
 | `sensor.jarvis_api_spend_today` | $ spent on API-dispatched jobs started today (UTC) |
+| `sensor.jarvis_power_cost_today` | $ electricity cost of local agent jobs started today (UTC) |
+| `sensor.jarvis_energy_today` | kWh sampled from local agent jobs started today (UTC) |
 | `sensor.jarvis_gpu_temp` | GPU temperature (°C) |
 | `sensor.jarvis_gpu_power` | GPU power draw (W) |
 
@@ -65,7 +67,7 @@ tail -5 ~/.local/state/jarvis/ha-publisher.log
    - Username / Password: the RabbitMQ credentials
      (`RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` from the
      docker-compose env — the same user the AMQP traffic uses)
-2. **Verify** — the nine `sensor.jarvis_*` entities appear under the
+2. **Verify** — the eleven `sensor.jarvis_*` entities appear under the
    *Jarvis Agent* device. They update every ~30 s.
 3. **Add the dashboard card** — `dashboard-snippet.yaml` in this folder
    adds one card: a **Jarvis Dashboard** button that opens the Phase 6
