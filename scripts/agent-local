@@ -54,6 +54,9 @@ export CLAUDE_CODE_AUTO_COMPACT_WINDOW="${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-${LOC
 # jarvis-brain is not an Anthropic ID; skip SDK model-name validation (telemetry: unrecognized_model).
 export ANTHROPIC_CUSTOM_MODEL_OPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION:-$LOCAL_MODEL}"
 export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="${ANTHROPIC_CUSTOM_MODEL_OPTION_NAME:-$LOCAL_MODEL}"
+# Qwen3.8 template only accepts xhigh|medium|low. Claude Code otherwise sends
+# reasoning_effort=unknown (or max/auto) and llama-server returns HTTP 500.
+export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-xhigh}"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="$LOCAL_MODEL"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="$CODER"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="$CODER"
