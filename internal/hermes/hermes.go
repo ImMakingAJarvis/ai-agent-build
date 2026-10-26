@@ -36,10 +36,11 @@ type Agent struct {
 	mu         sync.Mutex
 	ollama     ChatClient
 	queueConn  *queue.Conn
-	model      string          // Ollama model name for intent parsing
+	model      string            // Ollama model name for intent parsing
+	chatSlot   int               // llama.cpp slot for chat calls (0 = any)
 	actions    map[string]Action // registered actions by key
 	history    []HistoryEntry    // conversation history for context
-	maxHistory int             // max entries to keep
+	maxHistory int               // max entries to keep
 	access     config.AccessLevel
 }
 
@@ -54,6 +55,7 @@ type Config struct {
 	Model       string // Ollama model (e.g., "jarvis-brain")
 	MaxHistory  int    // max history entries (default 20)
 	AccessLevel config.AccessLevel
+	ChatSlot    int // llama.cpp parallel slot for chat calls (0 = any)
 }
 
 // New creates a new Hermes agent with the given configuration.
@@ -63,6 +65,7 @@ func New(cfg Config) *Agent {
 	}
 	return &Agent{
 		model:      cfg.Model,
+		chatSlot:   cfg.ChatSlot,
 		actions:    make(map[string]Action),
 		maxHistory: cfg.MaxHistory,
 		access:     cfg.AccessLevel,
@@ -131,7 +134,7 @@ func (a *Agent) Classify(ctx context.Context, userMessage string) (*Result, erro
 		Content: userMessage,
 	})
 
-	raw, err := ollama.Chat(a.model, messages)
+	raw, err := a.chatModel(a.model, messages)
 	if err != nil {
 		return nil, fmt.Errorf("hermes: classify: %w", err)
 	}
@@ -254,7 +257,7 @@ func (a *Agent) Chat(ctx context.Context, systemPrompt string, history []string,
 		Content: userMessage,
 	})
 
-	return ollama.Chat(a.model, messages)
+	return a.chatModel(a.model, messages)
 }
 
 // listActions returns a snapshot of the registered actions.
