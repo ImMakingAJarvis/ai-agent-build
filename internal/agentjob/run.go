@@ -77,16 +77,24 @@ func ModelFor(driver string) string {
 }
 
 func defaultCommand(driver, prompt, effort string) *exec.Cmd {
+	bin := "agent-local"
+	args := []string{"--dangerously-skip-permissions"}
 	if driver == "sonnet" {
-		return exec.Command("claude", "--model", ModelFor(driver),
-			"--dangerously-skip-permissions",
-			"--reasoning-effort", effort,
-			"-p", prompt)
+		bin = "claude"
+		args = []string{"--model", ModelFor(driver), "--dangerously-skip-permissions"}
 	}
-	return exec.Command("agent-local",
-		"--dangerously-skip-permissions",
-		"--reasoning-effort", effort,
-		"-p", prompt)
+	canon := queue.CanonicalEffort(effort, "coding")
+	env := append([]string{}, os.Environ()...)
+	if canon == queue.EffortOff {
+		env = append(env, "CLAUDE_CODE_DISABLE_THINKING=1", "MAX_THINKING_TOKENS=0")
+	} else if ce := queue.ClaudeEffort(canon); ce != "" {
+		args = append(args, "--effort", ce)
+		env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+ce)
+	}
+	args = append(args, "-p", prompt)
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	return cmd
 }
 
 func defaultPRLookup(branch string) string {
@@ -228,10 +236,7 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	}
 
 	prompt := r.Prompt(j, driver, note)
-	effort := j.ReasoningEffort
-	if effort == "" {
-		effort = queue.DefaultEffort
-	}
+	effort := queue.CanonicalEffort(j.ReasoningEffort, "coding")
 	cmdf := r.Command
 	if cmdf == nil {
 		cmdf = defaultCommand

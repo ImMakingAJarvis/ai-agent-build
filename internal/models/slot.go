@@ -13,11 +13,12 @@ import (
 // a llama.cpp parallel slot. id_slot is a llama.cpp server extension: the
 // request is served only by that slot, never by the work slot.
 type slotChatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []ChatMessage `json:"messages"`
-	Stream    bool          `json:"stream"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
-	IDSlot    int           `json:"id_slot"`
+	Model              string         `json:"model"`
+	Messages           []ChatMessage  `json:"messages"`
+	Stream             bool           `json:"stream"`
+	MaxTokens          int            `json:"max_tokens,omitempty"`
+	IDSlot             int            `json:"id_slot"`
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
 
 // chatSlotMaxTokens caps chat-slot replies. Chat answers are short; the cap
@@ -37,6 +38,8 @@ func (c *Client) ChatSlot(model string, messages []ChatMessage, idSlot int) (str
 		Stream:    false,
 		MaxTokens: chatSlotMaxTokens,
 		IDSlot:    idSlot,
+		// Voice/Discord chat: thinking off so replies stay short.
+		ChatTemplateKwargs: map[string]any{"enable_thinking": false},
 	}
 	body, err := json.Marshal(req)
 	if err != nil {

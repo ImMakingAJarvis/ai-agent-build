@@ -63,7 +63,8 @@ func main() {
 		if err != nil {
 			die("%v", err)
 		}
-		fmt.Printf("%s — %s\nstatus: %s\n\n%s\n", j.ID, j.Title, j.Status, j.Instructions)
+		fmt.Printf("%s — %s\nstatus: %s\neffort: %s\n\n%s\n", j.ID, j.Title, j.Status,
+			queue.CanonicalEffort(j.ReasoningEffort, "coding"), j.Instructions)
 	case "pause":
 		if len(args) != 1 {
 			die("pause <id>")
@@ -87,17 +88,17 @@ func main() {
 		driver := fs.String("driver", "local", "local or sonnet")
 		round := fs.String("round", "", "round label")
 		note := fs.String("note", "", "typed instructions for this round")
-		effort := fs.String("effort", queue.DefaultEffort,
-			"reasoning effort: low, medium, high, xhigh, max")
+		effort := fs.String("effort", "",
+			"reasoning effort for this round: off, low, medium, high, xhigh, max (default: job spec, else medium)")
 		if len(args) < 1 {
 			die("run <id> [flags]")
 		}
 		fs.Parse(args[1:])
-		// Inject effort into the job spec so the runner picks it up.
+		// Only overwrite the stored job effort when the flag is passed.
 		if *effort != "" {
 			j, err := store.Get(args[0])
 			if err == nil {
-				j.ReasoningEffort = *effort
+				j.ReasoningEffort = queue.CanonicalEffort(*effort, "coding")
 				store.Ingest(j.Spec)
 			}
 		}
@@ -211,6 +212,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	source := fs.String("source", "", "origin (discord, migrate, …)")
 	priority := fs.Int("priority", 0, "higher runs first")
 	instructions := fs.String("instructions", "", "job body (default: stdin)")
+	effort := fs.String("effort", "", "reasoning effort: off, low, medium, high, xhigh, max (default medium)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -226,12 +228,13 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		body = string(b)
 	}
 	added, err := store.Ingest(agentjob.Spec{
-		ID:           *id,
-		Title:        *title,
-		Instructions: strings.TrimSpace(body),
-		Driver:       *driver,
-		Source:       *source,
-		Priority:     *priority,
+		ID:              *id,
+		Title:           *title,
+		Instructions:    strings.TrimSpace(body),
+		Driver:          *driver,
+		Source:          *source,
+		Priority:        *priority,
+		ReasoningEffort: queue.CanonicalEffort(*effort, "coding"),
 	})
 	if err != nil {
 		return err
