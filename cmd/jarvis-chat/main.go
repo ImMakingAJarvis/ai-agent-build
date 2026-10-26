@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -120,6 +121,7 @@ func main() {
 		Model:       modelName,
 		MaxHistory:  20,
 		AccessLevel: config.AccessFull,
+		ChatSlot:    chatSlotID(),
 	})
 	hermesAgent.SetOllamaClient(ollamaClient)
 
@@ -138,7 +140,7 @@ func main() {
 		bCfg := botCfg // capture for closure
 
 		d, err := chat.NewDiscord(chat.Config{
-			Token:    bCfg.Token,
+			Token:   bCfg.Token,
 			OwnerID: pickOwnerID(bCfg, confDir),
 		})
 		if err != nil {
@@ -228,6 +230,18 @@ func main() {
 // pickOwnerID returns the owner ID for a bot. For the primary bot, it uses
 // DISCORD_OWNER_ID. For additional bots, it uses the first allowed user.
 // Falls back to reading from the signal file config.
+// chatSlotID returns the llama.cpp slot reserved for chat traffic. Slot 0
+// is the work slot (build rounds); chat replies run on slot 1 so both
+// happen at once. Override with CHAT_SLOT_ID.
+func chatSlotID() int {
+	if v := os.Getenv("CHAT_SLOT_ID"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1
+}
+
 func pickOwnerID(bCfg config.BotConfig, confDir string) string {
 	// Try the first allowed user.
 	if len(bCfg.AllowedUsers) > 0 {
