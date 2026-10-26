@@ -10,3 +10,6 @@ jarvis-chat
 
 # Temporary files
 tmp/
+
+# Dashboard binary (build artifact; source in cmd/dashboard)
+dashboard
