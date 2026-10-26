@@ -120,6 +120,30 @@ func (s *Store) ListEpics() ([]Epic, error) {
 	return epics, nil
 }
 
+// DeleteEpic removes an epic from the board.
+func (s *Store) DeleteEpic(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return os.Remove(filepath.Join(s.root, "epics", id+".json"))
+}
+
+// UpdateEpicTitle changes an epic's title.
+func (s *Store) UpdateEpicTitle(id, title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "epics", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var ep Epic
+	if err := json.Unmarshal(b, &ep); err != nil {
+		return err
+	}
+	ep.Title = title
+	return writeJSON(path, ep)
+}
+
 // --- Tasks ---
 
 // AddTask creates a new task and adds it to the epic's task list.
@@ -231,6 +255,67 @@ func (s *Store) UpdateTaskBranch(id, branch string) error {
 		return err
 	}
 	t.Branch = branch
+	t.UpdatedAt = time.Now().UTC()
+	return writeJSON(path, t)
+}
+
+// DeleteTask removes a task from the board.
+func (s *Store) DeleteTask(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return os.Remove(filepath.Join(s.root, "tasks", id+".json"))
+}
+
+// UpdateTaskTitle changes a task's title.
+func (s *Store) UpdateTaskTitle(id, title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	t.Title = title
+	t.UpdatedAt = time.Now().UTC()
+	return writeJSON(path, t)
+}
+
+// UpdateTaskPriority changes a task's priority.
+func (s *Store) UpdateTaskPriority(id string, priority int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	t.Priority = priority
+	t.UpdatedAt = time.Now().UTC()
+	return writeJSON(path, t)
+}
+
+// UpdateTaskModel assigns a model to a task.
+func (s *Store) UpdateTaskModel(id, model string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	t.Model = model
 	t.UpdatedAt = time.Now().UTC()
 	return writeJSON(path, t)
 }
