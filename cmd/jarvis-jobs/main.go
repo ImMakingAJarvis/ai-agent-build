@@ -1,6 +1,6 @@
 // jarvis-jobs is how the agent-run loop works with queued agent jobs.
 //
-//	jarvis-jobs list
+//	jarvis-jobs list [status]              all jobs, or only one status (e.g. failed)
 //	jarvis-jobs next                       print "<id>\t<title>"; exit 1 if none ready
 //	jarvis-jobs run <id> [-driver local|sonnet] [-round N] [-note TEXT]
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
@@ -27,7 +27,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list|next|run|finish|skip|requeue|show|pause|add")
+		die("usage: jarvis-jobs list [status]|next|run|finish|skip|requeue|show|pause|add")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -40,10 +40,8 @@ func main() {
 			die("%v", err)
 		}
 	case "list":
-		store.Recover()
-		jobs, _ := store.List()
-		for _, j := range jobs {
-			fmt.Printf("%-10s %-40s %s %s\n", j.Status, j.ID, j.Title, j.PRURL)
+		if err := cmdList(store, args, os.Stdout); err != nil {
+			die("%v", err)
 		}
 	case "next":
 		j, err := store.Next()
@@ -130,6 +128,43 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 		r.SignalFile = conf + "/pause-signal"
 	}
 	return r
+}
+
+// cmdList prints all jobs in queue order, optionally filtered to one status
+// (e.g. `jarvis-jobs list failed`). The trailing "# ..." line reports the
+// per-status totals for the *unfiltered* set, so a view truncated by head or
+// a pager still reveals how many jobs exist beyond what was shown.
+func cmdList(store *agentjob.Store, args []string, w io.Writer) error {
+	if err := store.Recover(); err != nil {
+		return err
+	}
+	jobs, err := store.List()
+	if err != nil {
+		return err
+	}
+	var filter string
+	if len(args) > 0 {
+		filter = args[0]
+	}
+	counts := map[string]int{}
+	for _, j := range jobs {
+		counts[j.Status]++
+	}
+	for _, j := range jobs {
+		if filter != "" && j.Status != filter {
+			continue
+		}
+		fmt.Fprintf(w, "%-10s %-40s %s %s\n", j.Status, j.ID, j.Title, j.PRURL)
+	}
+	var parts []string
+	for _, st := range []string{agentjob.Ready, agentjob.Claimed, agentjob.Running,
+		agentjob.Paused, agentjob.Done, agentjob.Failed, agentjob.Skipped} {
+		if n := counts[st]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, st))
+		}
+	}
+	fmt.Fprintf(w, "# %d jobs: %s\n", len(jobs), strings.Join(parts, ", "))
+	return nil
 }
 
 func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
