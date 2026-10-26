@@ -1,0 +1,22 @@
+[Unit]
+Description=Jarvis Memory Service (local vector database for work logs)
+After=network.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+ExecStart=/usr/bin/python3 /home/agent/ai-agent-build/scripts/memory_service.py
+WorkingDirectory=/home/agent/ai-agent-build
+Restart=on-failure
+RestartSec=5
+Environment=MEMORY_PORT=8101
+Environment=HOME=/home/agent
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/agent/.local/share/jarvis
+
+[Install]
+WantedBy=multi-user.target

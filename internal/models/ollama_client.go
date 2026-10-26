@@ -203,10 +203,11 @@ func (c *Client) ModelPS() ([]ModelInfo, error) {
 // Only model, messages, stream and think are sent — extra options
 // (num_ctx etc.) force Ollama to reload the 17 GB model.
 type ChatRequest struct {
-	Model   string             `json:"model"`
+	Model    string             `json:"model"`
 	Messages []ChatMessage      `json:"messages"`
-	Stream  bool               `json:"stream"`
-	Think   bool               `json:"think"`
+	Stream   bool               `json:"stream"`
+	Think    bool               `json:"think"`
+	Options  map[string]any     `json:"options,omitempty"`
 }
 
 // ChatMessage is one entry in the chat history.
@@ -231,6 +232,9 @@ func (c *Client) Chat(model string, messages []ChatMessage) (string, error) {
 		Messages: messages,
 		Stream:   false,
 		Think:    false,
+		Options: map[string]any{
+			"enable_thinking": false,
+		},
 	}
 	body, err := json.Marshal(req)
 	if err != nil {

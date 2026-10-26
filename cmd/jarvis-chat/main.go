@@ -34,6 +34,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
@@ -60,6 +61,10 @@ var (
 	busyTimeout = 20 * time.Second // send busy notice after this long
 	maxTimeout  = 4 * time.Minute  // give up after this long
 )
+
+// memClient searches the local memory service (work logs, kanban, pending
+// queue). Fails open: chat works normally when the service is down.
+var memClient = memory.New()
 
 // sender abstracts the Discord operations handleMessage needs,
 // so tests can substitute a fake.
@@ -334,6 +339,13 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, in chat.
 		systemPrompt := voice.SystemPrompt
 		if status := getStatusLine(); status != "" {
 			systemPrompt += "\n\nCurrent status:\n" + status
+		}
+		// Memory: relevant excerpts from work logs, kanban and the pending
+		// queue, so the brain can continue conversations about work and
+		// know what is up for scheduling next.
+		if hits := memClient.Search(ctx, content, 5); len(hits) > 0 {
+			systemPrompt += "\n\nRelevant context from my work logs and notes (use it when it helps):\n" +
+				memory.FormatContext(hits, 2400)
 		}
 
 		answerCh := make(chan string, 1)

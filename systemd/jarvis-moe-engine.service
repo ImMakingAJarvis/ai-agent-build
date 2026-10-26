@@ -1,0 +1,28 @@
+[Unit]
+Description=Jarvis MoE Engine — FreeToken server for Mixture-of-Experts models
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+PIDFile=/run/jarvis-moe-engine.pid
+Environment="HUGGING_FACE_HUB_TOKEN="
+ExecStart=/opt/freetoken-venv/bin/python3 -m freetoken \
+    --model-path Qwen/Qwen3.8-Flash-Next \
+    --port 11435 \
+    --moe-backend auto \
+    --moe-cache-auto \
+    --max-seq-len-override 65536 \
+    --max-output-tokens 32768 \
+    --tool-call-parser qwen \
+    --reasoning-parser qwen3
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis-moe-engine
+
+[Install]
+WantedBy=multi-user.target
