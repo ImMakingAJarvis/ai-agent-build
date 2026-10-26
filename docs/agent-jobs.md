@@ -14,3 +14,29 @@
 
 Run it only after the worker binary from this change is running: an older worker treats agent messages as text jobs.
 Other CLI: `jarvis-jobs list | show <id> | skip <id> | requeue <id>`.
+
+## Power cost (local jobs)
+
+While a local agent job runs, `jarvis-jobs` samples GPU power draw
+(`nvidia-smi power.draw`) every 10 s and integrates it into watt-hours
+(`internal/power`). At the end of the round the total is converted to
+kWh at the configured $/kWh rate and stored on the job (`kwh`,
+`power_cost` in `state.json`) and in the `jobs.jsonl` history record.
+Sampling is cumulative across attempts of the same job: the running
+total persists in `power.json` in the job dir, and a round resumed
+after a reboot picks it back up (at most one sampling interval is lost).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `JARVIS_POWER_RATE` | `0` | $/kWh; 0 tracks kWh at $0 |
+| `JARVIS_POWER_SYSTEM_W` | `0` | flat non-GPU overhead in W (the machine has no system power sensor, so the total is GPU draw + this) |
+| `JARVIS_POWER_SAMPLE_SECS` | `10` | sampling interval |
+| `JARVIS_POWER_GPU_CMD` | `nvidia-smi` | override for tests |
+
+Where the numbers show up: the Phase 6 dashboard (Cost Tracking cards
+"Power Cost (local)" / "Energy (local)", a ⚡ cell per recent job, and a
+Power column on the Agent Jobs table), the `jarvis-ha` sensors
+`sensor.jarvis_power_cost_today` / `sensor.jarvis_energy_today`, and
+the job log. Reference draw for this box: see
+`docs/gpu-power-measurements.md` (idle ~58 W, loaded idle ~71 W,
+generating ~412 W).
