@@ -49,6 +49,8 @@ type JobRecord struct {
 	Error         string  `json:"error,omitempty"`
 	EstimatedCost float64 `json:"estimated_cost,omitempty"`
 	ActualCost    float64 `json:"actual_cost,omitempty"`
+	Kwh           float64 `json:"kwh,omitempty"`
+	PowerCost     float64 `json:"power_cost,omitempty"`
 	InputTokens   int     `json:"input_tokens,omitempty"`
 	OutputTokens  int     `json:"output_tokens,omitempty"`
 	Kind          string  `json:"kind,omitempty"`
@@ -116,9 +118,11 @@ type DashboardState struct {
 	RecentJobs      []JobRecord      `json:"recent_jobs"`
 	AgentJobs       []agentjob.Job   `json:"agent_jobs"`      // build work: ready, claimed, running, done, failed
 	SlotQueues      []SlotQueue      `json:"slot_queues"`     // Currently-running jobs per slot
-	TotalCost       float64          `json:"total_cost"`      // Running total of estimated costs for API jobs
-	APICount        int              `json:"api_job_count"`   // Number of API-dispatched jobs
-	LocalCount      int              `json:"local_job_count"` // Number of local jobs
+	TotalCost       float64          `json:"total_cost"`       // Running total of estimated costs for API jobs
+	TotalPowerCost  float64          `json:"total_power_cost"` // $ electricity for local jobs (sampled GPU power × $/kWh)
+	TotalKwh        float64          `json:"total_kwh"`        // Energy used by local jobs
+	APICount        int              `json:"api_job_count"`    // Number of API-dispatched jobs
+	LocalCount      int              `json:"local_job_count"`  // Number of local jobs
 }
 
 // LightweightState is returned for the initial page load.
@@ -181,6 +185,7 @@ func New() *Server {
 		"statusClass":    StatusClass,
 		"formatDuration": FormatDuration,
 		"formatCost":     FormatCost,
+		"formatKwh":      FormatKwh,
 		"divCost":        DivCost,
 		"slotRuntime":    SlotRuntime,
 		"jobPath":        JobPath,
@@ -334,10 +339,12 @@ func (s *Server) handleLightweightHTML(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJobsSectionHTML(w http.ResponseWriter, r *http.Request) {
 	cached := s.getCachedJobData()
 	data := DashboardState{
-		RecentJobs: cached.jobs,
-		TotalCost:  cached.totalCost,
-		APICount:   cached.apiCount,
-		LocalCount: cached.localCount,
+		RecentJobs:     cached.jobs,
+		TotalCost:      cached.totalCost,
+		TotalPowerCost: cached.totalPowerCost,
+		TotalKwh:       cached.totalKwh,
+		APICount:       cached.apiCount,
+		LocalCount:     cached.localCount,
 	}
 	var buf bytes.Buffer
 	if err := s.tmpl.ExecuteTemplate(&buf, "jobs-section", data); err != nil {
@@ -402,6 +409,8 @@ func (s *Server) gatherState() DashboardState {
 		Queues:          depths,
 		RecentJobs:      cached.jobs,
 		TotalCost:       cached.totalCost,
+		TotalPowerCost:  cached.totalPowerCost,
+		TotalKwh:        cached.totalKwh,
 		APICount:        cached.apiCount,
 		LocalCount:      cached.localCount,
 	}
@@ -409,11 +418,13 @@ func (s *Server) gatherState() DashboardState {
 
 // cachedJobData holds the expensive-to-compute parts of the dashboard state.
 type cachedJobData struct {
-	jobs       []JobRecord
-	agentJobs  []agentjob.Job
-	totalCost  float64
-	apiCount   int
-	localCount int
+	jobs           []JobRecord
+	agentJobs      []agentjob.Job
+	totalCost      float64
+	totalPowerCost float64
+	totalKwh       float64
+	apiCount       int
+	localCount     int
 }
 
 const jobDataCacheTTL = 5 * time.Second
@@ -429,18 +440,20 @@ func (s *Server) getCachedJobData() cachedJobData {
 
 	if time.Since(s.stateTime) < jobDataCacheTTL {
 		return cachedJobData{
-			jobs:       s.stateCache.RecentJobs,
-			agentJobs:  s.stateCache.AgentJobs,
-			totalCost:  s.stateCache.TotalCost,
-			apiCount:   s.stateCache.APICount,
-			localCount: s.stateCache.LocalCount,
+			jobs:           s.stateCache.RecentJobs,
+			agentJobs:      s.stateCache.AgentJobs,
+			totalCost:      s.stateCache.TotalCost,
+			totalPowerCost: s.stateCache.TotalPowerCost,
+			totalKwh:       s.stateCache.TotalKwh,
+			apiCount:       s.stateCache.APICount,
+			localCount:     s.stateCache.LocalCount,
 		}
 	}
 
 	// Recompute.
 	jobs := s.readRecentJobs(100)
 
-	var totalCost float64
+	var totalCost, totalPowerCost, totalKwh float64
 	var apiCount, localCount int
 	for _, rec := range jobs {
 		if rec.UseLocal {
@@ -453,6 +466,9 @@ func (s *Server) getCachedJobData() cachedJobData {
 				totalCost += rec.ActualCost
 			}
 		}
+		// Power cost is recorded on local (agent) jobs.
+		totalPowerCost += rec.PowerCost
+		totalKwh += rec.Kwh
 	}
 
 	var agentJobs []agentjob.Job
@@ -464,16 +480,20 @@ func (s *Server) getCachedJobData() cachedJobData {
 	s.stateCache.RecentJobs = jobs
 	s.stateCache.AgentJobs = agentJobs
 	s.stateCache.TotalCost = totalCost
+	s.stateCache.TotalPowerCost = totalPowerCost
+	s.stateCache.TotalKwh = totalKwh
 	s.stateCache.APICount = apiCount
 	s.stateCache.LocalCount = localCount
 	s.stateTime = time.Now()
 
 	return cachedJobData{
-		jobs:       jobs,
-		agentJobs:  agentJobs,
-		totalCost:  totalCost,
-		apiCount:   apiCount,
-		localCount: localCount,
+		jobs:           jobs,
+		agentJobs:      agentJobs,
+		totalCost:      totalCost,
+		totalPowerCost: totalPowerCost,
+		totalKwh:       totalKwh,
+		apiCount:       apiCount,
+		localCount:     localCount,
 	}
 }
 
@@ -920,6 +940,17 @@ func FormatCost(c float64) string {
 		return fmt.Sprintf("$%.4f", c)
 	}
 	return fmt.Sprintf("$%.2f", c)
+}
+
+// FormatKwh formats an energy amount for display.
+func FormatKwh(kwh float64) string {
+	if kwh == 0 {
+		return "-"
+	}
+	if kwh < 1 {
+		return fmt.Sprintf("%.3f kWh", kwh)
+	}
+	return fmt.Sprintf("%.2f kWh", kwh)
 }
 
 // StatusClass returns a CSS class for a job status.

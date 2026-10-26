@@ -48,6 +48,7 @@ func jobLogFuncs() template.FuncMap {
 		"statusClass":    StatusClass,
 		"formatDuration": FormatDuration,
 		"formatCost":     FormatCost,
+		"formatKwh":      FormatKwh,
 		"divCost":        DivCost,
 		"slotRuntime":    SlotRuntime,
 		"jobPath":        JobPath,

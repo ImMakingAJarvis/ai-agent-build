@@ -91,7 +91,7 @@
   /* Cost summary cards */
   .cost-row {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 12px;
   }
   .cost-card {
@@ -114,6 +114,12 @@
   .cost-api { color: var(--blue); }
   .cost-local { color: var(--green); }
   .cost-rate { color: var(--yellow); }
+  .cost-power { color: var(--orange, #f59e0b); }
+  .power-cost {
+    color: var(--orange, #f59e0b);
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
 
   /* Jobs table */
   table {

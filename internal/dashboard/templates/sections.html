@@ -121,6 +121,14 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
       </div>
       <div class="label">Avg Cost / API Job</div>
     </div>
+    <div class="cost-card">
+      <div class="value cost-power">{{ formatCost .TotalPowerCost }}</div>
+      <div class="label">Power Cost (local)</div>
+    </div>
+    <div class="cost-card">
+      <div class="value cost-power">{{ formatKwh .TotalKwh }}</div>
+      <div class="label">Energy (local)</div>
+    </div>
   </div>
 </div>
 
@@ -155,7 +163,10 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
           {{ if .UseLocal }}<span class="local-badge">local</span>{{ else }}<span class="api-badge">api</span>{{ end }}
         </td>
         <td>{{ .Queue }}</td>
-        <td class="cost-cell">{{ formatCost .EstimatedCost }}</td>
+        <td class="cost-cell">
+          {{ formatCost .EstimatedCost }}
+          {{ if .PowerCost }}<span class="power-cost"> ⚡ {{ formatCost .PowerCost }} &middot; {{ formatKwh .Kwh }}</span>{{ end }}
+        </td>
         <td class="timestamp">{{ .StartedAt }}</td>
         <td>{{ .Duration }}</td>
         <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
@@ -178,13 +189,14 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
   {{ if .AgentJobs }}
   <div class="table-wrap">
   <table>
-    <thead><tr><th>Job</th><th>Status</th><th>Driver</th><th>Log</th><th>PR</th><th>Depends on</th></tr></thead>
+    <thead><tr><th>Job</th><th>Status</th><th>Driver</th><th>Power</th><th>Log</th><th>PR</th><th>Depends on</th></tr></thead>
     <tbody>
       {{ range .AgentJobs }}
       <tr>
         <td title="{{ .ID }}">{{ .ID }} — {{ .Title }}</td>
         <td>{{ .Status }}</td>
         <td>{{ if .RanWith }}{{ .RanWith }}{{ else }}{{ .Spec.Driver }}{{ end }}</td>
+        <td class="cost-cell">{{ if .Kwh }}⚡ {{ formatKwh .Kwh }} &middot; {{ formatCost .PowerCost }}{{ else }}-{{ end }}</td>
         <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
         <td>{{ if .PRURL }}<a href="{{ .PRURL }}">PR</a>{{ end }}</td>
         <td>{{ range .DependsOn }}{{ . }} {{ end }}</td>
