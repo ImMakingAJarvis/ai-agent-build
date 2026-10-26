@@ -10,3 +10,6 @@
 
 # Temporary files
 tmp/
+
+# Verbatim Discord/voice conversation logs (agent notes are tracked)
+notes/conversations/discord-*.md

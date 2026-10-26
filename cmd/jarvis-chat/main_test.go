@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -163,6 +164,8 @@ func TestHandleMessage_Reply(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("OLLAMA_URL", server.URL)
+	logDir := t.TempDir()
+	t.Setenv("JARVIS_NOTES_DIR", logDir)
 	client := models.NewClient()
 	hAgent := newTestHermesAgent(client)
 
@@ -191,6 +194,16 @@ func TestHandleMessage_Reply(t *testing.T) {
 	if history[0] != "Hi Jarvis!" {
 		t.Errorf("history[0] = %q", history[0])
 	}
+
+	// The exchange should be recorded in the conversation log.
+	logName := filepath.Join(logDir, "discord-"+time.Now().Format("2006-01-02")+".md")
+	b, err := os.ReadFile(logName)
+	if err != nil {
+		t.Fatalf("conversation log: %v", err)
+	}
+	if s := string(b); !strings.Contains(s, "Nathan: Hi Jarvis!") || !strings.Contains(s, "Hello") {
+		t.Errorf("conversation log = %q; want it to contain the exchange", s)
+	}
 }
 
 func TestHandleMessage_BusyNotice(t *testing.T) {
@@ -208,6 +221,7 @@ func TestHandleMessage_BusyNotice(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("OLLAMA_URL", server.URL)
+	t.Setenv("JARVIS_NOTES_DIR", t.TempDir())
 	client := models.NewClient()
 	hAgent := newTestHermesAgent(client)
 
@@ -255,6 +269,7 @@ func TestHandleMessage_Timeout(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("OLLAMA_URL", server.URL)
+	t.Setenv("JARVIS_NOTES_DIR", t.TempDir())
 	client := models.NewClient()
 	hAgent := newTestHermesAgent(client)
 
@@ -394,4 +409,34 @@ func TestSystemPromptVoiceSelection(t *testing.T) {
 	if unknown.Key != jarvis.Key {
 		t.Errorf("fallback voice key = %q, want %q", unknown.Key, jarvis.Key)
 	}
+}
+
+func TestLogConversation_WritesExchange(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JARVIS_NOTES_DIR", dir)
+
+	logConversation("hello there", "Hi! How can I help?")
+	logConversation("second", "ok")
+
+	name := filepath.Join(dir, "discord-"+time.Now().Format("2006-01-02")+".md")
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatalf("log file: %v", err)
+	}
+	for _, want := range []string{
+		"Nathan: hello there",
+		"Jarvis:",
+		"Hi! How can I help?",
+		"Nathan: second",
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("log missing %q in:\n%s", want, b)
+		}
+	}
+}
+
+func TestLogConversation_Disabled(t *testing.T) {
+	// Explicitly empty dir disables logging; must not panic or write.
+	t.Setenv("JARVIS_NOTES_DIR", "")
+	logConversation("a", "b")
 }
