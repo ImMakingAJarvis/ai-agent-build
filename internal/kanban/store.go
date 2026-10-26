@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,6 +119,37 @@ func (s *Store) ListEpics() ([]Epic, error) {
 		return epics[i].CreatedAt.After(epics[j].CreatedAt)
 	})
 	return epics, nil
+}
+
+// UpdateEpicTitle changes an epic's title.
+func (s *Store) UpdateEpicTitle(id, title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "epics", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var ep Epic
+	if err := json.Unmarshal(b, &ep); err != nil {
+		return err
+	}
+	ep.Title = title
+	return writeJSON(path, ep)
+}
+
+// DeleteEpic removes an epic and cascades to its tasks and their subtasks.
+func (s *Store) DeleteEpic(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ep, err := s.unlockedGetEpic(id)
+	if err != nil {
+		return err
+	}
+	for _, taskID := range ep.TaskIDs {
+		s.unlockedDeleteTaskCascade(taskID)
+	}
+	return os.Remove(filepath.Join(s.root, "epics", id+".json"))
 }
 
 // --- Tasks ---
@@ -233,6 +265,125 @@ func (s *Store) UpdateTaskBranch(id, branch string) error {
 	t.Branch = branch
 	t.UpdatedAt = time.Now().UTC()
 	return writeJSON(path, t)
+}
+
+// UpdateTaskPriority changes a task's priority.
+func (s *Store) UpdateTaskPriority(id string, priority int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	if priority < 0 {
+		priority = 0
+	}
+	t.Priority = priority
+	t.UpdatedAt = time.Now().UTC()
+	return writeJSON(path, t)
+}
+
+// UpdateTaskTitle changes a task's title.
+func (s *Store) UpdateTaskTitle(id, title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	t.Title = title
+	t.UpdatedAt = time.Now().UTC()
+	return writeJSON(path, t)
+}
+
+// UpdateTaskModel assigns a model to a task.
+func (s *Store) UpdateTaskModel(id, model string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	t.Model = model
+	t.UpdatedAt = time.Now().UTC()
+	return writeJSON(path, t)
+}
+
+// DeleteTask removes a task and its subtasks, and unlinks it from its epic.
+func (s *Store) DeleteTask(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.unlockedDeleteTaskCascade(id); err != nil {
+		return err
+	}
+	// Unlink from the parent epic's task list.
+	ents, err := os.ReadDir(filepath.Join(s.root, "epics"))
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		epPath := filepath.Join(s.root, "epics", e.Name())
+		ep, err := s.unlockedGetEpic(strings.TrimSuffix(e.Name(), ".json"))
+		if err != nil {
+			continue
+		}
+		for i, tid := range ep.TaskIDs {
+			if tid == id {
+				ep.TaskIDs = append(ep.TaskIDs[:i], ep.TaskIDs[i+1:]...)
+				return writeJSON(epPath, ep)
+			}
+		}
+	}
+	return nil
+}
+
+// unlockedDeleteTaskCascade removes a task file and its subtasks
+// (caller must hold s.mu). Missing task files are not an error.
+func (s *Store) unlockedDeleteTaskCascade(id string) error {
+	path := filepath.Join(s.root, "tasks", id+".json")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	ents, err := os.ReadDir(filepath.Join(s.root, "subtasks"))
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		stPath := filepath.Join(s.root, "subtasks", e.Name())
+		b, err := os.ReadFile(stPath)
+		if err != nil {
+			continue
+		}
+		var st SubTask
+		if err := json.Unmarshal(b, &st); err != nil {
+			continue
+		}
+		if st.TaskID == id {
+			os.Remove(stPath)
+		}
+	}
+	return nil
 }
 
 // --- SubTasks ---
