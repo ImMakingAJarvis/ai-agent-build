@@ -83,6 +83,25 @@ func TestFailingAgentRecordedFailed(t *testing.T) {
 	}
 }
 
+func TestDefaultCommandMapsEffort(t *testing.T) {
+	cmd := defaultCommand("local", "do it", "unknown")
+	joined := strings.Join(cmd.Args, " ")
+	if strings.Contains(joined, "--reasoning-effort") {
+		t.Fatalf("Claude Code 2.1 rejects --reasoning-effort: %s", joined)
+	}
+	if !strings.Contains(joined, "--effort") || !strings.Contains(joined, "medium") {
+		t.Fatalf("unknown coding job should --effort medium: %s", joined)
+	}
+	off := defaultCommand("local", "do it", "off")
+	if strings.Contains(strings.Join(off.Args, " "), "--effort") {
+		t.Fatalf("off must omit --effort: %s", off.Args)
+	}
+	env := strings.Join(off.Env, "\n")
+	if !strings.Contains(env, "CLAUDE_CODE_DISABLE_THINKING=1") {
+		t.Fatal("off should disable thinking")
+	}
+}
+
 func TestPromptHasRulesJobAndNote(t *testing.T) {
 	r := &Runner{Brief: func(string) string { return "RULES" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT", Branch: "br"}}, "local", "NOTE")

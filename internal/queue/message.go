@@ -51,8 +51,9 @@ type Message struct {
 	// Driver is "local" (default) or "sonnet".
 	Driver string `json:"driver,omitempty"`
 
-	// ReasoningEffort controls how much reasoning effort the model uses.
-	// One of: low, medium, high, xhigh, max. Defaults to "medium".
+	// ReasoningEffort controls thinking depth: off, low, medium, high, xhigh, max.
+	// Voice defaults to off; coding defaults to medium. "unknown" is not valid
+	// (Claude Code sends it for unrecognized model IDs).
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 

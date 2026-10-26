@@ -60,11 +60,12 @@ type chatMessage struct {
 // replyRequest is the /v1/chat/completions body. id_slot pins the request
 // to a llama.cpp parallel slot (the reserved chat slot).
 type replyRequest struct {
-	Model     string        `json:"model"`
-	Messages  []chatMessage `json:"messages"`
-	Stream    bool          `json:"stream"`
-	MaxTokens int           `json:"max_tokens"`
-	IDSlot    int           `json:"id_slot"`
+	Model              string         `json:"model"`
+	Messages           []chatMessage  `json:"messages"`
+	Stream             bool           `json:"stream"`
+	MaxTokens          int            `json:"max_tokens"`
+	IDSlot             int            `json:"id_slot"`
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
 
 type replyResponse struct {
@@ -204,11 +205,12 @@ func busyMessage(jobID string) string {
 // and returns the assistant's text.
 func replyToEngine(baseURL, model string, idSlot int, msgs []chatMessage, timeout time.Duration) (string, error) {
 	body, err := json.Marshal(replyRequest{
-		Model:     model,
-		Messages:  msgs,
-		Stream:    false,
-		MaxTokens: replyMaxTokens,
-		IDSlot:    idSlot,
+		Model:              model,
+		Messages:           msgs,
+		Stream:             false,
+		MaxTokens:          replyMaxTokens,
+		IDSlot:             idSlot,
+		ChatTemplateKwargs: map[string]any{"enable_thinking": false},
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)

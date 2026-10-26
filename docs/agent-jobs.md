@@ -1,6 +1,6 @@
 # Agent jobs: the queue as the source of build work
 
-- A job is a RabbitMQ message with `kind: "agent"`, `title`, `instructions`, `branch`, `depends_on`, `driver` (`local` default, or `sonnet`). They go on the `background` queue.
+- A job is a RabbitMQ message with `kind: "agent"`, `title`, `instructions`, `branch`, `depends_on`, `driver` (`local` default, or `sonnet`), and optional `reasoning_effort` (`off`, `low`, `medium`, `high`/`xhigh`/`max`). Coding defaults to medium; voice defaults to off. They go on the `background` queue.
 - The worker only **ingests** them: writes `~/.local/share/jarvis/jobs/<id>/job.json` + `state.json` (`ready`) and acks at once. Redelivery is harmless (ingest is idempotent).
 - `agent-run` asks `jarvis-jobs next` (highest priority, then oldest, all `depends_on` done), names the job at the Discord checkpoint, and runs it with `jarvis-jobs run <id> -driver local|sonnet`. States: ready, claimed, running, done, failed (or skipped).
 - Results (status, duration, model, PR URL, summary) go to the job's `state.json` and `jobs.jsonl`; the full output is `transcript.txt` in the job dir. The dashboard lists them under "Agent Jobs".
@@ -14,3 +14,12 @@
 
 Run it only after the worker binary from this change is running: an older worker treats agent messages as text jobs.
 Other CLI: `jarvis-jobs list [status] | show <id> | skip <id> | requeue <id>`. `list` takes an optional status (e.g. `jarvis-jobs list failed`) and ends with a `# N jobs: …` line giving per-status totals for the unfiltered set, so a `head`-truncated view still shows how much was cut off.
+
+Set thinking depth when enqueueing or running:
+
+```
+jarvis-jobs add -id J1 -title "…" -effort medium
+jarvis-jobs run J1 -driver local -effort high
+enqueue --type=coding --effort=low --prompt="…"
+enqueue --type=voice --effort=off --prompt="…"   # voice default is already off
+```

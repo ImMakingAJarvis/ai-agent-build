@@ -42,6 +42,10 @@ func TestChatSlotSendsIDSlot(t *testing.T) {
 	if got["max_tokens"] != float64(chatSlotMaxTokens) {
 		t.Errorf("max_tokens = %v, want %d", got["max_tokens"], chatSlotMaxTokens)
 	}
+	kw, _ := got["chat_template_kwargs"].(map[string]any)
+	if kw["enable_thinking"] != false {
+		t.Errorf("chat_template_kwargs.enable_thinking = %v, want false", kw["enable_thinking"])
+	}
 }
 
 // TestChatSlotPassesThroughSlotID checks a non-default slot value.
