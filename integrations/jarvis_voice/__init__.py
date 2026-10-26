@@ -14,7 +14,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.components.conversation.agent_manager import (
     get_agent_manager,
 )
-from .const import CONF_VOICE_URL, DEFAULT_VOICE_URL, DOMAIN
+from .const import (
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    CONF_VOICE_URL,
+    DEFAULT_VOICE_URL,
+    DOMAIN,
+)
 from .conversation import JarvisVoiceAgent
 from . import services
 
@@ -30,7 +36,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Jarvis Voice from a config entry."""
     voice_url = entry.data.get(CONF_VOICE_URL, DEFAULT_VOICE_URL)
-    agent = JarvisVoiceAgent(voice_url)
+    username = entry.data.get(CONF_USERNAME, "")
+    password = entry.data.get(CONF_PASSWORD, "")
+    agent = JarvisVoiceAgent(voice_url, username, password)
 
     # Register with the global agent manager
     manager = get_agent_manager(hass)

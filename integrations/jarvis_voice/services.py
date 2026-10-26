@@ -31,6 +31,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     agent._session = session
                 await session.post(
                     f"{agent._voice_url}/history/reset",
+                    auth=agent._auth,
                     timeout=aiohttp.ClientTimeout(total=10),
                 )
                 logger.info("History reset for agent %s", entry_id)

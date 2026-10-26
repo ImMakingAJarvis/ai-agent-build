@@ -28,8 +28,16 @@ class JarvisVoiceAgent(AbstractConversationAgent):
 
     supports_streaming = False
 
-    def __init__(self, voice_url: str) -> None:
+    def __init__(
+        self,
+        voice_url: str,
+        username: str = "",
+        password: str = "",
+    ) -> None:
         self._voice_url = voice_url
+        self._auth = (
+            aiohttp.BasicAuth(username, password) if username or password else None
+        )
         self._session: aiohttp.ClientSession | None = None
 
     @property
@@ -50,6 +58,7 @@ class JarvisVoiceAgent(AbstractConversationAgent):
             async with self._session.post(
                 f"{self._voice_url}/voice/json",
                 json={"text": user_input.text},
+                auth=self._auth,
                 timeout=timeout,
             ) as resp:
                 if resp.status != 200:
@@ -88,6 +97,7 @@ class JarvisVoiceAgent(AbstractConversationAgent):
         try:
             async with self._session.post(
                 f"{self._voice_url}/history/reset",
+                auth=self._auth,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 logger.info("History reset: status %d", resp.status)
