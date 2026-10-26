@@ -6,6 +6,8 @@
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
 //	jarvis-jobs add -id ID -title T [-driver local|sonnet] [-source S] [-priority N]
+//	jarvis-jobs message [TEXT]   send the agent a message (stdin when TEXT
+//	                              is "-" or absent); injected at its next step
 package main
 
 import (
@@ -17,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
@@ -27,7 +30,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|skip|requeue|show|pause|add")
+		die("usage: jarvis-jobs list [status]|next|run|finish|skip|requeue|show|pause|add|message")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -113,9 +116,42 @@ func main() {
 		fmt.Sscan(args[1], &code)
 		j, _ := runner(store).Finish(args[0], code, "")
 		fmt.Printf("==> job %s %s %s\n", j.ID, j.Status, j.PRURL)
+	case "message":
+		if err := cmdMessage(args, os.Stdin); err != nil {
+			die("%v", err)
+		}
 	default:
 		die("unknown command %q", cmd)
 	}
+}
+
+// cmdMessage sends a message to the agent's inbox (the queue site does the
+// same via POST /api/owner-message). Text is one or more arguments, or
+// stdin when the argument is "-" or absent.
+func cmdMessage(args []string, stdin io.Reader) error {
+	var text string
+	switch {
+	case len(args) == 0:
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return err
+		}
+		text = string(b)
+	case args[0] == "-":
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return err
+		}
+		text = string(b)
+	default:
+		text = strings.Join(args, " ")
+	}
+	name, err := inbox.Send(text)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("queued %s (%d waiting)\n", name, inbox.Count())
+	return nil
 }
 
 func runner(store *agentjob.Store) *agentjob.Runner {
