@@ -31,6 +31,8 @@ Environment:
 """
 
 import asyncio
+import base64
+import hmac
 import io
 import json
 import logging
@@ -45,7 +47,8 @@ import numpy as np
 import soundfile as sf
 import uvicorn
 
-from fastapi import FastAPI, File, UploadFile, Request, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Depends, File, UploadFile, Request, HTTPException, WebSocket, WebSocketDisconnect, status
+from starlette.requests import HTTPConnection
 from fastapi.responses import Response, JSONResponse, HTMLResponse
 from fastapi.security import HTTPBasic
 from fastapi.staticfiles import StaticFiles
@@ -293,9 +296,24 @@ from contextlib import asynccontextmanager
 
 security = HTTPBasic(auto_error=False)
 
-async def require_auth(request: Request):
-    """FastAPI dependency that enforces HTTP Basic Auth when credentials are set."""
+async def require_auth(request: HTTPConnection):
+    """FastAPI dependency that enforces HTTP Basic Auth when credentials are set.
+
+    Applied app-wide (see FastAPI(..., dependencies=...) below). Special cases:
+    - /voice/chat serves the static web-chat page, which the browser must be
+      able to load without a credentials prompt.
+    - WebSockets are handled in voice_websocket() itself: browsers cannot set
+      the Authorization header on a socket upgrade, and rejecting during the
+      dependency phase surfaces as a 403 handshake instead of a clean
+      close(1008) the client can react to.
+    (HTTPConnection is the common base of Request/WebSocket so one dependency
+    can be shared across HTTP and WS routes.)
+    """
     if not VOICE_USER or not VOICE_PASS:
+        return
+    if isinstance(request, WebSocket):
+        return
+    if request.url.path == "/voice/chat":
         return
     credentials = await security(request)
     if not credentials or credentials.username != VOICE_USER or credentials.password != VOICE_PASS:
@@ -305,6 +323,25 @@ async def require_auth(request: Request):
             headers={"WWW-Authenticate": "Basic"},
         )
 
+def _ws_token_ok(ws: WebSocket) -> bool:
+    """Check the WebSocket credential.
+
+    Browsers cannot set the Authorization header on a socket upgrade, so the
+    password is accepted as a ?token= query param (voice_chat.html prompts for
+    it); programmatic clients may send a standard Basic Authorization header.
+    """
+    if not VOICE_USER or not VOICE_PASS:
+        return True
+    token = ws.query_params.get("token", "")
+    header = ws.headers.get("authorization", "")
+    if header.lower().startswith("basic "):
+        try:
+            user, _, password = base64.b64decode(header[6:]).decode().partition(":")
+            token = password if user == VOICE_USER else ""
+        except Exception:
+            token = ""
+    return hmac.compare_digest(token, VOICE_PASS)
+
 @asynccontextmanager
 async def lifespan(context_app):
     load_whisper()
@@ -313,10 +350,14 @@ async def lifespan(context_app):
     logger.info("Voice service starting on port %d", LISTEN_PORT)
     yield
 
-app = FastAPI(title="Jarvis Voice Service", version="0.1.0", lifespan=lifespan)
-
-# Apply basic auth to all endpoints when credentials are configured
-app.dependencies = [require_auth]
+# NOTE: app-level dependencies must be passed at construction time; assigning
+# app.dependencies afterwards is silently ignored by FastAPI.
+app = FastAPI(
+    title="Jarvis Voice Service",
+    version="0.1.0",
+    lifespan=lifespan,
+    dependencies=[Depends(require_auth)],
+)
 
 @app.get("/health")
 async def health():
@@ -455,6 +496,13 @@ async def voice_chat_page():
 
 async def voice_websocket(ws: WebSocket):
     await ws.accept()
+
+    # Enforce auth: browsers can't set the Authorization header on a socket
+    # upgrade, so the token arrives as ?token= (or a Basic header from
+    # programmatic clients). close(1008) tells the client to re-auth.
+    if not _ws_token_ok(ws):
+        await ws.close(code=1008)
+        return
 
     # Send initial idle state
     await ws.send_json({"type": "status", "state": "idle"})
