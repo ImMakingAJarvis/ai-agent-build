@@ -13,4 +13,4 @@
     scripts/migrate_tasks_to_queue            # publish (idempotent; needs the NEW worker running)
 
 Run it only after the worker binary from this change is running: an older worker treats agent messages as text jobs.
-Other CLI: `jarvis-jobs list | show <id> | skip <id> | requeue <id>`.
+Other CLI: `jarvis-jobs list [status] | show <id> | skip <id> | requeue <id>`. `list` takes an optional status (e.g. `jarvis-jobs list failed`) and ends with a `# N jobs: …` line giving per-status totals for the unfiltered set, so a `head`-truncated view still shows how much was cut off.
