@@ -17,10 +17,10 @@ import (
 type Status string
 
 const (
-	StatusBacklog   Status = "backlog"
+	StatusBacklog    Status = "backlog"
 	StatusInProgress Status = "in-progress"
-	StatusReview    Status = "review"
-	StatusDone      Status = "done"
+	StatusReview     Status = "review"
+	StatusDone       Status = "done"
 )
 
 // Epic is a large body of work grouped under a shared theme.
@@ -41,6 +41,7 @@ type Task struct {
 	Status    Status    `json:"status"`
 	Priority  int       `json:"priority"`         // 1-10, higher = more urgent; 0 treated as 5
 	Branch    string    `json:"branch,omitempty"` // git branch created for this task
+	Model     string    `json:"model,omitempty"`  // model the task was assigned to
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

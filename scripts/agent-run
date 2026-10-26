@@ -258,10 +258,11 @@ $q"); then
       rm -f "$CONF/pause-signal"
     fi
     # Answer the user directly, then put the job back in the queue.
-    pause_prompt="You were in the middle of working on job $job_id ($job_title) when I messaged you.
-My message was: $user_msg
-Reply to me now. After this you'll be asked what to do next."
-    run_claude local 0 "$pause_prompt"
+    # jarvis-reply sends one short chat call pinned to the reserved chat
+    # slot (the work slot keeps running) and DMs the answer via
+    # jarvis-discord. If the brain is busy past the 2-minute limit it says
+    # "I'm busy on <job>, I'll answer after it" and we go on.
+    jarvis-reply --job "$job_id" "$user_msg" || true
     jarvis-jobs requeue "$job_id"
     msg="You interrupted the job to talk. What's next?"
     continue
