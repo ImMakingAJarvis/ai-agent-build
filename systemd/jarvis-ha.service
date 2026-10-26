@@ -1,0 +1,27 @@
+[Unit]
+Description=Jarvis HA sensor publisher (MQTT discovery)
+# RabbitMQ (with the rabbitmq_mqtt plugin) runs as the docker container
+# "jarvis-rabbitmq" (restart: unless-stopped), so there is no systemd unit
+# to order against — just wait for the network and let Restart= handle a
+# broker that is briefly down at boot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+EnvironmentFile=-/home/agent/.config/jarvis/agent.env
+# MQTT broker credentials (HA_MQTT_USER / HA_MQTT_PASS). The RabbitMQ
+# MQTT plugin authenticates with RabbitMQ users; this file is 0600 and
+# is NOT committed to the repo.
+EnvironmentFile=-/home/agent/.config/jarvis/ha.env
+ExecStart=/usr/local/bin/jarvis-ha
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/agent/.local/state/jarvis/ha-publisher.log
+StandardError=append:/home/agent/.local/state/jarvis/ha-publisher.log
+SyslogIdentifier=jarvis-ha
+
+[Install]
+WantedBy=multi-user.target
