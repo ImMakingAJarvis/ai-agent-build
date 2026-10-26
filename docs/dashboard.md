@@ -11,6 +11,36 @@ Web UI for queue and job history. systemd unit, same shape as `jarvis-chat` and 
 
 Does not require `agent-run`.
 
+## Talking to the worker (interrupt without stopping)
+
+The **Talk to the worker** box on the dashboard sends the agent a message
+the way you interrupt Claude or Cursor: the running process is never
+stopped or restarted — the message is injected into the agent's context.
+
+- `POST /api/owner-message` stores the message in the agent inbox
+  (`$JARVIS_DATA_DIR/inbox/`, default `~/.local/share/jarvis/inbox/`).
+  `jarvis-jobs message [TEXT]` does the same from the shell.
+- `jarvis-jobs run` exports `JARVIS_JOB_ID` into the agent session, and
+  the hook `scripts/owner-message-hook.sh` (wired in `.claude/settings.json`)
+  checks the inbox on every loop step:
+  - **PreToolUse** — a waiting message is printed as `additionalContext`,
+    so the model sees it before its next tool call;
+  - **Stop** — a message that arrived just as the round was ending blocks
+    the stop (exit 2) and feeds the message back, so the model gets one
+    more turn with it.
+- Messages sent while no job is running stay in the inbox; the runner
+  folds them into the next round's prompt ("Messages from me sent while
+  the agent was idle").
+- The Agent Jobs section shows how many messages are waiting, and
+  delivered messages are kept under `inbox/delivered/` (last 200).
+- Other claude sessions in this repo (no `JARVIS_JOB_ID`) never touch the
+  inbox, so the Discord chatbot cannot swallow a message meant for the
+  worker.
+
+Discord still has its old interrupt behavior (pause + `jarvis-reply`): a
+DM to the bot pauses the job when the chat slot is busy. The dashboard
+box is the non-pausing path.
+
 ## Inhibit
 
 1. File: `touch /var/lib/jarvis/dashboard.disabled` then reboot, or `sudo systemctl stop jarvis-dashboard`. Undo: `rm` the file and `sudo systemctl start jarvis-dashboard`.
