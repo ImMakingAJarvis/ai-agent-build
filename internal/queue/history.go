@@ -25,8 +25,12 @@ type JobRecord struct {
 	Status    string `json:"status"` // running, completed, failed, denied
 	Error     string `json:"error,omitempty"`
 	// Cost fields (populated for API-dispatched jobs).
-	EstimatedCost float64 `json:"estimated_cost,omitempty"`   // $ estimated before dispatch
-	ActualCost    float64 `json:"actual_cost,omitempty"`      // $ billed after dispatch
+	EstimatedCost float64 `json:"estimated_cost,omitempty"` // $ estimated before dispatch
+	ActualCost    float64 `json:"actual_cost,omitempty"`    // $ billed after dispatch
+	// Power fields (populated for local agent jobs): energy sampled from
+	// the GPU while the job ran, at the configured $/kWh rate.
+	Kwh       float64 `json:"kwh,omitempty"`
+	PowerCost float64 `json:"power_cost,omitempty"`
 	InputTokens   int     `json:"input_tokens,omitempty"`     // estimated input tokens
 	OutputTokens  int     `json:"output_tokens,omitempty"`    // estimated output tokens
 	// Agent jobs and stored text output.
