@@ -704,8 +704,18 @@ async def synthesize(text: str) -> bytes:
     audio_bytes.seek(0)
     return audio_bytes.read()
 
+_HEADER_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
 def ascii_header(value: str) -> str:
-    """Make a string safe for use in an HTTP header (latin-1)."""
+    """Make a string safe for use in an HTTP header.
+
+    Header values must not contain control characters: h11 (uvicorn's
+    HTTP layer) rejects them and aborts the whole response, so a reply
+    with a newline in X-Reply drops the audio too and the client gets a
+    reset connection (silence). Newlines are therefore collapsed to
+    spaces; anything else non-latin-1 becomes '?'.
+    """
+    value = _HEADER_CONTROL_RE.sub(" ", value)
     return value.encode("latin-1", "replace").decode("latin-1")
 
 # ---------------------------------------------------------------------------
