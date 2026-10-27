@@ -55,8 +55,9 @@ func EffectiveClass(class, source string) string {
 	}
 }
 
-// ClassRank orders classes for sorting: lower runs first (fix, build,
-// background).
+// ClassRank orders classes for sorting under the default band order: lower
+// runs first (fix, build, background). The runtime order can differ — see
+// Store.Rank and Store.BandOrder; List sorts by the runtime order.
 func ClassRank(class, source string) int {
 	switch EffectiveClass(class, source) {
 	case ClassFix:
@@ -201,9 +202,14 @@ func (s *Store) setState(id string, st State) error {
 	return writeJSON(filepath.Join(s.JobDir(id), "state.json"), st)
 }
 
-// List returns all jobs in queue order: class first (fix, then build, then
-// background), then priority desc within the class, oldest first, then ID.
+// List returns all jobs in queue order: band first (in the current runtime
+// band order, default fix, then build, then background — Store.BandOrder),
+// then priority desc within the band, oldest first, then ID.
 func (s *Store) List() ([]Job, error) {
+	rank, err := s.bandRank()
+	if err != nil {
+		return nil, err
+	}
 	ents, err := os.ReadDir(filepath.Join(s.dir, "jobs"))
 	if err != nil {
 		return nil, err
@@ -219,7 +225,7 @@ func (s *Store) List() ([]Job, error) {
 	}
 	sort.Slice(jobs, func(a, b int) bool {
 		x, y := jobs[a], jobs[b]
-		if rx, ry := ClassRank(x.Class, x.Source), ClassRank(y.Class, y.Source); rx != ry {
+		if rx, ry := rank[EffectiveClass(x.Class, x.Source)], rank[EffectiveClass(y.Class, y.Source)]; rx != ry {
 			return rx < ry
 		}
 		if x.Priority != y.Priority {
