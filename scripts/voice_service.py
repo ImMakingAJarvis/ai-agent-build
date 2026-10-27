@@ -284,6 +284,40 @@ def pcm16_to_wav(pcm: bytes, sample_rate: int) -> bytes:
         w.writeframes(pcm)
     return buf.getvalue()
 
+def ensure_wav(audio: bytes) -> bytes:
+    """Return upload audio as a WAV container soundfile can read.
+
+    The PWA's MediaRecorder uploads audio/webm;codecs=opus (voice.webm), and
+    other clients may send mp4/aac or ogg — soundfile only decodes WAV/FLAC,
+    so anything that is not already RIFF/WAVE is transcoded via ffmpeg to
+    16-bit PCM WAV at 16kHz mono (exactly what prepare_audio() expects).
+    WAV uploads pass through byte-for-byte, which keeps the existing paths
+    (including the WebSocket PCM16 -> pcm16_to_wav flow) untouched.
+    """
+    if len(audio) >= 12 and audio[:4] == b"RIFF" and audio[8:12] == b"WAVE":
+        return audio
+    logger.info("Transcoding non-WAV upload (%d bytes) to 16kHz PCM WAV via ffmpeg", len(audio))
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-i", "pipe:0",
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            "-f", "wav",
+            "pipe:1",
+        ],
+        input=audio,
+        capture_output=True,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode().strip()
+        logger.error("ffmpeg audio decode failed: %s", stderr)
+        last = stderr.splitlines()[-1] if stderr else "no error output"
+        raise RuntimeError(f"Could not decode uploaded audio: {last}")
+    return proc.stdout
+
 # ---------------------------------------------------------------------------
 # STT
 # ---------------------------------------------------------------------------
@@ -883,6 +917,7 @@ async def stt_endpoint(file: UploadFile = File(...)):
     """Speech-to-Text: upload audio file, get text back."""
     audio = await file.read()
     try:
+        audio = ensure_wav(audio)
         text = await transcribe(audio)
     except Exception as e:
         logger.exception("STT error")
@@ -910,6 +945,7 @@ async def voice_endpoint(file: UploadFile = File(...), model: str | None = Form(
     audio = await file.read()
 
     try:
+        audio = ensure_wav(audio)
         text = await transcribe(audio)
         if not text:
             return JSONResponse(
