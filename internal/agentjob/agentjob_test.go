@@ -156,6 +156,54 @@ func TestNextSkipsUnmetDependencies(t *testing.T) {
 	}
 }
 
+// TestClassOrdering checks the queue rule: fix jobs always run before build
+// jobs, build before background, regardless of numeric priority; within a
+// class, higher priority first, then oldest.
+func TestClassOrdering(t *testing.T) {
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "bg", Class: ClassBackground, Priority: 1000})
+	ingest(t, s, Spec{ID: "build", Class: ClassBuild, Priority: 100})
+	ingest(t, s, Spec{ID: "fix", Class: ClassFix, Priority: 1}) // lowest number, must still run first
+	// Legacy jobs (no class): migrate-sourced is background, the rest build.
+	ingest(t, s, Spec{ID: "legacy-mig", Source: "migrate", Priority: 999})
+	ingest(t, s, Spec{ID: "legacy-chat", Source: "discord", Priority: 80})
+
+	want := []string{"fix", "build", "legacy-chat", "bg", "legacy-mig"}
+	for i, id := range want {
+		j, err := s.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if j == nil || j.ID != id {
+			t.Fatalf("step %d: want %s, got %+v", i, id, j)
+		}
+		if err := s.SetStatus(id, State{Status: Skipped}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestClassOrderingWithinClass checks tie-breaks inside one class:
+// priority desc, then created_at asc, then ID.
+func TestClassOrderingWithinClass(t *testing.T) {
+	s := newStore(t)
+	old := time.Now().Add(-time.Hour)
+	ingest(t, s, Spec{ID: "a", Class: ClassBuild, Priority: 5, CreatedAt: old})
+	ingest(t, s, Spec{ID: "b", Class: ClassBuild, Priority: 9, CreatedAt: old.Add(time.Minute)})
+	ingest(t, s, Spec{ID: "c", Class: ClassBuild, Priority: 5, CreatedAt: old.Add(time.Minute)})
+	jobs, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, j := range jobs {
+		got = append(got, j.ID)
+	}
+	if strings.Join(got, ",") != "b,a,c" {
+		t.Fatalf("order %v, want [b a c]", got)
+	}
+}
+
 func TestClaimedJobReadyAfterRestartAndNotRunTwice(t *testing.T) {
 	s := newStore(t)
 	ingest(t, s, Spec{ID: "a"})
@@ -265,6 +313,11 @@ func TestPlanOrderAndDeps(t *testing.T) {
 	for i := 1; i < len(sp); i++ {
 		if sp[i].Priority >= sp[i-1].Priority {
 			t.Fatal("priority must descend in plan order")
+		}
+	}
+	for i, sp := range sp {
+		if sp.Class != ClassBackground {
+			t.Fatalf("plan job %d (%s): class %q, want background", i, sp.ID, sp.Class)
 		}
 	}
 }

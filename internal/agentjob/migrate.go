@@ -206,7 +206,7 @@ func Plan(baseDir, md string, now time.Time, skipSections []string) []Spec {
 			docPath := "docs/jobs/" + dm[1]
 			if sec, doc := readDocSection(baseDir, docPath, strings.ToLower(code)); sec != "" {
 				instructions = sec
-				sp := Spec{ID: id, Title: cut(title, 120), Instructions: instructions, Doc: doc, Driver: "local", Source: "migrate"}
+				sp := Spec{ID: id, Title: cut(title, 120), Instructions: instructions, Doc: doc, Driver: "local", Source: "migrate", Class: ClassBackground}
 				if m := branchRe.FindStringSubmatch(it.text); m != nil {
 					sp.Branch = m[1]
 				}
@@ -217,7 +217,7 @@ func Plan(baseDir, md string, now time.Time, skipSections []string) []Spec {
 				return
 			}
 		}
-		sp := Spec{ID: id, Title: cut(title, 120), Instructions: instructions, Driver: "local", Source: "migrate"}
+		sp := Spec{ID: id, Title: cut(title, 120), Instructions: instructions, Driver: "local", Source: "migrate", Class: ClassBackground}
 		if m := branchRe.FindStringSubmatch(it.text); m != nil {
 			sp.Branch = m[1]
 		}
