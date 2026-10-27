@@ -14,12 +14,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/slots"
@@ -123,6 +125,7 @@ type DashboardState struct {
 	TotalKwh        float64          `json:"total_kwh"`        // Energy used by local jobs
 	APICount        int              `json:"api_job_count"`    // Number of API-dispatched jobs
 	LocalCount      int              `json:"local_job_count"`  // Number of local jobs
+	WorkerMessages  int              `json:"worker_messages"` // Owner messages waiting in the agent inbox
 }
 
 // LightweightState is returned for the initial page load.
@@ -240,6 +243,7 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /api/pending", s.handlePending)
 	mux.HandleFunc("GET /api/approvals", s.handleApprovals)
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
+	mux.HandleFunc("POST /api/owner-message", s.handleOwnerMessage)
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
 	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
@@ -358,7 +362,8 @@ func (s *Server) handleJobsSectionHTML(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAgentJobsSectionHTML(w http.ResponseWriter, r *http.Request) {
 	cached := s.getCachedJobData()
 	data := DashboardState{
-		AgentJobs: cached.agentJobs,
+		AgentJobs:      cached.agentJobs,
+		WorkerMessages: inbox.Count(),
 	}
 	var buf bytes.Buffer
 	if err := s.tmpl.ExecuteTemplate(&buf, "agent-jobs-section", data); err != nil {
@@ -413,6 +418,7 @@ func (s *Server) gatherState() DashboardState {
 		TotalKwh:        cached.totalKwh,
 		APICount:        cached.apiCount,
 		LocalCount:      cached.localCount,
+		WorkerMessages:  inbox.Count(),
 	}
 }
 
@@ -768,6 +774,56 @@ func (s *Server) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 	// The worker will pick it up and the approval gate will pass.
 	s.approveJob(id)
 	fmt.Fprint(w, "approved")
+}
+
+// handleOwnerMessage stores a message for the agent (the "talk to the
+// worker" box). The message sits in the inbox until the agent's next loop
+// step: the owner-message hook injects it into the running session's
+// context, or the runner folds it into the next round's prompt when no job
+// is running. Responds with a small HTML fragment for the HTMX target.
+func (s *Server) handleOwnerMessage(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.Message) == "" {
+		http.Error(w, "empty message", http.StatusBadRequest)
+		return
+	}
+	if _, err := inbox.Send(body.Message); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if id := s.currentAgentJobID(); id != "" {
+		fmt.Fprintf(w, "Sent — the agent working on <code>%s</code> picks it up at its next step. ",
+			template.HTMLEscapeString(id))
+	} else {
+		fmt.Fprint(w, "Queued — no job is running; the next round starts with it. ")
+	}
+	fmt.Fprintf(w, "<span class=\"muted\">%d waiting</span>", inbox.Count())
+}
+
+// currentAgentJobID returns the id of the agent job that is running (or
+// claimed) right now, or "" when none is.
+func (s *Server) currentAgentJobID() string {
+	st, err := agentjob.Open(filepath.Dir(s.historyPath))
+	if err != nil {
+		return ""
+	}
+	jobs, err := st.List()
+	if err != nil {
+		return ""
+	}
+	for _, j := range jobs {
+		if j.Status == agentjob.Running || j.Status == agentjob.Claimed {
+			return j.ID
+		}
+	}
+	return ""
 }
 
 // getDeniedJobs reads the most recent denied jobs from the history file.

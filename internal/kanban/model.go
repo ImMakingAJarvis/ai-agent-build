@@ -41,7 +41,7 @@ type Task struct {
 	Status    Status    `json:"status"`
 	Priority  int       `json:"priority"`         // 1-10, higher = more urgent; 0 treated as 5
 	Branch    string    `json:"branch,omitempty"` // git branch created for this task
-	Model     string    `json:"model,omitempty"`  // model the task is assigned to
+	Model     string    `json:"model,omitempty"`  // model the task was assigned to
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

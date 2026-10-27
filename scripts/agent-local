@@ -58,6 +58,35 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="$LOCAL_MODEL"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="$CODER"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="$CODER"
 
+# Claude Code 2.1 flag is --effort, not --reasoning-effort (that errors:
+# "unknown option '--reasoning-effort'"). SDK "unknown" is not a valid level.
+canon_effort() {
+  local r="${1,,}"
+  case "$r" in
+    off|false|none|no|0) echo off ;;
+    low) echo low ;;
+    medium) echo medium ;;
+    high|xhigh|max) echo xhigh ;;
+    unknown|auto|"") echo medium ;;
+    *) echo medium ;;
+  esac
+}
+
+effort="${CLAUDE_CODE_EFFORT_LEVEL:-}"
+pass=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reasoning-effort|--effort)
+      [[ $# -ge 2 ]] || { echo "agent-local: $1 needs a value" >&2; exit 2; }
+      effort="$2"; shift 2 ;;
+    --reasoning-effort=*|--effort=*)
+      effort="${1#*=}"; shift ;;
+    *)
+      pass+=("$1"); shift ;;
+  esac
+done
+effort="$(canon_effort "$effort")"
+
 args=(--model "$LOCAL_MODEL")
 if [[ "$CODER" != "$LOCAL_MODEL" ]]; then
   args+=(--agents "$(jq -nc --arg m "$CODER" '{coder: {
@@ -65,4 +94,12 @@ if [[ "$CODER" != "$LOCAL_MODEL" ]]; then
     prompt: "You are the coding model. Do exactly the coding task you are given, run the relevant build/tests, and report what you changed and the test result. Do not commit, push, or message anyone.",
     model: "sonnet"}}')")
 fi
-exec claude "${args[@]}" "$@"
+if [[ "$effort" == off ]]; then
+  export CLAUDE_CODE_DISABLE_THINKING=1
+  export MAX_THINKING_TOKENS=0
+  unset CLAUDE_CODE_EFFORT_LEVEL || true
+else
+  export CLAUDE_CODE_EFFORT_LEVEL="$effort"
+  args+=(--effort "$effort")
+fi
+exec claude "${args[@]}" "${pass[@]}"

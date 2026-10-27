@@ -366,6 +366,29 @@
   }
   .btn-reject:hover { background: rgba(248,81,73,0.1); }
 
+  /* Talk to the worker */
+  .msg-form textarea {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 0.85rem;
+    resize: vertical;
+  }
+  .msg-form textarea:focus { outline: none; border-color: var(--blue); }
+  .msg-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+  }
+  .msg-status { font-size: 0.8rem; color: var(--green); }
+  .muted { color: var(--muted); }
+  .msg-waiting { color: var(--yellow); font-size: 0.8rem; margin-bottom: 8px; }
+
   a.log-link { color: var(--blue); text-decoration: none; font-weight: 500; }
   a.log-link:hover { text-decoration: underline; }
   .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -391,6 +414,28 @@
   </div>
   <div id="agent-jobs-section" hx-get="/html/agent-jobs-section" hx-trigger="load, every 15s" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Agent Jobs</div><div class="empty-state">Loading&hellip;</div></div>
+  </div>
+  <!-- Talk to the worker: send the running agent a message without stopping
+       it. The message lands in the agent's inbox and is injected into its
+       context at the next step (owner-message hook); if no job is running
+       it waits for the next round. Lives in the static shell so the
+       15s section refresh never wipes the text being typed. -->
+  <div class="section" id="worker-message">
+    <div class="section-title">Talk to the worker</div>
+    <p class="subtitle">Interrupt the agent without stopping it &mdash; the message is injected into its context at its next step.</p>
+    <div class="msg-form">
+      <textarea id="worker-msg-text" rows="2"
+        placeholder="Tell the agent something (e.g. &#39;skip the benchmarks, just fix the tests&#39;)"></textarea>
+      <div class="msg-actions">
+        <button class="btn" type="button"
+          hx-post="/api/owner-message"
+          hx-vals='{"message": "#worker-msg-text"}'
+          hx-target="#worker-msg-status"
+          hx-swap="innerHTML"
+          hx-on::after-request="if (event.detail.successful) { document.getElementById('worker-msg-text').value = ''; }">Send</button>
+        <span id="worker-msg-status" class="msg-status"></span>
+      </div>
+    </div>
   </div>
   {{ template "pending-section" }}
   <div class="section">

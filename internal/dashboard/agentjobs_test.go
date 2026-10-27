@@ -9,9 +9,14 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 )
 
-func TestAgentJobsSection(t *testing.T) {
+func parseTemplates(t *testing.T) (*template.Template, error) {
+	t.Helper()
 	funcs := template.FuncMap{"statusClass": StatusClass, "formatDuration": FormatDuration, "formatCost": FormatCost, "formatKwh": FormatKwh, "divCost": DivCost, "slotRuntime": SlotRuntime, "jobPath": JobPath}
-	tmpl, err := template.New("").Funcs(funcs).ParseFS(templatesFS, "templates/*.html")
+	return template.New("").Funcs(funcs).ParseFS(templatesFS, "templates/*.html")
+}
+
+func TestAgentJobsSection(t *testing.T) {
+	tmpl, err := parseTemplates(t)
 	if err != nil {
 		t.Fatal(err)
 	}

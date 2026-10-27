@@ -186,6 +186,9 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
 <!-- Agent Jobs (build work) -->
 <div class="section">
   <div class="section-title">Agent Jobs</div>
+  {{ if .WorkerMessages }}
+  <div class="msg-waiting">{{ .WorkerMessages }} message(s) waiting for the worker &mdash; picked up at its next step</div>
+  {{ end }}
   {{ if .AgentJobs }}
   <div class="table-wrap">
   <table>
