@@ -18,16 +18,21 @@ faster-whisper, sends the text to Ollama's jarvis-brain, synthesizes a
 reply with edge-tts, and streams the audio back.
 
 Environment:
-  OLLAMA_URL      default http://localhost:11434
+  OLLAMA_URL      LLM base URL, OpenAI-compatible (default http://localhost:11434;
+                  works with the llama.cpp jarvis-engine or real Ollama)
   LOCAL_MODEL     default jarvis-brain
-  WHISPER_MODEL   default medium  (tiny/base/small/medium/large)
-  TTS_VOICE       default en-US-GuyNeural
-  TTS_LANG        default en-US
-  VOICE_PROMPT    path to system prompt (default ~/.config/jarvis/voice-prompt.txt)
+  WHISPER_MODEL   default small   (tiny/base/small/medium/large)
+  JARVIS_VOICE    persona profile: "jarvis" (default) or "glados"
+  VOICE_PROMPT    override: path to system prompt file
+  TTS_VOICE       override: edge-tts voice (e.g. en-US-EmmaNeural)
+  TTS_RATE        override: edge-tts rate (e.g. -10%)
+  TTS_PITCH       override: edge-tts pitch (e.g. -2Hz)
   LISTEN_PORT     default 8100
 """
 
 import asyncio
+import base64
+import hmac
 import io
 import json
 import logging
@@ -42,7 +47,8 @@ import numpy as np
 import soundfile as sf
 import uvicorn
 
-from fastapi import FastAPI, File, UploadFile, Request, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Depends, File, UploadFile, Request, HTTPException, WebSocket, WebSocketDisconnect, status
+from starlette.requests import HTTPConnection
 from fastapi.responses import Response, JSONResponse, HTMLResponse
 from fastapi.security import HTTPBasic
 from fastapi.staticfiles import StaticFiles
@@ -54,11 +60,7 @@ from pydantic import BaseModel
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 LOCAL_MODEL = os.getenv("LOCAL_MODEL", "jarvis-brain")
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "small")
-TTS_VOICE = os.getenv("TTS_VOICE", "en-US-GuyNeural")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8100"))
-VOICE_PROMPT_PATH = os.getenv(
-    "VOICE_PROMPT", os.path.expanduser("~/.config/jarvis/voice-prompt.txt")
-)
 VOICE_USER = os.getenv("VOICE_USER", "")
 VOICE_PASS = os.getenv("VOICE_PASS", "")
 
@@ -66,21 +68,78 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [voice] %(message)s"
 logger = logging.getLogger("voice")
 
 # ---------------------------------------------------------------------------
-# Voice system prompt
+# Voice profiles (JARVIS_VOICE)
 # ---------------------------------------------------------------------------
-def load_voice_prompt() -> str:
-    if os.path.exists(VOICE_PROMPT_PATH):
-        with open(VOICE_PROMPT_PATH) as f:
-            return f.read().strip()
-    return (
-        "You are Jarvis, Nathan's home AI, speaking to him by voice. "
-        "Keep replies brief and conversational — one or two sentences max. "
-        "Do not use markdown, code blocks, or lists. "
-        "You cannot act on the machine directly; if Nathan asks you to do something, "
-        "tell him you'll have the coding worker handle it."
+# Each profile pairs a persona prompt with an edge-tts voice. Prompt files
+# live in scripts/voice_prompts/ next to this file. Global overrides:
+# VOICE_PROMPT (prompt file), TTS_VOICE / TTS_RATE / TTS_PITCH (TTS).
+PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_prompts")
+
+VOICE_PROFILES = {
+    "jarvis": {
+        "name": "Jarvis",
+        "prompt": "jarvis.txt",
+        "tts_voice": "en-US-GuyNeural",
+        "tts_rate": "+0%",
+        "tts_pitch": "+0Hz",
+    },
+    "glados": {
+        "name": "GLaDOS",
+        "prompt": "glados.txt",
+        # Flat, dry delivery: a measured news-anchor voice, slowed down and
+        # pitched down slightly for the deadpan.
+        "tts_voice": "en-US-EmmaNeural",
+        "tts_rate": "-10%",
+        "tts_pitch": "-2Hz",
+    },
+}
+
+ACTIVE_PROFILE_KEY = os.getenv("JARVIS_VOICE", "jarvis").strip().lower()
+if ACTIVE_PROFILE_KEY not in VOICE_PROFILES:
+    logger.warning(
+        "Unknown JARVIS_VOICE=%r; falling back to %r",
+        os.getenv("JARVIS_VOICE"), "jarvis",
+    )
+    ACTIVE_PROFILE_KEY = "jarvis"
+ACTIVE_PROFILE = VOICE_PROFILES[ACTIVE_PROFILE_KEY]
+
+
+def resolve_prompt() -> tuple[str, str]:
+    """Return (prompt_text, source_path) for the active profile."""
+    override = os.getenv("VOICE_PROMPT")
+    if override and os.path.exists(override):
+        with open(override) as f:
+            return f.read().strip(), override
+    path = os.path.join(PROMPT_DIR, ACTIVE_PROFILE["prompt"])
+    if os.path.exists(path):
+        with open(path) as f:
+            return f.read().strip(), path
+    # Legacy fallback for the stock profile.
+    if ACTIVE_PROFILE_KEY == "jarvis":
+        legacy = os.path.expanduser("~/.config/jarvis/voice-prompt.txt")
+        if os.path.exists(legacy):
+            with open(legacy) as f:
+                return f.read().strip(), legacy
+    raise RuntimeError(
+        f"No system prompt for voice {ACTIVE_PROFILE_KEY!r} in {PROMPT_DIR}"
     )
 
-VOICE_SYSTEM_PROMPT = load_voice_prompt()
+
+def tts_settings() -> tuple[str, str, str]:
+    """Return (voice, rate, pitch); env overrides beat the profile."""
+    return (
+        os.getenv("TTS_VOICE") or ACTIVE_PROFILE["tts_voice"],
+        os.getenv("TTS_RATE") or ACTIVE_PROFILE["tts_rate"],
+        os.getenv("TTS_PITCH") or ACTIVE_PROFILE["tts_pitch"],
+    )
+
+
+VOICE_SYSTEM_PROMPT, VOICE_PROMPT_SOURCE = resolve_prompt()
+logger.info(
+    "Voice profile: %s (key %s), prompt from %s, TTS %s",
+    ACTIVE_PROFILE["name"], ACTIVE_PROFILE_KEY,
+    VOICE_PROMPT_SOURCE, tts_settings()[0],
+)
 
 # ---------------------------------------------------------------------------
 # Whisper model (loaded once at startup on GPU)
@@ -173,7 +232,7 @@ chat_history: list[dict] = []
 MAX_HISTORY = 20
 
 async def ask_ollama(user_text: str) -> str:
-    """Send text to Ollama and get a reply."""
+    """Send text to the brain (OpenAI-compatible API) and get a reply."""
     messages = [
         {"role": "system", "content": VOICE_SYSTEM_PROMPT},
         *chat_history[-MAX_HISTORY:],
@@ -182,20 +241,24 @@ async def ask_ollama(user_text: str) -> str:
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
-            f"{OLLAMA_URL}/api/chat",
+            f"{OLLAMA_URL}/v1/chat/completions",
             json={
                 "model": LOCAL_MODEL,
                 "messages": messages,
                 "stream": False,
-                "options": {
-                    "temperature": 0.7,
-                    "num_ctx": 8192,
-                },
+                "temperature": 0.7,
+                # Voice replies are one or two sentences; cap the output.
+                "max_tokens": 300,
+                # The brain thinks by default; thinking burns the token cap
+                # (empty replies) and adds latency. Voice does not need it.
+                "chat_template_kwargs": {"enable_thinking": False},
             },
         )
         resp.raise_for_status()
         result = resp.json()
-        reply = result.get("message", {}).get("content", "(no reply)")
+        reply = result.get("choices", [{}])[0].get("message", {}).get(
+            "content", "(no reply)"
+        )
 
     chat_history.append({"role": "user", "content": user_text})
     chat_history.append({"role": "assistant", "content": reply})
@@ -206,14 +269,19 @@ async def ask_ollama(user_text: str) -> str:
 # TTS
 # ---------------------------------------------------------------------------
 async def synthesize(text: str) -> bytes:
-    """Synthesize text to speech using edge-tts, return WAV bytes."""
-    communicate = edge_tts.Communicate(text, TTS_VOICE)
+    """Synthesize text to speech using edge-tts, return audio bytes (MP3)."""
+    voice, rate, pitch = tts_settings()
+    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
     audio_bytes = io.BytesIO()
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
             audio_bytes.write(chunk["data"])
     audio_bytes.seek(0)
     return audio_bytes.read()
+
+def ascii_header(value: str) -> str:
+    """Make a string safe for use in an HTTP header (latin-1)."""
+    return value.encode("latin-1", "replace").decode("latin-1")
 
 # ---------------------------------------------------------------------------
 # Request models
@@ -228,9 +296,24 @@ from contextlib import asynccontextmanager
 
 security = HTTPBasic(auto_error=False)
 
-async def require_auth(request: Request):
-    """FastAPI dependency that enforces HTTP Basic Auth when credentials are set."""
+async def require_auth(request: HTTPConnection):
+    """FastAPI dependency that enforces HTTP Basic Auth when credentials are set.
+
+    Applied app-wide (see FastAPI(..., dependencies=...) below). Special cases:
+    - /voice/chat serves the static web-chat page, which the browser must be
+      able to load without a credentials prompt.
+    - WebSockets are handled in voice_websocket() itself: browsers cannot set
+      the Authorization header on a socket upgrade, and rejecting during the
+      dependency phase surfaces as a 403 handshake instead of a clean
+      close(1008) the client can react to.
+    (HTTPConnection is the common base of Request/WebSocket so one dependency
+    can be shared across HTTP and WS routes.)
+    """
     if not VOICE_USER or not VOICE_PASS:
+        return
+    if isinstance(request, WebSocket):
+        return
+    if request.url.path == "/voice/chat":
         return
     credentials = await security(request)
     if not credentials or credentials.username != VOICE_USER or credentials.password != VOICE_PASS:
@@ -240,6 +323,25 @@ async def require_auth(request: Request):
             headers={"WWW-Authenticate": "Basic"},
         )
 
+def _ws_token_ok(ws: WebSocket) -> bool:
+    """Check the WebSocket credential.
+
+    Browsers cannot set the Authorization header on a socket upgrade, so the
+    password is accepted as a ?token= query param (voice_chat.html prompts for
+    it); programmatic clients may send a standard Basic Authorization header.
+    """
+    if not VOICE_USER or not VOICE_PASS:
+        return True
+    token = ws.query_params.get("token", "")
+    header = ws.headers.get("authorization", "")
+    if header.lower().startswith("basic "):
+        try:
+            user, _, password = base64.b64decode(header[6:]).decode().partition(":")
+            token = password if user == VOICE_USER else ""
+        except Exception:
+            token = ""
+    return hmac.compare_digest(token, VOICE_PASS)
+
 @asynccontextmanager
 async def lifespan(context_app):
     load_whisper()
@@ -248,35 +350,43 @@ async def lifespan(context_app):
     logger.info("Voice service starting on port %d", LISTEN_PORT)
     yield
 
-app = FastAPI(title="Jarvis Voice Service", version="0.1.0", lifespan=lifespan)
-
-# Apply basic auth to all endpoints when credentials are configured
-app.dependencies = [require_auth]
+# NOTE: app-level dependencies must be passed at construction time; assigning
+# app.dependencies afterwards is silently ignored by FastAPI.
+app = FastAPI(
+    title="Jarvis Voice Service",
+    version="0.1.0",
+    lifespan=lifespan,
+    dependencies=[Depends(require_auth)],
+)
 
 @app.get("/health")
 async def health():
-    """Check that whisper is loaded and Ollama is reachable."""
-    ollama_ok = False
+    """Check that whisper is loaded and the brain is reachable."""
+    llm_ok = False
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{OLLAMA_URL}/api/tags")
+            resp = await client.get(f"{OLLAMA_URL}/v1/models")
             if resp.status_code == 200:
-                models = [m["name"].split(":", 1)[0]
+                # llama.cpp reports the GGUF path; Ollama reports e.g.
+                # "jarvis-brain:latest" — match by substring.
+                models = [m.get("name", "")
                           for m in resp.json().get("models", [])]
-                ollama_ok = LOCAL_MODEL.split(":", 1)[0] in models
+                llm_ok = any(LOCAL_MODEL in m for m in models) or bool(models)
     except Exception:
         pass
 
-    status = "ok" if (whisper_ready and ollama_ok) else "degraded"
+    status = "ok" if (whisper_ready and llm_ok) else "degraded"
     code = 200 if status == "ok" else 503
     return JSONResponse(
         status_code=code,
         content={
             "status": status,
             "whisper": whisper_ready,
-            "ollama": ollama_ok,
-            "ollama_url": OLLAMA_URL,
+            "llm": llm_ok,
+            "llm_url": OLLAMA_URL,
             "model": LOCAL_MODEL,
+            "voice": ACTIVE_PROFILE_KEY,
+            "tts_voice": tts_settings()[0],
         },
     )
 
@@ -324,8 +434,8 @@ async def voice_endpoint(file: UploadFile = File(...)):
             content=reply_audio,
             media_type="audio/wav",
             headers={
-                "X-Transcript": text,
-                "X-Reply": reply,
+                "X-Transcript": ascii_header(text),
+                "X-Reply": ascii_header(reply),
                 "X-Elapsed": f"{elapsed:.1f}",
             },
         )
@@ -351,7 +461,7 @@ async def voice_json_endpoint(req: TextRequest):
         return Response(
             content=reply_audio,
             media_type="audio/wav",
-            headers={"X-Reply": reply, "X-Elapsed": f"{elapsed:.1f}"},
+            headers={"X-Reply": ascii_header(reply), "X-Elapsed": f"{elapsed:.1f}"},
         )
     except Exception as e:
         logger.exception("Voice JSON pipeline error")
@@ -386,6 +496,13 @@ async def voice_chat_page():
 
 async def voice_websocket(ws: WebSocket):
     await ws.accept()
+
+    # Enforce auth: browsers can't set the Authorization header on a socket
+    # upgrade, so the token arrives as ?token= (or a Basic header from
+    # programmatic clients). close(1008) tells the client to re-auth.
+    if not _ws_token_ok(ws):
+        await ws.close(code=1008)
+        return
 
     # Send initial idle state
     await ws.send_json({"type": "status", "state": "idle"})
@@ -445,7 +562,8 @@ async def voice_websocket(ws: WebSocket):
 
                         # TTS - stream audio chunks as they arrive
                         await ws.send_json({"type": "status", "state": "speaking", "text": reply})
-                        communicate = edge_tts.Communicate(reply, TTS_VOICE)
+                        voice, rate, pitch = tts_settings()
+                        communicate = edge_tts.Communicate(reply, voice, rate=rate, pitch=pitch)
 
                         # Collect all audio first, then convert to raw PCM and stream
                         audio_bytes = io.BytesIO()

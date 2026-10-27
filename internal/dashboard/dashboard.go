@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -136,6 +137,19 @@ type LightweightState struct {
 	OllamaHealthy   bool         `json:"ollama_healthy"`
 	RabbitMQHealthy bool         `json:"rabbitmq_healthy"`
 	Queues          []QueueDepth `json:"queues"`
+	VoiceChatURL    string       `json:"voice_chat_url"`
+}
+
+// voiceChatURLFromHost builds the voice chat link from the Host header the
+// browser used to reach the dashboard, so it works from any machine on the
+// LAN (the old hardcoded localhost:8100 only worked from this box).
+func voiceChatURLFromHost(host string) string {
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		// No port in the Host header; append the voice service port.
+		return "http://" + host + ":8100/voice/chat"
+	}
+	return "http://" + h + ":8100/voice/chat"
 }
 
 // Server holds the dashboard dependencies.
@@ -331,6 +345,7 @@ func (s *Server) gatherLightweight() LightweightState {
 
 func (s *Server) handleLightweightHTML(w http.ResponseWriter, r *http.Request) {
 	data := s.gatherLightweight()
+	data.VoiceChatURL = voiceChatURLFromHost(r.Host)
 	var buf bytes.Buffer
 	if err := s.tmpl.ExecuteTemplate(&buf, "lightweight-content", data); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)

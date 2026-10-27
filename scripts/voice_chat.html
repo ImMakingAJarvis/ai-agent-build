@@ -233,6 +233,15 @@
 const WS_BASE = location.protocol.replace('http', 'ws') + '//' + location.host;
 const WS_URL = WS_BASE + '/voice/ws';
 
+// The voice service may require a token for the WebSocket (browsers cannot
+// send an Authorization header on a socket upgrade). Remembered per session.
+let wsToken = sessionStorage.getItem('voiceToken') || '';
+let authPrompted = false;
+
+function wsConnectUrl() {
+  return wsToken ? WS_URL + '?token=' + encodeURIComponent(wsToken) : WS_URL;
+}
+
 // Audio constants
 const SAMPLE_RATE = 16000;
 const CHUNK_DURATION_MS = 200;
@@ -276,7 +285,7 @@ const vizBars = visualizer.querySelectorAll('.viz-bar');
 // WebSocket
 // ---------------------------------------------------------------------------
 function connect() {
-  ws = new WebSocket(WS_URL);
+  ws = new WebSocket(wsConnectUrl());
 
   ws.onopen = () => {
     state = 'connected';
@@ -284,9 +293,20 @@ function connect() {
     console.log('WebSocket connected');
   };
 
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     state = 'disconnected';
     updateUI();
+    // 1008 = policy violation: the service rejected (or wants) a token.
+    if (e.code === 1008 && !authPrompted) {
+      authPrompted = true;
+      const t = prompt('This voice service requires a token. Enter it to continue:');
+      if (t !== null && t.trim() !== '') {
+        wsToken = t.trim();
+        sessionStorage.setItem('voiceToken', wsToken);
+        connect();
+        return;
+      }
+    }
     // Auto-reconnect after 3s
     setTimeout(connect, 3000);
   };

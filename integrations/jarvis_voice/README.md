@@ -7,19 +7,23 @@ Connects Home Assistant's voice pipeline to the local Jarvis voice service
 
 ```
 [Voice Preview Edition]
-        │  wake word detected → audio clip
+        │  wake word detected → on-device STT → text
         ▼
 [Home Assistant]
-        │  routes to jarvis_voice conversation agent
+        │  routes text to the jarvis_voice conversation agent
         ▼
 [Jarvis Voice Service :8100]
-        │  POST /voice  (audio in → WAV out)
+        │  POST /voice/json  (text in → reply text out)
         ▼
-  faster-whisper (CPU) → Ollama jarvis-brain → edge-tts
+  brain (llama.cpp, OpenAI-compatible) → X-Reply
         │
-        ▼  WAV audio response
-[Home Assistant] → plays back on speaker
+        ▼  reply text
+[Home Assistant] → HA-side TTS → plays back on speaker
 ```
+
+There is also a raw audio path, `POST /voice` (audio in → TTS audio out),
+used by the web chat page and by clients that do their own STT. On that path
+the service runs faster-whisper (CPU) for STT and edge-tts for TTS.
 
 ## Installation
 
@@ -51,14 +55,16 @@ ha core restart
 ### 3. Configure
 
 Go to **Settings → Devices & Services → Add Integration** and search for
-**Jarvis Voice**. Enter the voice service URL:
+**Jarvis Voice**. Enter the voice service URL and its credentials:
 
-- Local install: `http://localhost:8100`
-- Docker HA talking to host: `http://host.docker.internal:8100`
-- Same LAN: `http://<server-ip>:8100`
+- URL — local install: `http://localhost:8100`; Docker HA talking to host:
+  `http://host.docker.internal:8100`; same LAN: `http://<server-ip>:8100`
+- Username / Password — the `VOICE_USER` / `VOICE_PASS` values the voice
+  service was started with (see `~/.config/jarvis/local.env`). Leave blank
+  only if the service is running without auth.
 
-The config flow pings `/health` to verify whisper and Ollama are ready
-before saving.
+The config flow pings `/health` with those credentials to verify the service
+is reachable and the credentials are accepted before saving.
 
 ### 4. Set as default conversation agent
 
@@ -128,9 +134,24 @@ The Jarvis voice service exposes these endpoints:
 | `POST` | `/stt` | Audio file | `{"text": "..."}` |
 | `POST` | `/tts` | `{"text": "..."}` | WAV audio |
 | `POST` | `/history/reset` | — | `{"status": "history cleared"}` |
-| `GET`  | `/health` | — | `{"status":"ok","whisper":true,"ollama":true}` |
+| `GET`  | `/health` | — | `{"status":"ok","whisper":true,"llm":true,"voice":"glados",...}` |
 
 Response headers on `/voice` and `/voice/json`:
 - `X-Transcript` — what was transcribed
 - `X-Reply` — what the LLM replied
 - `X-Elapsed` — total pipeline time in seconds
+
+## Voice profiles
+
+The voice service runs one of the personas defined in
+`scripts/voice_prompts/`, selected by the `JARVIS_VOICE` env var on the
+`jarvis-voice` systemd unit:
+
+| Profile | Persona | edge-tts voice | Notes |
+|---------|---------|----------------|-------|
+| `jarvis` | Jarvis, the helpful home AI | `en-US-GuyNeural` | the stock voice |
+| `glados` | GLaDOS from Portal: dry, sarcastic, unenthusiastic | `en-US-EmmaNeural` at -10% rate, -2Hz pitch | flat, deadpan delivery |
+
+Overrides (env vars on the unit): `VOICE_PROMPT` (prompt file),
+`TTS_VOICE`, `TTS_RATE`, `TTS_PITCH` (edge-tts settings). After changing
+any of them: `sudo systemctl restart jarvis-voice`.

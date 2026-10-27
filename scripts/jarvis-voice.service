@@ -14,6 +14,7 @@ RestartSec=5
 EnvironmentFile=/home/agent/.config/jarvis/local.env
 Environment=LISTEN_PORT=8100
 Environment=WHISPER_MODEL=small
+Environment=JARVIS_VOICE=glados
 Environment=PYTHONPATH=/home/agent/.local/lib/python3.14/site-packages
 Environment=HOME=/home/agent
 
