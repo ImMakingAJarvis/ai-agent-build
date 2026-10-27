@@ -294,12 +294,24 @@ const SAMPLE_RATE = 16000;
 const CHUNK_DURATION_MS = 200;
 const CHUNK_SIZE = Math.floor(SAMPLE_RATE * (CHUNK_DURATION_MS / 1000)) * 2; // 2 bytes per sample
 
+// ScriptProcessorNode only accepts power-of-2 bufferSize values in [256, 16384];
+// anything else throws "Unsupported buffer size for ScriptProcessorNode".
+// Round the desired chunk length up to the next valid size
+// (200ms @ 16kHz = 3200 samples -> 4096 samples = 256ms).
+function scriptProcessorBufferSize(targetSamples) {
+  let size = 256;
+  while (size < targetSamples && size < 16384) size *= 2;
+  return size;
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 let ws = null;
 let state = 'disconnected'; // disconnected | connected | listening | processing | speaking
-let audioCtx = null;
+let audioCtx = null; // playback context (device default rate, 24kHz TTS)
+let captureCtx = null; // mic context, pinned to SAMPLE_RATE
+let captureMute = null; // zero-gain sink for the mic graph
 let mediaStream = null;
 let scriptProcessor = null;
 let playbackQueue = [];
@@ -468,17 +480,27 @@ async function startListening() {
       },
     });
 
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // Capture in its own AudioContext pinned to SAMPLE_RATE: the server
+    // expects 16kHz PCM, but a context created at the device default rate
+    // (usually 48kHz) would deliver samples three times too fast.
+    // (Playback keeps the default-rate audioCtx so 24kHz TTS is not downsampled.)
+    if (!captureCtx) {
+      captureCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+      captureMute = captureCtx.createGain();
+      captureMute.gain.value = 0; // mic audio flows through here, never to the speakers
+      captureMute.connect(captureCtx.destination);
+    }
+    if (captureCtx.state === 'suspended') {
+      await captureCtx.resume();
     }
 
-    const source = audioCtx.createMediaStreamSource(mediaStream);
-    const analyser = audioCtx.createAnalyser();
+    const source = captureCtx.createMediaStreamSource(mediaStream);
+    const analyser = captureCtx.createAnalyser();
     analyser.fftSize = 256;
 
     // Script processor for sending audio chunks to WebSocket
-    const bufferSize = SAMPLE_RATE * (CHUNK_DURATION_MS / 1000);
-    scriptProcessor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+    const targetSamples = SAMPLE_RATE * (CHUNK_DURATION_MS / 1000);
+    scriptProcessor = captureCtx.createScriptProcessor(scriptProcessorBufferSize(targetSamples), 1, 1);
 
     scriptProcessor.onaudioprocess = (e) => {
       const inputData = e.inputBuffer.getChannelData(0);
@@ -511,10 +533,11 @@ async function startListening() {
 
     source.connect(analyser);
     analyser.connect(scriptProcessor);
-    scriptProcessor.connect(audioCtx.destination); // needed to prevent GC
+    scriptProcessor.connect(captureMute); // zero gain: keeps the node in the graph, no speaker feedback
 
-    // Signal start of speech
-    ws.send(JSON.stringify({ type: 'start' }));
+    // Signal start of speech; declare the rate the capture context actually
+    // runs at (browsers that ignore the sampleRate option run at device rate).
+    ws.send(JSON.stringify({ type: 'start', sampleRate: captureCtx.sampleRate }));
     state = 'listening';
     updateUI();
 
