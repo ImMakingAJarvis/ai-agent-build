@@ -3,9 +3,15 @@
 voice_service.py — FastAPI service that turns Home Assistant audio into Jarvis voice replies.
 
 Endpoints:
-  POST /voice        Full pipeline: audio file in → WAV audio out (STT → LLM → TTS)
-  POST /voice/json   Full pipeline via JSON: {"text": "..."} → WAV audio out
+  POST /voice        Full pipeline: audio file in → WAV audio out (STT → LLM → TTS).
+                      Optional `model` form field overrides the brain for this turn.
+  POST /voice/json   Full pipeline via JSON: {"text": "...", "model"?} → WAV audio out
+  POST /chat         Stateless text chat: {"messages":[...], "model"?} →
+                      {"reply", "scheduled", "actions"} (the mobile app's text/planning
+                      path; runs the same schedule_job / search_jobs tools)
+  GET  /models       List the conversation models the brain can use (model picker)
   GET  /voice/chat   Real-time 2-way voice chat web interface (WebSocket)
+  GET  /app/         Mobile PWA (iOS/Android) — text + voice + planning, LAN/VPN only
   POST /stt          Speech-to-Text only: audio file in → {"text": "..."}
   POST /tts          Text-to-Speech only: {"text": "..."} → WAV audio out
   POST /history/reset  Clear conversation memory
@@ -61,7 +67,7 @@ import numpy as np
 import soundfile as sf
 import uvicorn
 
-from fastapi import FastAPI, Depends, File, UploadFile, Request, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Depends, File, UploadFile, Request, Form, HTTPException, WebSocket, WebSocketDisconnect, status
 from starlette.requests import HTTPConnection
 from fastapi.responses import Response, JSONResponse, HTMLResponse
 from fastapi.security import HTTPBasic
@@ -161,6 +167,43 @@ logger.info(
     ACTIVE_PROFILE["name"], ACTIVE_PROFILE_KEY,
     VOICE_PROMPT_SOURCE, tts_settings()[0],
 )
+
+
+def build_chat_prompt() -> str:
+    """System prompt for the text/planning chat (the mobile app).
+
+    Same persona as the voice profile, but tuned for text: a little longer
+    than a spoken reply, light markdown allowed, and it drives planning plus
+    the two tools (schedule_job, search_jobs) the same way voice does.
+    """
+    name = ACTIVE_PROFILE["name"]
+    return f"""You are {name}, Nathan's home AI, chatting with him by text.
+
+You help Nathan talk through ideas, make decisions, and plan work. This is
+text, not speech: you may be a little longer than a one-line voice reply and
+may use light markdown (bullets, a short numbered list) when it genuinely
+helps, but stay concise by default. Do not describe your tone.
+
+You can act through two tools:
+- schedule_job: queue work for the coding worker. When Nathan asks for
+  something built, fixed, installed, or changed, or asks to queue/plan it,
+  first restate the plan in a sentence or two, then call schedule_job with a
+  clear one-line title and the full instructions. You must actually call the
+  tool; never say something is queued unless you called it this same turn.
+- search_jobs: search all past work (every job's spec, transcript and result)
+  and the pending queue. Use it when Nathan asks what was done about
+  something, what happened in a job, or whether it is already queued. Answer
+  from what the search returns; if it finds nothing, say so.
+
+When planning something substantial, lay out the steps before you queue it,
+and ask one quick clarifying question only if a missing detail would
+genuinely change the work.
+"""
+
+
+CHAT_SYSTEM_PROMPT = build_chat_prompt()
+# Text replies can be longer than spoken ones.
+CHAT_MAX_TOKENS = 1200
 
 # ---------------------------------------------------------------------------
 # Whisper model (loaded once at startup on GPU)
@@ -433,20 +476,27 @@ SCHEDULE_CLAIM_RE = re.compile(
 )
 
 
-async def run_tool_loop(client, messages, on_action=None):
+async def run_tool_loop(client, messages, on_action=None, model=None,
+                        max_tokens=300, actions=None):
     """One brain turn: LLM call, tool execution, repeat until a plain
-    answer. Appends the exchange to messages. Returns (reply, scheduled)."""
+    answer. Appends the exchange to messages. Returns (reply, scheduled).
+
+    model overrides LOCAL_MODEL (the app's model picker); max_tokens sets the
+    output cap (voice keeps a short cap, text chat a longer one); actions, if
+    a list, is appended with {tool,label,result,scheduled} per tool run so a
+    non-streaming caller (the /chat endpoint) can report what happened.
+    """
     reply = "(no reply)"
     scheduled = False
     tools_supported = True
     for rnd in range(MAX_TOOL_ROUNDS + 1):
         payload = {
-            "model": LOCAL_MODEL,
+            "model": model or LOCAL_MODEL,
             "messages": messages,
             "stream": False,
             "temperature": 0.7,
-            # Voice replies are one or two sentences; cap the output.
-            "max_tokens": 300,
+            # Cap the output; voice passes a short cap, text chat a longer one.
+            "max_tokens": max_tokens,
             # The brain thinks by default; thinking burns the token cap
             # (empty replies) and adds latency. Voice does not need it.
             "chat_template_kwargs": {"enable_thinking": False},
@@ -508,10 +558,20 @@ async def run_tool_loop(client, messages, on_action=None):
                 "name": name,
                 "content": tool_result,
             })
+            if actions is not None:
+                actions.append({
+                    "tool": name,
+                    "label": TOOL_STATUS.get(name, name),
+                    "result": tool_result,
+                    "scheduled": (
+                        name == "schedule_job"
+                        and tool_result.startswith("Scheduled job")
+                    ),
+                })
     return reply, scheduled
 
 
-async def ask_brain(user_text: str, on_action=None) -> str:
+async def ask_brain(user_text: str, on_action=None, model=None, max_tokens=300) -> str:
     """Send text to the brain and get a spoken reply.
 
     The brain may call the tools in VOICE_TOOLS (schedule_job, search_jobs);
@@ -527,7 +587,9 @@ async def ask_brain(user_text: str, on_action=None) -> str:
     ]
 
     async with httpx.AsyncClient(timeout=180.0) as client:
-        reply, scheduled = await run_tool_loop(client, messages, on_action)
+        reply, scheduled = await run_tool_loop(
+            client, messages, on_action, model=model, max_tokens=max_tokens
+        )
 
         # Guardrail: the model sometimes says "I queued it" without calling
         # schedule_job. One correction pass: either call the tool or say
@@ -547,7 +609,9 @@ async def ask_brain(user_text: str, on_action=None) -> str:
                     "yourself and say plainly that nothing was queued."
                 ),
             })
-            reply, scheduled = await run_tool_loop(client, messages, on_action)
+            reply, scheduled = await run_tool_loop(
+                client, messages, on_action, model=model, max_tokens=max_tokens
+            )
 
     chat_history.append({"role": "user", "content": user_text})
     chat_history.append({"role": "assistant", "content": reply})
@@ -555,9 +619,42 @@ async def ask_brain(user_text: str, on_action=None) -> str:
     return reply
 
 
-async def ask_ollama(user_text: str) -> str:
+async def ask_ollama(user_text: str, model=None) -> str:
     """ask_brain under its old name (the REST endpoints call this)."""
-    return await ask_brain(user_text)
+    return await ask_brain(user_text, model=model)
+
+
+async def ask_chat(messages: list[dict], model=None, actions=None):
+    """One stateless text-chat turn for the mobile app.
+
+    Prepends the chat system prompt to the client-supplied history and runs
+    the same tool loop as voice (schedule_job / search_jobs) with a longer
+    output cap, so a text conversation can plan work and queue jobs. Returns
+    (reply, scheduled); each tool run is appended to actions when given.
+    """
+    full = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}, *messages]
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        reply, scheduled = await run_tool_loop(
+            client, full, on_action=None, model=model,
+            max_tokens=CHAT_MAX_TOKENS, actions=actions,
+        )
+        # Same guardrail as voice: catch "I queued it" without the tool call.
+        if not scheduled and SCHEDULE_CLAIM_RE.search(reply or ""):
+            full.append({"role": "assistant", "content": reply})
+            full.append({
+                "role": "user",
+                "content": (
+                    "You just said you queued or scheduled a job, but you did "
+                    "not call the schedule_job tool. If Nathan asked for a "
+                    "job, call schedule_job now. If he did not, correct "
+                    "yourself and say plainly that nothing was queued."
+                ),
+            })
+            reply, scheduled = await run_tool_loop(
+                client, full, on_action=None, model=model,
+                max_tokens=CHAT_MAX_TOKENS, actions=actions,
+            )
+    return reply, scheduled
 
 # ---------------------------------------------------------------------------
 # TTS
@@ -582,6 +679,16 @@ def ascii_header(value: str) -> str:
 # ---------------------------------------------------------------------------
 class TextRequest(BaseModel):
     text: str
+    # Optional model override (the mobile app's model picker); None = LOCAL_MODEL.
+    model: str | None = None
+
+
+class ChatRequest(BaseModel):
+    # Stateless text chat: the client owns the conversation and sends the full
+    # history (system prompt is prepended server-side). Lets the mobile app
+    # pick the model per conversation and survive reconnects.
+    messages: list[dict]
+    model: str | None = None
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -607,7 +714,10 @@ async def require_auth(request: HTTPConnection):
         return
     if isinstance(request, WebSocket):
         return
-    if request.url.path == "/voice/chat":
+    # The voice-chat page and the mobile app's static assets must load
+    # without a credentials prompt; the API they call still needs auth.
+    path = request.url.path
+    if path == "/voice/chat" or path == "/app" or path.startswith("/app/"):
         return
     credentials = await security(request)
     if not credentials or credentials.username != VOICE_USER or credentials.password != VOICE_PASS:
@@ -696,6 +806,78 @@ async def health():
         },
     )
 
+@app.get("/models")
+async def models_endpoint():
+    """List the conversation models the brain can use (for the app's picker).
+
+    Queries the configured LLM engine (OpenAI-compatible /v1/models). Today
+    the llama.cpp engine serves one model (jarvis-brain); if more are loaded
+    they appear here automatically. Falls back to the configured default if
+    the engine is unreachable.
+    """
+    models = []
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{OLLAMA_URL}/v1/models")
+            if resp.status_code == 200:
+                for m in resp.json().get("models", []):
+                    mid = m.get("id") or m.get("name") or ""
+                    if not mid:
+                        continue
+                    # llama.cpp reports the GGUF path; Ollama reports e.g.
+                    # "jarvis-brain:latest". Derive a short display name.
+                    name = mid.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+                    if name.lower().endswith(".gguf"):
+                        name = name[:-5]
+                    models.append({
+                        "id": mid,
+                        "name": name,
+                        "default": LOCAL_MODEL in mid,
+                    })
+    except Exception:
+        pass
+    if not models:
+        models.append({"id": LOCAL_MODEL, "name": LOCAL_MODEL, "default": True})
+    return JSONResponse({"models": models, "default": LOCAL_MODEL})
+
+
+@app.post("/chat")
+async def chat_endpoint(req: ChatRequest):
+    """Stateless text chat for the mobile app: messages in -> text out.
+
+    The client owns the conversation (localStorage) and sends the full
+    history; this prepends the system prompt and runs the tool loop so the
+    model can plan work and queue jobs. Returns {reply, scheduled, actions}.
+    """
+    msgs = []
+    for m in req.messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            msgs.append({"role": role, "content": content.strip()})
+    # Keep the context bounded; the newest messages matter most.
+    msgs = msgs[-40:]
+    if not msgs or msgs[-1]["role"] != "user":
+        return JSONResponse(
+            status_code=400,
+            content={"error": "messages must end with a user message"},
+        )
+    actions = []
+    try:
+        reply, scheduled = await ask_chat(msgs, model=req.model, actions=actions)
+    except httpx.HTTPStatusError as e:
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"LLM error: {e.response.text[:200]}"},
+        )
+    except Exception as e:
+        logger.exception("Chat error")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    return JSONResponse({"reply": reply, "scheduled": scheduled, "actions": actions})
+
+
 @app.post("/stt")
 async def stt_endpoint(file: UploadFile = File(...)):
     """Speech-to-Text: upload audio file, get text back."""
@@ -718,8 +900,12 @@ async def tts_endpoint(req: TextRequest):
     return Response(content=audio, media_type="audio/wav")
 
 @app.post("/voice")
-async def voice_endpoint(file: UploadFile = File(...)):
-    """Full voice pipeline: audio file in -> WAV audio out."""
+async def voice_endpoint(file: UploadFile = File(...), model: str | None = Form(None)):
+    """Full voice pipeline: audio file in -> WAV audio out.
+
+    `model` (optional form field) overrides the brain model for this turn —
+    the mobile app's model picker sends it here and in /voice/json.
+    """
     start = time.time()
     audio = await file.read()
 
@@ -731,7 +917,7 @@ async def voice_endpoint(file: UploadFile = File(...)):
                 content={"error": "No speech detected in audio"},
             )
 
-        reply = await ask_ollama(text)
+        reply = await ask_ollama(text, model=model)
         reply_audio = await synthesize(reply)
 
         elapsed = time.time() - start
@@ -761,7 +947,7 @@ async def voice_json_endpoint(req: TextRequest):
     """Full pipeline via JSON body: {"text": "..."} -> WAV audio out."""
     start = time.time()
     try:
-        reply = await ask_ollama(req.text)
+        reply = await ask_ollama(req.text, model=req.model)
         reply_audio = await synthesize(reply)
         elapsed = time.time() - start
         return Response(
@@ -786,6 +972,20 @@ async def voice_chat_page():
     import os
     html_path = os.path.join(os.path.dirname(__file__), "voice_chat.html")
     return FileResponse(html_path)
+
+
+# ---------------------------------------------------------------------------
+# Mobile app (PWA) — served from scripts/jarvis_app/
+# ---------------------------------------------------------------------------
+# A single cross-platform installable app (iOS "Add to Home Screen" and
+# Android "Install app") that talks to this service over the LAN/VPN. It is
+# mounted under /app so its static assets (index.html, sw.js, manifest,
+# icons) bypass the Basic-auth dependency — they contain no secrets; the API
+# calls (/chat, /voice, /models) still enforce auth when it is enabled.
+APP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_app")
+
+if os.path.isdir(APP_DIR):
+    app.mount("/app", StaticFiles(directory=APP_DIR, html=True), name="app")
 
 # ---------------------------------------------------------------------------
 # WebSocket endpoint for real-time 2-way audio communication
