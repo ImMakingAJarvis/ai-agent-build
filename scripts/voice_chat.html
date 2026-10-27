@@ -406,6 +406,9 @@ function handleJsonMessage(msg) {
         }
       }
     }
+  } else if (msg.type === 'action') {
+    // A tool is running (scheduling a job / searching job history).
+    if (msg.text) addTranscriptEntry('system', msg.text);
   } else if (msg.type === 'error') {
     console.error('Server error:', msg.message);
     addTranscriptEntry('system', 'Error: ' + msg.message);

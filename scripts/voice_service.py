@@ -21,6 +21,10 @@ Environment:
   OLLAMA_URL      LLM base URL, OpenAI-compatible (default http://localhost:11434;
                   works with the llama.cpp jarvis-engine or real Ollama)
   LOCAL_MODEL     default jarvis-brain
+  MEMORY_URL      vector-graph job memory (default http://localhost:8101);
+                  voice can search all past job history through it
+  JOBS_CLI        job queue CLI (default jarvis-jobs); voice schedules
+                  jobs through it
   WHISPER_MODEL   default small   (tiny/base/small/medium/large)
   JARVIS_VOICE    persona profile: "jarvis" (default) or "glados"
   VOICE_PROMPT    override: path to system prompt file
@@ -259,23 +263,185 @@ async def transcribe(audio_bytes: bytes) -> str:
     return text
 
 # ---------------------------------------------------------------------------
-# LLM chat via Ollama
+# LLM chat via the local brain (OpenAI-compatible API) with tools
 # ---------------------------------------------------------------------------
 chat_history: list[dict] = []
 MAX_HISTORY = 20
 
-async def ask_ollama(user_text: str) -> str:
-    """Send text to the brain (OpenAI-compatible API) and get a reply."""
+# Memory-graph service: vector DB over every past job (spec, transcript,
+# output), the pending queue, and a snapshot of the repo docs.
+MEMORY_URL = os.getenv("MEMORY_URL", "http://localhost:8101")
+# Job queue CLI used to schedule work from voice.
+JOBS_CLI = os.getenv("JOBS_CLI", "jarvis-jobs")
+# Cap the tool loop so a chatty model can't spin forever.
+MAX_TOOL_ROUNDS = 3
+# Tool results are fed back into the model's context; keep them short.
+SEARCH_RESULT_CAP = 2400
+
+# The two abilities voice has on the machine. The brain picks them; the
+# service executes them.
+VOICE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_job",
+            "description": (
+                "Schedule a job for the coding worker. Use it whenever Nathan "
+                "asks for something built, fixed, installed, or changed, or asks "
+                "to queue/schedule something. The worker picks it up on its own. "
+                "Returns the job id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short job title, one line.",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": "The full work to do, with every detail "
+                        "Nathan gave.",
+                    },
+                    "class": {
+                        "type": "string",
+                        "enum": ["fix", "build", "background"],
+                        "description": "fix for urgent repairs, build for new "
+                        "work, background for low-priority. Default build.",
+                    },
+                },
+                "required": ["title", "instructions"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_jobs",
+            "description": (
+                "Search all past work: every job's spec, transcript and output, "
+                "plus the pending queue and repo docs. Use it when Nathan asks "
+                "what was done about something, what happened in a job, or "
+                "whether something is queued. Returns the top matching excerpts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for, in plain words.",
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "Hits to return (default 5, max 8).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+]
+
+# UI-facing status for each tool while it runs.
+TOOL_STATUS = {
+    "schedule_job": "Scheduling job in the queue…",
+    "search_jobs": "Searching job history…",
+}
+
+async def tool_schedule_job(args: dict) -> str:
+    """Run `jarvis-jobs add` for the requested work."""
+    title = str(args.get("title") or "").strip()[:200]
+    instructions = str(args.get("instructions") or "").strip()[:4000]
+    cls = str(args.get("class") or "build").strip().lower()
+    if cls not in ("fix", "build", "background"):
+        cls = "build"
+    if not title or not instructions:
+        return "Error: schedule_job needs both a title and instructions."
+    job_id = f"voice-{int(time.time())}-{os.urandom(2).hex()}"
+    proc = await asyncio.to_thread(
+        subprocess.run,
+        [
+            JOBS_CLI, "add",
+            "-id", job_id,
+            "-title", title,
+            "-instructions", instructions,
+            "-class", cls,
+            "-source", "voice",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    out = (proc.stdout or "").strip()
+    if proc.returncode != 0:
+        logger.error("schedule_job failed: %s %s", out, proc.stderr)
+        return f"Error: could not schedule the job: {proc.stderr.strip()[:200]}"
+    if out == "exists":
+        return f"The job already exists in the queue as {job_id}."
+    logger.info("schedule_job: queued %s (%r) class=%s", job_id, title[:80], cls)
+    return f"Scheduled job {job_id} ({cls} class) in the build queue: {title}"
+
+async def tool_search_jobs(args: dict) -> str:
+    """Query the memory-graph service and compact the hits for the model."""
+    query = str(args.get("query") or "").strip()[:300]
+    if not query:
+        return "Error: search_jobs needs a query."
+    try:
+        k = int(args.get("k") or 5)
+    except (TypeError, ValueError):
+        k = 5
+    k = max(1, min(k, 8))
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{MEMORY_URL}/search",
+                json={"query": query, "k": k},
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+    except Exception as e:
+        logger.error("search_jobs failed: %s", e)
+        return "Error: the job memory service is unavailable right now."
+    if not results:
+        return f"No matches for {query!r} in the job history or queue."
+    lines = []
+    total = 0
+    for r in results:
+        text = " ".join(str(r.get("text", "")).split())[:280]
+        line = (
+            f"- [{r.get('source', '?')}] {r.get('title', '')} "
+            f"(score {r.get('score', 0):.2f}): {text}"
+        )
+        if total + len(line) > SEARCH_RESULT_CAP:
+            lines.append("- (more hits truncated)")
+            break
+        lines.append(line)
+        total += len(line)
+    return f"Top hits for {query!r}:\n" + "\n".join(lines)
+
+TOOL_RUNNERS = {
+    "schedule_job": tool_schedule_job,
+    "search_jobs": tool_search_jobs,
+}
+
+async def ask_brain(user_text: str, on_action=None) -> str:
+    """Send text to the brain and get a spoken reply.
+
+    The brain may call the tools in VOICE_TOOLS (schedule_job, search_jobs);
+    this runs the tool loop: on tool_calls, execute each one, feed the
+    results back, and let the model answer. on_action, if given, is awaited
+    with a short status string when a tool starts, so the UI can show what
+    voice is doing.
+    """
     messages = [
         {"role": "system", "content": VOICE_SYSTEM_PROMPT},
         *chat_history[-MAX_HISTORY:],
         {"role": "user", "content": user_text},
     ]
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(
-            f"{OLLAMA_URL}/v1/chat/completions",
-            json={
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        reply = "(no reply)"
+        tools_supported = True
+        for round in range(MAX_TOOL_ROUNDS + 1):
+            payload = {
                 "model": LOCAL_MODEL,
                 "messages": messages,
                 "stream": False,
@@ -285,18 +451,75 @@ async def ask_ollama(user_text: str) -> str:
                 # The brain thinks by default; thinking burns the token cap
                 # (empty replies) and adds latency. Voice does not need it.
                 "chat_template_kwargs": {"enable_thinking": False},
-            },
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        reply = result.get("choices", [{}])[0].get("message", {}).get(
-            "content", "(no reply)"
-        )
+            }
+            # The final round goes out without tools so the model must answer.
+            if tools_supported and round < MAX_TOOL_ROUNDS:
+                payload["tools"] = VOICE_TOOLS
+            try:
+                resp = await client.post(
+                    f"{OLLAMA_URL}/v1/chat/completions", json=payload
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                # An engine without tool support rejects the request; retry
+                # the conversation plain rather than fail the utterance.
+                if e.response.status_code == 400 and tools_supported:
+                    logger.warning(
+                        "Engine rejected tools payload (%s); falling back to "
+                        "plain chat", e.response.text[:200]
+                    )
+                    tools_supported = False
+                    continue
+                raise
+            result = resp.json()
+            msg = result.get("choices", [{}])[0].get("message", {})
+            tool_calls = msg.get("tool_calls") or []
+            if not tool_calls:
+                reply = msg.get("content") or "(no reply)"
+                break
+            messages.append({
+                "role": "assistant",
+                "content": msg.get("content") or None,
+                "tool_calls": tool_calls,
+            })
+            for i, tc in enumerate(tool_calls):
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                if on_action:
+                    await on_action(TOOL_STATUS.get(name, f"Working: {name}…"))
+                runner = TOOL_RUNNERS.get(name)
+                if runner is None:
+                    tool_result = f"Error: unknown tool {name!r}."
+                else:
+                    try:
+                        tool_result = await runner(args)
+                    except Exception as e:
+                        logger.exception("tool %s failed", name)
+                        tool_result = f"Error: {name} failed: {e}"
+                logger.info("tool %s -> %s", name, tool_result[:120])
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id") or f"call_{round}_{i}",
+                    "name": name,
+                    "content": tool_result,
+                })
+        else:
+            # Loop exhausted (model kept calling tools); ask for the answer.
+            logger.warning("Tool loop exhausted after %d rounds", MAX_TOOL_ROUNDS)
 
     chat_history.append({"role": "user", "content": user_text})
     chat_history.append({"role": "assistant", "content": reply})
     logger.info("LLM reply: %s", reply[:100])
     return reply
+
+
+async def ask_ollama(user_text: str) -> str:
+    """Plain (no-tools) chat, kept for callers that don't want the tools."""
+    return await ask_brain(user_text)
 
 # ---------------------------------------------------------------------------
 # TTS
@@ -408,6 +631,16 @@ async def health():
     except Exception:
         pass
 
+    # Memory-graph (job history) is a soft dependency: voice still works if
+    # it is down, search_jobs just reports it as unavailable.
+    memory_ok = False
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{MEMORY_URL}/health")
+            memory_ok = resp.status_code == 200
+    except Exception:
+        pass
+
     status = "ok" if (whisper_ready and llm_ok) else "degraded"
     code = 200 if status == "ok" else 503
     return JSONResponse(
@@ -418,6 +651,8 @@ async def health():
             "llm": llm_ok,
             "llm_url": OLLAMA_URL,
             "model": LOCAL_MODEL,
+            "memory": memory_ok,
+            "memory_url": MEMORY_URL,
             "voice": ACTIVE_PROFILE_KEY,
             "tts_voice": tts_settings()[0],
         },
@@ -525,6 +760,8 @@ async def voice_chat_page():
 #     - JSON: {"type": "end"}    — finished speaking, process the buffer
 #   Server → Client:
 #     - JSON: {"type": "status", "state": "listening|processing|speaking|idle", "text": "..."}
+#     - JSON: {"type": "action", "text": "..."}  — a tool is running
+#       (scheduling a job / searching job history)
 #     - Binary frames: TTS audio chunks (raw 16-bit PCM at 24kHz, mono)
 #     - JSON: {"type": "error", "message": "..."}
 
@@ -597,8 +834,13 @@ async def voice_websocket(ws: WebSocket):
                             "text": text,
                         })
 
-                        # LLM
-                        reply = await ask_ollama(text)
+                        # LLM (with tools: schedule_job / search_jobs).
+                        # Tool starts are surfaced as "action" messages so
+                        # the UI can show what voice is doing while it works.
+                        async def _action(label: str):
+                            await ws.send_json({"type": "action", "text": label})
+
+                        reply = await ask_brain(text, on_action=_action)
 
                         # TTS - stream audio chunks as they arrive
                         await ws.send_json({"type": "status", "state": "speaking", "text": reply})
