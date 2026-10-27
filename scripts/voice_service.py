@@ -47,6 +47,7 @@ import os
 import signal
 import subprocess
 import time
+import wave
 
 import edge_tts
 import faster_whisper
@@ -220,6 +221,20 @@ def prepare_audio(data: np.ndarray, sr: int) -> np.ndarray:
     if peak > 0:
         data = data / peak * 0.95
     return data
+
+def pcm16_to_wav(pcm: bytes, sample_rate: int) -> bytes:
+    """Wrap raw 16-bit mono PCM in a WAV container.
+
+    The WebSocket path accumulates headerless PCM16 frames from the browser;
+    transcribe() reads via soundfile, which needs a container header.
+    """
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
 
 # ---------------------------------------------------------------------------
 # STT
@@ -504,8 +519,9 @@ async def voice_chat_page():
 # ---------------------------------------------------------------------------
 # Protocol:
 #   Client → Server:
-#     - Binary frames: 16-bit PCM audio at 16kHz, mono (chunks of ~200ms = 6400 bytes)
-#     - JSON: {"type": "start"}  — begin speaking
+#     - Binary frames: 16-bit PCM audio, mono, at the rate declared in
+#       "start" (16kHz on a healthy client; chunks of ~256ms = 8192 bytes)
+#     - JSON: {"type": "start", "sampleRate": 16000}  — begin speaking
 #     - JSON: {"type": "end"}    — finished speaking, process the buffer
 #   Server → Client:
 #     - JSON: {"type": "status", "state": "listening|processing|speaking|idle", "text": "..."}
@@ -527,6 +543,7 @@ async def voice_websocket(ws: WebSocket):
 
     audio_buffer = bytearray()
     processing = False
+    declared_rate = 16000  # set from the client's "start" message
 
     try:
         while True:
@@ -536,7 +553,8 @@ async def voice_websocket(ws: WebSocket):
                 break
 
             # Handle JSON control messages
-            if data.get("type") == "websocket.receive" and isinstance(data["text"], str):
+            # (binary frames carry no "text" key — use .get or they raise KeyError)
+            if data.get("type") == "websocket.receive" and isinstance(data.get("text"), str):
                 try:
                     msg = json.loads(data["text"])
                 except json.JSONDecodeError:
@@ -544,6 +562,10 @@ async def voice_websocket(ws: WebSocket):
 
                 if msg.get("type") == "start":
                     audio_buffer.clear()
+                    try:
+                        declared_rate = int(msg.get("sampleRate") or 16000)
+                    except (TypeError, ValueError):
+                        declared_rate = 16000
                     await ws.send_json({"type": "status", "state": "listening"})
 
                 elif msg.get("type") == "end":
@@ -558,8 +580,8 @@ async def voice_websocket(ws: WebSocket):
                     await ws.send_json({"type": "status", "state": "processing"})
 
                     try:
-                        # STT
-                        text = await transcribe(bytes(audio_buffer))
+                        # STT (the buffer is raw PCM16 — wrap it in a WAV first)
+                        text = await transcribe(pcm16_to_wav(bytes(audio_buffer), declared_rate))
                         if not text:
                             await ws.send_json({
                                 "type": "status", "state": "idle",
@@ -593,7 +615,8 @@ async def voice_websocket(ws: WebSocket):
                         tts_wav = audio_bytes.read()
 
                         # Convert WAV to raw PCM (edge-tts produces 24kHz 16-bit mono)
-                        _, tts_pcm = sf.read(io.BytesIO(tts_wav), dtype="int16")
+                        # sf.read returns (data, samplerate) — data first
+                        tts_pcm, _ = sf.read(io.BytesIO(tts_wav), dtype="int16")
                         raw_pcm = tts_pcm.tobytes()
 
                         # Stream in chunks of ~200ms (4800 bytes at 24kHz 16-bit)
