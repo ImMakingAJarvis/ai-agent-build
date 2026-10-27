@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
@@ -60,6 +61,10 @@ type Runner struct {
 	// Pickup is called after a successful Claim (Discord parrot reaction).
 	// Defaults to defaultDiscordPickup, which never fails the job.
 	Pickup func(Job)
+	// Power, if set, starts a power sampler for a job directory and
+	// returns a stop function reporting the accumulated watt-hours.
+	// The default (nil) disables sampling. See internal/power.
+	Power func(jobDir string) func() float64
 }
 
 // ModelFor names the model a driver uses.
@@ -224,6 +229,12 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	j.StartedAt = time.Now().UTC().Format(time.RFC3339)
 	r.Store.SetStatus(id, j.State)
 
+	// Sample GPU power for the whole run (nil disables it).
+	var stopPower func() float64
+	if r.Power != nil {
+		stopPower = r.Power(r.Store.JobDir(id))
+	}
+
 	// Restore the work slot's KV cache (no-op when EngineURL is empty).
 	if err := r.restoreSlot(id); err != nil {
 		return j, fmt.Errorf("restore slot: %w", err)
@@ -269,7 +280,11 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	if ctx.Err() != nil && runErr == nil {
 		runErr = ctx.Err()
 	}
-	return r.finish(j, rec, buf.String(), runErr)
+	var wh float64
+	if stopPower != nil {
+		wh = stopPower()
+	}
+	return r.finish(j, rec, buf.String(), runErr, wh)
 }
 
 // signalWatcher polls SignalFile every second. When it appears (written by
@@ -304,7 +319,9 @@ func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 }
 
 // Finish records the result of a round that ran outside Run (for example one
-// resumed after a reboot). exitCode 0 is done.
+// resumed after a reboot). exitCode 0 is done. No sampler ran in this
+// process, so the energy comes from whatever the previous sampler persisted
+// (power.json) before the reboot — at most one sampling interval is lost.
 func (r *Runner) Finish(id string, exitCode int, output string) (Job, error) {
 	j, err := r.Store.Get(id)
 	if err != nil {
@@ -314,13 +331,19 @@ func (r *Runner) Finish(id string, exitCode int, output string) (Job, error) {
 	if exitCode != 0 {
 		runErr = fmt.Errorf("agent exited with status %d", exitCode)
 	}
-	return r.finish(j, nil, output, runErr)
+	wh, _ := power.LoadPersisted(r.Store.JobDir(id))
+	return r.finish(j, nil, output, runErr, wh)
 }
 
-func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error) (Job, error) {
+func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, wh float64) (Job, error) {
 	id := j.ID
 	r.Store.WriteFile(id, "transcript.txt", []byte(out))
 	r.Store.WriteFile(id, "output.txt", []byte(Summary(out)+"\n"))
+
+	// Local job cost: sampled energy at the configured $/kWh rate.
+	if kwh := power.Kwh(wh); kwh > 0 {
+		j.Kwh, j.PowerCost = kwh, power.Cost(wh, power.Rate())
+	}
 
 	pr := ""
 	if m := prRe.FindAllString(out, -1); len(m) > 0 {
@@ -357,6 +380,7 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error) (
 			rec.StartedAt = j.StartedAt
 		}
 		rec.PRURL, rec.Summary = pr, j.Summary
+		rec.Kwh, rec.PowerCost = j.Kwh, j.PowerCost
 		if runErr != nil {
 			r.History.Fail(rec, runErr)
 		} else {

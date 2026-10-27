@@ -59,6 +59,11 @@ type State struct {
 	PRURL      string `json:"pr_url,omitempty"`
 	Summary    string `json:"summary,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// Power (local runs): energy sampled from the GPU while the job ran,
+	// and its electricity cost at the configured $/kWh rate
+	// (internal/power). Cumulative across all attempts of the job.
+	Kwh       float64 `json:"kwh,omitempty"`
+	PowerCost float64 `json:"power_cost,omitempty"`
 }
 
 // Job is a spec plus its state.

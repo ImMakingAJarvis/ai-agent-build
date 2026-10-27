@@ -20,6 +20,7 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
@@ -163,6 +164,13 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 	r := &agentjob.Runner{Store: store, History: h}
 	if conf := os.Getenv("JARVIS_CONF"); conf != "" {
 		r.SignalFile = conf + "/pause-signal"
+	}
+	// Sample GPU power for the whole round; the total lands in the job
+	// state and history as kWh + $ at the configured JARVIS_POWER_RATE.
+	r.Power = func(jobDir string) func() float64 {
+		s := power.NewSampler(jobDir)
+		s.Start()
+		return s.Stop
 	}
 	return r
 }
