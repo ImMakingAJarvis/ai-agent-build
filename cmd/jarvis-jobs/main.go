@@ -6,6 +6,8 @@
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
 //	jarvis-jobs add -id ID -title T [-driver local|sonnet] [-source S] [-priority N]
+//	jarvis-jobs order [a,b,c]    show or set the runtime band priority order
+//	                              (a permutation of fix, build, background)
 //	jarvis-jobs message [TEXT]   send the agent a message (stdin when TEXT
 //	                              is "-" or absent); injected at its next step
 package main
@@ -31,7 +33,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|skip|requeue|show|pause|add|message")
+		die("usage: jarvis-jobs list [status]|next|run|finish|skip|requeue|show|pause|add|order|message")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -118,6 +120,10 @@ func main() {
 		fmt.Sscan(args[1], &code)
 		j, _ := runner(store).Finish(args[0], code, "")
 		fmt.Printf("==> job %s %s %s\n", j.ID, j.Status, j.PRURL)
+	case "order":
+		if err := cmdOrder(store, args); err != nil {
+			die("%v", err)
+		}
 	case "message":
 		if err := cmdMessage(args, os.Stdin); err != nil {
 			die("%v", err)
@@ -154,6 +160,34 @@ func cmdMessage(args []string, stdin io.Reader) error {
 	}
 	fmt.Printf("queued %s (%d waiting)\n", name, inbox.Count())
 	return nil
+}
+
+// cmdOrder shows or sets the runtime band priority order (highest first).
+// `jarvis-jobs order` prints the current order; `jarvis-jobs order
+// build,fix,background` sets it. The dashboard's queue settings do the same
+// through POST /api/queue/band-order; both persist to the job store.
+func cmdOrder(store *agentjob.Store, args []string) error {
+	switch len(args) {
+	case 0:
+		order, err := store.BandOrder()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("band order: %s\n", strings.Join(order, " -> "))
+		return nil
+	case 1:
+		order := strings.Split(args[0], ",")
+		for i := range order {
+			order[i] = strings.TrimSpace(order[i])
+		}
+		if err := store.SetBandOrder(order); err != nil {
+			return err
+		}
+		fmt.Printf("band order set: %s\n", strings.Join(order, " -> "))
+		return nil
+	default:
+		return fmt.Errorf("usage: jarvis-jobs order [fix,build,background]")
+	}
 }
 
 func runner(store *agentjob.Store) *agentjob.Runner {
