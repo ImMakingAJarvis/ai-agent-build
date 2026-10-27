@@ -233,6 +233,43 @@ func (s *Store) List() ([]Job, error) {
 	return jobs, nil
 }
 
+// SetOrder updates a job's class and within-class priority (higher priority
+// runs first within the class). It rewrites the job's spec (job.json) and
+// leaves its state untouched. This is the persistence behind the dashboard's
+// drag-to-reorder queue: dragging reorders a band by rewriting priorities,
+// and dropping a job in another band reclassifies it.
+func (s *Store) SetOrder(id, class string, priority int) error {
+	if !ValidID(id) {
+		return fmt.Errorf("agentjob: bad job id %q", id)
+	}
+	j, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	j.Class = class
+	j.Priority = priority
+	return writeJSON(filepath.Join(s.JobDir(id), "job.json"), j.Spec)
+}
+
+// ApplyOrder rewrites the class and priority of each listed job so that,
+// within each class band, jobs run in the given top-to-bottom order (the
+// first id runs first). The band order itself (fix, build, background) is
+// fixed and is not affected by the map's iteration order.
+func (s *Store) ApplyOrder(orders map[string][]string) error {
+	for class, ids := range orders {
+		if class != ClassFix && class != ClassBuild && class != ClassBackground {
+			return fmt.Errorf("agentjob: unknown class %q", class)
+		}
+		for i, id := range ids {
+			// Top (i=0) gets the highest priority so it runs first.
+			if err := s.SetOrder(id, class, len(ids)-i); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func alive(pid int) bool {
 	if pid <= 0 {
 		return false
