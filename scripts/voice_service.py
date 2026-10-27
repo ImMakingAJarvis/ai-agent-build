@@ -28,6 +28,13 @@ Environment:
   TTS_RATE        override: edge-tts rate (e.g. -10%)
   TTS_PITCH       override: edge-tts pitch (e.g. -2Hz)
   LISTEN_PORT     default 8100
+  TLS_PORT        HTTPS listener for browser clients (default 8443). Browsers
+                  only expose the microphone (getUserMedia) in secure contexts,
+                  so the /voice/chat UI needs HTTPS on other LAN machines.
+                  Enabled when TLS_CERT/TLS_KEY exist (see gen_voice_cert.sh);
+                  the plain-HTTP port stays up for the Home Assistant
+                  integration, which speaks http://.
+  TLS_CERT / TLS_KEY  default ~/.config/jarvis/tls/voice.{crt,key}
 """
 
 import asyncio
@@ -37,6 +44,7 @@ import io
 import json
 import logging
 import os
+import signal
 import subprocess
 import time
 
@@ -63,6 +71,13 @@ WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "small")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8100"))
 VOICE_USER = os.getenv("VOICE_USER", "")
 VOICE_PASS = os.getenv("VOICE_PASS", "")
+
+# TLS listener for browser clients (see module docstring). Enabled
+# automatically when the cert + key exist; the plain-HTTP port above keeps
+# serving the Home Assistant integration, which speaks http://.
+TLS_PORT = int(os.getenv("TLS_PORT", "8443"))
+TLS_CERT = os.getenv("TLS_CERT", os.path.expanduser("~/.config/jarvis/tls/voice.crt"))
+TLS_KEY = os.getenv("TLS_KEY", os.path.expanduser("~/.config/jarvis/tls/voice.key"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [voice] %(message)s")
 logger = logging.getLogger("voice")
@@ -148,7 +163,10 @@ whisper_model = None
 whisper_ready = False
 
 def load_whisper():
+    """Load the model once (lifespan runs per listener when TLS is enabled)."""
     global whisper_model, whisper_ready
+    if whisper_ready:
+        return
     try:
         logger.info("Loading faster-whisper model: %s (CPU)", WHISPER_MODEL_NAME)
         whisper_model = faster_whisper.WhisperModel(
@@ -607,5 +625,70 @@ async def voice_websocket(ws: WebSocket):
 app.websocket("/voice/ws")(voice_websocket)
 
 # ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+def tls_enabled() -> bool:
+    return os.path.isfile(TLS_CERT) and os.path.isfile(TLS_KEY)
+
+
+async def serve_all(http_cfg: uvicorn.Config, https_cfg: uvicorn.Config) -> None:
+    """Run the plain-HTTP and HTTPS listeners in one process.
+
+    uvicorn's Server.serve() installs its own SIGINT/SIGTERM handlers, so
+    two concurrent serve() calls on the main thread would mask each other
+    and only one server would ever shut down. Drive the lifecycle manually
+    instead: startup() both, wait for a signal ourselves, then main_loop()
+    (the should_exit watcher) and shutdown() for each.
+    """
+    loop = asyncio.get_running_loop()
+    servers = []
+    try:
+        for cfg in (http_cfg, https_cfg):
+            cfg.load()
+            server = uvicorn.Server(cfg)
+            server.lifespan = cfg.lifespan_class(cfg)  # normally set by serve()
+            await server.startup()
+            servers.append(server)
+    except Exception:
+        for server in servers:
+            server.should_exit = True
+            await server.shutdown()
+        raise
+
+    stop = loop.create_future()
+
+    def request_stop() -> None:
+        if not stop.done():
+            stop.set_result(None)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, request_stop)
+
+    watchers = [asyncio.ensure_future(server.main_loop()) for server in servers]
+    await stop
+    for server in servers:
+        server.should_exit = True
+    await asyncio.gather(*watchers)
+    for server in servers:
+        await server.shutdown()
+
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=LISTEN_PORT, log_level="info")
+    if tls_enabled():
+        http_cfg = uvicorn.Config(app, host="0.0.0.0", port=LISTEN_PORT, log_level="info")
+        https_cfg = uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=TLS_PORT,
+            ssl_certfile=TLS_CERT,
+            ssl_keyfile=TLS_KEY,
+            log_level="info",
+        )
+        logger.info(
+            "Voice service starting: http on :%d (Home Assistant), https on :%d (browser UI)",
+            LISTEN_PORT, TLS_PORT,
+        )
+        asyncio.run(serve_all(http_cfg, https_cfg))
+    else:
+        logger.info("No TLS cert at %s — plain HTTP only on :%d", TLS_CERT, LISTEN_PORT)
+        uvicorn.run(app, host="0.0.0.0", port=LISTEN_PORT, log_level="info")
