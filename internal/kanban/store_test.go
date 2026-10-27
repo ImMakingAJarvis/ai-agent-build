@@ -1,6 +1,7 @@
 package kanban
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -111,6 +112,45 @@ func TestDeleteEpicCascades(t *testing.T) {
 	}
 	if tasks, _ := s.ListTasks(); len(tasks) != 0 {
 		t.Errorf("ListTasks = %v, want empty", tasks)
+	}
+}
+
+// TestEmptyListsMarshalAsArrays locks the API contract: empty lists must
+// serialize as [] (not null), because the dashboard page iterates them in JS
+// and a null response crashed the board render.
+func TestEmptyListsMarshalAsArrays(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	epics, err := s.ListEpics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := s.ListTasks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	subtasks, err := s.ListSubTasks("missing-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		v    any
+	}{
+		{"epics", epics},
+		{"tasks", tasks},
+		{"subtasks", subtasks},
+	}
+	for _, c := range cases {
+		b, err := json.Marshal(c.v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != "[]" {
+			t.Errorf("%s = %s, want []", c.name, b)
+		}
 	}
 }
 

@@ -597,11 +597,11 @@ async function loadModels() {
 // Load board data
 async function loadBoard() {
   const res = await fetch('/api/kanban/epics');
-  const epics = await res.json();
+  const epics = (await res.json()) || [];
 
   // Load all tasks
   const tasksRes = await fetch('/api/kanban/tasks');
-  const allTasks = await tasksRes.json();
+  const allTasks = (await tasksRes.json()) || [];
 
   // Load subtasks for each task
   const subtasksByTask = {};
@@ -784,7 +784,7 @@ async function createTask() {
 async function openTaskDetail(taskId) {
   currentTaskId = taskId;
   const res = await fetch('/api/kanban/tasks?epic_id=' + currentEpicId);
-  const tasks = await res.json();
+  const tasks = (await res.json()) || [];
   const task = tasks.find(t => t.id === taskId);
   if (!task) return;
 
@@ -802,7 +802,7 @@ async function openTaskDetail(taskId) {
 
 async function loadSubTasks(taskId) {
   const res = await fetch('/api/kanban/subtasks?task_id=' + taskId);
-  const subtasks = await res.json();
+  const subtasks = (await res.json()) || [];
   const list = document.getElementById('detail-checklist');
   list.innerHTML = '';
   if (subtasks.length === 0) {

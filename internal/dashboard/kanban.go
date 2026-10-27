@@ -57,18 +57,6 @@ type modelOption struct {
 	Label string `json:"label"`
 }
 
-// kanbanBoardData is the full data sent to the kanban template.
-type kanbanBoardData struct {
-	Epics  []kanbanEpicWithTasks `json:"epics"`
-	Models []modelOption         `json:"models"`
-}
-
-type kanbanEpicWithTasks struct {
-	Epic   kanban.Epic    `json:"epic"`
-	Tasks  []kanban.Task  `json:"tasks"`
-	ByStatus map[string][]kanban.Task `json:"-"`
-}
-
 // handleKanbanBoardPage renders the kanban board page.
 func (ks *kanbanState) handleKanbanBoardPage(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -80,46 +68,6 @@ func (ks *kanbanState) handleKanbanBoardPage(s *Server) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		buf.WriteTo(w)
 	}
-}
-
-// handleKanbanBoardContentPage renders the kanban board content (HTMX fragment).
-func (ks *kanbanState) handleKanbanBoardContentPage(s *Server) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		data := ks.loadBoard()
-		var buf bytes.Buffer
-		if err := s.tmpl.ExecuteTemplate(&buf, "kanban-board-content", data); err != nil {
-			http.Error(w, "render error", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		buf.WriteTo(w)
-	}
-}
-
-func (ks *kanbanState) loadBoard() kanbanBoardData {
-	epics, _ := ks.store.ListEpics()
-
-	var result kanbanBoardData
-	result.Models = buildModelOptions()
-	result.Epics = make([]kanbanEpicWithTasks, 0, len(epics))
-
-	for _, ep := range epics {
-		tasks, _ := ks.store.ListTasks()
-		var epTasks []kanban.Task
-		byStatus := make(map[string][]kanban.Task)
-		for _, t := range tasks {
-			if t.EpicID == ep.ID {
-				epTasks = append(epTasks, t)
-				byStatus[string(t.Status)] = append(byStatus[string(t.Status)], t)
-			}
-		}
-		result.Epics = append(result.Epics, kanbanEpicWithTasks{
-			Epic:     ep,
-			Tasks:    epTasks,
-			ByStatus: byStatus,
-		})
-	}
-	return result
 }
 
 // --- Epic API ---
@@ -208,7 +156,8 @@ func (ks *kanbanState) apiListTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if epicID != "" {
-		var filtered []kanban.Task
+		// Non-nil so an empty result marshals as [] and never as null.
+		filtered := make([]kanban.Task, 0, len(tasks))
 		for _, t := range tasks {
 			if t.EpicID == epicID {
 				filtered = append(filtered, t)

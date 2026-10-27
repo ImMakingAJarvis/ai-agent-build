@@ -303,7 +303,6 @@ func (s *Server) routes() http.Handler {
 
 	// Kanban board routes.
 	mux.HandleFunc("GET /kanban", s.kanban.handleKanbanBoardPage(s))
-	mux.HandleFunc("GET /html/kanban-board", s.kanban.handleKanbanBoardContentPage(s))
 	mux.HandleFunc("POST /api/kanban/epics", s.kanban.apiCreateEpic)
 	mux.HandleFunc("GET /api/kanban/epics", s.kanban.apiListEpics)
 	mux.HandleFunc("DELETE /api/kanban/epics/{id}", s.kanban.apiDeleteEpic)
