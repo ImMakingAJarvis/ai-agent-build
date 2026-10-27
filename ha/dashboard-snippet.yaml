@@ -1,0 +1,33 @@
+# Jarvis headline sensors — Home Assistant dashboard card
+#
+# Add this to a custom dashboard (Settings → Dashboards → pick one →
+# ⋮ → Edit dashboard → "Show YAML editor"). It renders as one card:
+# a button that opens the Phase 6 job dashboard in a new tab, plus a
+# glance of the headline sensors published by the jarvis-ha service.
+#
+# Replace <JARVIS_HOST> with the LAN address of the Jarvis machine
+# (the one running the dashboard on port 8080).
+type: vertical-stack
+cards:
+  - type: horizontal
+    cards:
+      - type: button
+        name: Jarvis Dashboard
+        icon: mdi:monitor-dashboard
+        url: http://<JARVIS_HOST>:8080
+        show_name: true
+        show_icon: true
+  - type: glance
+    title: Jarvis Agent
+    show_state: true
+    columns: 3
+    entities:
+      - entity: sensor.jarvis_queue_voice
+      - entity: sensor.jarvis_queue_fix
+      - entity: sensor.jarvis_queue_coding
+      - entity: sensor.jarvis_queue_background
+      - entity: sensor.jarvis_current_job
+      - entity: sensor.jarvis_loaded_model
+      - entity: sensor.jarvis_api_spend_today
+      - entity: sensor.jarvis_gpu_temp
+      - entity: sensor.jarvis_gpu_power
