@@ -61,6 +61,20 @@ func postReorder(t *testing.T, s *Server, orders map[string][]string) (*httptest
 	return w, r
 }
 
+func postBandOrder(t *testing.T, s *Server, order []string) (*httptest.ResponseRecorder, queueResponse) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"order": order})
+	req := httptest.NewRequest("POST", "/api/queue/band-order", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.handleQueueBandOrder(w, req)
+	var r queueResponse
+	if w.Code == http.StatusOK {
+		json.Unmarshal(w.Body.Bytes(), &r)
+	}
+	return w, r
+}
+
 // bandIDs returns the job ids of one named band, in order.
 func bandIDs(r queueResponse, name string) []string {
 	for _, b := range r.Bands {
@@ -75,7 +89,7 @@ func bandIDs(r queueResponse, name string) []string {
 	return nil
 }
 
-func TestQueueBandsLockedOrder(t *testing.T) {
+func TestQueueBandsDefaultOrder(t *testing.T) {
 	s := newTestServer(t)
 	ingestAgentJob(t, "b1", agentjob.ClassBuild, 1, nil)
 	ingestAgentJob(t, "b2", agentjob.ClassBuild, 9, nil)
@@ -88,7 +102,7 @@ func TestQueueBandsLockedOrder(t *testing.T) {
 		r.Bands[0].Name != agentjob.ClassFix ||
 		r.Bands[1].Name != agentjob.ClassBuild ||
 		r.Bands[2].Name != agentjob.ClassBackground {
-		t.Fatalf("bands out of locked order: %+v", r.Bands)
+		t.Fatalf("bands out of the default band order: %+v", r.Bands)
 	}
 	// Within build, higher priority first: b2 then b1. done1 is not ready.
 	if got := bandIDs(r, agentjob.ClassBuild); strings.Join(got, ",") != "b2,b1" {
@@ -180,7 +194,7 @@ func TestQueueRoutesEndToEnd(t *testing.T) {
 	ingestAgentJob(t, "g1", agentjob.ClassBackground, 1, nil)
 	h := s.routes()
 
-	// GET /api/queue: three bands, locked order, one ready job each.
+	// GET /api/queue: three bands in the default band order, one ready job each.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/queue", nil))
 	if w.Code != http.StatusOK {
@@ -194,7 +208,7 @@ func TestQueueRoutesEndToEnd(t *testing.T) {
 		r.Bands[0].Name != agentjob.ClassFix ||
 		r.Bands[1].Name != agentjob.ClassBuild ||
 		r.Bands[2].Name != agentjob.ClassBackground {
-		t.Fatalf("bands out of locked order: %+v", r.Bands)
+		t.Fatalf("bands out of the default band order: %+v", r.Bands)
 	}
 
 	// POST /api/queue/reorder: promote background job g1 to the top of build.
@@ -221,5 +235,107 @@ func TestQueueRoutesEndToEnd(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `id="queue-content"`) {
 		t.Fatalf("GET /: status %d, queue section missing", w.Code)
+	}
+}
+
+func TestQueueBandOrderDynamic(t *testing.T) {
+	s := newTestServer(t)
+	ingestAgentJob(t, "f1", agentjob.ClassFix, 1, nil)
+	ingestAgentJob(t, "b1", agentjob.ClassBuild, 5, nil)
+	ingestAgentJob(t, "g1", agentjob.ClassBackground, 1, nil)
+
+	// Default order is reported and the bands follow it.
+	r := getQueue(t, s)
+	if strings.Join(r.Order, ",") != "fix,build,background" {
+		t.Fatalf("order = %v, want default fix,build,background", r.Order)
+	}
+	if r.Bands[0].Name != agentjob.ClassFix || r.Bands[1].Name != agentjob.ClassBuild ||
+		r.Bands[2].Name != agentjob.ClassBackground {
+		t.Fatalf("bands do not follow order: %+v", r.Bands)
+	}
+
+	// Re-prioritize at runtime: background runs first now.
+	w, r := postBandOrder(t, s, []string{agentjob.ClassBackground, agentjob.ClassBuild, agentjob.ClassFix})
+	if w.Code != http.StatusOK {
+		t.Fatalf("band-order: %d %s", w.Code, w.Body.String())
+	}
+	if strings.Join(r.Order, ",") != "background,build,fix" {
+		t.Fatalf("order after set = %v, want background,build,fix", r.Order)
+	}
+	if r.Bands[0].Name != agentjob.ClassBackground || r.Bands[1].Name != agentjob.ClassBuild ||
+		r.Bands[2].Name != agentjob.ClassFix {
+		t.Fatalf("bands not re-sorted: %+v", r.Bands)
+	}
+
+	// Drag-and-drop reorder still works under the dynamic order: move fix job
+	// f1 into the top of build. Bands stay in the dynamic order in the reply.
+	w, r = postReorder(t, s, map[string][]string{
+		agentjob.ClassBuild:      {"f1", "b1"},
+		agentjob.ClassFix:        {},
+		agentjob.ClassBackground: {"g1"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("reorder: %d %s", w.Code, w.Body.String())
+	}
+	if strings.Join(r.Order, ",") != "background,build,fix" {
+		t.Fatalf("order after reorder = %v, want background,build,fix", r.Order)
+	}
+	if got := bandIDs(r, agentjob.ClassBuild); strings.Join(got, ",") != "f1,b1" {
+		t.Fatalf("build band = %v, want [f1 b1]", got)
+	}
+	st, err := agentjob.Open(agentjob.DataDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f1, err := st.Get("f1"); err != nil || f1.Class != agentjob.ClassBuild {
+		t.Fatalf("f1 class = %q, %v; want build", f1.Class, err)
+	}
+
+	// The worker run order (Store.Next) follows both the new band order and
+	// the reclassification: background first, then the build band.
+	var got []string
+	for {
+		j, err := st.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if j == nil {
+			break
+		}
+		got = append(got, j.ID)
+		if err := st.SetStatus(j.ID, agentjob.State{Status: agentjob.Skipped}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.Join(got, ",") != "g1,f1,b1" {
+		t.Fatalf("run order %v, want [g1 f1 b1]", got)
+	}
+}
+
+func TestQueueBandOrderValidation(t *testing.T) {
+	s := newTestServer(t)
+	ingestAgentJob(t, "b1", agentjob.ClassBuild, 1, nil)
+
+	bad := [][]string{
+		nil,
+		{agentjob.ClassFix},
+		{agentjob.ClassFix, agentjob.ClassBuild, agentjob.ClassFix},
+		{agentjob.ClassFix, agentjob.ClassBuild, "bogus"},
+		{agentjob.ClassFix, agentjob.ClassBuild, agentjob.ClassBackground, agentjob.ClassFix},
+	}
+	for _, o := range bad {
+		if w, _ := postBandOrder(t, s, o); w.Code != http.StatusBadRequest {
+			t.Errorf("SetBandOrder %v: status %d, want %d", o, w.Code, http.StatusBadRequest)
+		}
+	}
+	// The stored order is untouched by the bad requests.
+	if r := getQueue(t, s); strings.Join(r.Order, ",") != "fix,build,background" {
+		t.Fatalf("order after bad sets = %v, want default", r.Order)
+	}
+	// Bad body.
+	w := httptest.NewRecorder()
+	s.handleQueueBandOrder(w, httptest.NewRequest("POST", "/api/queue/band-order", strings.NewReader("not json")))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad body: status %d", w.Code)
 	}
 }
