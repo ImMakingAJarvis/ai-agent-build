@@ -100,7 +100,8 @@ func (s *Store) ListEpics() ([]Epic, error) {
 	if err != nil {
 		return nil, err
 	}
-	var epics []Epic
+	// Non-nil so an empty board marshals as [] and never as null.
+	epics := make([]Epic, 0, len(ents))
 	for _, e := range ents {
 		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
 			b, err := os.ReadFile(filepath.Join(s.root, "epics", e.Name()))
@@ -216,7 +217,8 @@ func (s *Store) ListTasks() ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	var tasks []Task
+	// Non-nil so an empty board marshals as [] and never as null.
+	tasks := make([]Task, 0, len(ents))
 	for _, e := range ents {
 		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
 			b, err := os.ReadFile(filepath.Join(s.root, "tasks", e.Name()))
@@ -416,7 +418,7 @@ func (s *Store) ListSubTasks(taskID string) ([]SubTask, error) {
 	if err != nil {
 		return nil, err
 	}
-	var subtasks []SubTask
+	subtasks := make([]SubTask, 0, len(all))
 	for _, st := range all {
 		if st.TaskID == taskID {
 			subtasks = append(subtasks, st)
@@ -431,7 +433,7 @@ func (s *Store) unlockedListSubTasks() ([]SubTask, error) {
 	if err != nil {
 		return nil, err
 	}
-	var subtasks []SubTask
+	subtasks := make([]SubTask, 0, len(ents))
 	for _, e := range ents {
 		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
 			b, err := os.ReadFile(filepath.Join(s.root, "subtasks", e.Name()))
