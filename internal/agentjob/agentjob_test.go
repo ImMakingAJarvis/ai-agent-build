@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
@@ -82,6 +83,68 @@ func TestFailingAgentRecordedFailed(t *testing.T) {
 	if got.Status != Failed || !strings.Contains(got.Error, "status 3") || !strings.Contains(got.Summary, "boom") {
 		t.Fatalf("got %+v", got.State)
 	}
+}
+
+func TestRunRecordsPowerCost(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	t.Setenv("JARVIS_POWER_RATE", "0.25")
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A"})
+	r := runner(t, s, `true`)
+	// Fake sampler: 1000 Wh (1 kWh) for the whole round.
+	r.Power = func(jobDir string) func() float64 {
+		return func() float64 { return 1000 }
+	}
+	j, err := r.Run(context.Background(), "a", "r1", "local", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Kwh != 1 || j.PowerCost != 0.25 {
+		t.Fatalf("power: kwh=%v cost=%v, want 1 / 0.25", j.Kwh, j.PowerCost)
+	}
+	got, _ := s.Get("a")
+	if got.Kwh != 1 || got.PowerCost != 0.25 {
+		t.Fatalf("state not stored: %+v", got.State)
+	}
+	hist, _ := os.ReadFile(filepath.Join(os.Getenv("JARVIS_DATA_DIR"), "jobs.jsonl"))
+	if !strings.Contains(string(hist), `"kwh":1`) || !strings.Contains(string(hist), `"power_cost":0.25`) {
+		t.Fatalf("history: %s", hist)
+	}
+}
+
+func TestFinishUsesPersistedPower(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	t.Setenv("JARVIS_POWER_RATE", "0.10")
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A"})
+	if _, err := s.Claim("a", "r1", "local"); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the round having run (and sampled) until a reboot.
+	j, _ := s.Get("a")
+	j.Status = Running
+	j.StartedAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	if err := s.SetStatus("a", j.State); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.JobDir("a"), power.PersistFile),
+		[]byte(`{"wh":7200}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j, err := runner(t, s, `true`).Finish("a", 0, "done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 7200 Wh = 7.2 kWh, at $0.10/kWh = $0.72.
+	if notApprox(j.Kwh, 7.2) || notApprox(j.PowerCost, 0.72) {
+		t.Fatalf("power: kwh=%v cost=%v, want 7.2 / 0.72", j.Kwh, j.PowerCost)
+	}
+}
+
+// notApprox reports whether a and b differ by more than 1e-9.
+func notApprox(a, b float64) bool {
+	d := a - b
+	return d < -1e-9 || d > 1e-9
 }
 
 func TestDefaultCommandMapsEffort(t *testing.T) {

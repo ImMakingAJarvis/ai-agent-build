@@ -70,6 +70,22 @@ func DefaultEntities(prefix string) []Entity {
 			Icon:       "mdi:cash-multiple",
 		},
 		{
+			UniqueID:   "jarvis_power_cost_today",
+			Name:       "Jarvis Power Cost Today",
+			ValueTopic: t("power_cost_today"),
+			Unit:       "USD",
+			Icon:       "mdi:cash-multiple",
+		},
+		{
+			UniqueID:    "jarvis_energy_today",
+			Name:        "Jarvis Energy Today",
+			ValueTopic:  t("energy_today"),
+			Unit:        "kWh",
+			StateClass:  "total",
+			DeviceClass: "energy",
+			Icon:        "mdi:battery-high",
+		},
+		{
 			UniqueID:    "jarvis_gpu_temp",
 			Name:        "Jarvis GPU Temperature",
 			ValueTopic:  t("gpu_temp"),
@@ -201,6 +217,10 @@ func stateValue(e Entity, s State) string {
 		return s.LoadedModel
 	case "jarvis_api_spend_today":
 		return fmt.Sprintf("%.4f", s.APISpendToday)
+	case "jarvis_power_cost_today":
+		return fmt.Sprintf("%.4f", s.PowerCostToday)
+	case "jarvis_energy_today":
+		return fmt.Sprintf("%.3f", s.EnergyToday)
 	case "jarvis_gpu_temp":
 		if !s.GPUOK {
 			return "unknown"

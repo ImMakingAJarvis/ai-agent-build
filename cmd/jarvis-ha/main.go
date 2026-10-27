@@ -94,6 +94,11 @@ func main() {
 		} else {
 			s.APISpendToday = c
 		}
+		if cost, kwh, err := ha.TodayPowerCost(jobsLog); err != nil {
+			log.Printf("power cost: %v", err)
+		} else {
+			s.PowerCostToday, s.EnergyToday = cost, kwh
+		}
 		if temp, power, err := ha.GPUStats(); err != nil {
 			log.Printf("gpu: %v", err)
 			s.GPUOK = false

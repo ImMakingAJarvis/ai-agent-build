@@ -26,13 +26,15 @@ import (
 
 // State is one snapshot of all headline values.
 type State struct {
-	Queues        map[string]int // queue name -> depth
-	CurrentJob    string         // title of the running/claimed agent job, "" if none
-	LoadedModel   string         // model loaded in the engine, "" if unknown
-	APISpendToday float64        // $ spent (actual, else estimated) on API jobs started today (UTC)
-	GPUTemp       float64        // degrees C
-	GPUPower      float64        // watts
-	GPUOK         bool           // nvidia-smi succeeded this tick
+	Queues         map[string]int // queue name -> depth
+	CurrentJob     string         // title of the running/claimed agent job, "" if none
+	LoadedModel    string         // model loaded in the engine, "" if unknown
+	APISpendToday  float64        // $ spent (actual, else estimated) on API jobs started today (UTC)
+	PowerCostToday float64        // $ electricity cost of local jobs started today (UTC)
+	EnergyToday    float64        // kWh sampled from local jobs started today (UTC)
+	GPUTemp        float64        // degrees C
+	GPUPower       float64        // watts
+	GPUOK          bool           // nvidia-smi succeeded this tick
 }
 
 // QueueDepths returns the message count of every known job queue.
@@ -241,6 +243,84 @@ func TodayAPISpend(path string) (float64, error) {
 		end = start
 	}
 	return total, nil
+}
+
+// TodayPowerCost sums the sampled energy (kWh) and electricity cost ($)
+// of jobs started on the current UTC day, using the same tail-scan as
+// TodayAPISpend. The power fields are only populated for local agent
+// jobs (see internal/power).
+func TodayPowerCost(path string) (kwh, cost float64, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, 0, err
+	}
+
+	today := time.Now().UTC().Format("2006-01-02")
+	const chunk = 512 * 1024 // today's events are always in the tail
+
+	end := fi.Size()
+	for end > 0 {
+		start := end - chunk
+		if start < 0 {
+			start = 0
+		}
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return 0, 0, err
+		}
+		buf := make([]byte, end-start)
+		if _, err := io.ReadFull(f, buf); err != nil && err != io.ErrUnexpectedEOF {
+			return 0, 0, err
+		}
+		// Drop the partial line at the head of the chunk (unless at file start).
+		if start > 0 {
+			nl := bytes.IndexByte(buf, '\n')
+			if nl < 0 {
+				end = start
+				continue
+			}
+			buf = buf[nl+1:]
+		}
+		// Lines are oldest-first within the chunk; stop once we pass today.
+		stop := false
+		sc := bytes.NewBuffer(buf)
+		for {
+			line, err := readLine(sc)
+			if err == io.EOF {
+				break
+			}
+			if len(line) == 0 {
+				continue
+			}
+			var rec struct {
+				StartedAt  string  `json:"started_at"`
+				FinishedAt string  `json:"finished_at"`
+				Kwh        float64 `json:"kwh"`
+				PowerCost  float64 `json:"power_cost"`
+			}
+			if json.Unmarshal(line, &rec) != nil {
+				continue
+			}
+			if strings.HasPrefix(rec.StartedAt, today) {
+				kwh += rec.Kwh
+				cost += rec.PowerCost
+				continue
+			}
+			if rec.StartedAt != "" && rec.StartedAt < today &&
+				(rec.FinishedAt == "" || rec.FinishedAt < today) {
+				stop = true
+			}
+		}
+		if stop || start == 0 {
+			break
+		}
+		end = start
+	}
+	return kwh, cost, nil
 }
 
 // readLine reads one newline-terminated line (without the newline).
