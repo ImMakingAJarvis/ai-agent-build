@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Jarvis</title>
+  <meta name="description" content="Talk, chat, and plan with your home AI — on the home network or VPN.">
+
+  <!-- PWA / installable -->
+  <link rel="manifest" href="/app/manifest.webmanifest">
+  <meta name="theme-color" content="#0b0f14">
+  <link rel="icon" href="/app/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/app/icons/apple-touch-icon.png">
+  <link rel="apple-touch-startup-image" href="/app/icons/apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Jarvis">
+
+  <link rel="stylesheet" href="/app/style.css">
+  <script src="/app/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span id="status" class="status bad" title="connection"></span>
+      <h1>Jarvis</h1>
+    </div>
+    <div class="top-actions">
+      <select id="model" aria-label="Conversation model" title="Conversation model"></select>
+      <button id="newchat" class="ghost" title="New conversation" aria-label="New conversation">＋</button>
+      <button id="logout" class="ghost" title="Sign out" aria-label="Sign out" style="display:none">⎋</button>
+    </div>
+  </header>
+
+  <div id="offline" class="banner" hidden>
+    Can’t reach Jarvis. Open this app while on the home network or your VPN.
+  </div>
+
+  <main id="thread" aria-live="polite"></main>
+
+  <div id="empty" class="empty">
+    <div class="empty-icon">◉</div>
+    <p>Jarvis is ready.</p>
+    <p class="sub">Talk or type. Ask me to plan or build something and I’ll queue it.</p>
+  </div>
+
+  <div id="instHint" class="hint" hidden>
+    <span>Install: tap <b>Share</b>, then <b>Add to Home Screen</b>.</span>
+    <button id="dismissHint" aria-label="Dismiss">✕</button>
+  </div>
+
+  <footer class="composer">
+    <div id="state" class="state" hidden></div>
+    <div class="composer-row">
+      <button id="mic" class="mic" title="Voice" aria-label="Voice">🎙</button>
+      <input id="input" type="text" enterkeyhint="send" placeholder="Message Jarvis…" autocomplete="off">
+      <button id="plan" class="chip" title="Plan / queue this">🧩</button>
+      <button id="send" class="send" title="Send" aria-label="Send">➤</button>
+    </div>
+  </footer>
+
+  <!-- Login overlay (only shown when the service has auth enabled) -->
+  <div id="login" class="overlay" hidden>
+    <form id="loginForm" class="card">
+      <h2>Jarvis</h2>
+      <p class="sub">This service asks for a password.</p>
+      <input id="lu" type="text" placeholder="Username" autocomplete="username" required>
+      <input id="lp" type="password" placeholder="Password" autocomplete="current-password">
+      <button type="submit" class="send block">Sign in</button>
+    </form>
+  </div>
+
+  <button id="installBtn" class="install" hidden>Install app</button>
+</body>
+</html>
