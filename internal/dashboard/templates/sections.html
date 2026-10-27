@@ -218,15 +218,27 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
 
 {{define "queue-section"}}
 <!-- Interactive queue: drag a ready job's handle to reorder it within its
-     band, or drop it in another band to reclassify it. Band order (fix ->
-     build -> background) is locked. Uses Pointer Events (mouse + touch) with
+     band, or drop it in another band to reclassify it. The band priority
+     order itself is changeable at runtime (the "Band order" select posts to
+     /api/queue/band-order). Uses Pointer Events (mouse + touch) with
      touch-action:none on the handle so it works on a phone. -->
 <div class="section">
   <div class="section-title">
     Queue
+    <label title="Queue band priority (highest first) &mdash; changes the run order immediately" style="font-weight:400;font-size:0.75rem;color:var(--muted)">
+      Band order
+      <select id="q-band-order" onchange="qSetBandOrder(this.value)" style="font-size:0.75rem">
+        <option value="fix,build,background">Fix &rarr; Build &rarr; Background</option>
+        <option value="fix,background,build">Fix &rarr; Background &rarr; Build</option>
+        <option value="build,fix,background">Build &rarr; Fix &rarr; Background</option>
+        <option value="build,background,fix">Build &rarr; Background &rarr; Fix</option>
+        <option value="background,fix,build">Background &rarr; Fix &rarr; Build</option>
+        <option value="background,build,fix">Background &rarr; Build &rarr; Fix</option>
+      </select>
+    </label>
     <button class="btn" id="queue-refresh-btn" onclick="qLoad(true)">Refresh</button>
   </div>
-  <p class="subtitle">Drag a job&rsquo;s handle to reorder its band, or drop it in another band to reclassify it. Band priority is locked: fix &rarr; build &rarr; background. A job shown as &ldquo;blocked&rdquo; waits on its dependencies and still runs later in the band.</p>
+  <p class="subtitle">Drag a job&rsquo;s handle to reorder its band, or drop it in another band to reclassify it. Band priority (highest first): <span id="q-band-order-label">fix &rarr; build &rarr; background</span>. A job shown as &ldquo;blocked&rdquo; waits on its dependencies and still runs later in the band.</p>
   <div id="queue-content">
     <div class="empty-state">Loading queue&hellip;</div>
   </div>
@@ -244,6 +256,16 @@ function qEsc(s) {
 function qBandLabel(c) {
   return { fix: 'Fix', build: 'Build', background: 'Background' }[c] || c;
 }
+
+// The 6 possible band orders, matching the options of #q-band-order.
+var qBandOrderValues = [
+  'fix,build,background',
+  'fix,background,build',
+  'build,fix,background',
+  'build,background,fix',
+  'background,fix,build',
+  'background,build,fix'
+];
 
 function qLoad(showLoading) {
   var el = document.getElementById('queue-content');
@@ -276,10 +298,25 @@ function qJobCard(j) {
     + '</span></div>';
 }
 
+// Keep the "Band order" select and the subtitle label in sync with the
+// server's current runtime band order (qData.order).
+function qSyncBandOrder() {
+  if (!qData || !qData.order) return;
+  var sel = document.getElementById('q-band-order');
+  if (sel && qBandOrderValues.indexOf(qData.order.join(',')) !== -1) {
+    sel.value = qData.order.join(',');
+  }
+  var label = document.getElementById('q-band-order-label');
+  if (label) {
+    label.textContent = qData.order.map(qBandLabel).join(' → ');
+  }
+}
+
 function qRender() {
   var el = document.getElementById('queue-content');
   if (!el) return;
   if (!qData || !qData.bands) { el.innerHTML = ''; return; }
+  qSyncBandOrder();
   var total = 0;
   qData.bands.forEach(function (b) { total += (b.jobs || []).length; });
   if (total === 0) {
@@ -415,6 +452,25 @@ function qCommit() {
     qLoad(true); // server disagreed: reload the authoritative order
   }).then(function () {
     qBusy = false;
+  });
+}
+
+// Change the runtime band priority order (highest first) from the select.
+// The server persists it and re-sorts the queue and run order; on a
+// disagreement the authoritative state is reloaded.
+function qSetBandOrder(val) {
+  fetch('/api/queue/band-order', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order: val.split(',') })
+  }).then(function (resp) {
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp.json();
+  }).then(function (data) {
+    qData = data;
+    qRender();
+  }).catch(function () {
+    qLoad(true); // server disagreed: reload the authoritative order
   });
 }
 
