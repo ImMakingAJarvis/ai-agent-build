@@ -202,6 +202,74 @@ function sendPlanningNudge() {
 }
 
 // ---- Voice (record → /voice → play) ----
+// Auto-stop tuning — adjust here, no digging needed:
+//   VAD_SILENCE_MS   — stop and send after this long without speech
+//   VAD_MIN_RECORD_MS — never auto-stop before this much recording
+//   VAD_THRESHOLD    — RMS (0..1) below this counts as silence; raise it for
+//                      noisy rooms, lower it for quiet speakers
+const VAD_SILENCE_MS = 5000;
+const VAD_MIN_RECORD_MS = 2000;
+const VAD_THRESHOLD = 0.01;
+const VAD_TICK_MS = 100;
+let vadTimer = null;
+let vadCtx = null;
+let vadAnalyser = null;
+let vadBuf = null;
+let vadLastSpeechAt = 0;
+let vadStartedAt = 0;
+
+// Voice-activity detection: watch the live mic level and auto-stop once
+// silence has lasted VAD_SILENCE_MS (any speech resets the countdown, so
+// pauses shorter than that never cut the utterance). Falls back to plain
+// tap-to-stop if AudioContext is unavailable.
+function startVad(stream) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    vadCtx = new AC();
+    if (vadCtx.state === 'suspended') vadCtx.resume().catch(() => {});
+    const src = vadCtx.createMediaStreamSource(stream);
+    vadAnalyser = vadCtx.createAnalyser();
+    vadAnalyser.fftSize = 2048;
+    src.connect(vadAnalyser);
+    vadBuf = vadAnalyser.getFloatTimeDomainData
+      ? new Float32Array(vadAnalyser.fftSize)
+      : new Uint8Array(vadAnalyser.fftSize); // older Safari: byte path
+    const t0 = performance.now();
+    vadStartedAt = t0;
+    vadLastSpeechAt = t0;
+    vadTimer = setInterval(vadTick, VAD_TICK_MS);
+  } catch (e) {
+    stopVad();
+  }
+}
+function rmsLevel() {
+  let sum = 0;
+  if (vadBuf instanceof Float32Array) {
+    vadAnalyser.getFloatTimeDomainData(vadBuf);
+    for (let i = 0; i < vadBuf.length; i++) sum += vadBuf[i] * vadBuf[i];
+  } else {
+    vadAnalyser.getByteTimeDomainData(vadBuf);
+    for (let i = 0; i < vadBuf.length; i++) {
+      const v = (vadBuf[i] - 128) / 128;
+      sum += v * v;
+    }
+  }
+  return Math.sqrt(sum / vadBuf.length);
+}
+function vadTick() {
+  if (!recording) return;
+  const now = performance.now();
+  if (rmsLevel() >= VAD_THRESHOLD) { vadLastSpeechAt = now; return; }
+  if (now - vadLastSpeechAt >= VAD_SILENCE_MS &&
+      now - vadStartedAt >= VAD_MIN_RECORD_MS) stopVoice();
+}
+function stopVad() {
+  if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
+  if (vadCtx) { try { vadCtx.close(); } catch (e) {} vadCtx = null; }
+  vadAnalyser = null;
+  vadBuf = null;
+}
+
 function pickMime() {
   const c = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
   for (const t of c) { try { if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t; } catch (e) {} }
@@ -234,11 +302,13 @@ async function toggleVoice() {
   mediaRecorder.onstop = onVoiceStopped;
   mediaRecorder.start();
   recording = true;
+  startVad(mediaStream); // silence auto-stop; no-op fallback if unavailable
   setMic(true);
   recTimer = setTimeout(() => { if (recording) stopVoice(); }, 30000); // safety stop
 }
 function stopVoice() {
   if (recTimer) { clearTimeout(recTimer); recTimer = null; }
+  stopVad();
   if (mediaRecorder && mediaRecorder.state !== 'inactive') { try { mediaRecorder.stop(); } catch (e) {} }
   stopStream();
   recording = false;
@@ -297,7 +367,7 @@ function setMic(on) {
   const m = $('#mic');
   m.classList.toggle('on', on);
   m.textContent = on ? '⏹' : '🎙';
-  if (on) setState('Listening… tap to stop');
+  if (on) setState(vadTimer ? 'Listening… auto-stops after silence' : 'Listening… tap to stop');
   else if (!busy) setState('');
 }
 
