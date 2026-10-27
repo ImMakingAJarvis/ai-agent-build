@@ -267,6 +267,57 @@ func TestClassOrderingWithinClass(t *testing.T) {
 	}
 }
 
+// TestApplyOrderReordersAndReclassifies checks the persistence behind the
+// dashboard's drag queue: ApplyOrder rewrites a job's class and within-class
+// priority so the queue runs in the new top-to-bottom order within each band,
+// and dropping a job into another band reclassifies it (band priority stays
+// locked: build still runs before background).
+func TestApplyOrderReordersAndReclassifies(t *testing.T) {
+	s := newStore(t)
+	now := time.Now()
+	// Start in the "wrong" order so the reorder is observable.
+	ingest(t, s, Spec{ID: "b2", Class: ClassBuild, Priority: 9, CreatedAt: now})
+	ingest(t, s, Spec{ID: "b1", Class: ClassBuild, Priority: 1, CreatedAt: now})
+	ingest(t, s, Spec{ID: "g2", Class: ClassBackground, Priority: 9, CreatedAt: now})
+	ingest(t, s, Spec{ID: "g1", Class: ClassBackground, Priority: 1, CreatedAt: now})
+
+	// Reorder the build band to b1,b2 and promote background job g1 into it.
+	if err := s.ApplyOrder(map[string][]string{
+		ClassBuild:      {"b1", "b2", "g1"},
+		ClassBackground: {"g2"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for {
+		j, err := s.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if j == nil {
+			break
+		}
+		got = append(got, j.ID)
+		if err := s.SetStatus(j.ID, State{Status: Skipped}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.Join(got, ",") != "b1,b2,g1,g2" {
+		t.Fatalf("run order %v, want [b1 b2 g1 g2]", got)
+	}
+	if g1, _ := s.Get("g1"); g1.Class != ClassBuild {
+		t.Fatalf("g1 class %q, want %q", g1.Class, ClassBuild)
+	}
+	if g2, _ := s.Get("g2"); g2.Class != ClassBackground {
+		t.Fatalf("g2 class %q, want %q", g2.Class, ClassBackground)
+	}
+
+	if err := s.ApplyOrder(map[string][]string{"nope": {"b1"}}); err == nil {
+		t.Fatal("ApplyOrder accepted an unknown class")
+	}
+}
+
 func TestClaimedJobReadyAfterRestartAndNotRunTwice(t *testing.T) {
 	s := newStore(t)
 	ingest(t, s, Spec{ID: "a"})

@@ -215,3 +215,213 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
   {{ end }}
 </div>
 {{end}}
+
+{{define "queue-section"}}
+<!-- Interactive queue: drag a ready job's handle to reorder it within its
+     band, or drop it in another band to reclassify it. Band order (fix ->
+     build -> background) is locked. Uses Pointer Events (mouse + touch) with
+     touch-action:none on the handle so it works on a phone. -->
+<div class="section">
+  <div class="section-title">
+    Queue
+    <button class="btn" id="queue-refresh-btn" onclick="qLoad(true)">Refresh</button>
+  </div>
+  <p class="subtitle">Drag a job&rsquo;s handle to reorder its band, or drop it in another band to reclassify it. Band priority is locked: fix &rarr; build &rarr; background. A job shown as &ldquo;blocked&rdquo; waits on its dependencies and still runs later in the band.</p>
+  <div id="queue-content">
+    <div class="empty-state">Loading queue&hellip;</div>
+  </div>
+</div>
+
+<script>
+var qData = null, qDragged = null, qStartOrders = null, qBusy = false;
+
+function qEsc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function qBandLabel(c) {
+  return { fix: 'Fix', build: 'Build', background: 'Background' }[c] || c;
+}
+
+function qLoad(showLoading) {
+  var el = document.getElementById('queue-content');
+  if (!el) return;
+  if (showLoading) el.innerHTML = '<div class="empty-state">Loading queue&hellip;</div>';
+  fetch('/api/queue').then(function (resp) {
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp.json();
+  }).then(function (data) {
+    qData = data;
+    qRender();
+  }).catch(function (e) {
+    if (showLoading) el.innerHTML = '<div class="empty-state">Could not load the queue: ' + qEsc(e.message) + '</div>';
+  });
+}
+
+function qJobCard(j) {
+  var meta = [];
+  if (j.blocked) meta.push('<span class="qjob-blocked" title="Waiting on: ' + qEsc((j.blocked_by || []).join(', ')) + '">&#9646; blocked</span>');
+  meta.push('prio ' + j.priority);
+  if (j.created_at) meta.push(qEsc(j.created_at));
+  if (j.driver) meta.push(qEsc(j.driver));
+  if (j.depends_on && j.depends_on.length) meta.push('deps: ' + j.depends_on.map(qEsc).join(', '));
+  return '<div class="qjob" data-id="' + qEsc(j.id) + '">'
+    + '<span class="qjob-grip" title="Drag to reorder or reclassify" aria-label="Drag to reorder or reclassify" role="button">&#x283F;</span>'
+    + '<span class="qjob-main">'
+    +   '<span class="qjob-id">' + qEsc(j.id) + '</span> '
+    +   '<span class="qjob-title" title="' + qEsc(j.title) + '">' + qEsc(j.title) + '</span>'
+    +   '<div class="qjob-meta">' + meta.join(' &middot; ') + '</div>'
+    + '</span></div>';
+}
+
+function qRender() {
+  var el = document.getElementById('queue-content');
+  if (!el) return;
+  if (!qData || !qData.bands) { el.innerHTML = ''; return; }
+  var total = 0;
+  qData.bands.forEach(function (b) { total += (b.jobs || []).length; });
+  if (total === 0) {
+    el.innerHTML = '<div class="empty-state">The queue is empty &mdash; nothing ready to run.</div>';
+    return;
+  }
+  var html = '';
+  for (var i = 0; i < qData.bands.length; i++) {
+    var band = qData.bands[i];
+    var jobs = band.jobs || [];
+    html += '<div class="qband qband-' + qEsc(band.name) + '">';
+    html += '<div class="qband-head">' + qEsc(qBandLabel(band.name))
+          + ' <span class="qband-count">' + jobs.length + ' ready</span></div>';
+    html += '<div class="qband-body" data-band="' + qEsc(band.name) + '">';
+    if (jobs.length) {
+      for (var k = 0; k < jobs.length; k++) html += qJobCard(jobs[k]);
+    } else {
+      html += '<div class="qband-empty">Empty &mdash; drag a job here to reclassify it</div>';
+    }
+    html += '</div></div>';
+  }
+  el.innerHTML = html;
+  qWire();
+}
+
+function qWire() {
+  var grips = document.querySelectorAll('#queue-content .qjob-grip');
+  for (var i = 0; i < grips.length; i++) {
+    grips[i].addEventListener('pointerdown', function (e) { qOnDown(e, this); });
+    grips[i].addEventListener('pointermove', qOnMove);
+    grips[i].addEventListener('pointerup', function (e) { qOnUp(e, this); });
+    grips[i].addEventListener('pointercancel', function (e) { qOnUp(e, this); });
+  }
+}
+
+// Read the current on-screen order: { bandName: [jobId, ...] }.
+function qDerive() {
+  var orders = {};
+  var bodies = document.querySelectorAll('#queue-content .qband-body');
+  for (var i = 0; i < bodies.length; i++) {
+    var body = bodies[i], ids = [];
+    var jobs = body.querySelectorAll('.qjob');
+    for (var k = 0; k < jobs.length; k++) ids.push(jobs[k].getAttribute('data-id'));
+    orders[body.getAttribute('data-band')] = ids;
+  }
+  return orders;
+}
+
+function qChanged(a, b) {
+  var keys = {};
+  Object.keys(a).forEach(function (k) { keys[k] = 1; });
+  Object.keys(b).forEach(function (k) { keys[k] = 1; });
+  for (var k in keys) {
+    var x = a[k] || [], y = b[k] || [];
+    if (x.length !== y.length) return true;
+    for (var i = 0; i < x.length; i++) if (x[i] !== y[i]) return true;
+  }
+  return false;
+}
+
+function qOnDown(e, grip) {
+  var card = grip.closest('.qjob');
+  if (!card) return;
+  e.preventDefault();
+  qDragged = card;
+  qStartOrders = qDerive();
+  card.classList.add('qjob-dragging');
+  if (grip.setPointerCapture) grip.setPointerCapture(e.pointerId);
+}
+
+// The band whose body is closest to the given Y (a body that contains Y wins).
+function qBandAtY(y) {
+  var bodies = document.querySelectorAll('#queue-content .qband-body');
+  var best = null, bestDist = Infinity;
+  for (var i = 0; i < bodies.length; i++) {
+    var r = bodies[i].getBoundingClientRect();
+    var d = (y >= r.top && y <= r.bottom) ? 0 : Math.abs(y - (r.top + r.height / 2));
+    if (d < bestDist) { bestDist = d; best = bodies[i]; }
+  }
+  return best;
+}
+
+// The card in `body` that should come just before the dragged one, or null to
+// append at the end.
+function qAfterElement(body, y) {
+  var els = body.querySelectorAll('.qjob');
+  var closest = { offset: -Infinity, el: null };
+  for (var i = 0; i < els.length; i++) {
+    var el = els[i];
+    if (el === qDragged) continue;
+    var r = el.getBoundingClientRect();
+    var offset = y - (r.top + r.height / 2);
+    if (offset < 0 && offset > closest.offset) closest = { offset: offset, el: el };
+  }
+  return closest.el;
+}
+
+function qOnMove(e) {
+  if (!qDragged) return;
+  e.preventDefault();
+  var body = qBandAtY(e.clientY);
+  if (!body) return;
+  var empty = body.querySelector('.qband-empty');
+  if (empty) empty.style.display = 'none';
+  var after = qAfterElement(body, e.clientY);
+  if (after == null) body.appendChild(qDragged);
+  else body.insertBefore(qDragged, after);
+}
+
+function qOnUp(e, grip) {
+  if (!qDragged) return;
+  if (grip.releasePointerCapture) { try { grip.releasePointerCapture(e.pointerId); } catch (_) {} }
+  var card = qDragged;
+  qDragged = null;
+  card.classList.remove('qjob-dragging');
+  if (qChanged(qStartOrders, qDerive())) qCommit();
+  else qRender(); // nothing moved: redraw to restore any hidden empty-band hint
+}
+
+function qCommit() {
+  qBusy = true;
+  fetch('/api/queue/reorder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orders: qDerive() })
+  }).then(function (resp) {
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp.json();
+  }).then(function (data) {
+    qData = data;
+    qRender();
+  }).catch(function () {
+    qLoad(true); // server disagreed: reload the authoritative order
+  }).then(function () {
+    qBusy = false;
+  });
+}
+
+qLoad(true);
+// Keep the queue current like the rest of the dashboard, but never interrupt
+// a drag that is in flight.
+setInterval(function () { if (!qDragged && !qBusy) qLoad(false); }, 15000);
+</script>
+
+{{end}}

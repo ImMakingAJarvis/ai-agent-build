@@ -392,11 +392,75 @@
   a.log-link { color: var(--blue); text-decoration: none; font-weight: 500; }
   a.log-link:hover { text-decoration: underline; }
   .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* Interactive queue: drag a job's handle to reorder it within its band or
+     drop it in another band to reclassify it. Pointer Events + touch-action
+     keep it working for mouse and touch. */
+  .qband {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .qband-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+  }
+  .qband-fix .qband-head { border-left-color: var(--red); }
+  .qband-build .qband-head { border-left-color: var(--yellow); }
+  .qband-background .qband-head { border-left-color: var(--blue); }
+  .qband-count { color: var(--muted); font-weight: 400; font-size: 0.72rem; }
+  .qband-body { padding: 6px; min-height: 44px; }
+  .qband-empty {
+    color: var(--muted); font-size: 0.72rem; font-style: italic;
+    text-align: center; padding: 12px 6px;
+  }
+  .qjob {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 10px;
+    margin: 5px 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    user-select: none;
+  }
+  .qjob:hover { background: var(--card-hover); }
+  .qjob-dragging { opacity: 0.55; border-color: var(--blue); background: var(--card-hover); }
+  .qjob-grip {
+    flex: 0 0 auto;
+    cursor: grab;
+    color: var(--muted);
+    font-size: 1rem;
+    line-height: 1.4;
+    padding: 4px 8px;
+    border-radius: 4px;
+    /* Stop the page from scrolling while a touch drag is in progress. */
+    touch-action: none;
+  }
+  .qjob-grip:active { cursor: grabbing; }
+  .qjob-main { min-width: 0; }
+  .qjob-id { font-family: ui-monospace, SFMono-Regular, monospace; color: var(--muted); font-size: 0.72rem; }
+  .qjob-title { color: var(--fg); font-size: 0.83rem; font-weight: 500; }
+  .qjob-meta { color: var(--muted); font-size: 0.7rem; margin-top: 3px; }
+  .qjob-blocked { color: var(--yellow); font-weight: 600; }
   @media (max-width: 640px) {
     body { padding: 12px; }
     .cost-row, .queue-row, .slots-row { grid-template-columns: 1fr 1fr; }
     table { font-size: 0.8rem; }
     th, td { padding: 8px; }
+    /* Larger touch target for the drag handle on phones. */
+    .qjob-grip { padding: 10px 12px; font-size: 1.2rem; }
   }
 </style>
 </head>
@@ -415,6 +479,10 @@
   <div id="agent-jobs-section" hx-get="/html/agent-jobs-section" hx-trigger="load, every 15s" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Agent Jobs</div><div class="empty-state">Loading&hellip;</div></div>
   </div>
+  <!-- Interactive queue: drag ready jobs to reorder a band or reclassify a job.
+       Lives in the static shell so a 15s refresh never wipes a drag in flight;
+       it loads itself and refreshes on a timer that pauses while dragging. -->
+  {{ template "queue-section" }}
   <!-- Talk to the worker: send the running agent a message without stopping
        it. The message lands in the agent's inbox and is injected into its
        context at the next step (owner-message hook); if no job is running

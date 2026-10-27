@@ -246,6 +246,25 @@ func (s *Server) CloseRabbitMQ() {
 
 // Serve starts the HTTP server.
 func (s *Server) Serve() error {
+	handler := s.routes()
+	if s.authUser != "" && s.authPass != "" {
+		handler = s.basicAuth(handler)
+		fmt.Printf("dashboard: basic auth enabled (user: %s)", s.authUser)
+	}
+
+	server := &http.Server{
+		Addr:    s.addr,
+		Handler: handler,
+	}
+
+	fmt.Printf("dashboard: listening on %s", s.addr)
+	return server.ListenAndServe()
+}
+
+// routes builds the dashboard's route table. Split out of Serve so the mux can
+// be exercised in tests (e.g. the interactive-queue endpoints) without binding
+// a port or applying auth.
+func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /html/lightweight", s.handleLightweightHTML)
@@ -258,6 +277,8 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /api/approvals", s.handleApprovals)
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
 	mux.HandleFunc("POST /api/owner-message", s.handleOwnerMessage)
+	mux.HandleFunc("GET /api/queue", s.handleQueue)
+	mux.HandleFunc("POST /api/queue/reorder", s.handleQueueReorder)
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
 	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
@@ -277,20 +298,7 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("PATCH /api/kanban/subtasks/{id}", s.kanban.apiToggleSubTask)
 	mux.HandleFunc("GET /api/kanban/subtasks", s.kanban.apiListSubTasks)
 	mux.HandleFunc("GET /api/kanban/models", s.kanban.apiListModels)
-
-	var handler http.Handler = mux
-	if s.authUser != "" && s.authPass != "" {
-		handler = s.basicAuth(handler)
-		fmt.Printf("dashboard: basic auth enabled (user: %s)", s.authUser)
-	}
-
-	server := &http.Server{
-		Addr:    s.addr,
-		Handler: handler,
-	}
-
-	fmt.Printf("dashboard: listening on %s", s.addr)
-	return server.ListenAndServe()
+	return mux
 }
 
 // basicAuth returns a middleware that requires HTTP Basic Authentication.
