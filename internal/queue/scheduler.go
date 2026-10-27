@@ -52,49 +52,32 @@ func (s *Scheduler) SetDepths(depths map[string]int) {
 	codingDepth := depths[CodingQueue]
 	bgDepth := depths[BackgroundQueue]
 
-	// Voice is always active if there's work.
-	if voiceDepth > 0 {
+	// A queue is paused while any strictly higher-priority queue still has
+	// work (voice > fix > coding > background). Setting each flag from the
+	// depths (rather than only the higher queues) guarantees the
+	// highest-priority non-empty queue is always unpaused: previously the
+	// active queue was left in its prior state, so a queue that started
+	// paused (as NewScheduler leaves fix/coding/background) stayed paused
+	// and its jobs waited out the full pause before the worker pulled them.
+	s.paused[VoiceQueue] = false
+	s.paused[FixQueue] = voiceDepth > 0
+	s.paused[CodingQueue] = voiceDepth > 0 || fixDepth > 0
+	s.paused[BackgroundQueue] = voiceDepth > 0 || fixDepth > 0 || codingDepth > 0
+
+	// Name the single highest-priority queue that currently has work.
+	s.voiceActive.Store(0)
+	s.fixActive.Store(0)
+	s.codingActive.Store(0)
+	s.backgroundActive.Store(0)
+	switch {
+	case voiceDepth > 0:
 		s.voiceActive.Store(1)
-		s.fixActive.Store(0)
-		s.codingActive.Store(0)
-		s.backgroundActive.Store(0)
-		s.paused[FixQueue] = true
-		s.paused[CodingQueue] = true
-		s.paused[BackgroundQueue] = true
-	} else if fixDepth > 0 {
-		s.voiceActive.Store(0)
+	case fixDepth > 0:
 		s.fixActive.Store(1)
-		s.codingActive.Store(0)
-		s.backgroundActive.Store(0)
-		s.paused[VoiceQueue] = false
-		s.paused[CodingQueue] = true
-		s.paused[BackgroundQueue] = true
-	} else if codingDepth > 0 {
-		s.voiceActive.Store(0)
-		s.fixActive.Store(0)
+	case codingDepth > 0:
 		s.codingActive.Store(1)
-		s.backgroundActive.Store(0)
-		s.paused[VoiceQueue] = false
-		s.paused[FixQueue] = false
-		s.paused[BackgroundQueue] = true
-	} else if bgDepth > 0 {
-		s.voiceActive.Store(0)
-		s.fixActive.Store(0)
-		s.codingActive.Store(0)
+	case bgDepth > 0:
 		s.backgroundActive.Store(1)
-		s.paused[VoiceQueue] = false
-		s.paused[FixQueue] = false
-		s.paused[CodingQueue] = false
-	} else {
-		// All idle — un-pause everything so the next job can run.
-		s.voiceActive.Store(0)
-		s.fixActive.Store(0)
-		s.codingActive.Store(0)
-		s.backgroundActive.Store(0)
-		s.paused[VoiceQueue] = false
-		s.paused[FixQueue] = false
-		s.paused[CodingQueue] = false
-		s.paused[BackgroundQueue] = false
 	}
 }
 
