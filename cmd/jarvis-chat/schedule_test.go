@@ -61,7 +61,7 @@ func TestEnqueueFromChatAndConfirm(t *testing.T) {
 	t.Setenv("JARVIS_CONF", dir)
 	in := chat.Incoming{ChannelID: "c1", MessageID: "m1", Content: "!build add /health\nsmall job"}
 	title, body := titleAndBody("add /health\nsmall job")
-	id, err := enqueueFromChat(in, title, body)
+	id, err := enqueueFromChat(in, agentjob.ClassBuild, title, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,12 +79,36 @@ func TestEnqueueFromChatAndConfirm(t *testing.T) {
 	if j.Source != "discord" || j.Driver != "local" || j.DiscordMessageID != "m1" {
 		t.Fatalf("%+v", j.Spec)
 	}
+	if j.Class != agentjob.ClassBuild {
+		t.Fatalf("!build job class = %q, want build", j.Class)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "pause-signal")); !os.IsNotExist(err) {
 		t.Fatal("pause-signal must not be created")
 	}
 	confirm := enqueueConfirm(id)
 	if !strings.Contains(confirm, id) {
 		t.Fatalf("confirm %q", confirm)
+	}
+}
+
+func TestEnqueueFromChatFixClass(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JARVIS_DATA_DIR", dir)
+	in := chat.Incoming{ChannelID: "c1", MessageID: "m1"}
+	id, err := enqueueFromChat(in, agentjob.ClassFix, "fix the fan curve", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := agentjob.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Class != agentjob.ClassFix {
+		t.Fatalf("!fix job class = %q, want fix", j.Class)
 	}
 }
 

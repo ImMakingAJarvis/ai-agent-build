@@ -26,6 +26,48 @@ const (
 	Skipped = "skipped"
 )
 
+// Job classes, highest priority first. A job's class decides where it sits
+// in the queue: fix jobs always run before build jobs, which always run
+// before background (TASKS.md backlog) jobs — regardless of numeric
+// priority, which only orders jobs within the same class.
+const (
+	ClassFix        = "fix"
+	ClassBuild      = "build"
+	ClassBackground = "background"
+)
+
+// EffectiveClass normalizes a job's class. An empty class (jobs from before
+// the field existed) falls back to its source: work published from
+// TASKS.md (migrate) is background, everything else the owner asked for is
+// build. Unknown classes count as build so new kinds of user-requested
+// work still beat the backlog.
+func EffectiveClass(class, source string) string {
+	switch class {
+	case ClassFix, ClassBuild, ClassBackground:
+		return class
+	case "":
+		if source == "migrate" {
+			return ClassBackground
+		}
+		return ClassBuild
+	default:
+		return ClassBuild
+	}
+}
+
+// ClassRank orders classes for sorting: lower runs first (fix, build,
+// background).
+func ClassRank(class, source string) int {
+	switch EffectiveClass(class, source) {
+	case ClassFix:
+		return 0
+	case ClassBuild:
+		return 1
+	default:
+		return 2
+	}
+}
+
 // Spec is the immutable job definition (job.json).
 type Spec struct {
 	ID              string    `json:"id"`
@@ -35,7 +77,8 @@ type Spec struct {
 	Branch          string    `json:"branch,omitempty"`
 	DependsOn       []string  `json:"depends_on,omitempty"`
 	Driver          string    `json:"driver,omitempty"` // local (default) or sonnet
-	Priority        int       `json:"priority"`
+	Class           string    `json:"class,omitempty"`  // fix, build, background (see Class constants)
+	Priority        int       `json:"priority"`         // higher runs first within the class
 	CreatedAt       time.Time `json:"created_at"`
 	Source          string    `json:"source,omitempty"`
 	ReasoningEffort string    `json:"reasoning_effort,omitempty"` // off, low, medium, high, xhigh, max
@@ -158,7 +201,8 @@ func (s *Store) setState(id string, st State) error {
 	return writeJSON(filepath.Join(s.JobDir(id), "state.json"), st)
 }
 
-// List returns all jobs in queue order (priority desc, oldest first, ID).
+// List returns all jobs in queue order: class first (fix, then build, then
+// background), then priority desc within the class, oldest first, then ID.
 func (s *Store) List() ([]Job, error) {
 	ents, err := os.ReadDir(filepath.Join(s.dir, "jobs"))
 	if err != nil {
@@ -175,6 +219,9 @@ func (s *Store) List() ([]Job, error) {
 	}
 	sort.Slice(jobs, func(a, b int) bool {
 		x, y := jobs[a], jobs[b]
+		if rx, ry := ClassRank(x.Class, x.Source), ClassRank(y.Class, y.Source); rx != ry {
+			return rx < ry
+		}
 		if x.Priority != y.Priority {
 			return x.Priority > y.Priority
 		}

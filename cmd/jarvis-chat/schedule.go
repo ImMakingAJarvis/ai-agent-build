@@ -154,7 +154,7 @@ func enqueueConfirm(id string) string {
 	return fmt.Sprintf("Queued agent job %s for the worker. queued; agent-run is not running, so it will wait.", id)
 }
 
-func enqueueFromChat(in chat.Incoming, title, instructions string) (id string, err error) {
+func enqueueFromChat(in chat.Incoming, class, title, instructions string) (id string, err error) {
 	if title == "" {
 		return "", fmt.Errorf("empty title")
 	}
@@ -168,6 +168,7 @@ func enqueueFromChat(in chat.Incoming, title, instructions string) (id string, e
 		Title:            title,
 		Instructions:     instructions,
 		Driver:           "local",
+		Class:            class,
 		Priority:         chatJobPriority,
 		Source:           "discord",
 		DiscordChannelID: in.ChannelID,
@@ -185,7 +186,7 @@ func applySchedule(answer string, in chat.Incoming) (visible, extra string) {
 	if malformed {
 		return visible, "SCHEDULE block is malformed (need title: and instructions:). Did not enqueue."
 	}
-	id, err := enqueueFromChat(in, block.Title, block.Instructions)
+	id, err := enqueueFromChat(in, agentjob.ClassBuild, block.Title, block.Instructions)
 	if err != nil {
 		return visible, "Could not enqueue the SCHEDULE job: " + err.Error()
 	}

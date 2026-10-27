@@ -51,6 +51,12 @@ type Message struct {
 	// Driver is "local" (default) or "sonnet".
 	Driver string `json:"driver,omitempty"`
 
+	// Class is the agent-job priority class: "fix", "build" or
+	// "background" (see agentjob.Class*). Fix jobs always run before build
+	// jobs, which always run before background ones. Empty means build
+	// (background when Source is "migrate").
+	Class string `json:"class,omitempty"`
+
 	// ReasoningEffort controls thinking depth: off, low, medium, high, xhigh, max.
 	// Voice defaults to off; coding defaults to medium. "unknown" is not valid
 	// (Claude Code sends it for unrecognized model IDs).

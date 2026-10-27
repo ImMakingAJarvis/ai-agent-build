@@ -76,7 +76,7 @@ func main() {
 		msg := queue.Message{
 			ID: sp.ID, Type: queue.BackgroundQueue, Priority: sp.Priority, CreatedAt: sp.CreatedAt,
 			Source: "migrate", Kind: queue.KindAgent, Title: sp.Title, Instructions: sp.Instructions,
-			Branch: sp.Branch, DependsOn: sp.DependsOn, Driver: sp.Driver,
+			Branch: sp.Branch, DependsOn: sp.DependsOn, Driver: sp.Driver, Class: agentjob.ClassBackground,
 			Payload: map[string]string{},
 		}
 		if err := conn.Publish(msg, "background.agent"); err != nil {
