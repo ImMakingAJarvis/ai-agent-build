@@ -140,16 +140,34 @@ type LightweightState struct {
 	VoiceChatURL    string       `json:"voice_chat_url"`
 }
 
+// Voice service ports (scripts/voice_service.py): 8100 is plain HTTP (used
+// by the Home Assistant integration), 8443 is the HTTPS listener that
+// browser clients use for the /voice/chat UI.
+const (
+	voiceHTTPPort  = ":8100"
+	voiceHTTPSPort = ":8443"
+)
+
 // voiceChatURLFromHost builds the voice chat link from the Host header the
 // browser used to reach the dashboard, so it works from any machine on the
 // LAN (the old hardcoded localhost:8100 only worked from this box).
+//
+// Browsers only expose the microphone in secure contexts (HTTPS or
+// localhost): remote hosts get the HTTPS link, while localhost keeps plain
+// HTTP — it is already a secure context and skips the self-signed cert
+// warning when using the UI on this box.
 func voiceChatURLFromHost(host string) string {
-	h, _, err := net.SplitHostPort(host)
-	if err != nil {
-		// No port in the Host header; append the voice service port.
-		return "http://" + host + ":8100/voice/chat"
+	h := host
+	if p, _, err := net.SplitHostPort(host); err == nil {
+		h = p
 	}
-	return "http://" + h + ":8100/voice/chat"
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
+		if h == "::1" {
+			h = "[::1]"
+		}
+		return "http://" + h + voiceHTTPPort + "/voice/chat"
+	}
+	return "https://" + h + voiceHTTPSPort + "/voice/chat"
 }
 
 // Server holds the dashboard dependencies.
