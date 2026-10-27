@@ -63,8 +63,8 @@ func main() {
 		if err != nil {
 			die("%v", err)
 		}
-		fmt.Printf("%s — %s\nstatus: %s\neffort: %s\n\n%s\n", j.ID, j.Title, j.Status,
-			queue.CanonicalEffort(j.ReasoningEffort, "coding"), j.Instructions)
+		fmt.Printf("%s — %s\nstatus: %s\nclass: %s\neffort: %s\n\n%s\n", j.ID, j.Title, j.Status,
+			agentjob.EffectiveClass(j.Class, j.Source), queue.CanonicalEffort(j.ReasoningEffort, "coding"), j.Instructions)
 	case "pause":
 		if len(args) != 1 {
 			die("pause <id>")
@@ -210,7 +210,8 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	title := fs.String("title", "", "job title")
 	driver := fs.String("driver", "local", "local or sonnet")
 	source := fs.String("source", "", "origin (discord, migrate, …)")
-	priority := fs.Int("priority", 0, "higher runs first")
+	class := fs.String("class", agentjob.ClassBuild, "fix, build or background (fix runs before build, build before background)")
+	priority := fs.Int("priority", 0, "higher runs first within the class")
 	instructions := fs.String("instructions", "", "job body (default: stdin)")
 	effort := fs.String("effort", "", "reasoning effort: off, low, medium, high, xhigh, max (default medium)")
 	if err := fs.Parse(args); err != nil {
@@ -218,6 +219,11 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	}
 	if *id == "" || *title == "" {
 		return fmt.Errorf("add -id ID -title T")
+	}
+	switch *class {
+	case "", agentjob.ClassFix, agentjob.ClassBuild, agentjob.ClassBackground:
+	default:
+		return fmt.Errorf("-class must be fix, build or background (got %q)", *class)
 	}
 	body := *instructions
 	if body == "" {
@@ -233,6 +239,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		Instructions:    strings.TrimSpace(body),
 		Driver:          *driver,
 		Source:          *source,
+		Class:           *class,
 		Priority:        *priority,
 		ReasoningEffort: queue.CanonicalEffort(*effort, "coding"),
 	})

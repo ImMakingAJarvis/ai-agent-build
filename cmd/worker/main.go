@@ -183,7 +183,7 @@ func run() error {
 			added, err := jobStore.Ingest(agentjob.Spec{
 				ID: msg.ID, Title: msg.Title, Instructions: msg.Instructions,
 				Branch: msg.Branch, DependsOn: msg.DependsOn, Driver: msg.Driver,
-				Priority: msg.Priority, CreatedAt: msg.CreatedAt, Source: msg.Source,
+				Class: msg.Class, Priority: msg.Priority, CreatedAt: msg.CreatedAt, Source: msg.Source,
 				ReasoningEffort: msg.ReasoningEffort,
 			})
 			if err != nil {

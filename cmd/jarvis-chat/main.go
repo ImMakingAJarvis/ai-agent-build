@@ -36,6 +36,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
@@ -175,7 +176,11 @@ func main() {
 					return
 				}
 
-				if _, rest, ok := cutBuildFix(content); ok {
+				if kind, rest, ok := cutBuildFix(content); ok {
+					class := agentjob.ClassBuild
+					if kind == "fix" {
+						class = agentjob.ClassFix
+					}
 					title, body := titleAndBody(rest)
 					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 					defer cancel()
@@ -183,7 +188,7 @@ func main() {
 						_ = d.Notify(ctx, "Need a title after !build / !fix.")
 						return
 					}
-					id, err := enqueueFromChat(in, title, body)
+					id, err := enqueueFromChat(in, class, title, body)
 					if err != nil {
 						_ = d.Notify(ctx, "Could not enqueue: "+err.Error())
 						return
