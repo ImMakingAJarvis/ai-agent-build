@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
@@ -76,16 +77,24 @@ func ModelFor(driver string) string {
 }
 
 func defaultCommand(driver, prompt, effort string) *exec.Cmd {
+	bin := "agent-local"
+	args := []string{"--dangerously-skip-permissions"}
 	if driver == "sonnet" {
-		return exec.Command("claude", "--model", ModelFor(driver),
-			"--dangerously-skip-permissions",
-			"--reasoning-effort", effort,
-			"-p", prompt)
+		bin = "claude"
+		args = []string{"--model", ModelFor(driver), "--dangerously-skip-permissions"}
 	}
-	return exec.Command("agent-local",
-		"--dangerously-skip-permissions",
-		"--reasoning-effort", effort,
-		"-p", prompt)
+	canon := queue.CanonicalEffort(effort, "coding")
+	env := append([]string{}, os.Environ()...)
+	if canon == queue.EffortOff {
+		env = append(env, "CLAUDE_CODE_DISABLE_THINKING=1", "MAX_THINKING_TOKENS=0")
+	} else if ce := queue.ClaudeEffort(canon); ce != "" {
+		args = append(args, "--effort", ce)
+		env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+ce)
+	}
+	args = append(args, "-p", prompt)
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	return cmd
 }
 
 func defaultPRLookup(branch string) string {
@@ -124,7 +133,27 @@ func (r *Runner) Prompt(j Job, driver, note string) string {
 	if note != "" {
 		fmt.Fprintf(&b, "\n\nInstructions from me for this round (they take priority): %s\n", note)
 	}
+	// Messages the owner sent while the agent was idle (queue site or
+	// `jarvis-jobs message`). The running session picks up mid-round
+	// messages itself via the owner-message hook; this is the round-start
+	// path for anything that was waiting.
+	if msgs, err := inbox.Drain(); err == nil && strings.TrimSpace(msgs) != "" {
+		fmt.Fprintf(&b, "\n\nMessages from me sent while the agent was idle (they take priority):\n%s\n", msgs)
+	}
 	return b.String()
+}
+
+// stripEnv returns env without any entries for key, so appending a fresh
+// value below can never leave a duplicate behind.
+func stripEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, prefix) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // Summary is the tail of the output, trimmed for the history and dashboard.
@@ -207,15 +236,16 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	}
 
 	prompt := r.Prompt(j, driver, note)
-	effort := j.ReasoningEffort
-	if effort == "" {
-		effort = queue.DefaultEffort
-	}
+	effort := queue.CanonicalEffort(j.ReasoningEffort, "coding")
 	cmdf := r.Command
 	if cmdf == nil {
 		cmdf = defaultCommand
 	}
 	cmd := cmdf(driver, prompt, effort)
+	// Tag the session so the owner-message hook (scripts/owner-message-hook.sh)
+	// knows this is the job's own session and may drain the message inbox;
+	// any other claude session in this repo leaves the inbox alone.
+	cmd.Env = append(stripEnv(os.Environ(), "JARVIS_JOB_ID"), "JARVIS_JOB_ID="+id)
 	var buf bytes.Buffer
 	var w io.Writer = &buf
 	if r.Tee != nil {

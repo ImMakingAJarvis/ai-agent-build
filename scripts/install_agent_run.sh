@@ -24,10 +24,12 @@ sudo cp "$REPO_ROOT/scripts/agent-local" "$BIN_DIR/agent-local.tmp"
 sudo mv -f "$BIN_DIR/agent-local.tmp" "$BIN_DIR/agent-local"
 sudo chmod 755 "$BIN_DIR/agent-local"
 
-echo "==> Installing agent-run output-token drop-in (no restart)"
+echo "==> Installing agent-run drop-ins (no restart)"
 sudo mkdir -p "$SYSTEMD_DIR/agent-run.service.d"
 sudo cp systemd/agent-run.service.d/output-tokens.conf \
   "$SYSTEMD_DIR/agent-run.service.d/output-tokens.conf"
+sudo cp systemd/agent-run.service.d/effort.conf \
+  "$SYSTEMD_DIR/agent-run.service.d/effort.conf"
 
 echo "==> Notes/inhibit dir (agent owns, nathan can touch the disable file)"
 sudo mkdir -p "$NOTES_DIR"

@@ -80,7 +80,7 @@ func runEnqueueJob(_ context.Context, params map[string]string) (string, error) 
 	if instructions == "" {
 		instructions = title
 	}
-	effort := params["effort"]
+	effort := queue.CanonicalEffort(params["effort"], "coding")
 
 	msg := queue.Message{
 		ID:              fmt.Sprintf("hermes-%d", time.Now().UnixNano()),

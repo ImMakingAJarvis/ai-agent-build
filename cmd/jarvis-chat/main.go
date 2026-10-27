@@ -9,6 +9,8 @@
 //  3. Replies with Notify.
 //  4. If no answer after 20 s, sends a busy notice.
 //  5. Gives up after 4 minutes with a timeout message.
+//  6. Appends the exchange to the daily conversation log
+//     (notes/conversations/discord-YYYY-MM-DD.md).
 //
 // It skips messages while a checkpoint question is open
 // ($CONF/ask-open exists) and skips Discord replies to bot questions
@@ -23,12 +25,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"sync"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
@@ -120,6 +125,7 @@ func main() {
 		Model:       modelName,
 		MaxHistory:  20,
 		AccessLevel: config.AccessFull,
+		ChatSlot:    chatSlotID(),
 	})
 	hermesAgent.SetOllamaClient(ollamaClient)
 
@@ -138,7 +144,7 @@ func main() {
 		bCfg := botCfg // capture for closure
 
 		d, err := chat.NewDiscord(chat.Config{
-			Token:    bCfg.Token,
+			Token:   bCfg.Token,
 			OwnerID: pickOwnerID(bCfg, confDir),
 		})
 		if err != nil {
@@ -228,6 +234,18 @@ func main() {
 // pickOwnerID returns the owner ID for a bot. For the primary bot, it uses
 // DISCORD_OWNER_ID. For additional bots, it uses the first allowed user.
 // Falls back to reading from the signal file config.
+// chatSlotID returns the llama.cpp slot reserved for chat traffic. Slot 0
+// is the work slot (build rounds); chat replies run on slot 1 so both
+// happen at once. Override with CHAT_SLOT_ID.
+func chatSlotID() int {
+	if v := os.Getenv("CHAT_SLOT_ID"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1
+}
+
 func pickOwnerID(bCfg config.BotConfig, confDir string) string {
 	// Try the first allowed user.
 	if len(bCfg.AllowedUsers) > 0 {
@@ -405,9 +423,52 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, in chat.
 	*history = append(*history, content, answer)
 	pruneHistory(history, maxHistoryWords)
 
+	// Leave a written record of the exchange.
+	logConversation(content, answer)
+
 	if err := d.Notify(ctx, answer); err != nil {
 		log.Printf("jarvis-chat: notify: %v", err)
 	}
+}
+
+// logConversation appends one exchange to the daily conversation log
+// (discord-YYYY-MM-DD.md) so the coding agent can read back what was
+// talked about. Directory comes from $JARVIS_NOTES_DIR; when the var is
+// unset it defaults to <home>/ai-agent-build/notes/conversations, and an
+// explicitly empty var disables logging (tests rely on that).
+//
+// Logging is best-effort: any failure is logged and chat goes on.
+var conversationLogMu sync.Mutex
+
+func logConversation(content, answer string) {
+	dir, ok := os.LookupEnv("JARVIS_NOTES_DIR")
+	if !ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, "ai-agent-build", "notes", "conversations")
+		}
+	}
+	if dir == "" {
+		return
+	}
+
+	now := time.Now()
+	ts := now.Format("2006-01-02 15:04:05")
+	name := filepath.Join(dir, "discord-"+now.Format("2006-01-02")+".md")
+
+	conversationLogMu.Lock()
+	defer conversationLogMu.Unlock()
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("jarvis-chat: conversation log: %v", err)
+		return
+	}
+	f, err := os.OpenFile(name, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("jarvis-chat: conversation log: %v", err)
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "[%s] Nathan: %s\n\n[%s] Jarvis:\n%s\n\n", ts, content, ts, answer)
 }
 
 func typingLoop(ctx context.Context, d sender) {

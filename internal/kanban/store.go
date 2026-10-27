@@ -120,13 +120,6 @@ func (s *Store) ListEpics() ([]Epic, error) {
 	return epics, nil
 }
 
-// DeleteEpic removes an epic from the board.
-func (s *Store) DeleteEpic(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return os.Remove(filepath.Join(s.root, "epics", id+".json"))
-}
-
 // UpdateEpicTitle changes an epic's title.
 func (s *Store) UpdateEpicTitle(id, title string) error {
 	s.mu.Lock()
@@ -142,6 +135,29 @@ func (s *Store) UpdateEpicTitle(id, title string) error {
 	}
 	ep.Title = title
 	return writeJSON(path, ep)
+}
+
+// DeleteEpic removes an epic and all of its tasks and their subtasks.
+func (s *Store) DeleteEpic(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ep, err := s.unlockedGetEpic(id)
+	if err != nil {
+		return err
+	}
+	taskIDs := make(map[string]bool, len(ep.TaskIDs))
+	for _, tid := range ep.TaskIDs {
+		taskIDs[tid] = true
+		os.Remove(filepath.Join(s.root, "tasks", tid+".json"))
+	}
+	if sts, err := s.unlockedListSubTasks(); err == nil {
+		for _, st := range sts {
+			if taskIDs[st.TaskID] {
+				os.Remove(filepath.Join(s.root, "subtasks", st.ID+".json"))
+			}
+		}
+	}
+	return os.Remove(filepath.Join(s.root, "epics", id+".json"))
 }
 
 // --- Tasks ---
@@ -259,13 +275,6 @@ func (s *Store) UpdateTaskBranch(id, branch string) error {
 	return writeJSON(path, t)
 }
 
-// DeleteTask removes a task from the board.
-func (s *Store) DeleteTask(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return os.Remove(filepath.Join(s.root, "tasks", id+".json"))
-}
-
 // UpdateTaskTitle changes a task's title.
 func (s *Store) UpdateTaskTitle(id, title string) error {
 	s.mu.Lock()
@@ -284,7 +293,7 @@ func (s *Store) UpdateTaskTitle(id, title string) error {
 	return writeJSON(path, t)
 }
 
-// UpdateTaskPriority changes a task's priority.
+// UpdateTaskPriority changes a task's priority (0 is treated as the default 5).
 func (s *Store) UpdateTaskPriority(id string, priority int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -297,12 +306,18 @@ func (s *Store) UpdateTaskPriority(id string, priority int) error {
 	if err := json.Unmarshal(b, &t); err != nil {
 		return err
 	}
+	if priority < 0 {
+		priority = 0
+	}
+	if priority == 0 {
+		priority = 5
+	}
 	t.Priority = priority
 	t.UpdatedAt = time.Now().UTC()
 	return writeJSON(path, t)
 }
 
-// UpdateTaskModel assigns a model to a task.
+// UpdateTaskModel sets the model name on a task.
 func (s *Store) UpdateTaskModel(id, model string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -318,6 +333,43 @@ func (s *Store) UpdateTaskModel(id, model string) error {
 	t.Model = model
 	t.UpdatedAt = time.Now().UTC()
 	return writeJSON(path, t)
+}
+
+// DeleteTask removes a task file, its subtasks, and unlinks it from its epic.
+func (s *Store) DeleteTask(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	if sts, err := s.unlockedListSubTasks(); err == nil {
+		for _, st := range sts {
+			if st.TaskID == id {
+				os.Remove(filepath.Join(s.root, "subtasks", st.ID+".json"))
+			}
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	// Unlink from the epic.
+	if ep, err := s.unlockedGetEpic(t.EpicID); err == nil {
+		kept := make([]string, 0, len(ep.TaskIDs))
+		for _, tid := range ep.TaskIDs {
+			if tid != id {
+				kept = append(kept, tid)
+			}
+		}
+		ep.TaskIDs = kept
+		writeJSON(filepath.Join(s.root, "epics", t.EpicID+".json"), ep)
+	}
+	return nil
 }
 
 // --- SubTasks ---
@@ -360,6 +412,21 @@ func (s *Store) ToggleSubTask(id string) error {
 func (s *Store) ListSubTasks(taskID string) ([]SubTask, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	all, err := s.unlockedListSubTasks()
+	if err != nil {
+		return nil, err
+	}
+	var subtasks []SubTask
+	for _, st := range all {
+		if st.TaskID == taskID {
+			subtasks = append(subtasks, st)
+		}
+	}
+	return subtasks, nil
+}
+
+// unlockedListSubTasks loads all subtasks without locking (caller must hold s.mu).
+func (s *Store) unlockedListSubTasks() ([]SubTask, error) {
 	ents, err := os.ReadDir(filepath.Join(s.root, "subtasks"))
 	if err != nil {
 		return nil, err
@@ -375,9 +442,7 @@ func (s *Store) ListSubTasks(taskID string) ([]SubTask, error) {
 			if err := json.Unmarshal(b, &st); err != nil {
 				continue
 			}
-			if st.TaskID == taskID {
-				subtasks = append(subtasks, st)
-			}
+			subtasks = append(subtasks, st)
 		}
 	}
 	return subtasks, nil
