@@ -21,7 +21,7 @@ ExecStart=/opt/jarvis-engine/bin/llama-server \
     --cache-type-v q4_0 \
     --slot-save-path /var/lib/jarvis/slots \
     --log-disable
-Restart=on-failure
+Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
