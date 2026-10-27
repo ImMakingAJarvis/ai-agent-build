@@ -215,9 +215,17 @@ func TestIndexIsStaticShell(t *testing.T) {
 	s := &Server{tmpl: tmpl} // no backends: index must not touch them
 	rec := httptest.NewRecorder()
 	s.handleIndex(rec, httptest.NewRequest("GET", "/", nil))
+	body := rec.Body.String()
 	for _, w := range []string{`hx-get="/html/lightweight"`, `hx-get="/html/jobs-section"`, `hx-get="/html/agent-jobs-section"`} {
-		if !strings.Contains(rec.Body.String(), w) {
+		if !strings.Contains(body, w) {
 			t.Errorf("index lacks %q", w)
+		}
+	}
+	// The interactive queue ships in the static shell: a container the JS
+	// fills, a refresh button, and the Pointer-Event drag script.
+	for _, w := range []string{`id="queue-content"`, `id="queue-refresh-btn"`, `onclick="qLoad(true)"`, `qOnDown(e, this)`, `/api/queue/reorder`, `fetch('/api/queue')`} {
+		if !strings.Contains(body, w) {
+			t.Errorf("index lacks queue markup %q", w)
 		}
 	}
 }
