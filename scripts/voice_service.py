@@ -615,7 +615,8 @@ async def voice_websocket(ws: WebSocket):
                         tts_wav = audio_bytes.read()
 
                         # Convert WAV to raw PCM (edge-tts produces 24kHz 16-bit mono)
-                        _, tts_pcm = sf.read(io.BytesIO(tts_wav), dtype="int16")
+                        # sf.read returns (data, samplerate) — data first
+                        tts_pcm, _ = sf.read(io.BytesIO(tts_wav), dtype="int16")
                         raw_pcm = tts_pcm.tobytes()
 
                         # Stream in chunks of ~200ms (4800 bytes at 24kHz 16-bit)
