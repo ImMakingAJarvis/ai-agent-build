@@ -6,6 +6,8 @@
   <span class="status-dot {{ if .RabbitMQHealthy }}healthy{{ else }}unhealthy{{ end }}"></span>
   RabbitMQ {{ if .RabbitMQHealthy }}healthy{{ else }}unreachable{{ end }}
   &nbsp;&nbsp;&middot;&nbsp;&nbsp;
+  <a href="#queue" title="Jump to the drag &amp; drop queue" style="color: var(--blue); text-decoration: none;">Queue</a>
+  &nbsp;&nbsp;&middot;&nbsp;&nbsp;
   <a href="/kanban" style="color: var(--blue); text-decoration: none;">Kanban Board</a>
   &nbsp;&nbsp;&middot;&nbsp;&nbsp;
   <a href="{{ .VoiceChatURL }}" target="_blank" style="color: var(--blue); text-decoration: none;">Voice Chat</a>
@@ -222,7 +224,7 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
      order itself is changeable at runtime (the "Band order" select posts to
      /api/queue/band-order). Uses Pointer Events (mouse + touch) with
      touch-action:none on the handle so it works on a phone. -->
-<div class="section">
+<div class="section" id="queue">
   <div class="section-title">
     Queue
     <label title="Queue band priority (highest first) &mdash; changes the run order immediately" style="font-weight:400;font-size:0.75rem;color:var(--muted)">
