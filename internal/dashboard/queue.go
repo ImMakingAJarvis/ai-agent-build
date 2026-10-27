@@ -1,10 +1,13 @@
 // Package dashboard: the interactive queue for pending agent jobs.
 //
-// The queue is the set of ready agent jobs, grouped into the three locked
-// bands (fix, build, background). The bands never change order; a job can be
-// reordered within its band or dropped into another band to reclassify it.
-// Both actions are persisted by rewriting the job's class and within-class
-// priority (agentjob.Store.ApplyOrder), which is exactly what the run order
+// The queue is the set of ready agent jobs, grouped into the three bands
+// (fix, build, background), shown in the current runtime band priority order
+// (agentjob.Store.BandOrder; default fix, build, background). A job can be
+// reordered within its band or dropped into another band to reclassify it,
+// and the band order itself can be changed at runtime (POST
+// /api/queue/band-order). All of this is persisted by rewriting the job's
+// class and within-class priority (agentjob.Store.ApplyOrder) or the band
+// order (agentjob.Store.SetBandOrder), which is exactly what the run order
 // (Store.List / Store.Next) is derived from.
 package dashboard
 
@@ -15,10 +18,6 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 )
-
-// queueBandOrder is the locked run order of the bands: fix first, then build,
-// then background. Dragging cannot change it, only the order within a band.
-var queueBandOrder = []string{agentjob.ClassFix, agentjob.ClassBuild, agentjob.ClassBackground}
 
 // queueJob is one pending job as shown in the interactive queue.
 type queueJob struct {
@@ -41,8 +40,12 @@ type queueBand struct {
 	Jobs []queueJob `json:"jobs"`
 }
 
-// queueResponse is the body of GET /api/queue and POST /api/queue/reorder.
+// queueResponse is the body of GET /api/queue, POST /api/queue/reorder and
+// POST /api/queue/band-order.
 type queueResponse struct {
+	// Order is the current runtime band priority (highest first); the bands
+	// below are in the same order.
+	Order []string    `json:"order"`
 	Bands []queueBand `json:"bands"`
 }
 
@@ -52,19 +55,23 @@ func (s *Server) openAgentJobStore() (*agentjob.Store, error) {
 }
 
 // loadQueue lists the ready jobs in run order and groups them by band. Bands
-// are always present (even empty) and always in the locked order. A ready
-// job is marked blocked when one of its dependencies is not done yet.
-func (s *Server) loadQueue(st *agentjob.Store) ([]queueBand, error) {
+// are always present (even empty) and in the current runtime band order. A
+// ready job is marked blocked when one of its dependencies is not done yet.
+func (s *Server) loadQueue(st *agentjob.Store) (bands []queueBand, order []string, err error) {
 	jobs, err := st.List()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	order, err = st.BandOrder()
+	if err != nil {
+		return nil, nil, err
 	}
 	status := make(map[string]string, len(jobs))
 	for _, j := range jobs {
 		status[j.ID] = j.Status
 	}
 
-	byBand := make(map[string][]queueJob, len(queueBandOrder))
+	byBand := make(map[string][]queueJob, len(order))
 	for _, j := range jobs {
 		if j.Status != agentjob.Ready {
 			continue
@@ -91,26 +98,61 @@ func (s *Server) loadQueue(st *agentjob.Store) ([]queueBand, error) {
 		byBand[cls] = append(byBand[cls], qj)
 	}
 
-	bands := make([]queueBand, 0, len(queueBandOrder))
-	for _, cls := range queueBandOrder {
+	bands = make([]queueBand, 0, len(order))
+	for _, cls := range order {
 		bands = append(bands, queueBand{Name: cls, Jobs: byBand[cls]})
 	}
-	return bands, nil
+	return bands, order, nil
 }
 
-// handleQueue returns the pending (ready) queue grouped by band in run order.
+// handleQueue returns the pending (ready) queue grouped by band in the
+// current runtime band order.
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	st, err := s.openAgentJobStore()
 	if err != nil {
 		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	bands, err := s.loadQueue(st)
+	bands, order, err := s.loadQueue(st)
 	if err != nil {
 		http.Error(w, "load queue: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	respondJSON(w, queueResponse{Bands: bands})
+	respondJSON(w, queueResponse{Order: order, Bands: bands})
+}
+
+// handleQueueBandOrder changes the runtime band priority order. The body is
+// {"order": ["build", "fix", "background"]} — any permutation of the three
+// bands, highest priority first. It is persisted in the job store and takes
+// effect immediately: the queue view and the worker run order (Store.Next)
+// are both re-sorted. The updated queue is returned for re-render.
+func (s *Server) handleQueueBandOrder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Order []string `json:"order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	st, err := s.openAgentJobStore()
+	if err != nil {
+		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := st.SetBandOrder(req.Order); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	bands, order, err := s.loadQueue(st)
+	if err != nil {
+		http.Error(w, "load queue: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	respondJSON(w, queueResponse{Order: order, Bands: bands})
 }
 
 // handleQueueReorder persists a new queue arrangement. The client sends the
@@ -140,6 +182,11 @@ func (s *Server) handleQueueReorder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load queue: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	order, err := st.BandOrder()
+	if err != nil {
+		http.Error(w, "load queue: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	ready := make(map[string]bool, len(jobs))
 	for _, j := range jobs {
 		if j.Status == agentjob.Ready {
@@ -147,9 +194,9 @@ func (s *Server) handleQueueReorder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	orders := make(map[string][]string, len(queueBandOrder))
+	orders := make(map[string][]string, len(order))
 	seen := make(map[string]int)
-	for _, cls := range queueBandOrder {
+	for _, cls := range order {
 		for _, id := range req.Orders[cls] {
 			if !ready[id] {
 				http.Error(w, "job "+id+" is not in the queue", http.StatusConflict)
@@ -171,10 +218,10 @@ func (s *Server) handleQueueReorder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reorder: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	bands, err := s.loadQueue(st)
+	bands, order, err := s.loadQueue(st)
 	if err != nil {
 		http.Error(w, "load queue: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	respondJSON(w, queueResponse{Bands: bands})
+	respondJSON(w, queueResponse{Order: order, Bands: bands})
 }
