@@ -48,6 +48,7 @@ import io
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import time
@@ -422,6 +423,94 @@ TOOL_RUNNERS = {
     "search_jobs": tool_search_jobs,
 }
 
+# "I queued it" without a tool call is the failure mode to guard against:
+# the user cannot verify voice claims, so a false promise is the worst
+# outcome. Matches first-person claims only ("it is already queued" from a
+# search result does not).
+SCHEDULE_CLAIM_RE = re.compile(
+    r"\bI(?:'ve| have| will|'ll| can)?\s+(?:just\s+)?(?:queued|scheduled|queue|schedule)\b",
+    re.IGNORECASE,
+)
+
+
+async def run_tool_loop(client, messages, on_action=None):
+    """One brain turn: LLM call, tool execution, repeat until a plain
+    answer. Appends the exchange to messages. Returns (reply, scheduled)."""
+    reply = "(no reply)"
+    scheduled = False
+    tools_supported = True
+    for rnd in range(MAX_TOOL_ROUNDS + 1):
+        payload = {
+            "model": LOCAL_MODEL,
+            "messages": messages,
+            "stream": False,
+            "temperature": 0.7,
+            # Voice replies are one or two sentences; cap the output.
+            "max_tokens": 300,
+            # The brain thinks by default; thinking burns the token cap
+            # (empty replies) and adds latency. Voice does not need it.
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        # The final round goes out without tools so the model must answer.
+        if tools_supported and rnd < MAX_TOOL_ROUNDS:
+            payload["tools"] = VOICE_TOOLS
+        try:
+            resp = await client.post(
+                f"{OLLAMA_URL}/v1/chat/completions", json=payload
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # An engine without tool support rejects the request; retry
+            # the conversation plain rather than fail the utterance.
+            if e.response.status_code == 400 and tools_supported:
+                logger.warning(
+                    "Engine rejected tools payload (%s); falling back to "
+                    "plain chat", e.response.text[:200]
+                )
+                tools_supported = False
+                continue
+            raise
+        result = resp.json()
+        msg = result.get("choices", [{}])[0].get("message", {})
+        tool_calls = msg.get("tool_calls") or []
+        if not tool_calls:
+            reply = msg.get("content") or "(no reply)"
+            break
+        messages.append({
+            "role": "assistant",
+            "content": msg.get("content") or None,
+            "tool_calls": tool_calls,
+        })
+        for i, tc in enumerate(tool_calls):
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            if on_action:
+                await on_action(TOOL_STATUS.get(name, f"Working: {name}…"))
+            runner = TOOL_RUNNERS.get(name)
+            if runner is None:
+                tool_result = f"Error: unknown tool {name!r}."
+            else:
+                try:
+                    tool_result = await runner(args)
+                except Exception as e:
+                    logger.exception("tool %s failed", name)
+                    tool_result = f"Error: {name} failed: {e}"
+            if name == "schedule_job" and tool_result.startswith("Scheduled job"):
+                scheduled = True
+            logger.info("tool %s -> %s", name, tool_result[:120])
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id") or f"call_{rnd}_{i}",
+                "name": name,
+                "content": tool_result,
+            })
+    return reply, scheduled
+
+
 async def ask_brain(user_text: str, on_action=None) -> str:
     """Send text to the brain and get a spoken reply.
 
@@ -438,78 +527,27 @@ async def ask_brain(user_text: str, on_action=None) -> str:
     ]
 
     async with httpx.AsyncClient(timeout=180.0) as client:
-        reply = "(no reply)"
-        tools_supported = True
-        for round in range(MAX_TOOL_ROUNDS + 1):
-            payload = {
-                "model": LOCAL_MODEL,
-                "messages": messages,
-                "stream": False,
-                "temperature": 0.7,
-                # Voice replies are one or two sentences; cap the output.
-                "max_tokens": 300,
-                # The brain thinks by default; thinking burns the token cap
-                # (empty replies) and adds latency. Voice does not need it.
-                "chat_template_kwargs": {"enable_thinking": False},
-            }
-            # The final round goes out without tools so the model must answer.
-            if tools_supported and round < MAX_TOOL_ROUNDS:
-                payload["tools"] = VOICE_TOOLS
-            try:
-                resp = await client.post(
-                    f"{OLLAMA_URL}/v1/chat/completions", json=payload
-                )
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                # An engine without tool support rejects the request; retry
-                # the conversation plain rather than fail the utterance.
-                if e.response.status_code == 400 and tools_supported:
-                    logger.warning(
-                        "Engine rejected tools payload (%s); falling back to "
-                        "plain chat", e.response.text[:200]
-                    )
-                    tools_supported = False
-                    continue
-                raise
-            result = resp.json()
-            msg = result.get("choices", [{}])[0].get("message", {})
-            tool_calls = msg.get("tool_calls") or []
-            if not tool_calls:
-                reply = msg.get("content") or "(no reply)"
-                break
+        reply, scheduled = await run_tool_loop(client, messages, on_action)
+
+        # Guardrail: the model sometimes says "I queued it" without calling
+        # schedule_job. One correction pass: either call the tool or say
+        # plainly that nothing was queued.
+        if not scheduled and SCHEDULE_CLAIM_RE.search(reply or ""):
+            logger.warning(
+                "Model claimed to schedule without calling schedule_job; "
+                "running correction pass"
+            )
+            messages.append({"role": "assistant", "content": reply})
             messages.append({
-                "role": "assistant",
-                "content": msg.get("content") or None,
-                "tool_calls": tool_calls,
+                "role": "user",
+                "content": (
+                    "You just said you queued or scheduled a job, but you did "
+                    "not call the schedule_job tool. If Nathan asked for a "
+                    "job, call schedule_job now. If he did not, correct "
+                    "yourself and say plainly that nothing was queued."
+                ),
             })
-            for i, tc in enumerate(tool_calls):
-                fn = tc.get("function", {})
-                name = fn.get("name", "")
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                if on_action:
-                    await on_action(TOOL_STATUS.get(name, f"Working: {name}…"))
-                runner = TOOL_RUNNERS.get(name)
-                if runner is None:
-                    tool_result = f"Error: unknown tool {name!r}."
-                else:
-                    try:
-                        tool_result = await runner(args)
-                    except Exception as e:
-                        logger.exception("tool %s failed", name)
-                        tool_result = f"Error: {name} failed: {e}"
-                logger.info("tool %s -> %s", name, tool_result[:120])
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get("id") or f"call_{round}_{i}",
-                    "name": name,
-                    "content": tool_result,
-                })
-        else:
-            # Loop exhausted (model kept calling tools); ask for the answer.
-            logger.warning("Tool loop exhausted after %d rounds", MAX_TOOL_ROUNDS)
+            reply, scheduled = await run_tool_loop(client, messages, on_action)
 
     chat_history.append({"role": "user", "content": user_text})
     chat_history.append({"role": "assistant", "content": reply})
@@ -518,7 +556,7 @@ async def ask_brain(user_text: str, on_action=None) -> str:
 
 
 async def ask_ollama(user_text: str) -> str:
-    """Plain (no-tools) chat, kept for callers that don't want the tools."""
+    """ask_brain under its old name (the REST endpoints call this)."""
     return await ask_brain(user_text)
 
 # ---------------------------------------------------------------------------
