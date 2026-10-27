@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -138,7 +137,7 @@ func (s *Store) UpdateEpicTitle(id, title string) error {
 	return writeJSON(path, ep)
 }
 
-// DeleteEpic removes an epic and cascades to its tasks and their subtasks.
+// DeleteEpic removes an epic and all of its tasks and their subtasks.
 func (s *Store) DeleteEpic(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -146,8 +145,17 @@ func (s *Store) DeleteEpic(id string) error {
 	if err != nil {
 		return err
 	}
-	for _, taskID := range ep.TaskIDs {
-		s.unlockedDeleteTaskCascade(taskID)
+	taskIDs := make(map[string]bool, len(ep.TaskIDs))
+	for _, tid := range ep.TaskIDs {
+		taskIDs[tid] = true
+		os.Remove(filepath.Join(s.root, "tasks", tid+".json"))
+	}
+	if sts, err := s.unlockedListSubTasks(); err == nil {
+		for _, st := range sts {
+			if taskIDs[st.TaskID] {
+				os.Remove(filepath.Join(s.root, "subtasks", st.ID+".json"))
+			}
+		}
 	}
 	return os.Remove(filepath.Join(s.root, "epics", id+".json"))
 }
@@ -267,27 +275,6 @@ func (s *Store) UpdateTaskBranch(id, branch string) error {
 	return writeJSON(path, t)
 }
 
-// UpdateTaskPriority changes a task's priority.
-func (s *Store) UpdateTaskPriority(id string, priority int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	path := filepath.Join(s.root, "tasks", id+".json")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	var t Task
-	if err := json.Unmarshal(b, &t); err != nil {
-		return err
-	}
-	if priority < 0 {
-		priority = 0
-	}
-	t.Priority = priority
-	t.UpdatedAt = time.Now().UTC()
-	return writeJSON(path, t)
-}
-
 // UpdateTaskTitle changes a task's title.
 func (s *Store) UpdateTaskTitle(id, title string) error {
 	s.mu.Lock()
@@ -306,7 +293,31 @@ func (s *Store) UpdateTaskTitle(id, title string) error {
 	return writeJSON(path, t)
 }
 
-// UpdateTaskModel assigns a model to a task.
+// UpdateTaskPriority changes a task's priority (0 is treated as the default 5).
+func (s *Store) UpdateTaskPriority(id string, priority int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	if priority < 0 {
+		priority = 0
+	}
+	if priority == 0 {
+		priority = 5
+	}
+	t.Priority = priority
+	t.UpdatedAt = time.Now().UTC()
+	return writeJSON(path, t)
+}
+
+// UpdateTaskModel sets the model name on a task.
 func (s *Store) UpdateTaskModel(id, model string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -324,64 +335,39 @@ func (s *Store) UpdateTaskModel(id, model string) error {
 	return writeJSON(path, t)
 }
 
-// DeleteTask removes a task and its subtasks, and unlinks it from its epic.
+// DeleteTask removes a task file, its subtasks, and unlinks it from its epic.
 func (s *Store) DeleteTask(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.unlockedDeleteTaskCascade(id); err != nil {
-		return err
-	}
-	// Unlink from the parent epic's task list.
-	ents, err := os.ReadDir(filepath.Join(s.root, "epics"))
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	for _, e := range ents {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		epPath := filepath.Join(s.root, "epics", e.Name())
-		ep, err := s.unlockedGetEpic(strings.TrimSuffix(e.Name(), ".json"))
-		if err != nil {
-			continue
-		}
-		for i, tid := range ep.TaskIDs {
-			if tid == id {
-				ep.TaskIDs = append(ep.TaskIDs[:i], ep.TaskIDs[i+1:]...)
-				return writeJSON(epPath, ep)
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	if sts, err := s.unlockedListSubTasks(); err == nil {
+		for _, st := range sts {
+			if st.TaskID == id {
+				os.Remove(filepath.Join(s.root, "subtasks", st.ID+".json"))
 			}
 		}
 	}
-	return nil
-}
-
-// unlockedDeleteTaskCascade removes a task file and its subtasks
-// (caller must hold s.mu). Missing task files are not an error.
-func (s *Store) unlockedDeleteTaskCascade(id string) error {
-	path := filepath.Join(s.root, "tasks", id+".json")
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(path); err != nil {
 		return err
 	}
-	ents, err := os.ReadDir(filepath.Join(s.root, "subtasks"))
-	if err != nil {
-		return err
-	}
-	for _, e := range ents {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
+	// Unlink from the epic.
+	if ep, err := s.unlockedGetEpic(t.EpicID); err == nil {
+		kept := make([]string, 0, len(ep.TaskIDs))
+		for _, tid := range ep.TaskIDs {
+			if tid != id {
+				kept = append(kept, tid)
+			}
 		}
-		stPath := filepath.Join(s.root, "subtasks", e.Name())
-		b, err := os.ReadFile(stPath)
-		if err != nil {
-			continue
-		}
-		var st SubTask
-		if err := json.Unmarshal(b, &st); err != nil {
-			continue
-		}
-		if st.TaskID == id {
-			os.Remove(stPath)
-		}
+		ep.TaskIDs = kept
+		writeJSON(filepath.Join(s.root, "epics", t.EpicID+".json"), ep)
 	}
 	return nil
 }
@@ -426,6 +412,21 @@ func (s *Store) ToggleSubTask(id string) error {
 func (s *Store) ListSubTasks(taskID string) ([]SubTask, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	all, err := s.unlockedListSubTasks()
+	if err != nil {
+		return nil, err
+	}
+	var subtasks []SubTask
+	for _, st := range all {
+		if st.TaskID == taskID {
+			subtasks = append(subtasks, st)
+		}
+	}
+	return subtasks, nil
+}
+
+// unlockedListSubTasks loads all subtasks without locking (caller must hold s.mu).
+func (s *Store) unlockedListSubTasks() ([]SubTask, error) {
 	ents, err := os.ReadDir(filepath.Join(s.root, "subtasks"))
 	if err != nil {
 		return nil, err
@@ -441,9 +442,7 @@ func (s *Store) ListSubTasks(taskID string) ([]SubTask, error) {
 			if err := json.Unmarshal(b, &st); err != nil {
 				continue
 			}
-			if st.TaskID == taskID {
-				subtasks = append(subtasks, st)
-			}
+			subtasks = append(subtasks, st)
 		}
 	}
 	return subtasks, nil

@@ -29,9 +29,9 @@ Rules:
 - Keep chat replies brief and conversational.
 - Extract as many parameters as you can from the user's message for actions.
 - For enqueue_job actions, extract an "effort" parameter from urgency cues in the user's message.
-  Valid values are: low, medium, high, xhigh, max. Default to "medium" if not stated.
+  Valid values are: off, low, medium, high, xhigh, max. Default to "medium" if not stated.
   Examples: "urgent" or "critical" or "needs deep thinking" → "xhigh"; "quick fix" → "low";
-  "important" → "high"; nothing special → "medium".`
+  "no thinking" or "don't think" → "off"; "important" → "high"; nothing special → "medium".`
 
 // buildClassifyPrompt constructs the full message list for intent classification.
 // It fills in the available actions into the system prompt and appends the

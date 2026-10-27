@@ -38,7 +38,7 @@ type Spec struct {
 	Priority        int       `json:"priority"`
 	CreatedAt       time.Time `json:"created_at"`
 	Source          string    `json:"source,omitempty"`
-	ReasoningEffort string    `json:"reasoning_effort,omitempty"` // low, medium, high, xhigh, max
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"` // off, low, medium, high, xhigh, max
 	// DiscordChannelID / DiscordMessageID identify the owner message that
 	// scheduled this job. The worker reacts to that message on pickup.
 	DiscordChannelID string `json:"discord_channel_id,omitempty"`

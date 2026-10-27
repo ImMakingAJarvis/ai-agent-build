@@ -24,8 +24,8 @@ func main() {
 	prompt := flag.String("prompt", "", "prompt or description for the job")
 	forceAPI := flag.Bool("force-api", false, "force dispatch to Claude API")
 	modelOverride := flag.String("model-override", "", "override model selection")
-	effort := flag.String("effort", queue.DefaultEffort,
-		"reasoning effort: low, medium, high, xhigh, max")
+	effort := flag.String("effort", "",
+		"reasoning effort: off, low, medium, high, xhigh, max (default: off for voice, medium otherwise)")
 	flag.Parse()
 
 	if *prompt == "" {
@@ -43,7 +43,7 @@ func main() {
 		},
 		ForceAPI:        *forceAPI,
 		ModelOverride:   *modelOverride,
-		ReasoningEffort: *effort,
+		ReasoningEffort: queue.CanonicalEffort(*effort, *jobType),
 	}
 
 	// Set priority based on type.

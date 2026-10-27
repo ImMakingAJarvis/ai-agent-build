@@ -4,12 +4,15 @@
 *.env
 
 # Compiled binaries
-worker
-jarvis-discord
-jarvis-chat
+/worker
+/jarvis-discord
+/jarvis-chat
 
 # Temporary files
 tmp/
 
 # Dashboard binary (build artifact; source in cmd/dashboard)
-dashboard
+/dashboard
+
+# Verbatim Discord/voice conversation logs (agent notes are tracked)
+notes/conversations/discord-*.md

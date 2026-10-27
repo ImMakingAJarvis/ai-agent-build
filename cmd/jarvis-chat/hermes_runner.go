@@ -41,6 +41,7 @@ func newHermesRunner(botCfg config.BotConfig) *hermesRunner {
 		Model:       modelName,
 		MaxHistory:  20,
 		AccessLevel: botCfg.AccessLevel,
+		ChatSlot:    chatSlotID(),
 	})
 
 	// Inject the Ollama client.
