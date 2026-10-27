@@ -182,6 +182,18 @@
   }
   .level-fill.hot { background: var(--yellow); }
   .level-fill.clipping { background: var(--red); }
+  /* Secure-context warning (mic blocked on plain HTTP) */
+  .sec-banner {
+    background: rgba(210, 153, 34, 0.15);
+    border: 1px solid var(--yellow);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin-bottom: 16px;
+    text-align: left;
+    word-break: break-word;
+  }
 </style>
 </head>
 <body>
@@ -193,6 +205,10 @@
   <div class="conn-status">
     <span class="conn-dot" id="connDot"></span>
     <span id="connText">Disconnected</span>
+  </div>
+
+  <div class="sec-banner" id="secBanner" style="display:none">
+    <strong>Microphone blocked:</strong> <span id="secBannerText"></span>
   </div>
 
   <div class="visualizer" id="visualizer">
@@ -240,6 +256,37 @@ let authPrompted = false;
 
 function wsConnectUrl() {
   return wsToken ? WS_URL + '?token=' + encodeURIComponent(wsToken) : WS_URL;
+}
+
+// Same page on the voice service's HTTPS listener (port 8443). Browsers only
+// allow microphone access in secure contexts, so this is the link to open
+// when the page was loaded over plain HTTP.
+function httpsChatUrl() {
+  var host = location.host.replace(/:\d+$/, '');
+  return 'https://' + host + ':8443' + location.pathname;
+}
+
+// Map a getUserMedia failure to a message that says what to actually do.
+function showMicError(err) {
+  var name = err && err.name;
+  var msg;
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    msg = 'Browsers block the microphone on plain-HTTP pages (this one is '
+        + location.origin + '). Open ' + httpsChatUrl() + ' instead and '
+        + 'accept the certificate warning — the mic works there.';
+  } else if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+    msg = 'Microphone permission was denied. Allow the mic for this site in '
+        + 'your browser settings, then click again.';
+  } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+    msg = 'No microphone found on this device.';
+  } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+    msg = 'The microphone is in use by another app. Close it and try again.';
+  } else {
+    msg = 'Microphone error: ' + ((err && err.message) || name || 'unknown');
+  }
+  stateLabel.textContent = msg;
+  stateLabel.className = 'state-label';
+  addTranscriptEntry('system', msg);
 }
 
 // Audio constants
@@ -472,8 +519,8 @@ async function startListening() {
     updateUI();
 
   } catch (err) {
-    console.error('Microphone access denied:', err);
-    stateLabel.textContent = 'Microphone access denied';
+    console.error('Microphone error:', err);
+    showMicError(err);
   }
 }
 
@@ -592,6 +639,7 @@ micBtn.addEventListener('click', async () => {
   if (!isRecording) {
     isRecording = true;
     await startListening();
+    if (!mediaStream) isRecording = false; // startListening failed; stay clickable
   } else {
     isRecording = false;
     stopListening();
@@ -627,6 +675,16 @@ handleJsonMessage = function(msg) {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+// Warn up front if the browser will not allow the mic here (plain-HTTP,
+// non-localhost origins are not secure contexts).
+if (!window.isSecureContext) {
+  document.getElementById('secBannerText').textContent =
+    'this page was opened over plain HTTP, so the browser will not grant ' +
+    'microphone access. Open ' + httpsChatUrl() + ' instead and accept the ' +
+    'certificate warning.';
+  document.getElementById('secBanner').style.display = 'block';
+}
+
 connect();
 </script>
 

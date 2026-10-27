@@ -11,6 +11,20 @@ Web UI for queue and job history. systemd unit, same shape as `jarvis-chat` and 
 
 Does not require `agent-run`.
 
+## Voice chat link
+
+The subtitle bar's **Voice Chat** link is built from the request's `Host`
+header (`voiceChatURLFromHost`), never hardcoded:
+
+- `localhost`/`127.0.0.1`/`::1` → `http://<host>:8100/voice/chat` — localhost
+  is a secure context, so the mic works and no cert warning appears.
+- any other host → `https://<host>:8443/voice/chat` — browsers only expose
+  the microphone in secure contexts, so remote LAN hosts must use the voice
+  service's HTTPS listener (self-signed cert; see `scripts/gen_voice_cert.sh`).
+  The plain-HTTP `:8100` port stays up for the Home Assistant integration.
+- If the page was opened over plain HTTP anyway, it shows a banner pointing
+  at the HTTPS URL instead of a bare "access denied" when the mic fails.
+
 ## Talking to the worker (interrupt without stopping)
 
 The **Talk to the worker** box on the dashboard sends the agent a message
