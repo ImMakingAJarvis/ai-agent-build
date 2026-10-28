@@ -132,6 +132,9 @@ services:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      # !photo reads the generated PNG from the art service's host dir;
+      # chat needs it mounted (read-only) to attach it to the DM.
+      - /var/lib/jarvis/art:/var/lib/jarvis/art:ro
 
   dashboard:
     build:
