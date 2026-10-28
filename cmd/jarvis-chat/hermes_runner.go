@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/art"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
@@ -80,6 +81,12 @@ func (r *hermesRunner) handleMessage(in chat.Incoming) {
 	// !pause works on the Hermes runner too.
 	if content == "!pause" {
 		_ = os.WriteFile(r.confDir+"/pause-signal", []byte("!pause"), 0o644)
+		return
+	}
+
+	// !photo <prompt> works on the Hermes runner too.
+	if prompt, ok := cutPhoto(content); ok {
+		handlePhoto(r.discord, art.New(), prompt)
 		return
 	}
 
