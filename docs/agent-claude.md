@@ -69,3 +69,23 @@ WebSocket API (logbook/events): `ws://111.1.2.200/api/websocket`, auth with
 Caveats: the working MCP endpoint is `/api/mcp` (streamable HTTP) — the
 old `/api/mcp_server/sse` path 404s on this HA version. The Jarvis headline
 sensors published via MQTT are documented in `ha/README.md`.
+
+## Before you call a PR done
+
+A PR is not done while it conflicts with main. Before finishing any
+job that opens or updates a PR, verify the branch has no merge
+conflict:
+
+- `GH_TOKEN=$(ghapp-token) gh pr view <n> --json mergeable` must say
+  `MERGEABLE`. `UNKNOWN` means GitHub is still computing — wait and
+  re-check; `CONFLICTING` means fix it first.
+- If it conflicts: merge `origin/main` into the branch (in the
+  branch's worktree), resolve, push, re-check.
+
+The usual conflict is `notes/conversations/agent-<date>.md` — every
+round appends to it. Resolve by keeping ALL entries from both sides
+(chronological order), never by dropping one side.
+
+Then — and only then — Discord-notify with the PR link and finish the
+job done. (Job chat-1793154320-3d8d, 2026-10-27: PR #83 was left
+CONFLICTING and had to be reworked.)

@@ -1,0 +1,20 @@
+[Unit]
+Description=Jarvis Docker stack (docker compose up -d for the whole stack)
+Documentation=file:///home/agent/ai-agent-build/docs/services.md
+After=docker.service network-online.target
+Requires=docker.service
+# Skips cleanly until the compose file exists at the canonical path (it lands
+# there when the phase-services-containers PR is merged). Until then, boot
+# still works via the containers' own restart: unless-stopped policies.
+ConditionPathExists=/home/agent/ai-agent-build/docker-compose.yml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Restart=on-failure
+TimeoutStartSec=300
+ExecStart=/usr/bin/docker compose -p ai-agent-build -f /home/agent/ai-agent-build/docker-compose.yml up -d
+ExecStop=/usr/bin/docker compose -p ai-agent-build -f /home/agent/ai-agent-build/docker-compose.yml stop
+
+[Install]
+WantedBy=multi-user.target
