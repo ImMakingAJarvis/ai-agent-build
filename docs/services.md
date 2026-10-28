@@ -139,3 +139,9 @@ nothing secret is baked into images or committed.
 - Pre-2026-10-27 the same services ran as native systemd units; the units in
   `systemd/` and `scripts/jarvis-*.service` are the historical definitions and
   the rollback path.
+- **Chat memory** — the `chat` container gets `MEMORY_URL=http://memory:8101`;
+  before replying to a chat message it searches the memory service with the
+  message and appends the top hits to the system prompt (1200-char budget,
+  fails open if the service is down). Hermes additionally registers a
+  `search_memory` action for explicit lookups. Code: `internal/memory`
+  (Go client) and `internal/hermes/memory_action.go`.

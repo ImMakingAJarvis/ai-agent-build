@@ -94,6 +94,8 @@ services:
       ENGINE_URL: http://engine:11434
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       DASHBOARD_ADDR: dashboard:8080
+      # Vector DB over work logs / job history / queue (RAG + search action).
+      MEMORY_URL: http://memory:8101
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
