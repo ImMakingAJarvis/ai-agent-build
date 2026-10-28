@@ -28,3 +28,5 @@
 - 2026-10-28T05:41Z [chat-1793162906-6c4d] [chat-1793162906-6c4d] Dumped details of the 10 kanban task JSONs (6 NoBrakes + 4 VRAM-benchmark tasks, all backlog/p5) to notes/kanban/kanban-dump-2026-10-27.md (PR #94)
 - 2026-10-28T06:26Z [chat-1793163063-9121] CLAUDE.md: read the kanban board entry (task+epic+comments, ID from job title) before building; comment system absent so queued job kanban-comments (PR #95)
 - 2026-10-28T06:50Z [chat-1793164192-8d46] Voice channel epic 'camera mics + direct Sonos/Google speakers (no HA)' on the kanban: 12 tasks in dependency order + design doc (job chat-1793164192-8d46, PR #96)
+- 2026-10-28T10:21Z [chat-1793177028-8f95] Plan upload: dashboard Plans section (POST /api/plans) stores plan files under ~/.local/share/jarvis/plans/<id>/ and enqueues a ready agent job with the same id whose instructions are the worker's breakdown recipe; jarvis-jobs add gains -depends (PR #98)
+- 2026-10-28T20:11Z [chat-1793046157-6cbc] Fix-queue priority job chat-1793046157-6cbc closed as already done: PR #64 (agentjob class ordering) + PR #74 (worker SetDepths), both merged; evidence comment on PR #74

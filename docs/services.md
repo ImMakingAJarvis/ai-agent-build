@@ -11,6 +11,7 @@ for rollback.
 | Service | What it does | Port (host) | Container | State |
 |---|---|---|---|---|
 | `engine` | The brain: llama.cpp `llama-server` serving the qwen3.8 "jarvis-brain" GGUF, 128k ctx, quantized KV cache, 2 parallel slots | 11434 (127.0.0.1) | `jarvis-engine` (nvidia runtime) | model + templates: `/opt/jarvis-engine`; slots: `/var/lib/jarvis/slots` |
+| `art` | Photo generation: Z-Image-Turbo 6B (diffusers, sequential CPU offload) behind a small FastAPI app; `jarvis-art generate "..."` | 8120 (127.0.0.1) | `jarvis-art` (nvidia runtime) | code: `/opt/jarvis-art` (pinned deploy point); model: `/var/lib/jarvis/art/model`; images: `/var/lib/jarvis/art/out` |
 | `chat` | Discord bot: replies to owner DMs using the local brain; bridges voice wake events to jobs | — (Discord WS) | `jarvis-chat` | `.config/jarvis` (driver, prompts, `discord.env`), `.local/share/jarvis` (agentjob store) |
 | `dashboard` | Web dashboard: agent jobs, work queue, system state, PWA | 8080 | `jarvis-dashboard` | job store via `.local/share/jarvis` |
 | `ha` | Publishes Jarvis headline sensors to the Home Assistant box via MQTT (auto-discovery) | — (MQTT out) | `jarvis-ha` | job store + `.config/jarvis/ha.env` |
@@ -65,8 +66,9 @@ the driver lib is injected by the nvidia runtime.
 ## Verifying the stack
 
 ```bash
-docker compose ps                 # 13 services (14 with --profile optional)
+docker compose ps                 # 14 services (15 with --profile optional)
 curl -s 127.0.0.1:11434/v1/models | head -c 100                    # engine: serving jarvis-brain
+curl -s 127.0.0.1:8120/health | head -c 200                        # art: model loaded + GPU
 curl -s 127.0.0.1:8101/health                                       # memory: status + model + db
 curl -s 127.0.0.1:8100/health                                       # voice: brain + whisper ready
 curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8080/            # dashboard: 200
@@ -112,6 +114,7 @@ fallback for the brain.
 |---|---|---|
 | `/opt/jarvis-engine` | llama-server b11815 binary, brain GGUF, chat templates | `scripts/install_engine.sh`, `scripts/pull_models.sh` |
 | `/opt/jarvis-voice` | voice service code + `auth-off.env` | deploy a branch there + `DEPLOYED_FROM` marker (see the drop-in history in `jarvis-voice.service.d/deploy.conf`) |
+| `/opt/jarvis-art` | art service code (`art_service.py`) | `scripts/install_art.sh` (also downloads the model to `/var/lib/jarvis/art/model`) |
 | `/opt/jarvis-memory` | memory service script | copy from the repo/branch; update `DEPLOYED_FROM` |
 
 Env/secrets stay on the host under `/home/agent/.config/jarvis/`

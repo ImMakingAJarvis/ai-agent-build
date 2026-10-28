@@ -77,6 +77,33 @@ services:
         "--slot-save-path", "/var/lib/jarvis/slots",
         "--log-disable" ]
 
+  # ---------------- art (photo generation, port 8120) ---------------------
+  # Z-Image-Turbo (6B, 8-step turbo) behind a small FastAPI+diffusers app.
+  # The brain owns ~20 GB of the 4090 and the art model doesn't fit in the
+  # rest, so it runs with sequential CPU offload (submodules stream to the
+  # GPU per forward pass); expect tens of seconds per 1024x1024 image.
+  # Code: pinned deploy point /opt/jarvis-art (scripts/install_art.sh).
+  # Model weights + generated images: /var/lib/jarvis/art/{model,out}.
+  art:
+    build:
+      context: .
+      dockerfile: docker/art/Dockerfile
+    image: jarvis/art:local
+    container_name: jarvis-art
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      HOME: /home/agent
+      LISTEN_PORT: "8120"
+    ports:
+      - "127.0.0.1:8120:8120"
+    working_dir: /opt/jarvis-art
+    command: ["python3", "art_service.py"]
+    volumes:
+      - /opt/jarvis-art:/opt/jarvis-art
+      - /var/lib/jarvis/art:/var/lib/jarvis/art
+
   # ---------------- chat / dashboard / ha ----------------
   chat:
     build:
