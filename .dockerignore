@@ -1,0 +1,12 @@
+.git
+.claude
+bin/
+build/
+# stale prebuilt binaries at the repo root (built before containerization)
+dashboard
+jarvis-chat
+*.gguf
+*.pyc
+__pycache__/
+notes/
+*.log

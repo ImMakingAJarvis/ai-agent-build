@@ -1,4 +1,14 @@
-version: "3.9"
+# Jarvis stack — one compose project for every service on this box.
+#
+#   docker compose up -d                        # everything that runs today
+#   docker compose --profile optional up -d     # + worker, wake-queue
+#
+# Run from the repo root: the project name is then "ai-agent-build", which
+# matches the pre-existing rabbitmq container/volume (created 2026-10-24).
+# Boot: systemd unit jarvis-stack.service (systemd/ + scripts/install_stack.sh).
+# Native systemd units for these services are disabled but kept for rollback:
+#   docker compose stop <svc> && sudo systemctl enable --now jarvis-<svc>.service
+# See docs/services.md for the full picture.
 
 services:
   rabbitmq:
@@ -20,5 +30,270 @@ services:
       - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-jarvis}
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS:-jarvis-local}
 
+  # ---------------- the brain ----------------
+  # llama.cpp server (pinned b11815 build in /opt/jarvis-engine, installed by
+  # scripts/install_engine.sh). The binary is bind-mounted, not baked into the
+  # image: the image is only the CUDA 13.1 runtime it links against.
+  engine:
+    build:
+      context: .
+      dockerfile: docker/engine/Dockerfile
+    image: jarvis/engine:local
+    container_name: jarvis-engine
+    restart: unless-stopped
+    # agent's uid on the host: keeps files created in /var/lib/jarvis/slots
+    # agent-owned (the native unit ran as agent), so a rollback to the unit
+    # keeps working.
+    user: "1001:1001"
+    runtime: nvidia
+    shm_size: "16gb"
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - /opt/jarvis-engine:/opt/jarvis-engine:ro
+      - /var/lib/jarvis/slots:/var/lib/jarvis/slots
+    command:
+      [ "-m", "/opt/jarvis-engine/models/jarvis-brain.gguf",
+        "--port", "11434",
+        "--parallel", "2",
+        "--ctx-size", "131072",
+        "--kv-unified",
+        "--jinja",
+        "--chat-template-file", "/opt/jarvis-engine/templates/qwen3.8-chat-template.jinja",
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--slot-save-path", "/var/lib/jarvis/slots",
+        "--log-disable" ]
+
+  # ---------------- chat / dashboard / ha ----------------
+  chat:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/jarvis-chat }
+    image: jarvis/jarvis-chat:local
+    container_name: jarvis-chat
+    restart: always
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+    environment:
+      HOME: /home/agent
+      JARVIS_CONF: /home/agent/.config/jarvis
+      ENGINE_URL: http://engine:11434
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      DASHBOARD_ADDR: dashboard:8080
+    volumes:
+      - /home/agent/.config/jarvis:/home/agent/.config/jarvis
+      - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/dashboard }
+    image: jarvis/jarvis-dashboard:local
+    container_name: jarvis-dashboard
+    restart: on-failure
+    ports:
+      - "8080:8080"
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+    environment:
+      HOME: /home/agent
+      JARVIS_CONF: /home/agent/.config/jarvis
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+    volumes:
+      - /home/agent/.config/jarvis:/home/agent/.config/jarvis
+      - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+
+  ha:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/jarvis-ha }
+    image: jarvis/jarvis-ha:local
+    container_name: jarvis-ha
+    restart: on-failure
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+      - /home/agent/.config/jarvis/ha.env
+    environment:
+      HOME: /home/agent
+      JARVIS_CONF: /home/agent/.config/jarvis
+      HA_MQTT_URL: mqtt://rabbitmq:1883
+      HA_ENGINE_URL: http://engine:11434
+    volumes:
+      - /home/agent/.config/jarvis:/home/agent/.config/jarvis
+      - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+
+  # ---------------- voice (STT -> brain -> TTS, port 8100) ----------------
+  # Code is the pinned deploy point /opt/jarvis-voice (see its DEPLOYED_FROM).
+  voice:
+    build:
+      context: .
+      dockerfile: docker/voice/Dockerfile
+    image: jarvis/voice:local
+    container_name: jarvis-voice
+    restart: on-failure
+    ports:
+      - "8100:8100"
+    working_dir: /opt/jarvis-voice
+    command: ["python3", "scripts/voice_service.py"]
+    env_file:
+      - /home/agent/.config/jarvis/local.env
+      # wins over local.env: auth OFF until the HA-side jarvis_voice
+      # integration sends credentials (see /opt/jarvis-voice/auth-off.env)
+      - /opt/jarvis-voice/auth-off.env
+    environment:
+      HOME: /home/agent
+      LISTEN_PORT: "8100"
+      WHISPER_MODEL: small
+      JARVIS_VOICE: glados
+      OLLAMA_URL: http://engine:11434
+      MEMORY_URL: http://memory:8101
+    volumes:
+      - /opt/jarvis-voice:/opt/jarvis-voice
+      - /home/agent/.cache/huggingface:/home/agent/.cache/huggingface:ro
+
+  # ---------------- memory (vector search over work logs, port 8101) --------
+  memory:
+    build:
+      context: .
+      dockerfile: docker/memory/Dockerfile
+    image: jarvis/memory:local
+    container_name: jarvis-memory
+    restart: on-failure
+    ports:
+      - "127.0.0.1:8101:8101"
+    environment:
+      HOME: /home/agent
+      MEMORY_PORT: "8101"
+    volumes:
+      - /opt/jarvis-memory:/opt/jarvis-memory:ro
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+    command: ["python3", "/opt/jarvis-memory/memory_service.py"]
+
+  # Replaces jarvis-memory-reindex.timer (15 min cadence, 3 min after boot).
+  memory-reindex:
+    image: jarvis/memory:local
+    container_name: jarvis-memory-reindex
+    restart: unless-stopped
+    environment:
+      HOME: /home/agent
+    volumes:
+      - /opt/jarvis-memory:/opt/jarvis-memory:ro
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+    command: >
+      sh -c "sleep 180;
+             while true; do
+               python3 /opt/jarvis-memory/memory_service.py --reindex;
+               sleep 900;
+             done"
+
+  # ---------------- optional: raw-queue worker + wake bridge ----------------
+  worker:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/worker }
+    image: jarvis/worker:local
+    container_name: jarvis-worker
+    profiles: ["optional"]
+    restart: always
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+    environment:
+      HOME: /home/agent
+      JARVIS_CONF: /home/agent/.config/jarvis
+      ENGINE_URL: http://engine:11434
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      DASHBOARD_ADDR: dashboard:8080
+    volumes:
+      - /home/agent/.config/jarvis:/home/agent/.config/jarvis
+      - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+
+  wake-queue:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/wake-queue }
+    image: jarvis/wake-queue:local
+    container_name: jarvis-wake-queue
+    profiles: ["optional"]
+    restart: always
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+    environment:
+      HOME: /home/agent
+      JARVIS_CONF: /home/agent/.config/jarvis
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+    volumes:
+      - /home/agent/.config/jarvis:/home/agent/.config/jarvis
+      - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+
+  # ---------------- monitoring ----------------
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: jarvis-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    command:
+      [ "--config.file=/etc/prometheus/prometheus.yml",
+        "--storage.tsdb.path=/prometheus",
+        "--storage.tsdb.retention.time=15d",
+        "--web.listen-address=0.0.0.0:9090" ]
+    volumes:
+      - ./docker/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: jarvis-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./docker/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+
+  # Host metrics: rootfs is bind-mounted read-only (the --collector.systemd
+  # unit from the native unit is dropped — no systemd inside the container).
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: jarvis-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    command:
+      [ "--path.rootfs=/host",
+        "--web.listen-address=0.0.0.0:9100" ]
+    volumes:
+      - /:/host:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+
+  # nvidia-smi wrapper; the nvidia runtime mounts the driver libs + devices.
+  nvidia-exporter:
+    build:
+      context: .
+      dockerfile: docker/nvidia-exporter/Dockerfile
+    image: jarvis/nvidia-exporter:local
+    container_name: jarvis-nvidia-exporter
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    runtime: nvidia
+    volumes:
+      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
+    command: ["3001"]
+
 volumes:
   rabbitmq_data:
+  prometheus_data:
+  grafana_data:
