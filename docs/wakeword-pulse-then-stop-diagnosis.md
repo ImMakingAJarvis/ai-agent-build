@@ -6,9 +6,12 @@
 openWakeWord, wake word "Hey Jarvis") → HA 2026.10 @ 111.1.2.200:80 → "Jarvis"
 Assist pipeline → `jarvis_voice` HTTP conversation agent → voice service
 (111.1.2.27:8100)
-**Sources:** HA `/api/states` (live) + history/logbook (111.1.2.200), `journalctl
--u jarvis-voice` + Docker `jarvis-voice` logs (this box), companion docs
-`runner-log-tail-2026-10-27.md`, `phase4-wake-test-error-light-capture.md`,
+**Sources:** HA `/api/states` (live) + history/logbook (111.1.2.200), the
+`homeassistant` MCP server (live context from this box — device domains like
+`light`; it does not expose `stt` entities or Assist-pipeline config),
+`journalctl -u jarvis-voice` + Docker `jarvis-voice` logs (this box),
+companion docs `runner-log-tail-2026-10-27.md`,
+`phase4-wake-test-error-light-capture.md`,
 `openwakeword-vpe-confirmation.md`. No code changes.
 
 ## TL;DR
@@ -82,12 +85,31 @@ Connect a working STT to the "Jarvis" pipeline. Primary option:
 Equivalent alternative: repair/reinstall the speech-to-phrase addon so
 `stt.speech_to_phrase` becomes available.
 
-Either way requires **HA-box access** (Supervisor/UI or `home-assistant.log`) —
-the Assist-pipeline config is not exposed over the REST/WebSocket API from this
-box (`/api/assist_pipeline` → 404), so it cannot be applied from here. After the
-STT is live, re-test "Hey Jarvis, the sky is blue": the satellite should advance
-`listening → processing → responding`, a `POST /voice/json` should appear in the
-`jarvis-voice` journal, and a TTS reply should play on the VPE speaker.
+This box **does have HA access** — the `homeassistant` MCP server (live context
++ device control) plus the REST and WebSocket API — and that is how this
+diagnosis was re-verified live on Oct 27 (both STT entities still `unknown`,
+satellite `idle`, pipeline selection still "Jarvis"). But the Assist-pipeline
+/ STT config is not *settable* through any of those interfaces: the MCP toolset
+has no STT/pipeline tools (and does not expose `stt` entities in live context),
+REST `/api/assist_pipeline` → 404, and WS `assist_pipeline/list` →
+`unknown_command` (HA 2026.9.4). So the config change itself (load the Whisper
+STT / re-point the pipeline STT / repair the addon) still has to be made **on
+the HA box** (UI or Supervisor); the result is verifiable from here afterwards.
+After the STT is live, re-test "Hey Jarvis, the sky is blue": the satellite
+should advance `listening → processing → responding`, a `POST /voice/json`
+should appear in the `jarvis-voice` journal, and a TTS reply should play on the
+VPE speaker.
+
+## Re-verification (2026-10-27, job chat-1793164047-6316)
+
+Re-checked live from this box after the owner pointed out the MCP `homeassistant`
+server: it works (live context for device domains such as `light`), confirming
+this box can *see* HA. REST `/api/states` re-check: `stt.speech_to_phrase` and
+`stt.nathan_s_iphone` both still `unknown` (last changed 2026-10-27 01:25 / 02:41
+UTC), satellite `idle`, `select.…_assistant` still "Jarvis". Diagnosis holds.
+Also confirmed the pipeline/STT config cannot be set from here by any available
+interface (MCP toolset: no STT/pipeline tools; REST `/api/assist_pipeline` → 404;
+WS `assist_pipeline/list` → `unknown_command`).
 
 ## Limitations
 
