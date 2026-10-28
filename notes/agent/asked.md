@@ -24,3 +24,4 @@
 - 2026-10-28T20:11Z Nathan's repeated theme (Oct 26-28): fix jobs must always run before build, build before background — resolved by PR #64 + #74, original job 6cbc closed on evidence
 - 2026-10-28T20:30Z Nathan (job chat-1793091300-027f): discord daemon should be able to trigger photo gen, and there should be a site displaying all generated images
 - 2026-10-28T20:38Z Nathan: fix PR #97 (iGPU investigation) — it was CONFLICTING with main; wanted it mergeable for review
+- 2026-10-28T22:37Z !photo posted no image — Nathan asked to debug the art/Discord posting path; also: he'll check jarvis-brain status next job if local chat feels off
