@@ -27,3 +27,34 @@ Rules:
 A Stop hook (`scripts/notes-stop-hook.sh`, wired in `.claude/settings.json`)
 blocks the first stop of a session when no note was written yet. If you
 get that reminder, write the section and end the run again.
+
+## Kanban: read the task's board entry before building
+
+Before starting a job whose title references a kanban entry (a kanban ID
+in the title — an 8-char hex task ID like `4546f229`, or a full UUID),
+check the board:
+
+    ls ~/.local/share/jarvis/kanban/tasks/<id>*.json
+
+If the entry exists, read it all before building:
+- the task JSON — `title`, `content` (detailed instructions /
+  acceptance criteria), `status`, `priority`, `branch`, `model`
+- its epic — `epic_id` →
+  `~/.local/share/jarvis/kanban/epics/<epic_id>.json` (theme,
+  description, sibling tasks)
+- any comments on the task (see below)
+
+The board is a file store; the dashboard also serves it at
+`http://localhost:8080/api/kanban/tasks` and `/api/kanban/epics`. If no
+task file matches the ID in the title, the job stands on its own —
+build from the job's instructions.
+
+### Comments (not implemented yet)
+
+As of 2026-10-27 the kanban has no comment system: task JSONs carry no
+comments, and the store/API have no comment endpoints. Adding it is
+queued as job `kanban-comments` (Nathan's ask, job
+chat-1793163063-9121). When it ships, update this section: list the
+task's comments in the read step above, and add that the worker may add
+comments to a kanban task when it has questions while building — post
+the question as a comment rather than blocking the round on it.

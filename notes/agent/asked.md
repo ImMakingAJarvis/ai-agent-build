@@ -17,3 +17,4 @@
 - 2026-10-28T04:21Z Voice chat app mic: 'permission denied, never asked, still denied with everything allowed' (chat-1793001320-4d10) — classic non-secure-context signature, not a settings issue
 - 2026-10-28T04:39Z Nathan reported the Discord chatbot was 'stumbling' (replying 'Sorry, my brain stumbled'); wanted it fixed so it actually answers.
 - 2026-10-28T05:36Z Nathan on PR #93: 'you have MCP access to HA — is it not in your tools?' — confirmed it is and works; corrected PR; Whisper-STT fix still to be applied on the HA box
+- 2026-10-28T06:26Z Nathan: worker must check the kanban entry (kanban ID in job title) and read task+epic+comments before building; worker must be able to comment on the kanban with questions — CLAUDE.md gets that line once the comment system ships
