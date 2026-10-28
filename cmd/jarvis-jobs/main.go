@@ -199,6 +199,9 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 	r := &agentjob.Runner{Store: store, History: h}
 	if conf := os.Getenv("JARVIS_CONF"); conf != "" {
 		r.SignalFile = conf + "/pause-signal"
+		// !restart DM (jarvis-chat) writes this; the signal watcher kills
+		// the round and re-queues the job for a fresh run.
+		r.RestartSignalFile = conf + "/restart-signal"
 	}
 	// Sample GPU power for the whole round; the total lands in the job
 	// state and history as kWh + $ at the configured JARVIS_POWER_RATE.
