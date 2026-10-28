@@ -7,7 +7,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
     fastapi "uvicorn[standard]" faster-whisper edge-tts \
-    soundfile numpy httpx pydantic
+    soundfile numpy httpx pydantic python-multipart
 USER 1001:1001
 WORKDIR /opt/jarvis-voice
-ENTRYPOINT ["python3", "scripts/voice_service.py"]
+# No ENTRYPOINT: docker-compose.yml passes the full command, so an entrypoint
+# here would duplicate the script path as an extra argument.

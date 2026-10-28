@@ -5,4 +5,6 @@ FROM python:3.14-slim
 RUN pip install --no-cache-dir \
     fastapi "uvicorn[standard]" onnxruntime tokenizers numpy pydantic
 USER 1001:1001
-ENTRYPOINT ["python3", "/opt/jarvis-memory/memory_service.py"]
+# No ENTRYPOINT: docker-compose.yml passes the full command (memory and
+# memory-reindex differ), so an entrypoint here would duplicate the script
+# path as an extra argument and crash argparse.

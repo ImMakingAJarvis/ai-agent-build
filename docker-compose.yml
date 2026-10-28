@@ -46,6 +46,10 @@ services:
     # keeps working.
     user: "1001:1001"
     runtime: nvidia
+    # nvidia-container-runtime in CDI "auto" mode injects nothing unless a
+    # device is requested — this env var selects all GPUs.
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
     shm_size: "16gb"
     ports:
       - "127.0.0.1:11434:11434"
@@ -116,15 +120,22 @@ services:
     image: jarvis/jarvis-ha:local
     container_name: jarvis-ha
     restart: unless-stopped
+    # nvidia-smi (GPU temp/power sensor) runs inside the container; the
+    # nvidia runtime + host binary mount give it driver access, like
+    # nvidia-exporter.
+    runtime: nvidia
     env_file:
       - /home/agent/.config/jarvis/agent.env
       - /home/agent/.config/jarvis/ha.env
     environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
       HOME: /home/agent
       JARVIS_CONF: /home/agent/.config/jarvis
       HA_MQTT_URL: mqtt://rabbitmq:1883
       HA_ENGINE_URL: http://engine:11434
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
     volumes:
+      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
@@ -171,6 +182,9 @@ services:
     environment:
       HOME: /home/agent
       MEMORY_PORT: "8101"
+      # bind wide inside the container; the host-side port mapping
+      # (127.0.0.1:8101:8101) keeps it loopback-only from the host
+      MEMORY_HOST: "0.0.0.0"
     volumes:
       - /opt/jarvis-memory:/opt/jarvis-memory:ro
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
@@ -289,6 +303,8 @@ services:
     ports:
       - "3001:3001"
     runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
     volumes:
       - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
     command: ["3001"]
