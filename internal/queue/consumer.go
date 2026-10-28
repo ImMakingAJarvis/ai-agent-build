@@ -44,9 +44,10 @@ func NewConsumer(conn *Conn, handler Handler) *Consumer {
 func (c *Consumer) Start() error {
 	ch := c.conn.Channel()
 
-	// Declare queues (idempotent).
+	// Declare queues (idempotent). Args must match rabbitmq/definitions.json
+	// or RabbitMQ closes the channel (PRECONDITION_FAILED → 504).
 	for _, q := range AllQueues[:] {
-		if _, err := ch.QueueDeclare(q, true, false, false, false, nil); err != nil {
+		if _, err := ch.QueueDeclare(q, true, false, false, false, queueDeclareArgs(q)); err != nil {
 			return fmt.Errorf("declare queue %s: %w", q, err)
 		}
 		// Bind to the tasks exchange with the appropriate routing key.
@@ -77,6 +78,21 @@ func (c *Consumer) Start() error {
 
 	log.Printf("consumer: listening on %s, %s, %s, %s", AllQueues[0], AllQueues[1], AllQueues[2], AllQueues[3])
 	return nil
+}
+
+// queueDeclareArgs matches rabbitmq/definitions.json. A declare with nil
+// args against an existing x-priority queue fails and kills the worker.
+func queueDeclareArgs(name string) amqp.Table {
+	switch name {
+	case VoiceQueue:
+		return amqp.Table{"x-priority": int32(10)}
+	case CodingQueue:
+		return amqp.Table{"x-priority": int32(5)}
+	case BackgroundQueue:
+		return amqp.Table{"x-priority": int32(1)}
+	default:
+		return nil
+	}
 }
 
 // Stop signals the consumer to shut down.
