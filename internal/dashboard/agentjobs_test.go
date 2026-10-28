@@ -24,6 +24,7 @@ func TestAgentJobsSection(t *testing.T) {
 		Spec:  agentjob.Spec{ID: "d0", Title: "Fix poll", DependsOn: []string{"j0"}, Driver: "local"},
 		State: agentjob.State{Status: agentjob.Done, RanWith: "sonnet", PRURL: "https://github.com/o/r/pull/9", Kwh: 0.5, PowerCost: 0.075},
 	}}}
+	st.InProgress, st.Waiting, st.WaitingMore, st.Finished, st.FinishedTotal = splitAgentJobs(st.AgentJobs)
 	var buf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&buf, "agent-jobs-section", st); err != nil {
 		t.Fatal(err)

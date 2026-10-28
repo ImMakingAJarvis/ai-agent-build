@@ -127,6 +127,50 @@ type DashboardState struct {
 	APICount        int              `json:"api_job_count"`    // Number of API-dispatched jobs
 	LocalCount      int              `json:"local_job_count"`  // Number of local jobs
 	WorkerMessages  int              `json:"worker_messages"` // Owner messages waiting in the agent inbox
+
+	// Agent-jobs panel view (HTML only): active work, capped waiting list,
+	// and the most recent finished jobs, so the 15s refresh stays small.
+	InProgress    []agentjob.Job `json:"-"`
+	Waiting       []agentjob.Job `json:"-"`
+	WaitingMore   int            `json:"-"`
+	Finished      []agentjob.Job `json:"-"`
+	FinishedTotal int            `json:"-"`
+}
+
+const (
+	panelWaitingMax  = 15
+	panelFinishedMax = 25
+)
+
+// splitAgentJobs buckets jobs for the dashboard panel: running/claimed work,
+// the next waiting (ready) jobs in queue order, and the newest finished ones.
+func splitAgentJobs(jobs []agentjob.Job) (inProgress, waiting []agentjob.Job, waitingMore int, finished []agentjob.Job, finishedTotal int) {
+	for _, j := range jobs {
+		switch j.Status {
+		case "running", "claimed":
+			inProgress = append(inProgress, j)
+		case "ready", "pending", "":
+			waiting = append(waiting, j)
+		default:
+			finished = append(finished, j)
+		}
+	}
+	if len(waiting) > panelWaitingMax {
+		waitingMore = len(waiting) - panelWaitingMax
+		waiting = waiting[:panelWaitingMax]
+	}
+	key := func(j agentjob.Job) string {
+		if j.FinishedAt != "" {
+			return j.FinishedAt
+		}
+		return j.StartedAt
+	}
+	sort.SliceStable(finished, func(a, b int) bool { return key(finished[a]) > key(finished[b]) })
+	finishedTotal = len(finished)
+	if len(finished) > panelFinishedMax {
+		finished = finished[:panelFinishedMax]
+	}
+	return
 }
 
 // LightweightState is returned for the initial page load.
@@ -298,6 +342,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/queue", s.handleQueue)
 	mux.HandleFunc("POST /api/queue/reorder", s.handleQueueReorder)
 	mux.HandleFunc("POST /api/queue/band-order", s.handleQueueBandOrder)
+	mux.HandleFunc("GET /logs", s.handleLogsPage)
+	mux.HandleFunc("GET /api/engine/logs", s.handleEngineLogs)
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
 	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
@@ -406,6 +452,7 @@ func (s *Server) handleAgentJobsSectionHTML(w http.ResponseWriter, r *http.Reque
 		AgentJobs:      cached.agentJobs,
 		WorkerMessages: inbox.Count(),
 	}
+	data.InProgress, data.Waiting, data.WaitingMore, data.Finished, data.FinishedTotal = splitAgentJobs(cached.agentJobs)
 	var buf bytes.Buffer
 	if err := s.tmpl.ExecuteTemplate(&buf, "agent-jobs-section", data); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)

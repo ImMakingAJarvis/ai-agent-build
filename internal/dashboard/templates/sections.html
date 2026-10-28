@@ -194,27 +194,38 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
   <div class="msg-waiting">{{ .WorkerMessages }} message(s) waiting for the worker &mdash; picked up at its next step</div>
   {{ end }}
   {{ if .AgentJobs }}
-  <div class="table-wrap">
-  <table>
-    <thead><tr><th>Job</th><th>Status</th><th>Driver</th><th>Power</th><th>Log</th><th>PR</th><th>Depends on</th></tr></thead>
-    <tbody>
-      {{ range .AgentJobs }}
-      <tr>
-        <td title="{{ .ID }}">{{ .ID }} — {{ .Title }}</td>
-        <td>{{ .Status }}</td>
-        <td>{{ if .RanWith }}{{ .RanWith }}{{ else }}{{ .Spec.Driver }}{{ end }}</td>
-        <td class="cost-cell">{{ if .Kwh }}⚡ {{ formatKwh .Kwh }} &middot; {{ formatCost .PowerCost }}{{ else }}-{{ end }}</td>
-        <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
-        <td>{{ if .PRURL }}<a href="{{ .PRURL }}">PR</a>{{ end }}</td>
-        <td>{{ range .DependsOn }}{{ . }} {{ end }}</td>
-      </tr>
-      {{ end }}
-    </tbody>
-  </table>
-  </div>
+  <div class="section-title">In progress</div>
+  {{ if .InProgress }}{{ template "agent-jobs-table" .InProgress }}{{ else }}<div class="empty-state">Nothing running right now.</div>{{ end }}
+  {{ if .Waiting }}
+  <div class="section-title">Waiting{{ if .WaitingMore }} (next {{ len .Waiting }}, +{{ .WaitingMore }} more in the Queue below){{ end }}</div>
+  {{ template "agent-jobs-table" .Waiting }}
+  {{ end }}
+  <div class="section-title">Recently finished (latest {{ len .Finished }} of {{ .FinishedTotal }})</div>
+  {{ if .Finished }}{{ template "agent-jobs-table" .Finished }}{{ else }}<div class="empty-state">Nothing finished yet.</div>{{ end }}
   {{ else }}
   <div class="empty-state">No agent jobs.</div>
   {{ end }}
+</div>
+{{end}}
+
+{{define "agent-jobs-table"}}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Job</th><th>Status</th><th>Driver</th><th>Power</th><th>Log</th><th>PR</th><th>Depends on</th></tr></thead>
+  <tbody>
+    {{ range . }}
+    <tr>
+      <td title="{{ .ID }}">{{ .ID }} — {{ .Title }}</td>
+      <td>{{ .Status }}</td>
+      <td>{{ if .RanWith }}{{ .RanWith }}{{ else }}{{ .Spec.Driver }}{{ end }}</td>
+      <td class="cost-cell">{{ if .Kwh }}⚡ {{ formatKwh .Kwh }} &middot; {{ formatCost .PowerCost }}{{ else }}-{{ end }}</td>
+      <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
+      <td>{{ if .PRURL }}<a href="{{ .PRURL }}">PR</a>{{ end }}</td>
+      <td>{{ range .DependsOn }}{{ . }} {{ end }}</td>
+    </tr>
+    {{ end }}
+  </tbody>
+</table>
 </div>
 {{end}}
 
