@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -161,6 +162,7 @@ func TestSectionsHaveLogLinks(t *testing.T) {
 		}},
 		RecentJobs: []JobRecord{{ID: "cli-1", Status: "completed"}},
 	}
+	st.InProgress, st.Waiting, st.WaitingMore, st.Finished, st.FinishedTotal = splitAgentJobs(st.AgentJobs)
 	var buf strings.Builder
 	for _, name := range []string{"agent-jobs-section", "jobs-section"} {
 		if err := tmpl.ExecuteTemplate(&buf, name, st); err != nil {
@@ -227,5 +229,30 @@ func TestIndexIsStaticShell(t *testing.T) {
 		if !strings.Contains(body, w) {
 			t.Errorf("index lacks queue markup %q", w)
 		}
+	}
+}
+
+func TestSplitAgentJobs(t *testing.T) {
+	var jobs []agentjob.Job
+	mk := func(id, status, fin string) {
+		jobs = append(jobs, agentjob.Job{Spec: agentjob.Spec{ID: id}, State: agentjob.State{Status: status, FinishedAt: fin}})
+	}
+	mk("run", "running", "")
+	for i := 0; i < panelWaitingMax+3; i++ {
+		mk(fmt.Sprintf("r%d", i), "ready", "")
+	}
+	for i := 0; i < panelFinishedMax+5; i++ {
+		mk(fmt.Sprintf("d%02d", i), "done", fmt.Sprintf("2026-10-27T10:%02d:00Z", i))
+	}
+	mk("bad", "failed", "2026-10-28T00:00:00Z")
+	ip, w, more, fin, total := splitAgentJobs(jobs)
+	if len(ip) != 1 || ip[0].ID != "run" {
+		t.Errorf("in progress: %+v", ip)
+	}
+	if len(w) != panelWaitingMax || more != 3 {
+		t.Errorf("waiting %d more %d", len(w), more)
+	}
+	if len(fin) != panelFinishedMax || total != panelFinishedMax+6 || fin[0].ID != "bad" {
+		t.Errorf("finished %d total %d first %s", len(fin), total, fin[0].ID)
 	}
 }
