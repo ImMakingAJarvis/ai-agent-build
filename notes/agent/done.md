@@ -18,3 +18,4 @@
 - 2026-10-28T03:23Z Dashboard: in-progress / recently-finished job lists (PR #82)
 - 2026-10-28T03:23Z Stack: containerize all self-built services (compose + Dockerfiles + boot) (PR #83)
 - 2026-10-28T03:23Z Chatbot: memory of the work logs (vector DB wiring, RAG + search tool) (PR #85)
+- 2026-10-28T03:29Z [chat-1792998605-81b4] Agent notes: three-bucket done/system/asked notes + jarvis-notes CLI, wired into the vector graph (PR #87)
