@@ -27,3 +27,4 @@
 - 2026-10-28T05:36Z [chat-1793164047-6316] PR #93: corrected HA-access wording — this box CAN see HA via MCP/REST/WS (re-verified dead STT live); only the pipeline/STT config is not settable from here (job chat-1793164047-6316)
 - 2026-10-28T05:41Z [chat-1793162906-6c4d] [chat-1793162906-6c4d] Dumped details of the 10 kanban task JSONs (6 NoBrakes + 4 VRAM-benchmark tasks, all backlog/p5) to notes/kanban/kanban-dump-2026-10-27.md (PR #94)
 - 2026-10-28T06:26Z [chat-1793163063-9121] CLAUDE.md: read the kanban board entry (task+epic+comments, ID from job title) before building; comment system absent so queued job kanban-comments (PR #95)
+- 2026-10-28T06:50Z [chat-1793164192-8d46] Voice channel epic 'camera mics + direct Sonos/Google speakers (no HA)' on the kanban: 12 tasks in dependency order + design doc (job chat-1793164192-8d46, PR #96)
