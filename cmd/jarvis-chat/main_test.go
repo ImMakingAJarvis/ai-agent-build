@@ -20,9 +20,14 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
+
+// deadMemory points at a closed port: Search fails open and returns nil,
+// keeping the handleMessage tests hermetic (no live memory service).
+var deadMemory = memory.NewClient("http://127.0.0.1:1")
 
 // testDiscord mimics *chat.Discord for tests.
 // It records Notify and Typing calls so we can assert on them.
@@ -172,7 +177,7 @@ func TestHandleMessage_Reply(t *testing.T) {
 	d := &testDiscord{}
 	var history []string
 
-	handleMessage(d, hAgent, voices.Get(""), chat.Incoming{Content: "Hi Jarvis!"}, &history)
+	handleMessage(d, hAgent, voices.Get(""), deadMemory, chat.Incoming{Content: "Hi Jarvis!"}, &history)
 
 	// Should have typed at least once.
 	if d.typingCount() < 1 {
@@ -234,7 +239,7 @@ func TestHandleMessage_BusyNotice(t *testing.T) {
 
 	// "What are you working on?" is fast-classified as check_status action,
 	// so use a message that's clearly conversational to exercise the chat path.
-	handleMessage(d, hAgent, voices.Get(""), chat.Incoming{Content: "Tell me a fun fact about robots"}, &history)
+	handleMessage(d, hAgent, voices.Get(""), deadMemory, chat.Incoming{Content: "Tell me a fun fact about robots"}, &history)
 
 	// Should have sent busy notice then the actual reply.
 	if n := d.notifyCount(); n != 2 {
@@ -280,7 +285,7 @@ func TestHandleMessage_Timeout(t *testing.T) {
 	d := &testDiscord{}
 	var history []string
 
-	handleMessage(d, hAgent, voices.Get(""), chat.Incoming{Content: "Hello?"}, &history)
+	handleMessage(d, hAgent, voices.Get(""), deadMemory, chat.Incoming{Content: "Hello?"}, &history)
 
 	// Should have sent busy notice then timeout message.
 	if n := d.notifyCount(); n != 2 {
@@ -439,4 +444,97 @@ func TestLogConversation_Disabled(t *testing.T) {
 	// Explicitly empty dir disables logging; must not panic or write.
 	t.Setenv("JARVIS_NOTES_DIR", "")
 	logConversation("a", "b")
+}
+
+// TestHandleMessage_MemoryContext verifies that chat replies get relevant
+// work-log context from the memory service injected into the system
+// prompt (RAG), and that a dead service leaves the prompt untouched.
+func TestHandleMessage_MemoryContext(t *testing.T) {
+	oldBusy := busyTimeout
+	oldMax := maxTimeout
+	busyTimeout = 500 * time.Millisecond
+	maxTimeout = 2 * time.Second
+	defer func() {
+		busyTimeout = oldBusy
+		maxTimeout = oldMax
+	}()
+
+	// Fake memory service: one hit about the wake word.
+	memSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"results":[{"text":"wake word latency measured at 1.2s","score":0.7,"source":"job","path":"job-1/transcript.txt","title":"wake-latency"}]}`)
+	}))
+	defer memSrv.Close()
+
+	// Fake Ollama that records the Chat request bodies.
+	var mu sync.Mutex
+	var bodies []string
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []models.ChatMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, req.Messages[0].Content) // system prompt of each call
+		mu.Unlock()
+		reply := `{"type":"chat","reply":"it was 1.2s"}`
+		if len(bodies) > 1 {
+			reply = "it was 1.2s"
+		}
+		resp := models.ChatResponse{
+			Choices: []struct {
+				Message models.ChatMessage `json:"message"`
+			}{
+				{Message: models.ChatMessage{Role: "assistant", Content: reply}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer ollama.Close()
+
+	t.Setenv("OLLAMA_URL", ollama.URL)
+	t.Setenv("JARVIS_NOTES_DIR", t.TempDir())
+	client := models.NewClient()
+	hAgent := newTestHermesAgent(client)
+	d := &testDiscord{}
+	var history []string
+
+	mem := memory.NewClient(memSrv.URL)
+	handleMessage(d, hAgent, voices.Get(""), mem,
+		chat.Incoming{Content: "what was the wake word latency again?"}, &history)
+
+	mu.Lock()
+	if len(bodies) < 1 {
+		t.Fatalf("want a chat call, got %d", len(bodies))
+	}
+	chatSystem := bodies[len(bodies)-1] // last call is the chat reply
+	for _, want := range []string{
+		"Relevant context from the work logs",
+		"job", "job-1/transcript.txt", "1.2s",
+	} {
+		if !strings.Contains(chatSystem, want) {
+			t.Errorf("chat system prompt missing %q:\n%s", want, chatSystem)
+		}
+	}
+
+	// Dead memory service: no context block, reply still works.
+	bodies = nil
+	mu.Unlock()
+	handleMessage(d, hAgent, voices.Get(""), deadMemory,
+		chat.Incoming{Content: "hello?"}, &history)
+	mu.Lock()
+	if len(bodies) < 1 {
+		t.Fatalf("want a chat call, got %d", len(bodies))
+	}
+	if strings.Contains(bodies[len(bodies)-1], "Relevant context from the work logs") {
+		t.Errorf("dead memory service must not add context:\n%s", bodies[len(bodies)-1])
+	}
 }

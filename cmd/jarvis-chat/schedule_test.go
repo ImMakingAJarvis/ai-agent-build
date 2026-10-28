@@ -196,7 +196,7 @@ func TestHandleMessageScheduleEnqueues(t *testing.T) {
 
 	d := &testDiscord{}
 	var history []string
-	handleMessage(d, hAgent, voices.Get(""), chat.Incoming{
+	handleMessage(d, hAgent, voices.Get(""), deadMemory, chat.Incoming{
 		ChannelID: "ch", MessageID: "msg", Content: "add a health endpoint",
 	}, &history)
 
