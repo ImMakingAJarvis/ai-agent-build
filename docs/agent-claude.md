@@ -29,11 +29,30 @@ Endpoints:
 It reindexes automatically every 15 minutes (`jarvis-memory-reindex.timer`).
 Data lives in `~/.local/share/jarvis/memory/memory.db`.
 
-Caveat: the service code (`scripts/memory_service.py`) currently lives on
-branch `phase-chatbot-memory-vectordb`, not main. It can also be driven as a
-CLI (`python3 scripts/memory_service.py --search "..." | --stats | --reindex`).
-If the service is down, restore the script from that branch and run
-`sudo systemctl restart jarvis-memory`.
+It can also be driven as a CLI
+(`python3 scripts/memory_service.py --search "..." | --stats | --reindex`).
+If the service is down, run `sudo systemctl restart jarvis-memory`.
+
+## Keep notes — things done, the system, what Nathan asked
+
+Besides the per-run conversation notes (`notes/conversations/agent-<date>.md`),
+keep a small standing record in three buckets under `notes/agent/`, using
+`jarvis-notes`:
+
+- `done`   — a curated "shipped" log (one line per finished job/PR)
+- `system` — durable facts about this machine/stack (services, ports, gotchas)
+- `asked`  — themes of what Nathan has asked about / decided
+
+At the end of each job, record what is worth keeping:
+
+    jarvis-notes add done "<what shipped> (PR #n)" --job <id>
+    jarvis-notes add system "<new durable fact, if any>"
+    jarvis-notes add asked "<something Nathan asked or decided, if any>"
+
+Each `add` writes the file AND pushes it into the vector graph immediately, so
+a note is searchable this session rather than after the 15-minute reindex.
+Search the graph (above) before grepping the filesystem for prior work.
+See `docs/agent-notes.md` for the full how-it-works.
 
 ## Home Assistant (the house)
 
