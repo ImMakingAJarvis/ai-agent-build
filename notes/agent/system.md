@@ -1,0 +1,17 @@
+# system — durable facts about this machine / stack
+# One fact per line: `- <UTC ts> <fact>`. Update when a fact changes.
+
+- 2026-10-28T03:23Z Machine: Ubuntu 26.04.1 LTS, glibc 2.43, kernel 7.0.0-38-generic; RTX 4090 (24 GB), 128 GB RAM. Runs as user `agent` (passwordless sudo for system changes).
+- 2026-10-28T03:23Z The stack is containerized with docker compose (PR #83): one `docker-compose.yml` at the repo root, started by a boot unit. Full service list + health checks in `docs/services.md`.
+- 2026-10-28T03:23Z Local brain = llama.cpp server in the `jarvis-engine` container on `127.0.0.1:11434` (serves the `jarvis-brain` model). Model is Qwen3.8 27B Q4_K_M, 128K context, ~48 tok/s, ~18.5/24.5 GB VRAM (details: `docs/local-brain.md`). No separate coder model for now.
+- 2026-10-28T03:23Z Jarvis Memory Service = `jarvis-memory` container on `127.0.0.1:8101`. Local vector DB (SQLite + all-MiniLM-L6-v2 ONNX). DB at `~/.local/share/jarvis/memory/memory.db`. Re-scan every 15 min (`jarvis-memory-reindex.timer`). Sources: `job`, `jobs`, `kanban`, `queue`, `repo-doc`.
+- 2026-10-28T03:23Z Dashboard = `jarvis-dashboard` on `0.0.0.0:8080` (`/api/pending`, `/logs`, drag&drop queue, job lists). Voice = `jarvis-voice` on `0.0.0.0:8100`. Discord chatbot = `jarvis-chat`.
+- 2026-10-28T03:23Z Queue = RabbitMQ in `jarvis-rabbitmq` (AMQP 127.0.0.1:5672, MQTT 0.0.0.0:1883, management 127.0.0.1:15672). Monitoring: Prometheus 9090, Grafana 3000, nvidia/node exporters (3001/9100).
+- 2026-10-28T03:23Z Agent data locations: job store `~/.local/share/jarvis/jobs/<id>/` (job.json, state.json, transcript.txt, output.txt); kanban `~/.local/share/jarvis/kanban/{epics,tasks}/`; current job `~/.config/jarvis/current-job`.
+- 2026-10-28T03:23Z Home Assistant runs at `http://111.1.2.200/` (HA 2026.10 behind a reverse proxy on port 80; 8123 is NOT reachable from this box). Use the `homeassistant` MCP server for all HA work; REST fallback on `/api`. See the HA section of `~/.claude/CLAUDE.md`.
+- 2026-10-28T03:23Z Git: repo `ImMakingAJarvis/ai-agent-build`. Work on `phase-<n>-<slug>` branches, never commit/push to main, open a PR. `gh` needs `GH_TOKEN=$(ghapp-token) gh ...` (the token expires hourly). Never commit secrets.
+- 2026-10-28T03:23Z Gotcha — PRs: a job is not done while its PR conflicts with main. `gh pr view <n> --json mergeable` must say MERGEABLE. The usual conflict is `notes/conversations/agent-<date>.md` — keep ALL entries from both sides.
+- 2026-10-28T03:23Z Gotcha — the brain engine's Docker image must match the host glibc (2.43); an image built against a different glibc will not run (hit in PR #83).
+- 2026-10-28T03:23Z Gotcha — kill throwaway processes by recorded PID or by port, never `pkill -f <path>` (it also kills the live /opt deployment and the running shell).
+- 2026-10-28T03:23Z Gotcha — the `sqlite3` CLI is not installed; query `memory.db` (and other SQLite files) with `python3 -c 'import sqlite3; ...'`.
+- 2026-10-28T03:23Z Gotcha — HA MCP working endpoint is `/api/mcp` (streamable HTTP); the old `/api/mcp_server/sse` path 404s on this HA version.

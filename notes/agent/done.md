@@ -1,0 +1,21 @@
+# done — what the agent has shipped
+# One line per finished job or PR: `- <UTC ts> [<job>] <what> (PR #n)`.
+# Keep it curated; the full detail lives in the job transcript in the vector graph.
+# (Seeded 2026-10-28 with recent merges; each round appends one line.)
+
+- 2026-10-28T03:23Z Conversation notes: agent notes + Stop-hook enforcement (PR #57)
+- 2026-10-28T03:23Z Worker: interrupt a running job from the queue site (owner messages, no restart) (PR #58)
+- 2026-10-28T03:23Z Worker: priority order jobs > fix > build > background (PR #64)
+- 2026-10-28T03:23Z Queue: drag to reorder & reclassify jobs, mouse + touch (PR #65)
+- 2026-10-28T03:23Z Voice chat: HTTPS mic (secure context) + IP-based link (PR #66)
+- 2026-10-28T03:23Z Kanban: fix empty board render (list APIs answer [] not null) (PR #70)
+- 2026-10-28T03:23Z Voice chat: schedule jobs + search job history via tool calling (PR #71)
+- 2026-10-28T03:23Z Queue: runtime re-prioritization of band order (PR #75)
+- 2026-10-28T03:23Z Mobile chat: Jarvis Chat PWA, iOS + Android (PR #76)
+- 2026-10-28T03:23Z PWA mic: decode webm/opus uploads via ffmpeg (PR #78)
+- 2026-10-28T03:23Z Voice: fix broken multi-line replies (newlines in reply headers) (PR #80)
+- 2026-10-28T03:23Z Dashboard: /logs page with engine status + log tails (PR #81)
+- 2026-10-28T03:23Z Dashboard: in-progress / recently-finished job lists (PR #82)
+- 2026-10-28T03:23Z Stack: containerize all self-built services (compose + Dockerfiles + boot) (PR #83)
+- 2026-10-28T03:23Z Chatbot: memory of the work logs (vector DB wiring, RAG + search tool) (PR #85)
+- 2026-10-28T03:29Z [chat-1792998605-81b4] Agent notes: three-bucket done/system/asked notes + jarvis-notes CLI, wired into the vector graph (PR #87)
