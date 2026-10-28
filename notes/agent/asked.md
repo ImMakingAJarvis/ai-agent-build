@@ -19,3 +19,4 @@
 - 2026-10-28T05:36Z Nathan on PR #93: 'you have MCP access to HA — is it not in your tools?' — confirmed it is and works; corrected PR; Whisper-STT fix still to be applied on the HA box
 - 2026-10-28T06:26Z Nathan: worker must check the kanban entry (kanban ID in job title) and read task+epic+comments before building; worker must be able to comment on the kanban with questions — CLAUDE.md gets that line once the comment system ships
 - 2026-10-28T06:50Z Own voice channel bypassing Home Assistant: UniFi Protect camera mics (RTSP audio) as input, Sonos (S1 RCP announce) / Google Nest (Cast) / camera speakers (Protect talk) as direct output; future mics expected — built as kanban epic ed9ecd12, 12 tasks, design doc PR #96
+- 2026-10-28T07:19Z Nathan asked (job chat-1793010774-0126) whether the Ryzen iGPU could serve as another model handler — investigated, PR #97, recommendation: keep disabled
