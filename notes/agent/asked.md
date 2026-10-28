@@ -16,3 +16,4 @@
 - 2026-10-28T03:57Z Nathan wants FreeToken as second runner: install+verify now, then VRAM-spare benchmark (100/150/200/250/300 MB free) of qwen3.8-flash-next (job chat-1792976974-392b)
 - 2026-10-28T04:21Z Voice chat app mic: 'permission denied, never asked, still denied with everything allowed' (chat-1793001320-4d10) — classic non-secure-context signature, not a settings issue
 - 2026-10-28T04:39Z Nathan reported the Discord chatbot was 'stumbling' (replying 'Sorry, my brain stumbled'); wanted it fixed so it actually answers.
+- 2026-10-28T05:36Z Nathan on PR #93: 'you have MCP access to HA — is it not in your tools?' — confirmed it is and works; corrected PR; Whisper-STT fix still to be applied on the HA box
