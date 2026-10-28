@@ -150,7 +150,7 @@ services:
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
 
-  # ---------------- voice (STT -> brain -> TTS, port 8100) ----------------
+  # ---------------- voice (STT -> brain -> TTS, ports 8100 + 8443) -------
   # Code is the pinned deploy point /opt/jarvis-voice (see its DEPLOYED_FROM).
   voice:
     build:
@@ -160,7 +160,9 @@ services:
     container_name: jarvis-voice
     restart: unless-stopped
     ports:
-      - "8100:8100"
+      - "8100:8100"   # plain HTTP — HA integration + machine-to-machine
+      - "8443:8443"   # HTTPS — browser UI; the mic (getUserMedia) only works
+                      # in secure contexts, so LAN devices must use this
     working_dir: /opt/jarvis-voice
     command: ["python3", "scripts/voice_service.py"]
     env_file:
@@ -178,6 +180,10 @@ services:
     volumes:
       - /opt/jarvis-voice:/opt/jarvis-voice
       - /home/agent/.cache/huggingface:/home/agent/.cache/huggingface:ro
+      # self-signed TLS cert for the 8443 listener (voice_service.py's default
+      # path ~/.config/jarvis/tls/voice.{crt,key}, HOME is /home/agent here);
+      # regenerate with scripts/gen_voice_cert.sh after the IP changes
+      - /home/agent/.config/jarvis/tls:/home/agent/.config/jarvis/tls:ro
 
   # ---------------- memory (vector search over work logs, port 8101) --------
   memory:
