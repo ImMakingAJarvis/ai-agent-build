@@ -82,14 +82,15 @@ func (c *Consumer) Start() error {
 
 // queueDeclareArgs matches rabbitmq/definitions.json. A declare with nil
 // args against an existing x-priority queue fails and kills the worker.
+// RabbitMQ stores these as AMQP long (int64), not int32.
 func queueDeclareArgs(name string) amqp.Table {
 	switch name {
 	case VoiceQueue:
-		return amqp.Table{"x-priority": int32(10)}
+		return amqp.Table{"x-priority": int64(10)}
 	case CodingQueue:
-		return amqp.Table{"x-priority": int32(5)}
+		return amqp.Table{"x-priority": int64(5)}
 	case BackgroundQueue:
-		return amqp.Table{"x-priority": int32(1)}
+		return amqp.Table{"x-priority": int64(1)}
 	default:
 		return nil
 	}
