@@ -55,9 +55,12 @@ Images: Go services are built from the repo at build time
 (`docker/jarvis-go/Dockerfile`, `ARG BIN` selects the package); `voice` and
 `memory` are Python runtimes whose code is bind-mounted from the pinned deploy
 points `/opt/jarvis-voice` and `/opt/jarvis-memory` (each has a
-`DEPLOYED_FROM` marker); `engine` is the CUDA 13.1 runtime with the host's
-pinned llama.cpp **b11815** binary mounted from `/opt/jarvis-engine`
-(installed by `scripts/install_engine.sh`).
+`DEPLOYED_FROM` marker); `engine` is a minimal `ubuntu:26.04` runtime — the
+host's pinned llama.cpp **b11815** binary (mounted from `/opt/jarvis-engine`,
+installed by `scripts/install_engine.sh`) links glibc 2.43, which the
+nvidia/cuda images (ubuntu24.04, glibc 2.39) cannot provide, so the CUDA 13.1
+toolkit libs are bind-mounted from `/usr/local/cuda-13.1/lib64` instead and
+the driver lib is injected by the nvidia runtime.
 
 ## Runs on boot, keeps retrying
 
@@ -111,6 +114,10 @@ nothing secret is baked into images or committed.
 - **node-exporter** runs with `--path.rootfs=/host` (host metrics from inside
   the container); the native unit's `--collector.systemd` is dropped because
   there is no systemd inside the container.
+- **Engine image base** is `ubuntu:26.04` because the pinned llama-server
+  binary links glibc ≥ 2.43 (see `docker/engine/Dockerfile`); if the binary
+  is ever reinstalled against a different glibc, the base must change to
+  match.
 - **Grafana** uses the stock 11.4.0 config plus the provisioning dir copied
   from `/etc/grafana/provisioning` (the host `grafana.ini` was all defaults
   and `ldap.toml` is the distro sample, so neither is committed).

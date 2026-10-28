@@ -33,7 +33,9 @@ services:
   # ---------------- the brain ----------------
   # llama.cpp server (pinned b11815 build in /opt/jarvis-engine, installed by
   # scripts/install_engine.sh). The binary is bind-mounted, not baked into the
-  # image: the image is only the CUDA 13.1 runtime it links against.
+  # image: it links glibc 2.43 (Ubuntu 26.04) plus the CUDA 13.1 toolkit libs,
+  # so the image is a minimal ubuntu:26.04 runtime and the toolkit libs are
+  # bind-mounted (see docker/engine/Dockerfile).
   engine:
     build:
       context: .
@@ -50,14 +52,20 @@ services:
     # device is requested — this env var selects all GPUs.
     environment:
       NVIDIA_VISIBLE_DEVICES: "all"
+      # CUDA 13.1 toolkit libs (cudart/cublas .so.13) bind-mounted below
+      LD_LIBRARY_PATH: /usr/local/cuda-13.1/lib64
     shm_size: "16gb"
     ports:
       - "127.0.0.1:11434:11434"
     volumes:
       - /opt/jarvis-engine:/opt/jarvis-engine:ro
+      - /usr/local/cuda-13.1/lib64:/usr/local/cuda-13.1/lib64:ro
       - /var/lib/jarvis/slots:/var/lib/jarvis/slots
+    # --host 0.0.0.0: llama-server defaults to 127.0.0.1, which inside the
+    # container is unreachable from the host-side port mapping.
     command:
       [ "-m", "/opt/jarvis-engine/models/jarvis-brain.gguf",
+        "--host", "0.0.0.0",
         "--port", "11434",
         "--parallel", "2",
         "--ctx-size", "131072",
