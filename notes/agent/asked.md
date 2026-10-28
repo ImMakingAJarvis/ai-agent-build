@@ -26,3 +26,4 @@
 - 2026-10-28T20:38Z Nathan: fix PR #97 (iGPU investigation) — it was CONFLICTING with main; wanted it mergeable for review
 - 2026-10-28T22:37Z !photo posted no image — Nathan asked to debug the art/Discord posting path; also: he'll check jarvis-brain status next job if local chat feels off
 - 2026-10-28T23:01Z Nathan (job chat-1793219773-c61e): service restart must be triggerable from jarvis-jobs interface or Discord even when the daemon is down
+- 2026-10-28T23:26Z Nathan: always-on small model (CPU, or iGPU if accessible) as a helper for setup changes and self-restart — iGPU route adopted
