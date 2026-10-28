@@ -1,7 +1,19 @@
-# iGPU as a model handler (investigation)
+# iGPU as a model handler (investigation + adoption)
 
 Job chat-1793010774-0126. Question: can the integrated GPU of the Ryzen
 chip serve as another model handler, alongside the 4090 engine?
+
+**Status (2026-10-28, job chat-1793124710-b1cf): adopted.** The iGPU now
+runs the always-on **helper model** — Qwen2.5-3B Q4_K_M
+(`qwen2.5-3b-instruct-q4_k_m.gguf` from `Qwen/Qwen2.5-3B-Instruct-GGUF`)
+serving OpenAI-compatible chat on 11435 via
+`jarvis-engine-igpu.service` (enabled, `Restart=always`), queried through
+the `jarvis-helper` CLI (setup brief in
+`scripts/jarvis-helper-context.md`). Measured on the 3B model:
+pp512 ≈ 115 tok/s, tg64 ≈ 13.2 tok/s on Vulkan1 (llama-bench, 2026-10-28).
+The CPU-offload niche from the investigation is exactly what it fills:
+the agent consults it for setup-change and self-restart questions without
+spending CPU cores.
 
 ## TL;DR
 
@@ -78,20 +90,21 @@ narrower than the CPU's, and the iGPU also lost prompt processing
 (46 vs 622 tok/s) — its 12 CUs are not much compute. Expect ~10 tok/s
 from a 4B-class model on the iGPU, ~20 from the same model on the CPU.
 
-## How to adopt it (if wanted)
+## How to adopt it (done — helper model, 2026-10-28)
 
-Everything is staged but **off** by default:
+Adopted as the always-on helper (see the status note at the top):
 
 1. `scripts/install_igpu_engine.sh` — builds the Vulkan llama.cpp to
-   `/opt/jarvis-igpu/bin`, adds group access, installs
-   `systemd/jarvis-engine-igpu.service` **disabled**.
-2. Put a GGUF at `/opt/jarvis-igpu/models/jarvis-igpu.gguf`
-   (4B-class is the sweet spot), then
+   `/opt/jarvis-igpu/bin` (agent-owned), adds group access, installs
+   `systemd/jarvis-engine-igpu.service` (disabled by default).
+2. The helper GGUF lives at `/opt/jarvis-igpu/models/jarvis-igpu.gguf`
+   (3B-class Q4_K_M is the sweet spot on this iGPU), then
    `sudo systemctl enable --now jarvis-engine-igpu`.
 3. It serves OpenAI-compatible chat on **port 11435** (port 11434 stays
    the brain). `internal/models.Client` already takes a base URL via
    `OLLAMA_URL`; a second `Client` pointed at 11435 is all the code
-   side needs for an auxiliary model.
+   side needs for an auxiliary model. `scripts/install_helper.sh`
+   deploys the `jarvis-helper` CLI + context and enables the unit.
 
 Sensible uses, in order of worth: (a) none by default; (b) a
 background/batch model (summarization of long transcripts) where CPU

@@ -33,6 +33,11 @@ Not containerized, on purpose:
   sudo, the repo working tree and the CLI toolchain; it is also what manages
   the stack, so it stays a host systemd unit (runs as `agent`,
   `Restart=on-failure`, inhibited by `touch /var/lib/jarvis/agent-run.disabled`).
+- **`jarvis-engine-igpu`** — the always-on helper model: Vulkan llama.cpp
+  on the Ryzen iGPU (Qwen2.5-3B Q4_K_M, port 11435, 127.0.0.1). The agent
+  queries it via the `jarvis-helper` CLI for setup-change and self-restart
+  questions; it costs no CPU cores (docs/igpu-model-handler.md). Model:
+  `/opt/jarvis-igpu/models/jarvis-igpu.gguf`; deploy: `scripts/install_helper.sh`.
 - **`ollama`** — installed but disabled (`Conflicts=jarvis-engine.service`);
   the engine superseded it. Left as a host option, not part of the stack.
 - **CLIs** (`jarvis-jobs`, `jarvis-discord`, `enqueue`, `jarvis-reply`,
@@ -68,6 +73,7 @@ the driver lib is injected by the nvidia runtime.
 ```bash
 docker compose ps                 # 14 services (15 with --profile optional)
 curl -s 127.0.0.1:11434/v1/models | head -c 100                    # engine: serving jarvis-brain
+curl -s 127.0.0.1:11435/health | head -c 60                        # igpu helper: {"status":"ok"}
 curl -s 127.0.0.1:8120/health | head -c 200                        # art: model loaded + GPU
 curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8120/            # art gallery: 200
 curl -s 127.0.0.1:8101/health                                       # memory: status + model + db
