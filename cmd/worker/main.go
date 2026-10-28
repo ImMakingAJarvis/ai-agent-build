@@ -319,13 +319,12 @@ func run() error {
 // managed queue. Returns a map of queue-name → depth.
 func getQueueDepths(conn *queue.Conn) map[string]int {
 	depths := make(map[string]int)
-	ch := conn.Channel()
 	for _, q := range queue.AllQueues {
-		get, err := ch.QueueInspect(q)
+		n, err := conn.QueueDepth(q)
 		if err != nil {
 			continue
 		}
-		depths[q] = get.Messages
+		depths[q] = n
 	}
 	return depths
 }
