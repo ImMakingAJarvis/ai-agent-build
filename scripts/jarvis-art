@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""jarvis-art — generate photos with the local art model (jarvis-art service).
+
+  jarvis-art generate "a photo of ..." [--seed N] [--size 1024x1024]
+  jarvis-art list
+
+The service (127.0.0.1:8120, override with ART_HOST) saves PNGs under
+/var/lib/jarvis/art/out/ and this prints the path of what was made.
+Generations take tens of seconds; this waits for the result.
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+HOST = os.environ.get("ART_HOST", "127.0.0.1:8120")
+
+
+def api(path, payload=None):
+    req = urllib.request.Request(
+        f"http://{HOST}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=None) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")[:200]
+        print(f"jarvis-art: service error {e.code}: {body}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"jarvis-art: cannot reach art service at {HOST}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="jarvis-art", description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    g = sub.add_parser("generate", help="generate a photo; prints the saved path")
+    g.add_argument("prompt")
+    g.add_argument("--seed", type=int, default=None, help="reproduce a result")
+    g.add_argument("--size", default=None, help="WxH, e.g. 1024x1024 (max 1024)")
+    sub.add_parser("list", help="list generated images, newest first")
+    a = p.parse_args()
+
+    if a.cmd == "generate":
+        body = {"prompt": a.prompt}
+        if a.seed is not None:
+            body["seed"] = a.seed
+        if a.size:
+            body["size"] = a.size
+        print("generating...", file=sys.stderr)
+        r = api("/generate", body)
+        print(f"{r['path']}  ({r['width']}x{r['height']}, seed {r['seed']}, {r['seconds']:.1f}s)")
+    elif a.cmd == "list":
+        for item in api("/images"):
+            prompt = (item.get("prompt") or "").replace("\n", " ")
+            if len(prompt) > 80:
+                prompt = prompt[:77] + "..."
+            when = (item.get("modified") or "")[:16].replace("T", " ")
+            print(f"{item['name']}  {when}  {prompt}".rstrip())
+
+
+if __name__ == "__main__":
+    main()

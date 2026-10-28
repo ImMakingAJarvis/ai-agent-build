@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/art"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
@@ -32,11 +34,19 @@ var deadMemory = memory.NewClient("http://127.0.0.1:1")
 // testDiscord mimics *chat.Discord for tests.
 // It records Notify and Typing calls so we can assert on them.
 type testDiscord struct {
-	mu         sync.Mutex
-	notifyMsgs []string
+	mu          sync.Mutex
+	notifyMsgs  []string
 	typingCalls int
-	typingErr  error
-	notifyErr  error
+	typingErr   error
+	notifyErr   error
+	photoMsgs   []photoSend
+	sendImageErr error
+}
+
+// photoSend is one SendImage call recorded by testDiscord.
+type photoSend struct {
+	text string
+	path string
 }
 
 func (d *testDiscord) Notify(_ context.Context, text string) error {
@@ -51,6 +61,25 @@ func (d *testDiscord) Typing() error {
 	defer d.mu.Unlock()
 	d.typingCalls++
 	return d.typingErr
+}
+
+func (d *testDiscord) SendImage(_ context.Context, text, path string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sendImageErr != nil {
+		return d.sendImageErr
+	}
+	d.photoMsgs = append(d.photoMsgs, photoSend{text, path})
+	return nil
+}
+
+func (d *testDiscord) lastPhoto() (photoSend, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.photoMsgs) == 0 {
+		return photoSend{}, false
+	}
+	return d.photoMsgs[len(d.photoMsgs)-1], true
 }
 
 // lastNotify returns the most recent Notify message, or "" if none.
@@ -536,5 +565,115 @@ func TestHandleMessage_MemoryContext(t *testing.T) {
 	}
 	if strings.Contains(bodies[len(bodies)-1], "Relevant context from the work logs") {
 		t.Errorf("dead memory service must not add context:\n%s", bodies[len(bodies)-1])
+	}
+}
+
+// fakeArtServer emulates the art service's /generate endpoint.
+func fakeArtServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/generate" || r.Method != http.MethodPost {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	}))
+}
+
+func TestCutPhoto(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"!photo a red panda in snow", "a red panda in snow", true},
+		{"!photo    spaced out  ", "spaced out", true},
+		{"!photo", "", true},
+		{"!photograph a sunset", "", false},
+		{"hello !photo x", "", false},
+		{"!build something", "", false},
+	}
+	for _, c := range cases {
+		got, ok := cutPhoto(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("cutPhoto(%q) = %q, %v; want %q, %v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestHandlePhotoSendsImage(t *testing.T) {
+	// A throwaway PNG where the fake art service says the image landed.
+	png := filepath.Join(t.TempDir(), "20261028-000000-42.png")
+	if err := os.WriteFile(png, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := fakeArtServer(t, http.StatusOK,
+		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":42,"steps":9,"seconds":25.3}`, png))
+	defer srv.Close()
+
+	d := &testDiscord{}
+	handlePhoto(d, art.NewWithURL(srv.URL), "a red panda in fresh snow")
+
+	ph, ok := d.lastPhoto()
+	if !ok {
+		t.Fatalf("no image sent; notifies: %v", d.notifyMsgs)
+	}
+	if ph.path != png {
+		t.Errorf("sent path %q, want %q", ph.path, png)
+	}
+	for _, want := range []string{"a red panda in fresh snow", "seed 42", "1024x1024", "25s"} {
+		if !strings.Contains(ph.text, want) {
+			t.Errorf("caption missing %q:\n%s", want, ph.text)
+		}
+	}
+	if d.typingCount() == 0 {
+		t.Error("no typing indicator during generation")
+	}
+}
+
+func TestHandlePhotoBusy(t *testing.T) {
+	srv := fakeArtServer(t, http.StatusConflict, `{"detail":"a generation is already running"}`)
+	defer srv.Close()
+
+	d := &testDiscord{}
+	handlePhoto(d, art.NewWithURL(srv.URL), "a red panda")
+	if got := d.lastNotify(); !strings.Contains(got, "already generating") {
+		t.Errorf("busy reply = %q", got)
+	}
+	if _, ok := d.lastPhoto(); ok {
+		t.Error("no image should be sent while busy")
+	}
+}
+
+func TestHandlePhotoUnavailable(t *testing.T) {
+	d := &testDiscord{}
+	handlePhoto(d, art.NewWithURL("http://127.0.0.1:1"), "a red panda")
+	if got := d.lastNotify(); got == "" || strings.Contains(got, "seed") {
+		t.Errorf("unavailable reply = %q", got)
+	}
+}
+
+func TestHandlePhotoEmptyPrompt(t *testing.T) {
+	d := &testDiscord{}
+	handlePhoto(d, art.NewWithURL("http://127.0.0.1:1"), "   ")
+	if got := d.lastNotify(); !strings.Contains(got, "Need a prompt") {
+		t.Errorf("empty prompt reply = %q", got)
+	}
+}
+
+func TestHandlePhotoSendFails(t *testing.T) {
+	png := filepath.Join(t.TempDir(), "x.png")
+	if err := os.WriteFile(png, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := fakeArtServer(t, http.StatusOK,
+		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":42,"steps":9,"seconds":1}`, png))
+	defer srv.Close()
+
+	d := &testDiscord{sendImageErr: errors.New("discord down")}
+	handlePhoto(d, art.NewWithURL(srv.URL), "a red panda")
+	if got := d.lastNotify(); !strings.Contains(got, "could not send") {
+		t.Errorf("send failure reply = %q", got)
 	}
 }
