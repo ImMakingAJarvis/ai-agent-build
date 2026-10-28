@@ -116,6 +116,7 @@ services:
     environment:
       HOME: /home/agent
       JARVIS_CONF: /home/agent/.config/jarvis
+      ENGINE_URL: http://engine:11434
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
