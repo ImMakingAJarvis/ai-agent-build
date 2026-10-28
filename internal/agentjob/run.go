@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +42,13 @@ type Runner struct {
 	// the running command is cancelled and the job is paused so the agent
 	// can answer the user immediately.
 	SignalFile string
+	// RestartSignalFile, if non-empty, is polled during job execution. When
+	// it appears (written by jarvis-chat on a "!restart" DM), the running
+	// command is killed and the job is put back to ready, so the agent-run
+	// loop starts the same job over in a fresh conversation. The file is
+	// consumed, and a stale file from a previous round is cleared by
+	// agent-run before it starts the next one.
+	RestartSignalFile string
 	// ReplySignalFile, if non-empty, is written by signalWatcher when a
 	// Discord message arrives but the engine slot is free — the round is NOT
 	// paused. After the job completes, agent-run checks for this file and
@@ -269,11 +277,11 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	}
 	cmd.Stdout, cmd.Stderr = w, w
 
-	// Start the command; if SignalFile is set, poll it in a goroutine.
+	// Start the command; if a signal file is set, poll it in a goroutine.
 	if err := cmd.Start(); err != nil {
 		return j, err
 	}
-	if r.SignalFile != "" {
+	if r.SignalFile != "" || r.RestartSignalFile != "" {
 		go r.signalWatcher(j.ID, cmd)
 	}
 	runErr := cmd.Wait()
@@ -287,13 +295,27 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	return r.finish(j, rec, buf.String(), runErr, wh)
 }
 
-// signalWatcher polls SignalFile every second. When it appears (written by
-// the Discord watcher when the user sends a message), it checks whether the
-// engine's chat slot is free. If free, it writes ReplySignalFile and lets
-// the round finish (agent-run sends a light reply after completion). If the
-// slot is busy, it kills the running command and pauses the job as before.
+// signalWatcher polls SignalFile and RestartSignalFile every second. A
+// restart signal (a "!restart" DM) kills the running command and re-queues
+// the job for a fresh run. A pause signal (an incoming user message) checks
+// whether the engine's chat slot is free. If free, it writes ReplySignalFile
+// and lets the round finish (agent-run sends a light reply after completion).
+// If the slot is busy, it kills the running command and pauses the job.
 func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 	for {
+		if r.RestartSignalFile != "" {
+			if _, err := os.Stat(r.RestartSignalFile); err == nil {
+				// Kill first, then re-queue: if the command already exited,
+				// Restart() is a no-op on a non-running job, so a late
+				// signal can never re-run a finished job.
+				if cmd.Process != nil {
+					cmd.Process.Kill()
+				}
+				_ = r.Store.Restart(id)
+				_ = os.Remove(r.RestartSignalFile) // consume; don't kill the next round
+				return
+			}
+		}
 		if _, err := os.Stat(r.SignalFile); err == nil {
 			// Signal file exists: user wants to talk.
 			slotBusy := true
@@ -361,13 +383,20 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 		j.Duration = now.Sub(st).Round(time.Second).String()
 	}
 	j.PRURL, j.Summary, j.PID = pr, Summary(out), 0
-	// If signalWatcher already paused the job, don't overwrite Paused → Failed.
+	// If signalWatcher already paused or restarted the job, don't
+	// overwrite its status with the kill's error.
 	cur, _ := r.Store.Get(id)
-	if cur.Status == Paused {
+	restarted := false
+	switch {
+	case cur.Status == Paused:
 		j.Status = Paused
-	} else if runErr != nil {
+	case cur.Status == Ready:
+		// !restart: the watcher already put the job back in the queue.
+		j.Status = Ready
+		restarted = true
+	case runErr != nil:
 		j.Status, j.Error = Failed, runErr.Error()
-	} else {
+	default:
 		j.Status, j.Error = Done, ""
 	}
 	if err := r.Store.SetStatus(id, j.State); err != nil {
@@ -382,7 +411,11 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 		rec.PRURL, rec.Summary = pr, j.Summary
 		rec.Kwh, rec.PowerCost = j.Kwh, j.PowerCost
 		if runErr != nil {
-			r.History.Fail(rec, runErr)
+			failErr := runErr
+			if restarted {
+				failErr = errors.New("restarted by owner")
+			}
+			r.History.Fail(rec, failErr)
 		} else {
 			r.History.Complete(rec)
 		}
