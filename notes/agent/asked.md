@@ -21,3 +21,4 @@
 - 2026-10-28T06:50Z Own voice channel bypassing Home Assistant: UniFi Protect camera mics (RTSP audio) as input, Sonos (S1 RCP announce) / Google Nest (Cast) / camera speakers (Protect talk) as direct output; future mics expected — built as kanban epic ed9ecd12, 12 tasks, design doc PR #96
 - 2026-10-28T10:21Z Nathan asked (job chat-1793177028-8f95): a way to upload a md or other file with a plan, and a worker takes it and creates all the jobs around it — decided: dashboard upload enqueues the breakdown job; the actual job creation happens in the worker's round.
 - 2026-10-28T20:11Z Nathan's repeated theme (Oct 26-28): fix jobs must always run before build, build before background — resolved by PR #64 + #74, original job 6cbc closed on evidence
+- 2026-10-28T20:30Z Nathan (job chat-1793091300-027f): discord daemon should be able to trigger photo gen, and there should be a site displaying all generated images

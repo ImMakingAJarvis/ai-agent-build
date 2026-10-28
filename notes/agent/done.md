@@ -30,3 +30,4 @@
 - 2026-10-28T06:50Z [chat-1793164192-8d46] Voice channel epic 'camera mics + direct Sonos/Google speakers (no HA)' on the kanban: 12 tasks in dependency order + design doc (job chat-1793164192-8d46, PR #96)
 - 2026-10-28T10:21Z [chat-1793177028-8f95] Plan upload: dashboard Plans section (POST /api/plans) stores plan files under ~/.local/share/jarvis/plans/<id>/ and enqueues a ready agent job with the same id whose instructions are the worker's breakdown recipe; jarvis-jobs add gains -depends (PR #98)
 - 2026-10-28T20:11Z [chat-1793046157-6cbc] Fix-queue priority job chat-1793046157-6cbc closed as already done: PR #64 (agentjob class ordering) + PR #74 (worker SetDepths), both merged; evidence comment on PR #74
+- 2026-10-28T20:30Z [chat-1793091300-027f] Discord !photo command (jarvis-chat → art service, image attachment DM) + photo gallery site at :8120 with per-image prompt metadata (PR #99)
