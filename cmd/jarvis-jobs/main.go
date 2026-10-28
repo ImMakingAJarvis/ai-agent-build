@@ -5,7 +5,8 @@
 //	jarvis-jobs run <id> [-driver local|sonnet] [-round N] [-note TEXT]
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
-//	jarvis-jobs add -id ID -title T [-driver local|sonnet] [-source S] [-priority N]
+//	jarvis-jobs add -id ID -title T [-driver local|sonnet] [-source S]
+//	                   [-class fix|build|background] [-priority N] [-depends a,b]
 //	jarvis-jobs order [a,b,c]    show or set the runtime band priority order
 //	                              (a permutation of fix, build, background)
 //	jarvis-jobs message [TEXT]   send the agent a message (stdin when TEXT
@@ -256,11 +257,18 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	priority := fs.Int("priority", 0, "higher runs first within the class")
 	instructions := fs.String("instructions", "", "job body (default: stdin)")
 	effort := fs.String("effort", "", "reasoning effort: off, low, medium, high, xhigh, max (default medium)")
+	depends := fs.String("depends", "", "comma-separated job ids this job waits on (they must be done first)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *id == "" || *title == "" {
 		return fmt.Errorf("add -id ID -title T")
+	}
+	var deps []string
+	for _, d := range strings.Split(*depends, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			deps = append(deps, d)
+		}
 	}
 	switch *class {
 	case "", agentjob.ClassFix, agentjob.ClassBuild, agentjob.ClassBackground:
@@ -279,6 +287,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		ID:              *id,
 		Title:           *title,
 		Instructions:    strings.TrimSpace(body),
+		DependsOn:       deps,
 		Driver:          *driver,
 		Source:          *source,
 		Class:           *class,
