@@ -298,6 +298,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/queue", s.handleQueue)
 	mux.HandleFunc("POST /api/queue/reorder", s.handleQueueReorder)
 	mux.HandleFunc("POST /api/queue/band-order", s.handleQueueBandOrder)
+	mux.HandleFunc("GET /logs", s.handleLogsPage)
+	mux.HandleFunc("GET /api/engine/logs", s.handleEngineLogs)
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
 	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
