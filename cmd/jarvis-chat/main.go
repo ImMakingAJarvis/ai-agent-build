@@ -196,6 +196,19 @@ func main() {
 					return
 				}
 
+				// !restart is a special command: write the restart-signal file
+				// so the running job's signal watcher kills the round and
+				// re-queues the job — the agent run restarts on a fresh
+				// conversation. Only useful while a round is running; between
+				// rounds the file is cleared before the next round starts.
+				if content == "!restart" {
+					_ = os.WriteFile(confDir+"/restart-signal", []byte("!restart"), 0o644)
+					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+					_ = d.Notify(ctx, "Restarting the agent run: killing the current round and putting its job back in the queue.")
+					cancel()
+					return
+				}
+
 				// !photo <prompt> generates a photo with the local art
 				// model and sends it back as an attachment.
 				if prompt, ok := cutPhoto(content); ok {

@@ -248,6 +248,9 @@ $q"); then
   round=$((round + 1))
   echo "==> $(date '+%F %T') job $job_id on $d (round $round)"
 
+  # A !restart sent between rounds must not kill the new round on start.
+  rm -f "$CONF/restart-signal"
+
   # Start Discord watcher so the user can interrupt this job at any time.
   start_watcher
   jarvis-jobs run "$job_id" -driver "$d" -round "$(date +%s)-$round" -note "$note"; status=$?
@@ -276,5 +279,10 @@ $q"); then
   fi
 
   rm -f "$CONF/current-job"
-  msg=$(summary "$d" "$status")
+  # A !restart during the run re-queued the job for a fresh conversation.
+  if [[ "$job_status" == "ready" ]]; then
+    msg="!restart: ${job_id} is back in the queue — it runs next in a fresh conversation."
+  else
+    msg=$(summary "$d" "$status")
+  fi
 done

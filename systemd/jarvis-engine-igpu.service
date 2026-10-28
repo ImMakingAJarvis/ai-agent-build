@@ -1,0 +1,26 @@
+[Unit]
+Description=Jarvis iGPU Engine — Vulkan llama.cpp server on the Ryzen iGPU (auxiliary models)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+SupplementaryGroups=video render
+PIDFile=/run/jarvis-engine-igpu.pid
+ExecStart=/opt/jarvis-igpu/bin/llama-server \
+    -m /opt/jarvis-igpu/models/jarvis-igpu.gguf \
+    --port 11435 \
+    -dev Vulkan1 \
+    -ngl 99 \
+    --ctx-size 8192 \
+    --jinja \
+    --log-disable
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis-engine-igpu
+
+[Install]
+WantedBy=multi-user.target

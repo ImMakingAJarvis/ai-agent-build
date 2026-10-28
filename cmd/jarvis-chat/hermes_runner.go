@@ -84,6 +84,18 @@ func (r *hermesRunner) handleMessage(in chat.Incoming) {
 		return
 	}
 
+	// !restart works on the Hermes runner too: kills the running round and
+	// re-queues its job so the agent run starts over.
+	if content == "!restart" {
+		_ = os.WriteFile(r.confDir+"/restart-signal", []byte("!restart"), 0o644)
+		if r.discord != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_ = r.discord.Notify(ctx, "Restarting the agent run: killing the current round and putting its job back in the queue.")
+			cancel()
+		}
+		return
+	}
+
 	// !photo <prompt> works on the Hermes runner too.
 	if prompt, ok := cutPhoto(content); ok {
 		handlePhoto(r.discord, art.New(), prompt)

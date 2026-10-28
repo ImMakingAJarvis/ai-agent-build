@@ -28,6 +28,9 @@
 - 2026-10-28T05:41Z [chat-1793162906-6c4d] [chat-1793162906-6c4d] Dumped details of the 10 kanban task JSONs (6 NoBrakes + 4 VRAM-benchmark tasks, all backlog/p5) to notes/kanban/kanban-dump-2026-10-27.md (PR #94)
 - 2026-10-28T06:26Z [chat-1793163063-9121] CLAUDE.md: read the kanban board entry (task+epic+comments, ID from job title) before building; comment system absent so queued job kanban-comments (PR #95)
 - 2026-10-28T06:50Z [chat-1793164192-8d46] Voice channel epic 'camera mics + direct Sonos/Google speakers (no HA)' on the kanban: 12 tasks in dependency order + design doc (job chat-1793164192-8d46, PR #96)
+- 2026-10-28T07:19Z [chat-1793010774-0126] iGPU model-handler investigation: 7800X3D's RDNA2 iGPU works as a llama.cpp Vulkan handler (parallel to the 4090 brain) but decodes ~2x slower than CPU (~27 vs ~49 GB/s); staged disabled, not recommended as default — PR #97
 - 2026-10-28T10:21Z [chat-1793177028-8f95] Plan upload: dashboard Plans section (POST /api/plans) stores plan files under ~/.local/share/jarvis/plans/<id>/ and enqueues a ready agent job with the same id whose instructions are the worker's breakdown recipe; jarvis-jobs add gains -depends (PR #98)
 - 2026-10-28T20:11Z [chat-1793046157-6cbc] Fix-queue priority job chat-1793046157-6cbc closed as already done: PR #64 (agentjob class ordering) + PR #74 (worker SetDepths), both merged; evidence comment on PR #74
 - 2026-10-28T20:30Z [chat-1793091300-027f] Discord !photo command (jarvis-chat → art service, image attachment DM) + photo gallery site at :8120 with per-image prompt metadata (PR #99)
+- 2026-10-28T20:38Z [chat-1793218355-0e62] Fixed PR #97 (iGPU model-handler investigation) merge conflict — merged origin/main into phase-igpu-model-handler, kept all notes entries from both sides, back to MERGEABLE (PR #97)
+- 2026-10-28T21:00Z [chat-1793219796-26cb] !restart from Discord kills a running coding round and re-queues its job for a fresh run (PR #100)
