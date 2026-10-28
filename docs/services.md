@@ -62,6 +62,21 @@ nvidia/cuda images (ubuntu24.04, glibc 2.39) cannot provide, so the CUDA 13.1
 toolkit libs are bind-mounted from `/usr/local/cuda-13.1/lib64` instead and
 the driver lib is injected by the nvidia runtime.
 
+## Verifying the stack
+
+```bash
+docker compose ps                 # 12 services (14 with --profile optional)
+curl -s 127.0.0.1:11434/v1/models | head -c 100                    # engine: serving jarvis-brain
+curl -s 127.0.0.1:8101/health                                       # memory: status + model + db
+curl -s 127.0.0.1:8100/health                                       # voice: brain + whisper ready
+curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8080/            # dashboard: 200
+curl -s 127.0.0.1:9090/-/healthy                                    # prometheus
+curl -s 127.0.0.1:3000/api/health                                   # grafana
+curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:9100/metrics     # node-exporter: 200
+curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:3001/metrics     # nvidia-exporter (GPU): 200
+curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:15672/           # rabbitmq mgmt: 200
+```
+
 ## Runs on boot, keeps retrying
 
 Three layers:
