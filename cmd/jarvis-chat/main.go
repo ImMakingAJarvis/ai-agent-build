@@ -40,6 +40,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
@@ -135,6 +136,12 @@ func main() {
 		hermesAgent.Register(action)
 	}
 
+	// Memory service: vector search over work logs, job history, queue.
+	// MEMORY_URL is set by docker-compose (http://memory:8101); the
+	// client fails open when the service is down.
+	memClient := memory.NewClient(os.Getenv("MEMORY_URL"))
+	hermesAgent.Register(hermes.MemoryAction(memClient))
+
 	// Conversation history: alternating user/assistant turns.
 	var history []string // [user1, assistant1, user2, assistant2, ...]
 
@@ -197,7 +204,7 @@ func main() {
 					return
 				}
 
-				handleMessage(d, hermesAgent, voice, in, &history)
+				handleMessage(d, hermesAgent, voice, memClient, in, &history)
 			})
 		} else {
 			// Additional bots: Hermes runner with enhanced capabilities.
@@ -267,7 +274,7 @@ func pickOwnerID(bCfg config.BotConfig, confDir string) string {
 	return ""
 }
 
-func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, in chat.Incoming, history *[]string) {
+func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, mem *memory.Client, in chat.Incoming, history *[]string) {
 	content := in.Content
 	ctx, cancel := context.WithTimeout(context.Background(), maxTimeout)
 	defer cancel()
@@ -357,6 +364,15 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, in chat.
 		systemPrompt := voice.SystemPrompt
 		if status := getStatusLine(); status != "" {
 			systemPrompt += "\n\nCurrent status:\n" + status
+		}
+
+		// RAG: pull relevant work-log context from the memory service so
+		// the chat can reference past jobs, decisions and the pending
+		// queue. Fails open — no hits, no context, chat goes on.
+		if hits := mem.Search(ctx, content, 4); len(hits) > 0 {
+			systemPrompt += "\n\nRelevant context from the work logs " +
+				"(memory service; use it when it fits, cite the source):\n" +
+				memory.FormatContext(hits, 1200)
 		}
 
 		answerCh := make(chan string, 1)

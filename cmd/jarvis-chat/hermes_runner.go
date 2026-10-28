@@ -11,6 +11,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 )
 
@@ -52,6 +53,10 @@ func newHermesRunner(botCfg config.BotConfig) *hermesRunner {
 	for _, action := range hermes.DefaultActions() {
 		agent.Register(action)
 	}
+
+	// Memory service: vector search over work logs, job history, queue.
+	memClient := memory.NewClient(os.Getenv("MEMORY_URL"))
+	agent.Register(hermes.MemoryAction(memClient))
 
 	return &hermesRunner{
 		agent:     agent,
