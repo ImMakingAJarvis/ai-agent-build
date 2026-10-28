@@ -23,3 +23,4 @@
 - 2026-10-28T10:21Z Nathan asked (job chat-1793177028-8f95): a way to upload a md or other file with a plan, and a worker takes it and creates all the jobs around it — decided: dashboard upload enqueues the breakdown job; the actual job creation happens in the worker's round.
 - 2026-10-28T20:11Z Nathan's repeated theme (Oct 26-28): fix jobs must always run before build, build before background — resolved by PR #64 + #74, original job 6cbc closed on evidence
 - 2026-10-28T20:30Z Nathan (job chat-1793091300-027f): discord daemon should be able to trigger photo gen, and there should be a site displaying all generated images
+- 2026-10-28T20:38Z Nathan: fix PR #97 (iGPU investigation) — it was CONFLICTING with main; wanted it mergeable for review

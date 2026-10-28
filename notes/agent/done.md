@@ -32,3 +32,4 @@
 - 2026-10-28T10:21Z [chat-1793177028-8f95] Plan upload: dashboard Plans section (POST /api/plans) stores plan files under ~/.local/share/jarvis/plans/<id>/ and enqueues a ready agent job with the same id whose instructions are the worker's breakdown recipe; jarvis-jobs add gains -depends (PR #98)
 - 2026-10-28T20:11Z [chat-1793046157-6cbc] Fix-queue priority job chat-1793046157-6cbc closed as already done: PR #64 (agentjob class ordering) + PR #74 (worker SetDepths), both merged; evidence comment on PR #74
 - 2026-10-28T20:30Z [chat-1793091300-027f] Discord !photo command (jarvis-chat → art service, image attachment DM) + photo gallery site at :8120 with per-image prompt metadata (PR #99)
+- 2026-10-28T20:38Z [chat-1793218355-0e62] Fixed PR #97 (iGPU model-handler investigation) merge conflict — merged origin/main into phase-igpu-model-handler, kept all notes entries from both sides, back to MERGEABLE (PR #97)
