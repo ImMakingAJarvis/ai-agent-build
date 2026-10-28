@@ -4,8 +4,12 @@
 Serves the art model behind a small HTTP API so the rest of the stack
 (chat, Discord daemon, dashboard) can ask for photos:
 
+  GET  /          -> the gallery: a page showing every generated image
   GET  /health    -> status, model, GPU memory, last generation
-  GET  /images    -> generated images, newest first (?limit=N)
+  GET  /images    -> generated images, newest first (?limit=N), each with
+                     name, prompt, seed and timing (from the sidecar .json
+                     written next to each PNG)
+  GET  /img/N.png -> the image file itself (basename only, no traversal)
   POST /generate  -> {"prompt": ..., "seed"?: int, "size"?: "1024x1024",
                       "steps"?: int}
                      saves a PNG under ART_OUT_DIR and returns its path
@@ -25,6 +29,7 @@ Model weights: ART_MODEL_DIR (default /var/lib/jarvis/art/model), populated
 by scripts/install_art.sh. Images: ART_OUT_DIR (default /var/lib/jarvis/art/out).
 """
 
+import json
 import os
 import re
 import time
@@ -35,6 +40,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
 
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8120"))
 MODEL_DIR = os.environ.get("ART_MODEL_DIR", "/var/lib/jarvis/art/model")
@@ -85,6 +91,90 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="jarvis-art", lifespan=lifespan)
 
+# The gallery: a self-contained page (no external assets) that fetches
+# /images and renders every generated photo with its prompt and timing.
+# It re-fetches every 30 s, so a new photo appears without reloading.
+GALLERY_PAGE = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jarvis-art — generated photos</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0f1115; color: #e6e8ee;
+         font: 15px/1.5 system-ui, -apple-system, sans-serif; }
+  header { padding: 16px 22px; border-bottom: 1px solid #262a33;
+           display: flex; align-items: baseline; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; }
+  #count { color: #8b93a7; font-size: 13px; }
+  #grid { display: grid; gap: 14px; padding: 18px 22px;
+          grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+  .card { background: #171a21; border: 1px solid #262a33;
+          border-radius: 10px; overflow: hidden; }
+  .card img { width: 100%; display: block; cursor: zoom-in; }
+  .cap { padding: 8px 10px 10px; font-size: 13px; }
+  .cap .p { display: -webkit-box; -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical; overflow: hidden; }
+  .cap .m { color: #8b93a7; font-size: 12px; margin-top: 4px; }
+  #empty { padding: 48px; text-align: center; color: #8b93a7; }
+</style>
+</head>
+<body>
+<header><h1>jarvis-art</h1><span id="count"></span></header>
+<div id="grid"></div>
+<div id="empty" hidden>No photos yet — ask Jarvis on Discord:
+<code>!photo a photo of ...</code></div>
+<script>
+async function refresh() {
+  try {
+    const r = await fetch('/images?limit=200');
+    if (!r.ok) return;
+    const items = await r.json();
+    const grid = document.getElementById('grid');
+    document.getElementById('count').textContent =
+      items.length + ' photo' + (items.length === 1 ? '' : 's');
+    document.getElementById('empty').hidden = items.length > 0;
+    grid.innerHTML = '';
+    for (const it of items) {
+      const card = document.createElement('div'); card.className = 'card';
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.src = '/img/' + encodeURIComponent(it.name);
+      img.alt = it.prompt || 'generated photo';
+      const cap = document.createElement('div'); cap.className = 'cap';
+      const p = document.createElement('div'); p.className = 'p';
+      p.textContent = it.prompt || '(no prompt saved)';
+      const m = document.createElement('div'); m.className = 'm';
+      m.textContent = [
+        it.modified ? it.modified.replace('T', ' ').slice(0, 16) + ' UTC' : null,
+        it.seed != null ? 'seed ' + it.seed : null,
+        it.seconds != null ? it.seconds + 's' : null,
+      ].filter(Boolean).join(' \\u00b7 ');
+      cap.append(p, m); card.append(img, cap); grid.append(card);
+    }
+  } catch (e) { /* service restarting; try again next tick */ }
+}
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
+"""
+
+
+def read_meta(png: Path) -> dict:
+    """Read the sidecar <name>.json written next to each generated PNG.
+
+    Images made before the sidecar existed (or a missing/corrupt file)
+    simply come back without prompt/seed fields.
+    """
+    try:
+        with open(png.with_suffix(".json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
 
 def gpu_stats():
     try:
@@ -117,16 +207,38 @@ def images(limit: int = 50):
     out = []
     for p in sorted(Path(OUT_DIR).glob("*.png"), reverse=True):
         st = p.stat()
-        out.append(
-            {
-                "path": str(p),
-                "size_bytes": st.st_size,
-                "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
-            }
-        )
+        item = {
+            "path": str(p),
+            "name": p.name,
+            "size_bytes": st.st_size,
+            "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+        }
+        item.update(read_meta(p))
+        out.append(item)
         if len(out) >= limit:
             break
     return out
+
+
+# Basesnake-case-safe PNG names only: no path separators, no dot-dot.
+_IMG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.png")
+
+
+@app.get("/img/{name}")
+def image_file(name: str):
+    if not _IMG_NAME.fullmatch(name):
+        raise HTTPException(404, "not found")
+    p = (Path(OUT_DIR) / name).resolve()
+    # Belt and braces: the regex already blocks separators, but make sure
+    # the resolved path still lands inside OUT_DIR.
+    if p.parent != Path(OUT_DIR).resolve() or not p.is_file():
+        raise HTTPException(404, "not found")
+    return FileResponse(p, media_type="image/png")
+
+
+@app.get("/", response_class=HTMLResponse)
+def gallery():
+    return GALLERY_PAGE
 
 
 @app.post("/generate")
@@ -181,6 +293,20 @@ def _run(prompt, payload):
     out = Path(OUT_DIR) / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{seed}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     img.save(out)
+    # Sidecar metadata so the gallery (and /images) can show the prompt
+    # for every image, not just the last one.
+    with open(out.with_suffix(".json"), "w") as f:
+        json.dump(
+            {
+                "prompt": prompt,
+                "seed": seed,
+                "width": w,
+                "height": h,
+                "steps": steps,
+                "seconds": round(dt, 1),
+            },
+            f,
+        )
     _last.update(
         {
             "path": str(out),

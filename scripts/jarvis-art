@@ -58,7 +58,11 @@ def main():
         print(f"{r['path']}  ({r['width']}x{r['height']}, seed {r['seed']}, {r['seconds']:.1f}s)")
     elif a.cmd == "list":
         for item in api("/images"):
-            print(item["path"])
+            prompt = (item.get("prompt") or "").replace("\n", " ")
+            if len(prompt) > 80:
+                prompt = prompt[:77] + "..."
+            when = (item.get("modified") or "")[:16].replace("T", " ")
+            print(f"{item['name']}  {when}  {prompt}".rstrip())
 
 
 if __name__ == "__main__":

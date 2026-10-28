@@ -96,8 +96,10 @@ services:
       NVIDIA_VISIBLE_DEVICES: "all"
       HOME: /home/agent
       LISTEN_PORT: "8120"
+    # Bound to all interfaces like the dashboard (8080): port 8120 is
+    # also the photo gallery site, meant to be opened from the LAN.
     ports:
-      - "127.0.0.1:8120:8120"
+      - "8120:8120"
     working_dir: /opt/jarvis-art
     command: ["python3", "art_service.py"]
     volumes:

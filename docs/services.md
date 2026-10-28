@@ -11,7 +11,7 @@ for rollback.
 | Service | What it does | Port (host) | Container | State |
 |---|---|---|---|---|
 | `engine` | The brain: llama.cpp `llama-server` serving the qwen3.8 "jarvis-brain" GGUF, 128k ctx, quantized KV cache, 2 parallel slots | 11434 (127.0.0.1) | `jarvis-engine` (nvidia runtime) | model + templates: `/opt/jarvis-engine`; slots: `/var/lib/jarvis/slots` |
-| `art` | Photo generation: Z-Image-Turbo 6B (diffusers, sequential CPU offload) behind a small FastAPI app; `jarvis-art generate "..."` | 8120 (127.0.0.1) | `jarvis-art` (nvidia runtime) | code: `/opt/jarvis-art` (pinned deploy point); model: `/var/lib/jarvis/art/model`; images: `/var/lib/jarvis/art/out` |
+| `art` | Photo generation: Z-Image-Turbo 6B (diffusers, sequential CPU offload) behind a small FastAPI app; `jarvis-art generate "..."`; Discord `!photo <prompt>` sends the result back as an attachment; photo gallery site at `http://111.1.2.27:8120` | 8120 (all interfaces — the gallery is meant to be opened from the LAN) | `jarvis-art` (nvidia runtime) | code: `/opt/jarvis-art` (pinned deploy point); model: `/var/lib/jarvis/art/model`; images: `/var/lib/jarvis/art/out` |
 | `chat` | Discord bot: replies to owner DMs using the local brain; bridges voice wake events to jobs | — (Discord WS) | `jarvis-chat` | `.config/jarvis` (driver, prompts, `discord.env`), `.local/share/jarvis` (agentjob store) |
 | `dashboard` | Web dashboard: agent jobs, work queue, system state, PWA | 8080 | `jarvis-dashboard` | job store via `.local/share/jarvis` |
 | `ha` | Publishes Jarvis headline sensors to the Home Assistant box via MQTT (auto-discovery) | — (MQTT out) | `jarvis-ha` | job store + `.config/jarvis/ha.env` |
@@ -69,6 +69,7 @@ the driver lib is injected by the nvidia runtime.
 docker compose ps                 # 14 services (15 with --profile optional)
 curl -s 127.0.0.1:11434/v1/models | head -c 100                    # engine: serving jarvis-brain
 curl -s 127.0.0.1:8120/health | head -c 200                        # art: model loaded + GPU
+curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8120/            # art gallery: 200
 curl -s 127.0.0.1:8101/health                                       # memory: status + model + db
 curl -s 127.0.0.1:8100/health                                       # voice: brain + whisper ready
 curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8080/            # dashboard: 200
