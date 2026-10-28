@@ -22,3 +22,4 @@
 - 2026-10-28T03:57Z [chat-1793040169-43b4] FreeToken runner hardened: clone at /home/agent/freetoken (v0.2.1), editable venv /home/agent/ftvenv verified (PR #89)
 - 2026-10-28T04:21Z [chat-1793001320-4d10] Voice chat mic: HTTPS 8443 listener restored in the containerized stack — compose publishes 8443 + bind-mounts ~/.config/jarvis/tls ro; plain-HTTP-only origin was why the browser never prompted for the mic (PR #90)
 - 2026-10-28T04:39Z [chat-1793161590-d967] Discord chatbot 'stumbling' fixed — models.NewClient now reads ENGINE_URL (was OLLAMA_URL/localhost only), so brain calls work in the containerized stack; dashboard given ENGINE_URL too (PR #92)
+- 2026-10-28T04:43Z [chat-1793161502-641f] Scheduled voice-natural-tts job (build/medium): fix sped-up/modulated voice output, natural conversational persona
