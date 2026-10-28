@@ -1,0 +1,102 @@
+# openWakeWord "pulse then stop" — diagnosis
+
+**Date:** 2026-10-27
+**Job:** chat-1793008053-3f25 — Diagnose openWakeWord pulse-then-stop behavior
+**Device:** ESPHome assist satellite `home_assistant_voice_09897c` (VPE, on-device
+openWakeWord, wake word "Hey Jarvis") → HA 2026.10 @ 111.1.2.200:80 → "Jarvis"
+Assist pipeline → `jarvis_voice` HTTP conversation agent → voice service
+(111.1.2.27:8100)
+**Sources:** HA `/api/states` (live) + history/logbook (111.1.2.200), `journalctl
+-u jarvis-voice` + Docker `jarvis-voice` logs (this box), companion docs
+`runner-log-tail-2026-10-27.md`, `phase4-wake-test-error-light-capture.md`,
+`openwakeword-vpe-confirmation.md`. No code changes.
+
+## TL;DR
+
+**Likely cause:** the STT in the "Jarvis" Assist pipeline,
+`stt.speech_to_phrase`, is **dead** (entity state `unknown`; dead since ~Oct 23).
+The wake word fires and the VPE→HA handoff works, but the utterance is never
+transcribed, so the pipeline stalls at `listening` and times out (7–20 s) back to
+`idle` with no reply. The LED ring "pulse" is the device-local listening
+animation; it stops because the pipeline never advances past `listening`.
+
+**One fix:** give the "Jarvis" pipeline a **working STT** — load the already
+installed (but not loaded) **Whisper** STT on HA and set it as the pipeline's
+STT, replacing the dead `stt.speech_to_phrase`. (Equivalent alternative: repair
+/reinstall the speech-to-phrase addon.) Both current STT entities are `unknown`,
+so the pipeline has no live transcriber until one is connected.
+
+## The last 2 test runs (event traces, all PDT)
+
+| Loop | Wake → listening → end | Outcome |
+|---|---|---|
+| **Oct 26 23:45:12–22** | wake burst (1 s) → `listening` 9.4 s → `idle` | no reply |
+| **Oct 26 23:46:51–59** | wake burst (1 s) → `listening` 7.6 s → `idle` | no reply (last activity) |
+
+Both: openWakeWord detects "Hey Jarvis" → VPE plays the ack beep and spins the
+LED ring (satellite → `listening`) → the device waits for the command to be
+transcribed → **no transcription returns** → `listening` times out → `idle`.
+That is exactly the owner's "beep + light spin, then it pulses and stops with no
+response."
+
+The same stall repeats in every loop in the captured window: Oct 26
+16:30:39→16:31:00 (20 s), 17:35:46, 17:56:25, 20:35:26, 23:45:12, 23:46:59, and a
+satellite/media-player state change at **Oct 27 13:03** (zero voice-service
+requests — same dead-STT signature). The single exception, Oct 26 21:18:14,
+reached `processing`→`responding` and produced a ~2 s HA-side
+`tts.google_translate` clip with **zero calls to the local voice service** — an
+error/noise clip from the pipeline, not a real answer, consistent with an STT
+failure being spoken rather than the owner's utterance.
+
+## What is working vs broken
+
+| Stage | Status (verified 2026-10-27) |
+|---|---|
+| openWakeWord wake detection (ESP32, on-device) | **Working** — fires every time (satellite → `listening`, ack beep, LED spin) |
+| VPE → HA handoff (satellite states) | **Working** — state transitions reach HA reliably |
+| HA STT (`stt.speech_to_phrase`) | **DEAD** — state `unknown`; no transcription ever returns |
+| "Jarvis" conversation agent → voice service (8100) | Never invoked — no transcript to send (agent last used Oct 26 01:15) |
+| Local brain (llama, 11434) + voice service (8100) STT/LLM/TTS | **Healthy now** — Docker `jarvis-engine` up 3 h, `jarvis-voice` up; web-chat STT+LLM round-trips succeeded Oct 27 21:22–21:28 |
+
+Because the local brain and voice service are healthy, **the only broken leg is
+HA's STT.** The silence is entirely on the HA side.
+
+## Root cause
+
+`stt.speech_to_phrase` (the "Jarvis" pipeline's STT) has been `unknown` since
+~Oct 23 and flips unavailable↔unknown on every HA restart — it never comes up.
+With no live STT, the Assist pipeline cannot turn the captured audio into text,
+so it never invokes the conversation agent, never calls the voice service, and
+never produces TTS. The satellite sits in `listening` until its 8–20 s timeout
+and returns to `idle`. Nothing on the build box crashed; the local journal shows
+zero voice requests in every one of these windows.
+
+## The fix
+
+Connect a working STT to the "Jarvis" pipeline. Primary option:
+
+1. **Load the Whisper STT on HA** (noted in the Oct 26 diagnosis as
+   "installed but not loaded") and **set it as the STT for the "Jarvis" Assist
+   pipeline**, replacing `stt.speech_to_phrase`.
+
+Equivalent alternative: repair/reinstall the speech-to-phrase addon so
+`stt.speech_to_phrase` becomes available.
+
+Either way requires **HA-box access** (Supervisor/UI or `home-assistant.log`) —
+the Assist-pipeline config is not exposed over the REST/WebSocket API from this
+box (`/api/assist_pipeline` → 404), so it cannot be applied from here. After the
+STT is live, re-test "Hey Jarvis, the sky is blue": the satellite should advance
+`listening → processing → responding`, a `POST /voice/json` should appear in the
+`jarvis-voice` journal, and a TTS reply should play on the VPE speaker.
+
+## Limitations
+
+- openWakeWord's own logs live on the ESP32 VPE / HA box (ESPHome serial) — not
+  reachable from this box; wake detection is confirmed via the satellite state
+  transitions instead.
+- HA logbook is empty now (cleared by HA restarts + limited in-memory
+  retention); the per-event traces above are from the 11 h history capture in
+  `runner-log-tail-2026-10-27.md` plus live `/api/states` `last_changed`
+  timestamps.
+- The exact HA-side STT error text is in `home-assistant.log` on the HA box
+  (standing open item, needs SSH/Supervisor).
