@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""jarvis-notes — keep the agent's own notes, wired into the vector graph.
+
+The agent keeps three kinds of notes, one file per kind under notes/agent/:
+
+  done    things the agent has done (a running "shipped" log, one line/PR)
+  system  durable facts about this system (services, endpoints, gotchas)
+  asked   things Nathan has asked about, decided, or asked repeatedly
+
+Every `add` appends a timestamped line to the file and then immediately
+pushes the whole file into the Jarvis Memory Service (POST /index) so it is
+searchable right away instead of waiting for the 15-minute reindex. The push
+uses the same source (repo-doc) and path the periodic reindexer uses
+(index_repo_docs in memory_service.py), so it never creates a duplicate doc —
+the reindex simply keeps the same (source, path) fresh. If the service is
+down the note is still written to disk and picked up on the next reindex;
+the CLI warns but does not fail the write.
+
+Stdlib only: it talks to the service over HTTP and does not embed locally.
+
+Usage:
+  jarvis-notes add <done|system|asked> "text" [--job <id>] [--no-index]
+  jarvis-notes add <done|system|asked> -f notes.txt          # one note/line
+  jarvis-notes list [bucket] [--tail N]
+  jarvis-notes sync                                          # push all files now
+  jarvis-notes stats                                         # memory /stats
+
+Env:
+  JARVIS_REPO_DIR        repo root (default /home/agent/ai-agent-build)
+  JARVIS_AGENT_NOTES_DIR notes dir (default <repo>/notes/agent)
+  MEMORY_URL             memory service (default http://127.0.0.1:8101)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+REPO_DIR = os.environ.get("JARVIS_REPO_DIR") or "/home/agent/ai-agent-build"
+NOTES_DIR = os.environ.get("JARVIS_AGENT_NOTES_DIR") or os.path.join(REPO_DIR, "notes", "agent")
+MEMORY_URL = os.environ.get("MEMORY_URL") or "http://127.0.0.1:8101"
+
+# The three buckets the agent keeps, in the order they show in `list`.
+BUCKETS = {
+    "done": "things the agent has done (one line per finished job / PR)",
+    "system": "durable facts about this system (services, endpoints, gotchas)",
+    "asked": "things Nathan has asked about, decided, or asked repeatedly",
+}
+
+HEADERS = {
+    "done": "# done — what the agent has shipped\n# One line per finished job or PR: `- <UTC ts> [<job>] <what> (PR #n)`.\n# Keep it curated; the full detail lives in the job transcript in the vector graph.\n",
+    "system": "# system — durable facts about this machine / stack\n# One fact per line: `- <UTC ts> <fact>`. Update when a fact changes.\n",
+    "asked": "# asked — what Nathan has asked about or decided\n# One line per topic: `- <UTC ts> <topic / decision>`. Group by theme as they recur.\n",
+}
+
+
+def bucket_path(name: str) -> str:
+    return os.path.join(NOTES_DIR, f"{name}.md")
+
+
+def now_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+
+def ensure_file(name: str) -> str:
+    path = bucket_path(name)
+    os.makedirs(NOTES_DIR, exist_ok=True)
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(HEADERS[name])
+    return path
+
+
+def append_lines(name: str, lines: list[str], job: str | None) -> tuple[str, int]:
+    path = ensure_file(name)
+    ts = now_utc()
+    tag = f"[{job}] " if job else ""
+    with open(path, "a", encoding="utf-8") as f:
+        for line in lines:
+            f.write(f"- {ts} {tag}{line}\n")
+    return path, len(lines)
+
+
+def read_file(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def push_to_graph(name: str) -> str:
+    """Push one note file into the memory graph. Returns a short status string."""
+    path = bucket_path(name)
+    text = read_file(path)
+    if text is None:
+        return "skipped (no file)"
+    rel = os.path.relpath(path, REPO_DIR)
+    payload = json.dumps({
+        "source": "repo-doc",
+        "path": rel,
+        "title": os.path.basename(path),
+        "text": text,
+        "meta": {},
+    }).encode()
+    req = urllib.request.Request(
+        MEMORY_URL.rstrip("/") + "/index",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = json.loads(r.read() or b"{}")
+            chunks = body.get("indexed_chunks", 0)
+            state = body.get("status", "ok")
+            return f"indexed {chunks} chunk(s) into the graph ({state})"
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return f"NOT indexed (memory service unreachable: {e}) — on disk, next reindex picks it up"
+
+
+def cmd_add(args) -> int:
+    if args.bucket not in BUCKETS:
+        print(f"unknown bucket '{args.bucket}' — use one of: {', '.join(BUCKETS)}", file=sys.stderr)
+        return 2
+    if args.file:
+        text = read_file(args.file)
+        if text is None:
+            print(f"cannot read {args.file}", file=sys.stderr)
+            return 1
+        lines = [l.rstrip("\n") for l in text.splitlines() if l.strip()]
+        if not lines:
+            print("nothing to add (file empty)", file=sys.stderr)
+            return 1
+    else:
+        text = " ".join(args.text).strip()
+        if not text:
+            print("empty note", file=sys.stderr)
+            return 2
+        lines = [text]
+    path, n = append_lines(args.bucket, lines, args.job)
+    print(f"added {n} note(s) to {path}")
+    if not args.no_index:
+        print("  graph:", push_to_graph(args.bucket))
+    return 0
+
+
+def cmd_list(args) -> int:
+    names = [args.bucket] if args.bucket else list(BUCKETS)
+    for i, name in enumerate(names):
+        if args.bucket and name not in BUCKETS:
+            print(f"unknown bucket '{name}' — use one of: {', '.join(BUCKETS)}", file=sys.stderr)
+            return 2
+        text = read_file(bucket_path(name))
+        if i:
+            print()
+        print(f"## {name} — {BUCKETS[name]}")
+        if text is None or not text.strip():
+            print("(no notes yet)")
+            continue
+        lines = [l for l in text.splitlines()]
+        if args.tail:
+            lines = [l for l in lines if l.strip() and not l.lstrip().startswith("#")][-args.tail:]
+        print("\n".join(l for l in lines if l.strip()) or "(only the header)")
+    return 0
+
+
+def cmd_sync(_args) -> int:
+    for name in BUCKETS:
+        print(f"{name}:", " ", push_to_graph(name))
+    return 0
+
+
+def cmd_stats(_args) -> int:
+    try:
+        req = urllib.request.Request(MEMORY_URL.rstrip("/") + "/stats")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            print(r.read().decode())
+    except (urllib.error.URLError, OSError) as e:
+        print(f"memory service unreachable: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog="buckets: " + ", ".join(BUCKETS))
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("add", help="append a note to a bucket and index it")
+    a.add_argument("bucket", choices=sorted(BUCKETS))
+    a.add_argument("text", nargs="*", help="note text (or use -f)")
+    a.add_argument("-f", "--file", help="read notes from this file, one per line")
+    a.add_argument("--job", help="tag the note with a job id, e.g. chat-...")
+    a.add_argument("--no-index", action="store_true", help="write the file but skip the graph push")
+    a.set_defaults(fn=cmd_add)
+
+    l = sub.add_parser("list", help="show the notes (all buckets, or one)")
+    l.add_argument("bucket", nargs="?", help="a bucket name, or omit for all")
+    l.add_argument("--tail", type=int, default=0, help="show only the last N notes (non-# lines)")
+    l.set_defaults(fn=cmd_list)
+
+    s = sub.add_parser("sync", help="push all note files to the graph now")
+    s.set_defaults(fn=cmd_sync)
+
+    st = sub.add_parser("stats", help="show memory-service /stats")
+    st.set_defaults(fn=cmd_stats)
+
+    args = p.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
