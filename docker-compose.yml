@@ -1,7 +1,7 @@
 # Jarvis stack — one compose project for every service on this box.
 #
-#   docker compose up -d                        # everything that runs today
-#   docker compose --profile optional up -d     # + worker, wake-queue
+#   docker compose up -d                        # everything that runs today (includes worker)
+#   docker compose --profile optional up -d     # + wake-queue
 #
 # Run from the repo root: the project name is then "ai-agent-build", which
 # matches the pre-existing rabbitmq container/volume (created 2026-10-24).
@@ -225,7 +225,6 @@ services:
       args: { BIN: cmd/worker }
     image: jarvis/worker:local
     container_name: jarvis-worker
-    profiles: ["optional"]
     restart: always
     env_file:
       - /home/agent/.config/jarvis/agent.env

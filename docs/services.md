@@ -18,7 +18,7 @@ for rollback.
 | `memory` | Vector search over work logs/jobs (SQLite + all-MiniLM-L6-v2 ONNX); the agent searches it before grepping | 8101 (127.0.0.1) | `jarvis-memory` | `~/.local/share/jarvis/memory` (db + model) |
 | `memory-reindex` | Re-scans all sources every 15 min (was `jarvis-memory-reindex.timer`) | — | `jarvis-memory-reindex` | same as `memory` |
 | `rabbitmq` | Message broker: AMQP + MQTT (port 1883, LAN-facing for HA) + Prometheus metrics | 5672, 15672, 15692 (127.0.0.1), 1883 (LAN) | `jarvis-rabbitmq` (predates this PR) | named volume `ai-agent-build_rabbitmq_data`; config: `rabbitmq/` |
-| `worker` *(optional)* | Consumes the raw RabbitMQ job queue and runs agent jobs | — (metrics 9101 when on) | `jarvis-worker` | agentjob store; **not running today** — start with `--profile optional` |
+| `worker` | Consumes the raw RabbitMQ job queue (voice/coding/background) | — (metrics 9101 when on) | `jarvis-worker` | agentjob store; started by `docker compose up -d` / `jarvis-stack` |
 | `wake-queue` *(optional)* | Bridges wake-word events into the job pipeline | — | `jarvis-wake-queue` | **not running today** — start with `--profile optional` |
 | `prometheus` | Scrapes everything below, 15 d retention | 9090 | `jarvis-prometheus` | named volume `prometheus_data`; config: `docker/monitoring/prometheus/` |
 | `grafana` | Dashboards (provisioned from `docker/monitoring/grafana/provisioning/`) | 3000 | `jarvis-grafana` | named volume `grafana_data` |
@@ -45,7 +45,7 @@ cd /home/agent/ai-agent-build          # repo root (project name = ai-agent-buil
 docker compose config                  # sanity check
 docker compose build                   # build the jarvis/* images
 docker compose up -d                   # everything that runs today
-docker compose --profile optional up -d   # also worker + wake-queue
+docker compose --profile optional up -d   # also wake-queue
 docker compose ps
 docker compose logs -f chat            # logs of one service
 docker compose stop voice              # stop one (state survives)
@@ -65,7 +65,7 @@ the driver lib is injected by the nvidia runtime.
 ## Verifying the stack
 
 ```bash
-docker compose ps                 # 12 services (14 with --profile optional)
+docker compose ps                 # 13 services (14 with --profile optional)
 curl -s 127.0.0.1:11434/v1/models | head -c 100                    # engine: serving jarvis-brain
 curl -s 127.0.0.1:8101/health                                       # memory: status + model + db
 curl -s 127.0.0.1:8100/health                                       # voice: brain + whisper ready
