@@ -77,6 +77,27 @@ func (c *Conn) Channel() *amqp.Channel {
 	return c.channel
 }
 
+// QueueDepth inspects one queue on a throwaway channel so a missing
+// queue (AMQP 404) cannot close the consumer's channel.
+func (c *Conn) QueueDepth(name string) (int, error) {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return 0, fmt.Errorf("not connected")
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		return 0, err
+	}
+	defer ch.Close()
+	q, err := ch.QueueInspect(name)
+	if err != nil {
+		return 0, err
+	}
+	return q.Messages, nil
+}
+
 // Exchange returns the exchange name.
 func (c *Conn) Exchange() string { return c.exchange }
 
