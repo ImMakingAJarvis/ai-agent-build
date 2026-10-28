@@ -15,3 +15,5 @@
 - 2026-10-28T03:23Z Gotcha — kill throwaway processes by recorded PID or by port, never `pkill -f <path>` (it also kills the live /opt deployment and the running shell).
 - 2026-10-28T03:23Z Gotcha — the `sqlite3` CLI is not installed; query `memory.db` (and other SQLite files) with `python3 -c 'import sqlite3; ...'`.
 - 2026-10-28T03:23Z Gotcha — HA MCP working endpoint is `/api/mcp` (streamable HTTP); the old `/api/mcp_server/sse` path 404s on this HA version.
+- 2026-10-28T03:57Z FreeToken: /home/agent/ftvenv = 0.2.1 editable from /home/agent/freetoken (bench venv); /opt/freetoken-venv = old 0.1.1 still referenced by stopped jarvis-moe-engine.service (port 11435); bench profiles in ~/.cache/freetoken/benchbw/
+- 2026-10-28T04:21Z jarvis-voice (docker) needs BOTH: port 8443 published AND ~/.config/jarvis/tls bind-mounted ro (uid 1001 == container user == cert owner) or voice_service.py falls back to plain HTTP :8100 and every browser mic is silently blocked. Cert SAN holds the box IP — rerun scripts/gen_voice_cert.sh after an IP change, then docker compose up -d voice.

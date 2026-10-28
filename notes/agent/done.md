@@ -19,3 +19,5 @@
 - 2026-10-28T03:23Z Stack: containerize all self-built services (compose + Dockerfiles + boot) (PR #83)
 - 2026-10-28T03:23Z Chatbot: memory of the work logs (vector DB wiring, RAG + search tool) (PR #85)
 - 2026-10-28T03:29Z [chat-1792998605-81b4] Agent notes: three-bucket done/system/asked notes + jarvis-notes CLI, wired into the vector graph (PR #87)
+- 2026-10-28T03:57Z [chat-1793040169-43b4] FreeToken runner hardened: clone at /home/agent/freetoken (v0.2.1), editable venv /home/agent/ftvenv verified (PR #89)
+- 2026-10-28T04:21Z [chat-1793001320-4d10] Voice chat mic: HTTPS 8443 listener restored in the containerized stack — compose publishes 8443 + bind-mounts ~/.config/jarvis/tls ro; plain-HTTP-only origin was why the browser never prompted for the mic (PR #90)
