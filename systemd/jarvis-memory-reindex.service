@@ -1,0 +1,11 @@
+[Unit]
+Description=Jarvis Memory reindex (periodic)
+After=jarvis-memory.service
+Requires=jarvis-memory.service
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+Environment=HOME=/home/agent
+ExecStart=/usr/bin/python3 /home/agent/ai-agent-build/scripts/memory_service.py --reindex
