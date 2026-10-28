@@ -34,3 +34,5 @@
 - 2026-10-28T20:30Z [chat-1793091300-027f] Discord !photo command (jarvis-chat → art service, image attachment DM) + photo gallery site at :8120 with per-image prompt metadata (PR #99)
 - 2026-10-28T20:38Z [chat-1793218355-0e62] Fixed PR #97 (iGPU model-handler investigation) merge conflict — merged origin/main into phase-igpu-model-handler, kept all notes entries from both sides, back to MERGEABLE (PR #97)
 - 2026-10-28T21:00Z [chat-1793219796-26cb] !restart from Discord kills a running coding round and re-queues its job for a fresh run (PR #100)
+- 2026-10-28T22:37Z [chat-1793219709-180a] !photo fix: chat container now mounts /var/lib/jarvis/art read-only; generated PNGs reachable by SendImage (PR #101)
+- 2026-10-28T23:01Z [chat-1793219773-c61e] agent-run restart helper: /usr/local/bin/agent-run-restart (deferred via agent-run-restart-later oneshot mid-round; restarts immediately when idle/down; --now hard restart; respects disable/resume-pending) + jarvis-jobs restart [--now] + DM !restart-service [now] (PR #102)

@@ -24,6 +24,11 @@ sudo cp "$REPO_ROOT/scripts/agent-local" "$BIN_DIR/agent-local.tmp"
 sudo mv -f "$BIN_DIR/agent-local.tmp" "$BIN_DIR/agent-local"
 sudo chmod 755 "$BIN_DIR/agent-local"
 
+echo "==> Installing agent-run-restart atomically"
+sudo cp "$REPO_ROOT/scripts/agent-run-restart" "$BIN_DIR/agent-run-restart.tmp"
+sudo mv -f "$BIN_DIR/agent-run-restart.tmp" "$BIN_DIR/agent-run-restart"
+sudo chmod 755 "$BIN_DIR/agent-run-restart"
+
 echo "==> Installing agent-run drop-ins (no restart)"
 sudo mkdir -p "$SYSTEMD_DIR/agent-run.service.d"
 sudo cp systemd/agent-run.service.d/output-tokens.conf \

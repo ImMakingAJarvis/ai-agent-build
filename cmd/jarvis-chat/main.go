@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -206,6 +207,32 @@ func main() {
 					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 					_ = d.Notify(ctx, "Restarting the agent run: killing the current round and putting its job back in the queue.")
 					cancel()
+					return
+				}
+
+				// !restart-service restarts the agent-run *service* itself,
+				// not just the current round: it runs the agent-run-restart
+				// helper, which defers the restart until the running round
+				// ends (or takes it now with "now"), and starts the service
+				// when it is down.
+				if content == "!restart-service" || content == "!restart-service now" {
+					var helperArgs []string
+					if content == "!restart-service now" {
+						helperArgs = append(helperArgs, "--now")
+					}
+					hctx, hcancel := context.WithTimeout(context.Background(), 60*time.Second)
+					out, herr := exec.CommandContext(hctx, "/usr/local/bin/agent-run-restart", helperArgs...).CombinedOutput()
+					hcancel()
+					msg := strings.TrimSpace(string(out))
+					if herr != nil {
+						msg = "agent-run restart failed: " + msg
+					}
+					if msg == "" {
+						msg = "agent-run restart failed with no output"
+					}
+					nctx, ncancel := context.WithTimeout(context.Background(), 15*time.Second)
+					_ = d.Notify(nctx, msg)
+					ncancel()
 					return
 				}
 

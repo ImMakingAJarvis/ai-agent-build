@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+#
+# agent-run-restart: restart the agent-run service (the coding-round loop).
+#
+#   agent-run-restart            if a round is running, defer the restart
+#                                until it ends (armed as the transient
+#                                unit agent-run-restart-later); otherwise
+#                                restart immediately. Works when the service
+#                                is down — a restart of a dead unit starts it.
+#   agent-run-restart --now      restart immediately, even mid-round
+#                                (kills the running round).
+#   agent-run-restart --dry-run  print the decision, do nothing.
+#   agent-run-restart --wait JOB internal: deferred-waiter mode, run as
+#                                agent-run-restart-later by systemd-run.
+#
+# A round is "running" while $CONF/current-job exists: agent-run writes it
+# before each round and removes it after. The deferred waiter polls that
+# file; when the armed round clears it restarts the service. If the file
+# comes back with a different job (a new round already owns the loop) it
+# aborts instead of killing that round. If the service goes inactive while
+# waiting, it restarts it at once.
+#
+# Inherited from agent-run's own rules: nothing restarts while
+# /var/lib/jarvis/agent-run.disabled exists or while the resume-pending
+# marker is set (agent-resume owns the next start after a reboot).
+#
+# Env overrides (mainly for testing against a dummy unit): AGENT_RUN_UNIT,
+# JARVIS_CONF, AGENT_RUN_DISABLE_FILE, AGENT_RUN_RESTART_UNIT.
+
+set -uo pipefail
+
+UNIT="${AGENT_RUN_UNIT:-agent-run}"
+CONF="${JARVIS_CONF:-$HOME/.config/jarvis}"
+DISABLE_FILE="${AGENT_RUN_DISABLE_FILE:-/var/lib/jarvis/$UNIT.disabled}"
+WAITER_UNIT="${AGENT_RUN_RESTART_UNIT:-agent-run-restart-later}"
+WAIT_SECS=2
+WAIT_TIMEOUT=3600   # 1h: a round still running after that is hung; do not kill it
+
+say() { printf '==> %s\n' "$*"; }
+die() { printf 'agent-run-restart: %s\n' "$*" >&2; exit 1; }
+
+job_now() { cat "$CONF/current-job" 2>/dev/null || true; }
+
+# ----------------------------------------------------------------- --wait mode
+# Runs as the $WAITER_UNIT oneshot (root, env passed via systemd-run).
+if [[ "${1:-}" == "--wait" ]]; then
+  armed="${2:-?}"
+  say "waiting for round $armed to end before restarting $UNIT"
+  deadline=$(( $(date +%s) + WAIT_TIMEOUT ))
+  while (( $(date +%s) < deadline )); do
+    if ! systemctl is-active --quiet "$UNIT"; then
+      say "$UNIT went inactive; restarting it now"
+      if sudo systemctl restart "$UNIT"; then
+        exit 0
+      fi
+      say "ERROR: failed to restart $UNIT" >&2
+      exit 1
+    fi
+    cur=$(job_now)
+    if [[ -n "$cur" && "$cur" != "$armed" ]]; then
+      say "a new round ($cur) owns the loop; aborting deferred restart"
+      exit 0
+    fi
+    if [[ -z "$cur" ]]; then
+      sleep 10   # let the loop finish post-round bookkeeping
+      cur=$(job_now)
+      if [[ -n "$cur" && "$cur" != "$armed" ]]; then
+        say "a new round ($cur) started while settling; aborting deferred restart"
+        exit 0
+      fi
+      break
+    fi
+    sleep "$WAIT_SECS"
+  done
+  if (( $(date +%s) >= deadline )); then
+    die "round $armed still running after $WAIT_TIMEOUTs; aborting deferred restart"
+  fi
+  rm -f "$CONF/current-job"   # bookkeeping may have been cut short
+  say "round $armed is over; restarting $UNIT"
+  sudo systemctl restart "$UNIT"
+  sleep 2
+  if systemctl is-active --quiet "$UNIT"; then
+    say "$UNIT is running again"
+  else
+    say "ERROR: $UNIT did not come back; journalctl -u $UNIT" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+# ----------------------------------------------------------------- main mode
+now=0; dry=0
+for a in "$@"; do
+  case "$a" in
+    --now)     now=1 ;;
+    --dry-run) dry=1 ;;
+    *) die "unknown flag $a (usage: agent-run-restart [--now] [--dry-run])" ;;
+  esac
+done
+
+if [[ -f "$DISABLE_FILE" ]]; then
+  say "$UNIT is inhibited ($DISABLE_FILE exists); not restarting. Remove the file, then retry."
+  exit 0
+fi
+if [[ -f "$CONF/resume-pending" ]]; then
+  say "resume-pending marker is set; agent-resume owns the next start, not a restart."
+  exit 0
+fi
+
+active=0
+systemctl is-active --quiet "$UNIT" && active=1
+running_job=$(job_now)
+
+if (( active )) && [[ -n "$running_job" ]] && (( ! now )); then
+  # A round is running: arm the deferred waiter unless one is already armed.
+  if systemctl is-active --quiet "$WAITER_UNIT"; then
+    say "deferred restart already armed ($WAITER_UNIT is active); nothing to do"
+    exit 0
+  fi
+  self="$(readlink -f "$0")"
+  cmd=(sudo systemd-run --unit="$WAITER_UNIT"
+    --description="Restart $UNIT after the current round ends"
+    --property=Environment=JARVIS_CONF="$CONF"
+    --property=Environment=AGENT_RUN_UNIT="$UNIT"
+    "$self" --wait "$running_job")
+  if (( dry )); then
+    say "DRY RUN: round $running_job is running; would arm: ${cmd[*]}"
+    exit 0
+  fi
+  "${cmd[@]}" >/dev/null || die "failed to arm $WAITER_UNIT"
+  say "round $running_job is running; $WAITER_UNIT will restart $UNIT as soon as it ends"
+  exit 0
+fi
+
+# Immediate path: idle, service down, or --now mid-round.
+if systemctl is-active --quiet "$WAITER_UNIT"; then
+  say "a deferred restart was armed; it is redundant now, stopping it"
+  sudo systemctl stop "$WAITER_UNIT"
+fi
+if (( dry )); then
+  if (( active )); then
+    say "DRY RUN: would restart $UNIT now (active; round: ${running_job:-none}; --now: $now)"
+  else
+    say "DRY RUN: $UNIT is not active; would start it now"
+  fi
+  exit 0
+fi
+if (( ! active )) && [[ -n "$running_job" ]]; then
+  # The service is down, so this round is dead too; clear the stale marker.
+  rm -f "$CONF/current-job"
+  say "cleared stale current-job ($running_job): $UNIT was not running"
+fi
+if (( now )) && [[ -n "$running_job" ]]; then
+  say "restarting $UNIT (mid-round: killing the running round $running_job)"
+else
+  say "restarting $UNIT"
+fi
+sudo systemctl restart "$UNIT" || die "systemctl restart $UNIT failed"
+sleep 2
+if systemctl is-active --quiet "$UNIT"; then
+  say "$UNIT is active"
+else
+  say "ERROR: $UNIT did not come back; recent log:" >&2
+  journalctl -u "$UNIT" --no-pager -n 15 >&2 || true
+  exit 1
+fi
