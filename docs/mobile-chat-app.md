@@ -78,8 +78,13 @@ The app ships inside the voice service deployment:
 ```
 cp -r scripts/jarvis_app /opt/jarvis-voice/scripts/
 # voice_service.py also copied; /opt/jarvis-voice/DEPLOYED_FROM = commit hash
-sudo systemctl restart jarvis-voice
+cd <repo> && docker compose up -d voice
 ```
+
+The container must publish `8443` and bind-mount the TLS cert
+(`/home/agent/.config/jarvis/tls`, see `docker-compose.yml`) or the mic
+will still be blocked — the browser only allows it in a secure context.
+Regenerate the cert with `scripts/gen_voice_cert.sh` after the IP changes.
 
 Verify: `curl -sk https://localhost:8443/app/` → 200 HTML, and
 `curl -s http://localhost:8100/health` → ok.
