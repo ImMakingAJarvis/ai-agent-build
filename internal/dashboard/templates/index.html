@@ -389,6 +389,32 @@
   .muted { color: var(--muted); }
   .msg-waiting { color: var(--yellow); font-size: 0.8rem; margin-bottom: 8px; }
 
+  /* Plans: upload a plan file (md or other) for the worker to break into jobs. */
+  .plan-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .plan-form input[type="file"] { flex: 1 1 220px; min-width: 0; }
+  .plan-form input[type="text"] { flex: 1 1 160px; min-width: 0; }
+  .plan-form input[type="file"],
+  .plan-form input[type="text"],
+  .plan-form select,
+  .plan-form input[type="number"] {
+    padding: 7px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 0.8rem;
+  }
+  .plan-form select, .plan-form input[type="number"] { flex: 0 0 auto; }
+  .plan-form input:focus, .plan-form select:focus { outline: none; border-color: var(--blue); }
+  .plan-form .btn { flex: 0 0 auto; }
+
   a.log-link { color: var(--blue); text-decoration: none; font-weight: 500; }
   a.log-link:hover { text-decoration: underline; }
   .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -484,6 +510,36 @@
        Lives in the static shell so a 15s refresh never wipes a drag in flight;
        it loads itself and refreshes on a timer that pauses while dragging. -->
   {{ template "queue-section" }}
+  <!-- Plans: upload a plan file (md or anything else). The dashboard saves it
+       and enqueues a ready plan job; the worker's round for that job reads the
+       plan and creates all the jobs around it. Lives in the static shell so a
+       15s refresh never wipes a file being chosen. -->
+  <div class="section" id="plans">
+    <div class="section-title">Plans</div>
+    <p class="subtitle">Upload a plan (md or other file) &mdash; a worker takes it and creates all the jobs around it.</p>
+    <form id="plan-upload-form" hx-post="/api/plans" hx-encoding="multipart/form-data"
+      hx-target="#plan-upload-status" hx-swap="innerHTML"
+      hx-on::before-request="this.querySelector('button[type=submit]').disabled = true"
+      hx-on::after-request="this.querySelector('button[type=submit]').disabled = false; if (event.detail.successful) { this.reset(); }">
+      <div class="plan-form">
+        <input type="file" name="file" required>
+        <input type="text" name="title" placeholder="Name (default: file name)">
+        <select name="class" title="Job class (which band the plan job runs in)">
+          <option value="build" selected>build</option>
+          <option value="fix">fix</option>
+          <option value="background">background</option>
+        </select>
+        <input type="number" name="priority" value="10" min="0" title="Priority (higher runs first within the class)">
+        <button class="btn" type="submit">Upload plan</button>
+      </div>
+      <div class="msg-actions">
+        <span id="plan-upload-status" class="msg-status"></span>
+      </div>
+    </form>
+    <div id="plans-list" hx-get="/html/plans-section" hx-trigger="load, every 15s" hx-swap="innerHTML">
+      <div class="empty-state">Loading&hellip;</div>
+    </div>
+  </div>
   <!-- Talk to the worker: send the running agent a message without stopping
        it. The message lands in the agent's inbox and is injected into its
        context at the next step (owner-message hook); if no job is running
