@@ -94,7 +94,7 @@ services:
       args: { BIN: cmd/dashboard }
     image: jarvis/jarvis-dashboard:local
     container_name: jarvis-dashboard
-    restart: on-failure
+    restart: unless-stopped
     ports:
       - "8080:8080"
     env_file:
@@ -115,7 +115,7 @@ services:
       args: { BIN: cmd/jarvis-ha }
     image: jarvis/jarvis-ha:local
     container_name: jarvis-ha
-    restart: on-failure
+    restart: unless-stopped
     env_file:
       - /home/agent/.config/jarvis/agent.env
       - /home/agent/.config/jarvis/ha.env
@@ -137,7 +137,7 @@ services:
       dockerfile: docker/voice/Dockerfile
     image: jarvis/voice:local
     container_name: jarvis-voice
-    restart: on-failure
+    restart: unless-stopped
     ports:
       - "8100:8100"
     working_dir: /opt/jarvis-voice
@@ -165,7 +165,7 @@ services:
       dockerfile: docker/memory/Dockerfile
     image: jarvis/memory:local
     container_name: jarvis-memory
-    restart: on-failure
+    restart: unless-stopped
     ports:
       - "127.0.0.1:8101:8101"
     environment:
