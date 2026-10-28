@@ -41,6 +41,9 @@ involved):
   job is re-queued).
 - `!restart` — kill the running round and re-queue its job so the agent run
   starts over in a fresh conversation. See docs/agent-run.md.
+- `!restart-service` / `!restart-service now` — restart the agent-run
+  *service* (defers until the current round ends unless `now`). Works when
+  the service is down. See docs/agent-run.md.
 - `!photo <prompt>` — generate a photo with the local art model.
 - `!build <title…>` / `!fix <title…>` — queue a build/fix job.
 
