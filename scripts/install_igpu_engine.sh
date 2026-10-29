@@ -53,6 +53,10 @@ cmake --build "$BUILD" --config Release -j"$(nproc)" \
   --target llama-server llama-bench
 mkdir -p "$DEST/bin"
 cp "$BUILD"/bin/llama-server "$BUILD"/bin/llama-bench "$DEST/bin/"
+# The service and model dir are agent-owned: the server runs as agent and
+# the model is swapped in by hand.
+sudo chown -R agent:agent "$DEST"/bin
+sudo install -d -o agent -g agent "$DEST/models"
 log "Installed to $DEST/bin"
 
 if [[ $BUILD_ONLY -eq 1 ]]; then
