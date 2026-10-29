@@ -58,6 +58,49 @@ func TestParseTranscriptEmpty(t *testing.T) {
 	}
 }
 
+// TestParseTranscriptStreamEvents covers --include-partial-messages output,
+// where every content_block_* event arrives wrapped in a stream_event
+// envelope and the full assistant messages repeat the streamed content.
+func TestParseTranscriptStreamEvents(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"type":"system","subtype":"init"}`,
+		`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"check the"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" store"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_stop","index":0}}`,
+		`{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"Bash"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"ls jobs\"}"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_stop","index":1}}`,
+		`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"check the store"},{"type":"tool_use","name":"Bash","input":{"command":"ls jobs"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","content":"d0.1\n"}]}}`,
+		`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Listed the "}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"jobs."}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_stop","index":0}}`,
+		`{"type":"result","subtype":"success","result":"Listed the jobs."}`,
+	}, "\n")
+	ev := ParseTranscript(raw)
+	if len(ev) != 5 {
+		t.Fatalf("events=%d %+v", len(ev), ev)
+	}
+	if ev[0].Kind != "thought" || ev[0].Body != "check the store" {
+		t.Errorf("thought: %+v", ev[0])
+	}
+	if ev[1].Kind != "command" || ev[1].Title != "Bash" || ev[1].Body != "ls jobs" {
+		t.Errorf("command: %+v", ev[1])
+	}
+	if ev[2].Kind != "result" || !strings.Contains(ev[2].Body, "d0.1") {
+		t.Errorf("result: %+v", ev[2])
+	}
+	if ev[3].Kind != "output" || ev[3].Title != "Reply" || ev[3].Body != "Listed the jobs." {
+		t.Errorf("reply: %+v", ev[3])
+	}
+	if ev[4].Kind != "output" || ev[4].Title != "Result" || ev[4].Body != "Listed the jobs." {
+		t.Errorf("final result: %+v", ev[4])
+	}
+}
+
 func TestJobLogPages(t *testing.T) {
 	dir := t.TempDir()
 	st, err := agentjob.Open(dir)
@@ -206,6 +249,61 @@ func TestLogStreamTail(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/big/log/stream?tail=0", nil))
 	if rec.Body.Len() != sb.Len() {
 		t.Fatalf("full stream %d != %d", rec.Body.Len(), sb.Len())
+	}
+}
+
+func TestLogStreamEventsMode(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := agentjob.Open(dir)
+	if _, err := st.Ingest(agentjob.Spec{ID: "big"}); err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	for i := 0; i < 20000; i++ {
+		sb.WriteString("line of log output number x\n")
+	}
+	if err := st.WriteFile("big", "transcript.txt", []byte(sb.String())); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{historyPath: filepath.Join(dir, "jobs.jsonl")}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/big/log/stream?format=events", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type %q", ct)
+	}
+	if rec.Header().Get("X-Log-Truncated") != "true" || rec.Header().Get("X-Log-Size") == "" {
+		t.Fatalf("headers %q / %q", rec.Header().Get("X-Log-Truncated"), rec.Header().Get("X-Log-Size"))
+	}
+	var out struct {
+		Events []LogEvent `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(out.Events) == 0 || out.Events[0].Kind != "output" {
+		t.Fatalf("events: %+v", out.Events)
+	}
+
+	// tail=0 returns the whole log parsed, not truncated.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/big/log/stream?tail=0&format=events", nil))
+	if rec.Header().Get("X-Log-Truncated") != "false" {
+		t.Fatalf("full stream should not be truncated, header %q", rec.Header().Get("X-Log-Truncated"))
+	}
+	var full struct {
+		Events []LogEvent `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &full); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(full.Events) == 0 {
+		t.Fatal("no events for full log")
 	}
 }
 

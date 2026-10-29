@@ -16,9 +16,9 @@ import (
 
 // LogEvent is one chronological step on a job log page.
 type LogEvent struct {
-	Kind  string // thought, command, result, output
-	Title string
-	Body  string
+	Kind  string `json:"kind"` // thought, command, result, output
+	Title string `json:"title,omitempty"`
+	Body  string `json:"body,omitempty"`
 }
 
 // JobLog is the data for GET /jobs/{id}.
@@ -167,8 +167,8 @@ func (s *Server) loadJobLog(id string) JobLog {
 }
 
 // readJobTail reads at most the last max bytes of the job's transcript for
-// the formatted view, dropping a partial leading line. truncated reports
-// whether older output was left out.
+// the formatted view, dropping a partial leading line. max <= 0 reads the
+// whole log. truncated reports whether older output was left out.
 func readJobTail(st *agentjob.Store, id string, max int64) (raw, label string, truncated bool, err error) {
 	path := jobLogPath(st, id)
 	if path == "" {
@@ -183,7 +183,7 @@ func readJobTail(st *agentjob.Store, id string, max int64) (raw, label string, t
 	if err != nil {
 		return "", "", false, err
 	}
-	if fi.Size() > max {
+	if max > 0 && fi.Size() > max {
 		truncated = true
 		if _, err := f.Seek(fi.Size()-max, io.SeekStart); err != nil {
 			return "", "", false, err
@@ -253,6 +253,12 @@ func parseJSONTranscript(raw string) ([]LogEvent, bool) {
 	var pendingKind string // "thought", "tool" or "text" (goes to textBuf)
 	var pendingName string
 	var pendingJSON strings.Builder
+	flushText := func() {
+		if t := strings.TrimSpace(textBuf.String()); t != "" {
+			events = append(events, LogEvent{Kind: "output", Title: "Reply", Body: t})
+			textBuf.Reset()
+		}
+	}
 	flushPending := func() {
 		switch pendingKind {
 		case "thought":
@@ -271,14 +277,10 @@ func parseJSONTranscript(raw string) ([]LogEvent, bool) {
 			}
 			events = append(events, LogEvent{Kind: "command", Title: title, Body: formatToolInput(title, input)})
 			pendingJSON.Reset()
+		case "text":
+			flushText()
 		}
 		pendingKind = ""
-	}
-	flushText := func() {
-		if t := strings.TrimSpace(textBuf.String()); t != "" {
-			events = append(events, LogEvent{Kind: "output", Title: "Reply", Body: t})
-			textBuf.Reset()
-		}
 	}
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -293,6 +295,17 @@ func parseJSONTranscript(raw string) ([]LogEvent, bool) {
 			continue
 		}
 		typ, _ := ev["type"].(string)
+		// --include-partial-messages wraps every partial event in a
+		// stream_event envelope; unwrap it so the cases below see the
+		// inner content_block_* event.
+		if typ == "stream_event" {
+			inner, ok := ev["event"].(map[string]any)
+			if !ok {
+				continue
+			}
+			ev = inner
+			typ, _ = inner["type"].(string)
+		}
 		if hasDelta && typ == "assistant" {
 			continue // already streamed via deltas
 		}

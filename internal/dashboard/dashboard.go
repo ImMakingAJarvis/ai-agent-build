@@ -1246,6 +1246,26 @@ func (s *Server) handleJobLogStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	size := fi.Size()
+
+	// format=events serves the same tail parsed into human-readable
+	// events (thoughts, tools, outcomes) instead of raw stream-json.
+	if r.URL.Query().Get("format") == "events" {
+		raw, _, trunc, err := readJobTail(st, id, tail)
+		if err != nil {
+			http.Error(w, "could not read log", http.StatusInternalServerError)
+			return
+		}
+		h := w.Header()
+		h.Set("Content-Type", "application/json")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("X-Log-Size", strconv.FormatInt(size, 10))
+		h.Set("X-Log-Truncated", strconv.FormatBool(trunc))
+		json.NewEncoder(w).Encode(struct {
+			Events []LogEvent `json:"events"`
+		}{Events: ParseTranscript(raw)})
+		return
+	}
+
 	truncated := tail > 0 && size > tail
 	if truncated {
 		if _, err := f.Seek(size-tail, io.SeekStart); err != nil {
