@@ -11,6 +11,10 @@ serving OpenAI-compatible chat on 11435 via
 the `jarvis-helper` CLI (setup brief in
 `scripts/jarvis-helper-context.md`). Measured on the 3B model:
 pp512 ≈ 115 tok/s, tg64 ≈ 13.2 tok/s on Vulkan1 (llama-bench, 2026-10-28).
+Full CPU comparison (2026-10-29, job chat-1793248851-31c8): the CPU is
+**1.69× faster at decode** (22.9 vs 13.55 tok/s) but the **iGPU is ~2.2×
+faster at prefill** (116.7 vs 45–49 tok/s) — see the benchmark table and
+"Reading the numbers" below.
 The CPU-offload niche from the investigation is exactly what it fills:
 the agent consults it for setup-change and self-restart questions without
 spending CPU cores.
@@ -24,13 +28,14 @@ A Vulkan build of llama.cpp runs models on it, and it runs **in
 parallel with the brain on the 4090** with no VRAM contention (the
 iGPU reads weights from system RAM).
 
-Measured: the iGPU decodes at ~27 GB/s effective — about **45% of the
-CPU** (same RAM) and ~1/37 of the 4090. So it is not a speed win; its
+Measured: the iGPU decodes at ~27 GB/s effective — about **45% (7B) to
+59% (3B) of the CPU** (same RAM) and ~1/37 of the 4090 at decode. So it is not a speed win; its
 only real value is **running an auxiliary model without spending CPU
 cores** (the CPU is busy with the agent itself, voice pipeline, memory
 service). That niche is small: for interactive chat the 4090 engine's
-chat slot is the fast path, and for pure CPU-offload a small model on
-the CPU is faster than on the iGPU. Recommendation: keep the staged
+chat slot is the fast path, and for decode-heavy CPU-offload a small
+model on the CPU is faster than on the iGPU (prefill-bound work is the
+one case where the iGPU wins — see below). Recommendation: keep the staged
 components (below) as an available option, do not enable the iGPU
 engine by default, and do not put anything bigger than ~8B on it.
 
@@ -76,6 +81,22 @@ was running the brain, so its numbers are a busy-device lower bound):
 | llama3.2 1B (Q8_0, 1.24B) | 4090 (Vulkan0) | 33900 ± 16269 | 218.0 ± 1.3 |
 | qwen2.5 7B (Q4_K_M, 7.62B) | iGPU (Vulkan1) | 46.1 ± 0.04 | 5.9 ± 0.00 |
 | qwen2.5 7B (Q4_K_M, 7.62B) | CPU (16 threads) | 622.0 ± 0.6 | 10.4 ± 0.01 |
+| qwen2.5 3B (Q4_K_M, 3.40B) | iGPU (Vulkan1) | 116.7 ± 0.01 ² | 13.55 ± 0.01 ² |
+| qwen2.5 3B (Q4_K_M, 3.40B) | CPU (16 threads) | 45–49 ¹ ² | 22.94 ± 0.02 ² |
+| qwen2.5 3B (Q4_K_M, 3.40B) | 4090 (Vulkan0) | 17863 ± 62 ² | 283.7 ± 1.1 ² |
+
+¹ **llama-bench's CPU pp512 is wrong in this build.** It reported
+3674–3858 tok/s for the 3B CPU prefill, but a live `llama-server` with
+`-ngl 0` (same binary, same model, 282-token prompt, two runs) measured
+**49.4 and 45.1 tok/s** (`prompt eval time` log line) — ~75× off, and the
+reported rate implies ~25 TFLOPS on a ~1.2 TFLOPS chip. The CPU **tg**
+rows and all **GPU** rows pass the bandwidth/compute sanity checks and
+match live-server measurements, so only the CPU prefill column is
+affected; treat the 1B/7B CPU pp values above as suspect in the same
+way. For CPU prefill, trust `llama-server`'s `prompt eval time`.
+² 2026-10-29, `scripts/igpu-bench.sh` (llama-bench pp512/tg512, 3
+repeats) on the helper model `/opt/jarvis-igpu/models/jarvis-igpu.gguf`;
+the 4090 row is the busy-device reference (brain was loaded).
 
 (Brain reference: qwen3.8 27B Q4_K_M on the 4090 ≈ 48 tok/s decode,
 docs/local-brain.md.)
@@ -85,10 +106,24 @@ docs/local-brain.md.)
 Decode is weight-bandwidth bound: tok/s ≈ effective bandwidth / bytes
 per token. From the 7B row: iGPU 5.87 tok/s × 4.68 GB ≈ **27 GB/s
 effective**, CPU 10.43 tok/s × 4.68 GB ≈ **49 GB/s** (near the
-theoretical 58). The iGPU's Infinity Fabric link to DRAM is simply
-narrower than the CPU's, and the iGPU also lost prompt processing
-(46 vs 622 tok/s) — its 12 CUs are not much compute. Expect ~10 tok/s
-from a 4B-class model on the iGPU, ~20 from the same model on the CPU.
+theoretical 58). The 3B row agrees: 13.55 × 1.95 ≈ **26 GB/s** (iGPU)
+vs 22.94 × 1.95 ≈ **45 GB/s** (CPU). The iGPU's Infinity Fabric link to
+DRAM is simply narrower than the CPU's, so the CPU wins decode —
+measured **22.9 vs 13.55 tok/s (1.69×)** for the 3B, i.e. the helper
+model answers ~1.7× faster if it ran on the CPU.
+
+Prefill, though, flips: it is compute-bound, and the iGPU's FP32 peak
+(~6 TFLOPS across 12 RDNA2 CUs) is ~5× the CPU's (~1.2 TFLOPS on 8
+Zen4 cores). Measured on the 3B: iGPU **116.7** tok/s (llama-bench;
+live-server 105.6) vs CPU **45–49** tok/s — the iGPU pre-fills a long
+prompt ~2.2× faster. (The earlier "iGPU lost prompt processing, 46 vs
+622" note was based on llama-bench's broken CPU pp numbers, ¹.)
+
+Practical split, confirmed by the 3B: interactive chat (decode-bound,
+many tokens per turn) → the CPU would be faster, but the iGPU still
+costs zero CPU cores, which is why the helper lives there; long-prompt
+batch work (summarizing transcripts) → the iGPU is the better
+prefill device *and* still costs no CPU cores.
 
 ## How to adopt it (done — helper model, 2026-10-28)
 
