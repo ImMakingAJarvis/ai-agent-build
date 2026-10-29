@@ -4,6 +4,7 @@ package dashboard
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
@@ -225,6 +227,7 @@ type Server struct {
 	authUser     string
 	authPass     string
 	kanban       *kanbanState
+	redis        *redis.Client // live job streams (nil = file-tail fallback)
 
 	// Pre-compiled templates (parsed once at startup).
 	tmpl *template.Template
@@ -259,6 +262,11 @@ func New() *Server {
 
 	engineClient := slots.NewClient()
 
+	// Live job streams: connect to Redis (where the runner publishes each
+	// agent output line). Unreachable or disabled leaves it nil and the
+	// live view falls back to tailing the transcript file.
+	redisClient := connectRedis()
+
 	// Pre-compile templates once at startup.
 	funcMap := template.FuncMap{
 		"statusClass":    StatusClass,
@@ -285,7 +293,37 @@ func New() *Server {
 		authPass:     os.Getenv("DASHBOARD_PASS"),
 		tmpl:         tmpl,
 		kanban:       initKanban(historyDir),
+		redis:        redisClient,
 	}
+}
+
+// connectRedis dials the Redis that carries live job output
+// ($JARVIS_REDIS, defaulting to the local one; "off" disables). It
+// returns nil when Redis is unreachable so the dashboard keeps working
+// without it.
+func connectRedis() *redis.Client {
+	addr := agentjob.StreamAddr()
+	if addr == "off" || addr == "none" {
+		return nil
+	}
+	opt, err := redis.ParseURL(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dashboard: bad JARVIS_REDIS %q: %v\n", addr, err)
+		return nil
+	}
+	if opt.DialTimeout == 0 {
+		opt.DialTimeout = time.Second
+	}
+	client := redis.NewClient(opt)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err = client.Ping(ctx).Err()
+	cancel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dashboard: redis %s unreachable (%v); live view falls back to the transcript file\n", opt.Addr, err)
+		client.Close()
+		return nil
+	}
+	return client
 }
 
 // StartRabbitMQ creates a persistent RabbitMQ connection for peeking at pending jobs.
@@ -347,6 +385,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
 	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
+	mux.HandleFunc("GET /api/jobs/{id}/live", s.handleJobLive)
 
 	// Kanban board routes.
 	mux.HandleFunc("GET /kanban", s.kanban.handleKanbanBoardPage(s))
