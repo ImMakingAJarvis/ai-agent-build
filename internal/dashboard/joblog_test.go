@@ -252,6 +252,61 @@ func TestLogStreamTail(t *testing.T) {
 	}
 }
 
+func TestLogStreamEventsMode(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := agentjob.Open(dir)
+	if _, err := st.Ingest(agentjob.Spec{ID: "big"}); err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	for i := 0; i < 20000; i++ {
+		sb.WriteString("line of log output number x\n")
+	}
+	if err := st.WriteFile("big", "transcript.txt", []byte(sb.String())); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{historyPath: filepath.Join(dir, "jobs.jsonl")}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.handleJobLogStream)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/big/log/stream?format=events", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type %q", ct)
+	}
+	if rec.Header().Get("X-Log-Truncated") != "true" || rec.Header().Get("X-Log-Size") == "" {
+		t.Fatalf("headers %q / %q", rec.Header().Get("X-Log-Truncated"), rec.Header().Get("X-Log-Size"))
+	}
+	var out struct {
+		Events []LogEvent `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(out.Events) == 0 || out.Events[0].Kind != "output" {
+		t.Fatalf("events: %+v", out.Events)
+	}
+
+	// tail=0 returns the whole log parsed, not truncated.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/big/log/stream?tail=0&format=events", nil))
+	if rec.Header().Get("X-Log-Truncated") != "false" {
+		t.Fatalf("full stream should not be truncated, header %q", rec.Header().Get("X-Log-Truncated"))
+	}
+	var full struct {
+		Events []LogEvent `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &full); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(full.Events) == 0 {
+		t.Fatal("no events for full log")
+	}
+}
+
 func TestIndexIsStaticShell(t *testing.T) {
 	tmpl, err := template.New("").Funcs(jobLogFuncs()).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
