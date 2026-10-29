@@ -7,7 +7,33 @@ Web UI for queue and job history. systemd unit, same shape as `jarvis-chat` and 
 - User: `agent` (so it reads the agent job store, not Nathan's empty one)
 - URL: **http://111.1.2.57:8080/** (or http://localhost:8080 on the box)
 - Polls `GET /html/dashboard` as HTML. `/api/state` stays JSON. The old :8081 shim is not needed for this build.
-- Each Agent Job and Recent Job row has a **Log** link to `/jobs/<id>`: thoughts, commands, and outcomes from that job's `transcript.txt` (or `output.txt` / `jobs.jsonl` summary if that is all that exists). Empty jobs say “No log for this job.” Missing IDs 404. Running jobs refresh every 5s. Traces stay in the existing job store; the dashboard does not keep a second copy.
+- Each Agent Job and Recent Job row has a **Log** link to `/jobs/<id>`: the worker's thoughts, tool calls, and outcomes, live while the job runs (see Live view below) and from that job's `transcript.txt` (or `output.txt` / `jobs.jsonl` summary if that is all that exists) afterwards. Empty jobs say “No log for this job.” Missing IDs 404. Traces stay in the existing job store; the dashboard does not keep a second copy.
+
+## Live view (worker thoughts, real time)
+
+`/jobs/<id>` streams the worker's progress while a job runs, as
+server-sent events from `GET /api/jobs/<id>/live`:
+
+- **Transport** — `jarvis-jobs run` executes the agent with
+  `--output-format stream-json --verbose --include-partial-messages`, so
+  thoughts, tool calls, results and token deltas are JSON lines as they
+  happen. Each completed line is XADDed to the job's Redis stream
+  (`jarvis:job:<id>`, `MAXLEN ~ 20000`) by `internal/agentjob/stream.go`.
+  The `redis` compose service carries it: host runners use
+  `127.0.0.1:6379` (default), the dashboard container
+  `redis://redis:6379` via `JARVIS_REDIS` (docker-compose.yml).
+- **Events** — `meta` (job state), `seed` (everything published so far,
+  from the last 5000 stream entries), `step` (one event or token delta as
+  it arrives; deltas merge into the open block on the page), `done`.
+  The stream's ID sequence makes seed-then-follow gap-free.
+- **Fallback** — with Redis down, or for jobs that predate it, the
+  endpoint seeds from the bounded transcript tail and polls the file
+  every 2 s (`internal/dashboard/live.go`), so the page always works.
+- The batch/formatted log view (`handleJobLogHTML`) parses the same
+  stream-json lines, merging partial-message deltas, so live and final
+  views match.
+- A finished job's stream gets a 24 h TTL when the runner closes it; the
+  `transcript.txt` in the job dir is the durable copy.
 
 Does not require `agent-run`.
 

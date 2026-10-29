@@ -227,7 +227,7 @@ func ParseTranscript(raw string) []LogEvent {
 
 func parseJSONTranscript(raw string) ([]LogEvent, bool) {
 	lines := strings.Split(raw, "\n")
-	jsonLines, nonEmpty := 0, 0
+	jsonLines, nonEmpty, hasDelta := 0, 0, false
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -236,6 +236,9 @@ func parseJSONTranscript(raw string) ([]LogEvent, bool) {
 		nonEmpty++
 		if strings.HasPrefix(line, "{") {
 			jsonLines++
+			if !hasDelta && strings.Contains(line, `"content_block_delta"`) {
+				hasDelta = true
+			}
 		}
 	}
 	if jsonLines == 0 || jsonLines*2 < nonEmpty {
@@ -244,6 +247,33 @@ func parseJSONTranscript(raw string) ([]LogEvent, bool) {
 
 	var events []LogEvent
 	var textBuf strings.Builder
+	// In partial-message transcripts the content_block_delta lines carry
+	// each block token by token and the full assistant messages repeat it;
+	// deltas are merged per block and those messages are skipped.
+	var pendingKind string // "thought", "tool" or "text" (goes to textBuf)
+	var pendingName string
+	var pendingJSON strings.Builder
+	flushPending := func() {
+		switch pendingKind {
+		case "thought":
+			if t := strings.TrimSpace(pendingJSON.String()); t != "" {
+				events = append(events, LogEvent{Kind: "thought", Title: "Thought", Body: t})
+			}
+			pendingJSON.Reset()
+		case "tool":
+			var input any
+			if j := strings.TrimSpace(pendingJSON.String()); j != "" {
+				json.Unmarshal([]byte(j), &input)
+			}
+			title := pendingName
+			if title == "" {
+				title = "Tool"
+			}
+			events = append(events, LogEvent{Kind: "command", Title: title, Body: formatToolInput(title, input)})
+			pendingJSON.Reset()
+		}
+		pendingKind = ""
+	}
 	flushText := func() {
 		if t := strings.TrimSpace(textBuf.String()); t != "" {
 			events = append(events, LogEvent{Kind: "output", Title: "Reply", Body: t})
@@ -257,12 +287,61 @@ func parseJSONTranscript(raw string) ([]LogEvent, bool) {
 		}
 		var ev map[string]any
 		if json.Unmarshal([]byte(line), &ev) != nil {
+			flushPending()
 			flushText()
 			events = append(events, LogEvent{Kind: "output", Title: "Output", Body: line})
 			continue
 		}
+		typ, _ := ev["type"].(string)
+		if hasDelta && typ == "assistant" {
+			continue // already streamed via deltas
+		}
+		if hasDelta {
+			switch typ {
+			case "content_block_start":
+				flushPending()
+				b, _ := ev["content_block"].(map[string]any)
+				switch b["type"] {
+				case "thinking":
+					pendingKind = "thought"
+				case "tool_use":
+					pendingKind = "tool"
+					pendingName, _ = b["name"].(string)
+				case "text":
+					pendingKind = "text"
+				}
+			case "content_block_delta":
+				d, _ := ev["delta"].(map[string]any)
+				switch pendingKind {
+				case "thought":
+					if t, ok := d["thinking"].(string); ok {
+						pendingJSON.WriteString(t)
+					}
+				case "text":
+					if t, ok := d["text"].(string); ok {
+						textBuf.WriteString(t)
+					}
+				case "tool":
+					if t, ok := d["partial_json"].(string); ok {
+						pendingJSON.WriteString(t)
+					}
+				}
+			case "content_block_stop":
+				flushPending()
+			case "user", "result":
+				flushPending()
+				events = append(events, eventsFromJSON(ev, &textBuf)...)
+				flushText()
+				continue
+			default:
+				continue
+			}
+			continue
+		}
+		flushText()
 		events = append(events, eventsFromJSON(ev, &textBuf)...)
 	}
+	flushPending()
 	flushText()
 	if len(events) == 0 {
 		return nil, false

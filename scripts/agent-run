@@ -189,13 +189,20 @@ stop_watcher() {
   fi
 }
 
+# jarvis_chat_running reports whether the Discord chat daemon is up anywhere:
+# the Docker container (primary) or the host systemd unit (fallback).
+jarvis_chat_running() {
+  systemctl is-active --quiet jarvis-chat && return 0
+  docker inspect --format '{{.State.Running}}' jarvis-chat 2>/dev/null | grep -q '^true$'
+}
+
 start_watcher() {
-  # When jarvis-chat is active, it already listens for owner DMs and
-  # answers them — no need to run a separate pause watcher. The
-  # !pause command is handled by jarvis-chat itself (it writes the
+  # When jarvis-chat is running (container or host unit), it already listens
+  # for owner DMs and answers them — no need to run a separate pause watcher.
+  # The !pause command is handled by jarvis-chat itself (it writes the
   # pause-signal file). Skip the watcher to avoid killing the round
   # on every normal message.
-  if systemctl is-active --quiet jarvis-chat; then
+  if jarvis_chat_running; then
     return
   fi
   rm -f "$CONF/pause-signal"  # clear any stale signal
