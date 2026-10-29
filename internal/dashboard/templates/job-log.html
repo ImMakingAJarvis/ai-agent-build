@@ -82,6 +82,16 @@
     font-size: 0.75rem;
     color: var(--muted);
   }
+  .log-controls .chk {
+    font-size: 0.75rem;
+    color: var(--fg);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .log-controls .chk input { margin: 0; }
   /* Live event cards */
   #live-log {
     display: flex;
@@ -123,6 +133,15 @@
   .ev.result .ev-title { color: var(--green); }
   .ev.result .ev-body { color: var(--muted); max-height: 240px; overflow-y: auto; }
   .ev.output { border-left-color: var(--fg); }
+  .log-events {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
   .log-pre {
     background: var(--card);
     border: 1px solid var(--border);
@@ -166,9 +185,11 @@
   <div class="log-controls">
     <span class="status" id="log-status">Connecting…</span>
     <button class="btn" onclick="connect()">Reconnect</button>
-    <button class="btn" id="btn-raw" onclick="toggleRaw()">Raw log</button>
+    <label class="chk" title="Show the log as readable events; uncheck for the raw json stream"><input type="checkbox" id="chk-human" checked> Human readable</label>
+    <button class="btn" id="btn-log" onclick="toggleLog()">Log</button>
   </div>
   <div id="live-log"></div>
+  <div id="log-events" class="log-events" style="display:none"></div>
   <pre id="log-output" class="log-pre" style="display:none"></pre>
   <script>
     const liveBox = document.getElementById('live-log');
@@ -231,24 +252,82 @@
       });
       es.onerror = () => setStatus('Reconnecting…', true);
     }
-    let rawFull = false;
-    async function toggleRaw() {
-      if (rawPre.style.display !== 'none') {
-        rawPre.style.display = 'none';
-        return;
+    // Log section: the full log on demand, either as readable events
+    // (Human readable checked) or as the raw stream-json (unchecked).
+    let logOpen = false, fullLoaded = false;
+    const humanChk = document.getElementById('chk-human');
+    const eventsBox = document.getElementById('log-events');
+    const logBtn = document.getElementById('btn-log');
+    function makeCard(ev) {
+      const el = document.createElement('div');
+      el.className = 'ev ' + (ev.kind || 'output');
+      const t = document.createElement('div');
+      t.className = 'ev-title';
+      t.textContent = ev.title || kindTitle[ev.kind] || 'Output';
+      const b = document.createElement('div');
+      b.className = 'ev-body';
+      b.textContent = ev.body || '';
+      el.appendChild(t); el.appendChild(b);
+      return el;
+    }
+    function closeLog() {
+      logOpen = false;
+      eventsBox.style.display = 'none';
+      eventsBox.innerHTML = '';
+      rawPre.style.display = 'none';
+      rawPre.textContent = '';
+      logBtn.textContent = 'Log';
+    }
+    function toggleLog() {
+      if (logOpen) { closeLog(); return; }
+      logOpen = true;
+      renderLog();
+    }
+    humanChk.addEventListener('change', () => { if (logOpen) renderLog(); });
+    async function renderLog() {
+      if (humanChk.checked) await renderHumanLog(); else await renderRawLog();
+    }
+    async function renderHumanLog() {
+      rawPre.style.display = 'none';
+      eventsBox.innerHTML = '<div class="loading-state">Loading…</div>';
+      eventsBox.style.display = '';
+      try {
+        const resp = await fetch('/api/jobs/{{ .ID }}/log/stream?format=events' + (fullLoaded ? '&tail=0' : ''));
+        if (!resp.ok) {
+          eventsBox.innerHTML = '<div class="error-state">Error ' + resp.status + '</div>';
+          return;
+        }
+        const j = await resp.json();
+        const evs = j.events || [];
+        eventsBox.innerHTML = '';
+        if (!evs.length) {
+          eventsBox.innerHTML = '<div class="empty-state">No readable events in the log.</div>';
+        }
+        evs.forEach(ev => eventsBox.appendChild(makeCard(ev)));
+        const total = parseInt(resp.headers.get('X-Log-Size') || '0', 10);
+        const truncated = resp.headers.get('X-Log-Truncated') === 'true';
+        logBtn.textContent = truncated ? 'Load full log' : 'Log';
+        statusEl.textContent = truncated
+          ? 'Log: last part of ' + (total / 1024 / 1024).toFixed(2) + ' MB — click again for full'
+          : 'Log: ' + evs.length + ' events';
+        if (truncated) fullLoaded = true;
+      } catch (e) {
+        eventsBox.innerHTML = '<div class="error-state">Error: ' + e.message + '</div>';
       }
+    }
+    async function renderRawLog() {
+      eventsBox.style.display = 'none';
       rawPre.style.display = '';
       rawPre.textContent = 'Loading…';
       try {
-        const resp = await fetch('/api/jobs/{{ .ID }}/log/stream' + (rawFull ? '?tail=0' : ''));
+        const resp = await fetch('/api/jobs/{{ .ID }}/log/stream' + (fullLoaded ? '?tail=0' : ''));
         if (!resp.ok) {
           rawPre.textContent = 'Error ' + resp.status;
           return;
         }
         const total = parseInt(resp.headers.get('X-Log-Size') || '0', 10);
         const truncated = resp.headers.get('X-Log-Truncated') === 'true';
-        const btn = document.getElementById('btn-raw');
-        btn.textContent = truncated ? 'Load full log' : 'Raw log';
+        logBtn.textContent = truncated ? 'Load full log' : 'Log';
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let bytes = 0;
@@ -259,7 +338,7 @@
           rawPre.textContent += decoder.decode(value, { stream: true });
           bytes += value.length;
         }
-        if (truncated) rawFull = true;
+        if (truncated) fullLoaded = true;
         statusEl.textContent = truncated
           ? 'Raw: last ' + (bytes / 1024).toFixed(0) + ' KB of ' + (total / 1024).toFixed(0) + ' KB — click again for full'
           : 'Raw: ' + (bytes / 1024).toFixed(1) + ' KB';
