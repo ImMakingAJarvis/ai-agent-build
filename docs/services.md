@@ -110,6 +110,14 @@ sudo systemctl enable --now jarvis-chat.service
 (`jarvis-engine.service`, `Restart=always` drop-in included) is the fastest
 fallback for the brain.
 
+Never run the chat container and the host unit at the same time: both
+daemons receive every owner DM on the gateway, so they double-reply and
+every `!build`/`!fix` gets enqueued twice. `scripts/install_chat.sh`
+enforces this on every deploy — it leaves `jarvis-chat.service`
+disabled while the container runs and enables it only as a fallback when
+the container is down (which is also how you repair a system where both
+were left running: just re-run the script).
+
 ## Deploy points (pinned host copies, mounted into containers)
 
 | Path | Contents | How it is updated |
