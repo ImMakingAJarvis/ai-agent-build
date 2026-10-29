@@ -96,6 +96,11 @@ func defaultCommand(driver, prompt, effort string) *exec.Cmd {
 		args = append(args, "--effort", ce)
 		env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+ce)
 	}
+	// stream-json emits the agent's thoughts, tool calls, and results as
+	// JSON lines as they happen (the dashboard live-streams them, and the
+	// job log page parses them); --verbose is required with stream-json in
+	// print mode, and --include-partial-messages streams token deltas.
+	args = append(args, "--output-format", "stream-json", "--verbose", "--include-partial-messages")
 	args = append(args, "-p", prompt)
 	cmd := exec.Command(bin, args...)
 	cmd.Env = env
@@ -146,6 +151,31 @@ func (r *Runner) Prompt(j Job, driver, note string) string {
 		fmt.Fprintf(&b, "\n\nMessages from me sent while the agent was idle (they take priority):\n%s\n", msgs)
 	}
 	return b.String()
+}
+
+// streamResultText returns the agent's final answer when the output is
+// stream-json (a trailing {"type":"result","result":"..."} line), so
+// summaries show the reply text instead of the raw event. Any other
+// output (plain-text runs, error tails) is returned unchanged.
+func streamResultText(out string) string {
+	lines := strings.Split(out, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var ev map[string]any
+		if json.Unmarshal([]byte(line), &ev) != nil {
+			break
+		}
+		if ev["type"] == "result" {
+			if r, _ := ev["result"].(string); strings.TrimSpace(r) != "" {
+				return r
+			}
+		}
+		break
+	}
+	return out
 }
 
 // stripEnv returns env without any entries for key, so appending a fresh
@@ -267,6 +297,16 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 		defer tf.Close()
 		w = io.MultiWriter(w, tf)
 	}
+	// Live stream: publish each output line to the job's Redis stream so
+	// the dashboard can show the worker's thoughts and progress as they
+	// happen. The transcript file above stays the durable copy; a missing
+	// or dead Redis never affects the job itself.
+	if addr := StreamAddr(); addr != "off" && addr != "none" {
+		if pub := NewStreamPublisher(addr, id); pub != nil {
+			defer pub.Close()
+			w = io.MultiWriter(w, pub)
+		}
+	}
 	cmd.Stdout, cmd.Stderr = w, w
 
 	// Start the command; if SignalFile is set, poll it in a goroutine.
@@ -306,12 +346,15 @@ func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 				_ = os.WriteFile(r.ReplySignalFile, nil, 0o644)
 				return
 			}
-			// Slot busy (or no reply path configured): save cache, kill, and pause.
+			// Slot busy (or no reply path configured): save cache, pause,
+			// then kill. The pause must land in the store before the kill:
+			// finish() reads the status after Wait returns, and a job that
+			// is already Failed would refuse the Pause and show up as
+			// failed instead of paused.
 			_ = r.saveSlot(id)  // best-effort; don't fail if engine is down
-			if cmd.Process != nil {
+			if err := r.Store.Pause(id); err == nil && cmd.Process != nil {
 				cmd.Process.Kill()
 			}
-			r.Store.Pause(id)
 			return
 		}
 		time.Sleep(time.Second)
@@ -338,7 +381,9 @@ func (r *Runner) Finish(id string, exitCode int, output string) (Job, error) {
 func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, wh float64) (Job, error) {
 	id := j.ID
 	r.Store.WriteFile(id, "transcript.txt", []byte(out))
-	r.Store.WriteFile(id, "output.txt", []byte(Summary(out)+"\n"))
+	// With stream-json the tail of out is a result event; keep summaries
+	// human-readable by showing the agent's final answer instead.
+	r.Store.WriteFile(id, "output.txt", []byte(Summary(streamResultText(out))+"\n"))
 
 	// Local job cost: sampled energy at the configured $/kWh rate.
 	if kwh := power.Kwh(wh); kwh > 0 {
@@ -360,7 +405,7 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 	if st, err := time.Parse(time.RFC3339, j.StartedAt); err == nil {
 		j.Duration = now.Sub(st).Round(time.Second).String()
 	}
-	j.PRURL, j.Summary, j.PID = pr, Summary(out), 0
+	j.PRURL, j.Summary, j.PID = pr, Summary(streamResultText(out)), 0
 	// If signalWatcher already paused the job, don't overwrite Paused → Failed.
 	cur, _ := r.Store.Get(id)
 	if cur.Status == Paused {
