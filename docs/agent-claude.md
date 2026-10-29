@@ -5,6 +5,28 @@ This is the local agent's personal note file. It is installed to
 it in every session, on top of the repo's `CLAUDE.md` (which is about
 conversation notes).
 
+## Helper model — small, always-on, on the iGPU
+
+When you need to change your own setup or restart something, ask the
+**helper** first: a small always-on model (Qwen2.5-3B Q4_K_M) running on
+the Ryzen iGPU (Vulkan, port 11435, unit `jarvis-engine-igpu`) — it costs
+zero CPU cores. It knows a curated setup brief (services, ports, restart
+procedures, key paths — `scripts/jarvis-helper-context.md`) plus a live
+stack snapshot, and it answers "not in my context" honestly for anything
+else (then read the doc it points at — its pointers can be vague).
+
+    jarvis-helper "how do I restart the voice service?"
+    jarvis-helper -s NAME "follow-up"      # multi-turn session
+    jarvis-helper --raw "anything"         # no setup context
+    jarvis-helper --status                 # health
+
+Expect ~13 s prompt processing + ~13 tok/s decode on the iGPU. If the
+engine is down: `sudo systemctl restart jarvis-engine-igpu`. Swapping the
+model: replace `/opt/jarvis-igpu/models/jarvis-igpu.gguf` (keep a `.bak`),
+restart the unit, re-test. If the setup changes substantially, update
+`scripts/jarvis-helper-context.md` and re-run `scripts/install_helper.sh`.
+Investigation + benchmarks: docs/igpu-model-handler.md.
+
 ## The vector graph — more data than the repo
 
 The **Jarvis Memory Service** (`jarvis-memory` systemd unit,

@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+#
+# jarvis-helper — ask the always-on helper model about this setup.
+#
+# The helper is a small instruct model (Qwen2.5-3B Q4_K_M) served by
+# llama.cpp on the Ryzen iGPU (Vulkan), port 11435, systemd unit
+# jarvis-engine-igpu. It costs zero CPU cores (weights stream from RAM)
+# and runs in parallel with the brain on the 4090.
+#
+# Use it when you need to change your own setup or restart something:
+# "which service owns port 8100?", "how do I restart the voice pipeline?",
+# "how do I restart myself mid-round?" It answers ONLY from a curated
+# setup brief (scripts/jarvis-helper-context.md, deployed to
+# /opt/jarvis-helper/context.md) plus a live snapshot of the stack, and
+# is instructed to say so when something is not in that context.
+#
+#   jarvis-helper "how do I restart the voice service?"
+#   jarvis-helper -s NAME "question"       multi-turn session (follow-ups)
+#   jarvis-helper --raw "anything"         no setup context, plain model
+#   jarvis-helper --status                 engine health, model, service
+#   jarvis-helper --max-tokens N "question"
+#
+# Env: JARVIS_HELPER_URL (default http://127.0.0.1:11435/v1/chat/completions),
+# JARVIS_HELPER_MODEL (jarvis-igpu), JARVIS_HELPER_CONTEXT (context file),
+# JARVIS_HELPER_TIMEOUT (curl seconds, default 300).
+#
+# If the engine is down: sudo systemctl restart jarvis-engine-igpu
+# (journalctl -u jarvis-engine-igpu for why it died).
+
+set -uo pipefail
+
+URL="${JARVIS_HELPER_URL:-http://127.0.0.1:11435/v1/chat/completions}"
+MODEL="${JARVIS_HELPER_MODEL:-jarvis-igpu}"
+CONTEXT="${JARVIS_HELPER_CONTEXT:-/opt/jarvis-helper/context.md}"
+TIMEOUT="${JARVIS_HELPER_TIMEOUT:-300}"
+MAX_TOKENS=512
+TEMPERATURE=0.2
+RAW=0
+SESSION=""
+QUESTION=""
+
+say() { printf '%s\n' "$*" >&2; }
+die() { printf 'jarvis-helper: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+########################################
+# status
+########################################
+status() {
+  local svc="jarvis-engine-igpu"
+  printf 'service: %s (%s)\n' "$MODEL" "$(systemctl is-active "$svc" 2>/dev/null)"
+  local h
+  if h=$(curl -s --max-time 5 "http://127.0.0.1:11435/health"); then
+    printf 'health:  %s\n' "$h"
+  else
+    printf 'health:  DOWN — sudo systemctl restart %s (journalctl -u %s)\n' "$svc" "$svc"
+  fi
+  local f=/opt/jarvis-igpu/models/jarvis-igpu.gguf
+  if [[ -f "$f" ]]; then
+    printf 'model:   %s (%s)\n' "$f" "$(du -h "$f" | cut -f1)"
+  else
+    printf 'model:   MISSING at %s\n' "$f"
+  fi
+  return 0
+}
+
+########################################
+# context: static brief + live snapshot
+########################################
+live_snapshot() {
+  local out=()
+  local repo=/home/agent/ai-agent-build
+  if [[ -f "$repo/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1; then
+    local ps
+    if ps=$(cd "$repo" && docker compose ps 2>/dev/null | head -30); then
+      out+=("docker compose ps (live):
+$ps")
+    fi
+  fi
+  local units
+  units=$(systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null \
+    | awk '{print $1}' | grep -E '^(agent-|jarvis-|ollama|wake-)' | tr '\n' ' ')
+  out+=("running host units: ${units:-none}"
+        "now: $(date -u '+%Y-%m-%d %H:%M UTC')")
+  printf '%s' "${out[*]}"
+}
+
+system_prompt() {
+  local ctx=""
+  if [[ -f "$CONTEXT" ]]; then
+    ctx="$(cat "$CONTEXT")"
+  else
+    say "WARNING: context file missing at $CONTEXT (run scripts/install_helper.sh); answering with no setup knowledge"
+  fi
+  if (( ! RAW )) && [[ -n "$ctx" ]]; then
+    printf '%s\n\n## Live snapshot\n%s\n' "$ctx" "$(live_snapshot)"
+  elif (( RAW )); then
+    printf 'You are a small local helper model. Be concise and factual; if you do not know something, say so.'
+  fi
+}
+
+########################################
+# multi-turn sessions: /tmp/jarvis-helper-<name>.jsonl (one message/line)
+########################################
+hist_file() { printf '/tmp/jarvis-helper-%s.jsonl' "$1"; }
+
+session_history() {
+  local f
+  f=$(hist_file "$SESSION")
+  if [[ -f "$f" ]]; then
+    tail -10 "$f" | jq -s '.' 2>/dev/null || printf '[]'
+  else
+    printf '[]'
+  fi
+}
+
+post_chat() {
+  local msgs="$1"
+  local body resp t0 t1
+  body=$(jq -n --arg model "$MODEL" --argjson msgs "$msgs" \
+    --argjson max "$MAX_TOKENS" --argjson temp "$TEMPERATURE" \
+    '{model:$model, temperature:$temp, max_tokens:$max, stream:false, messages:$msgs}')
+  t0=$(date +%s.%N)
+  resp=$(curl -sS --max-time "$TIMEOUT" -X POST "$URL" \
+    -H 'Content-Type: application/json' -d "$body") || {
+    die "engine request failed (is jarvis-engine-igpu up? sudo systemctl status jarvis-engine-igpu)"; }
+  t1=$(date +%s.%N)
+  if ! jq -e '.choices[0].message.content' <<<"$resp" >/dev/null 2>&1; then
+    printf '%s\n' "$resp" | head -c 400 >&2
+    die "engine returned an error"
+  fi
+  local content comp
+  content=$(jq -r '.choices[0].message.content' <<<"$resp")
+  comp=$(jq -r '.usage.completion_tokens // empty' <<<"$resp")
+  if [[ -n "$comp" ]]; then
+    say "$(awk -v c="$comp" -v t0="$t0" -v t1="$t1" \
+      'BEGIN{dt=t1-t0; printf "took %.1fs, %.1f tok/s decode", dt, (dt>0?c/dt:0)}')"
+  fi
+  printf '%s\n' "$content"
+}
+
+########################################
+# argument parsing
+########################################
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -s|--session)   SESSION="${2:?-s needs a name}"; shift 2 ;;
+    --raw)          RAW=1; shift ;;
+    --status)       status; exit $? ;;
+    --max-tokens)   MAX_TOKENS="${2:?--max-tokens needs a number}"; shift 2 ;;
+    -h|--help)      usage 0 ;;
+    -*)             usage 1 ;;
+    *)              QUESTION="$1"; shift ;;
+  esac
+done
+[[ -n "$QUESTION" ]] || usage 1
+
+########################################
+# main
+########################################
+sys=$(system_prompt)
+if [[ -n "$SESSION" ]]; then
+  hist=$(session_history)
+  msgs=$(jq -n --arg sys "$sys" --argjson h "$hist" --arg q "$QUESTION" \
+    '[$sys | {role:"system", content:.}] + $h + [{role:"user", content:$q}]')
+  ans=$(post_chat "$msgs")
+  f=$(hist_file "$SESSION")
+  jq -nc --arg q "$QUESTION" '{role:"user", content:$q}' >> "$f"
+  jq -nc --arg a "$ans" '{role:"assistant", content:$a}' >> "$f"
+  # keep the file small: last 10 messages only
+  tail -10 "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  printf '%s\n' "$ans"
+else
+  msgs=$(jq -n --arg sys "$sys" --arg q "$QUESTION" \
+    '[{role:"system", content:$sys}, {role:"user", content:$q}]')
+  post_chat "$msgs"
+fi
