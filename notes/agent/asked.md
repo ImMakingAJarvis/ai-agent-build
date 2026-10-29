@@ -31,3 +31,4 @@
 - 2026-10-29T02:05Z Live worker view re-queued as duplicate (chat-1793228762-fd2a); confirmed live on main via merged PR #104, Nathan said close it
 - 2026-10-29T03:46Z Nathan wants worker logs human readable, not raw stream-json; he confirmed he was on the raw log page when he saw the json
 - 2026-10-29T04:53Z Nathan asked for an output of running containers + currently loaded models; he suspected a qwen2.5 chatbot on the iGPU — confirmed: Qwen2.5-3B Q4_K_M on :11435 is the jarvis-helper model
+- 2026-10-29T07:31Z Nathan (job chat-1793252684-1127): open PRs have merge conflicts — check and fix all open PRs' mergeability
