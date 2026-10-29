@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ if .Title }}{{ .ID }} — {{ .Title }}{{ else }}{{ .ID }}{{ end }} · Job log</title>
+<title>{{ if .Title }}{{ .ID }} — {{ .Title}}{{ else }}{{ .ID }}{{ end }} · Job log</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -47,26 +47,21 @@
     padding: 40px 12px;
     font-size: 0.95rem;
     background: var(--card);
-    border: 1px solid var(--border);
+    border: 1px solid: var(--border);
     border-radius: 8px;
   }
   .error-state { color: var(--red); border-color: var(--red); }
-  .log-pre {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    font-family: ui-monospace, SFMono-Regular, monospace;
-    font-size: 0.8rem;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: var(--fg);
-    line-height: 1.5;
-    max-height: 70vh;
-    overflow-y: auto;
-  }
   .source { color: var(--muted); font-size: 0.75rem; margin-bottom: 12px; }
-  .live { color: var(--yellow); }
+  .live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--yellow);
+    margin-right: 4px;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.3; } }
   .log-controls {
     display: flex;
     gap: 8px;
@@ -87,6 +82,61 @@
     font-size: 0.75rem;
     color: var(--muted);
   }
+  /* Live event cards */
+  #live-log {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .ev {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .ev .ev-title {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .ev .ev-body {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.78rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+    color: var(--fg);
+  }
+  .ev.thought { border-left-color: var(--purple); }
+  .ev.thought .ev-title { color: var(--purple); }
+  .ev.thought .ev-body { color: #a89bc4; }
+  .ev.command { border-left-color: var(--blue); }
+  .ev.command .ev-title { color: var(--blue); }
+  .ev.result { border-left-color: var(--green); }
+  .ev.result .ev-title { color: var(--green); }
+  .ev.result .ev-body { color: var(--muted); max-height: 240px; overflow-y: auto; }
+  .ev.output { border-left-color: var(--fg); }
+  .log-pre {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--fg);
+    line-height: 1.5;
+    max-height: 70vh;
+    overflow-y: auto;
+  }
   @media (max-width: 640px) {
     body { padding: 12px; }
   }
@@ -101,79 +151,124 @@
   {{ else }}
   <h1>{{ if .Title }}{{ .ID }} — {{ .Title }}{{ else }}{{ .ID }}{{ end }}</h1>
   <p class="subtitle">
-    Human-readable run log
-    {{ if .Live }}<span class="live"> · still running</span>{{ end }}
+    Live thoughts and progress
+    {{ if .Live }}<span class="live-dot"></span><span class="live" style="color: var(--yellow)">running now</span>{{ end }}
   </p>
   <div class="meta">
     {{ if .Status }}<span>Status <strong class="{{ statusClass .Status }}">{{ .Status }}</strong></span>{{ end }}
     {{ if .Driver }}<span>Driver <strong>{{ .Driver }}</strong></span>{{ end }}
     {{ if .Model }}<span>Model <strong>{{ .Model }}</strong></span>{{ end }}
-    {{ if .Duration }}<span>Duration <strong>{{ .Duration }}</strong></span>{{ end }}
+    {{ if .Duration }}<span>Duration <strong>{{ .Duration}}</strong></span>{{ end }}
     {{ if .StartedAt }}<span>Started <strong>{{ .StartedAt }}</strong></span>{{ end }}
     {{ if .PRURL }}<span><a href="{{ .PRURL }}">Pull request</a></span>{{ end }}
   </div>
   {{ if .Error }}<p class="subtitle" style="color: var(--red);">{{ .Error }}</p>{{ end }}
-  {{ if .Empty }}
-  <div class="empty-state">No log for this job. The agent has not written a transcript yet — usual for jobs that never ran, or older runs before transcripts were saved.</div>
-  {{ else }}
   <div class="log-controls">
-    <span class="status" id="log-status"></span>
-    <button class="btn" id="btn-raw" onclick="streamLog(false)">{{ if .Live }}Refresh log{{ else }}Load log{{ end }}</button>
-    <button class="btn" id="btn-full" onclick="streamLog(true)" style="display:none">Load full log</button>
-    <button class="btn" onclick="loadFormatted()">Formatted view</button>
+    <span class="status" id="log-status">Connecting…</span>
+    <button class="btn" onclick="connect()">Reconnect</button>
+    <button class="btn" id="btn-raw" onclick="toggleRaw()">Raw log</button>
   </div>
-  <div id="log-formatted"></div>
-  <pre id="log-output" class="log-pre"></pre>
+  <div id="live-log"></div>
+  <pre id="log-output" class="log-pre" style="display:none"></pre>
   <script>
-    let loading = false;
-    // Streams the raw log into the page as it arrives. Only the last 256 KB
-    // unless full is set; nothing is fetched until this runs.
-    async function streamLog(full) {
-      if (loading) return;
-      loading = true;
-      const output = document.getElementById('log-output');
-      const status = document.getElementById('log-status');
-      const fullBtn = document.getElementById('btn-full');
-      output.textContent = '';
-      status.textContent = 'Streaming…';
+    const liveBox = document.getElementById('live-log');
+    const statusEl = document.getElementById('log-status');
+    const rawPre = document.getElementById('log-output');
+    let es = null, stuckToBottom = true;
+
+    liveBox.addEventListener('scroll', () => {
+      stuckToBottom = liveBox.scrollHeight - liveBox.scrollTop - liveBox.clientHeight < 80;
+    });
+    function stick() {
+      if (stuckToBottom) liveBox.scrollTop = liveBox.scrollHeight;
+    }
+    const kindTitle = { thought: 'Thought', command: 'Tool', result: 'Outcome', output: 'Reply' };
+    function appendEvent(ev) {
+      const last = liveBox.lastElementChild;
+      if (ev.delta && last && last.dataset.kind === ev.kind && last.dataset.open === '1') {
+        last.querySelector('.ev-body').textContent += ev.body;
+      } else {
+        const el = document.createElement('div');
+        el.className = 'ev ' + (ev.kind || 'output');
+        el.dataset.kind = ev.kind || 'output';
+        el.dataset.open = ev.delta ? '1' : '0';
+        const title = ev.title || kindTitle[ev.kind] || 'Output';
+        const t = document.createElement('div');
+        t.className = 'ev-title';
+        t.textContent = title;
+        const b = document.createElement('div');
+        b.className = 'ev-body';
+        b.textContent = ev.body || '';
+        el.appendChild(t); el.appendChild(b);
+        liveBox.appendChild(el);
+      }
+      stick();
+    }
+    function setStatus(text, live) {
+      statusEl.textContent = text;
+      statusEl.style.color = live ? 'var(--yellow)' : 'var(--muted)';
+    }
+    function connect() {
+      if (es) es.close();
+      liveBox.innerHTML = '';
+      stuckToBottom = true;
+      setStatus('Connecting…', true);
+      es = new EventSource('/api/jobs/{{ .ID }}/live');
+      es.addEventListener('meta', e => {
+        const m = JSON.parse(e.data);
+        if (m.live) setStatus('Live — streaming…', true);
+        else setStatus('Finished — ' + m.status, false);
+      });
+      es.addEventListener('seed', e => {
+        const s = JSON.parse(e.data);
+        (s.events || []).forEach(appendEvent);
+      });
+      es.addEventListener('step', e => appendEvent(JSON.parse(e.data)));
+      es.addEventListener('done', e => {
+        const d = JSON.parse(e.data);
+        setStatus('Finished — ' + d.status + (d.error ? ': ' + d.error : ''), false);
+        es.close();
+      });
+      es.onerror = () => setStatus('Reconnecting…', true);
+    }
+    let rawFull = false;
+    async function toggleRaw() {
+      if (rawPre.style.display !== 'none') {
+        rawPre.style.display = 'none';
+        return;
+      }
+      rawPre.style.display = '';
+      rawPre.textContent = 'Loading…';
       try {
-        const resp = await fetch('/api/jobs/{{ .ID }}/log/stream' + (full ? '?tail=0' : ''));
+        const resp = await fetch('/api/jobs/{{ .ID }}/log/stream' + (rawFull ? '?tail=0' : ''));
         if (!resp.ok) {
-          status.textContent = 'Error ' + resp.status;
+          rawPre.textContent = 'Error ' + resp.status;
           return;
         }
         const total = parseInt(resp.headers.get('X-Log-Size') || '0', 10);
         const truncated = resp.headers.get('X-Log-Truncated') === 'true';
-        fullBtn.style.display = truncated ? '' : 'none';
+        const btn = document.getElementById('btn-raw');
+        btn.textContent = truncated ? 'Load full log' : 'Raw log';
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let bytes = 0;
+        rawPre.textContent = '';
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          output.textContent += decoder.decode(value, { stream: true });
+          rawPre.textContent += decoder.decode(value, { stream: true });
           bytes += value.length;
-          output.scrollTop = output.scrollHeight;
         }
-        status.textContent = truncated
-          ? 'Showing last ' + (bytes / 1024).toFixed(0) + ' KB of ' + (total / 1024).toFixed(0) + ' KB'
-          : 'Loaded ' + (bytes / 1024).toFixed(1) + ' KB';
+        if (truncated) rawFull = true;
+        statusEl.textContent = truncated
+          ? 'Raw: last ' + (bytes / 1024).toFixed(0) + ' KB of ' + (total / 1024).toFixed(0) + ' KB — click again for full'
+          : 'Raw: ' + (bytes / 1024).toFixed(1) + ' KB';
       } catch (e) {
-        status.textContent = 'Error: ' + e.message;
-      } finally {
-        loading = false;
+        rawPre.textContent = 'Error: ' + e.message;
       }
     }
-    async function loadFormatted() {
-      const box = document.getElementById('log-formatted');
-      box.innerHTML = '<div class="empty-state">Loading…</div>';
-      const resp = await fetch('/html/jobs/{{ .ID }}');
-      box.innerHTML = await resp.text();
-    }
-    // Opening a job's page is asking for its log: start streaming the tail now.
-    streamLog(false);
+    connect();
   </script>
-  {{ end }}
   {{ end }}
 </body>
 </html>

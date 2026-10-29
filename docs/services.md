@@ -19,6 +19,7 @@ for rollback.
 | `memory` | Vector search over work logs/jobs (SQLite + all-MiniLM-L6-v2 ONNX); the agent searches it before grepping | 8101 (127.0.0.1) | `jarvis-memory` | `~/.local/share/jarvis/memory` (db + model) |
 | `memory-reindex` | Re-scans all sources every 15 min (was `jarvis-memory-reindex.timer`) | — | `jarvis-memory-reindex` | same as `memory` |
 | `rabbitmq` | Message broker: AMQP + MQTT (port 1883, LAN-facing for HA) + Prometheus metrics | 5672, 15672, 15692 (127.0.0.1), 1883 (LAN) | `jarvis-rabbitmq` (predates this PR) | named volume `ai-agent-build_rabbitmq_data`; config: `rabbitmq/` |
+| `redis` | Live job streams: the runner XADDs the agent's stream-json output per job (`jarvis:job:<id>`, 20k entries, 24 h TTL after the job ends); the dashboard tails it for the live job view | 6379 (127.0.0.1) | `jarvis-redis` | named volume `redis_data` (AOF) |
 | `worker` | Consumes the raw RabbitMQ job queue (voice/coding/background) | — (metrics 9101 when on) | `jarvis-worker` | agentjob store; started by `docker compose up -d` / `jarvis-stack` |
 | `wake-queue` *(optional)* | Bridges wake-word events into the job pipeline | — | `jarvis-wake-queue` | **not running today** — start with `--profile optional` |
 | `prometheus` | Scrapes everything below, 15 d retention | 9090 | `jarvis-prometheus` | named volume `prometheus_data`; config: `docker/monitoring/prometheus/` |
