@@ -30,6 +30,21 @@ services:
       - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-jarvis}
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS:-jarvis-local}
 
+  # Live job stream: the agent runner XADDs the agent's stream-json output
+  # as it happens (internal/agentjob/stream.go); the dashboard tails it for
+  # GET /jobs/{id} live views (internal/dashboard/live.go). Host-side
+  # runners reach it at 127.0.0.1:6379 (JARVIS_REDIS left unset); the
+  # dashboard container reaches it at redis:6379 (set below).
+  redis:
+    image: redis:7
+    container_name: jarvis-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+
   # ---------------- the brain ----------------
   # llama.cpp server (pinned b11815 build in /opt/jarvis-engine, installed by
   # scripts/install_engine.sh). The binary is bind-mounted, not baked into the
@@ -115,6 +130,9 @@ services:
       HOME: /home/agent
       JARVIS_CONF: /home/agent/.config/jarvis
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      # Live job streams (see the redis service above); unset means the
+      # dashboard falls back to tailing transcript files.
+      JARVIS_REDIS: redis://redis:6379
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
@@ -319,5 +337,6 @@ services:
 
 volumes:
   rabbitmq_data:
+  redis_data:
   prometheus_data:
   grafana_data:
