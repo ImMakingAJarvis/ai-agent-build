@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""jarvis-stack-status — report the running containers and the models currently loaded.
+
+Prints a snapshot of the stack:
+
+  1. Docker containers — running by default (`--all` includes stopped):
+     name, image, uptime, published ports.
+  2. Loaded models — every llama-server process on this host, discovered
+     dynamically from /proc, with the model file, size/quantization
+     (queried live from the engine's /v1/models endpoint), context size,
+     and memory in use (process RSS, plus GPU VRAM when nvidia-smi
+     answers). A new engine shows up without changing this script.
+
+Known engines are checked even when down, so a dead engine is reported
+rather than silently missing:
+
+  main   docker container `jarvis-engine`   (brain on the RTX 4090, :11434)
+  igpu   systemd unit `jarvis-engine-igpu`  (helper on the iGPU, :11435)
+
+Usage:
+  jarvis-stack-status          human-readable report
+  jarvis-stack-status --json   machine-readable JSON
+  jarvis-stack-status --all    include stopped containers
+
+Exit status: 0 when docker is reachable and every known engine is up and
+serving, 1 otherwise (the report is still printed).
+
+Stdlib only; read-only — it never restarts or mutates anything.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+
+KNOWN_ENGINES = [
+    # (label, kind, name, hint shown in the report)
+    ("main", "container", "jarvis-engine", "brain on the RTX 4090"),
+    ("igpu", "unit", "jarvis-engine-igpu", "helper on the Ryzen iGPU"),
+]
+HTTP_TIMEOUT = 3.0
+
+
+def sh(args, timeout=10):
+    """Run a command, return (rc, stdout+stderr as one string)."""
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, str(e)
+
+
+def http_json(url):
+    """GET a URL and parse JSON; return (ok, data|error-string)."""
+    try:
+        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as r:
+            return True, json.loads(r.read().decode())
+    except Exception as e:  # URLError, HTTPError, timeout, bad JSON
+        return False, str(e)
+
+
+def human_bytes(n):
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KiB") else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def human_params(n):
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}B"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.0f}M"
+    return str(n)
+
+
+def _quant(ftype):
+    """'Q4_K - Medium' -> 'Q4_K_M' (llama.cpp ftype to gguf quant name)."""
+    if not ftype:
+        return None
+    parts = ftype.split(" - ")
+    return parts[0] + ({"Medium": "_M", "Small": "_S", "Super": "_S"}.get(parts[1], "")
+                       if len(parts) > 1 else "")
+
+
+def docker_available():
+    rc, _ = sh(["docker", "version", "--format", "{{.Server.Version}}"], timeout=5)
+    return rc == 0
+
+
+def list_containers(include_stopped):
+    """Return ((running, stopped), None) on success, (None, error) on failure."""
+    args = ["docker", "ps", "--format", "{{json .}}"]
+    if include_stopped:
+        args.insert(2, "-a")
+    rc, out = sh(args)
+    if rc != 0:
+        return None, out.strip()
+    running, stopped = [], []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        c = json.loads(line)
+        # In `docker ps --format json`, Ports is a string like
+        # "0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp" — same mapping twice.
+        ports = set()
+        for part in (c.get("Ports") or "").split(","):
+            part = part.strip()
+            if not part or "->" not in part:
+                continue  # exposed only, nothing published
+            pub, rest = part.split("->", 1)
+            ports.add(re.sub(r"^(0\.0\.0\.0|\[::\]):", "", pub) + "->" + rest)
+        entry = {
+            "name": c.get("Names", ""),
+            "image": c.get("Image", ""),
+            "status": c.get("Status", ""),
+            "ports": sorted(ports),
+        }
+        (running if "Up" in entry["status"] else stopped).append(entry)
+    return (running, stopped), None
+
+
+def parse_llama_args(argv):
+    """Extract the flags jarvis-stack cares about from a llama-server cmdline."""
+    info = {"model": None, "port": None, "device": None, "ctx": None, "parallel": None}
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        nxt = argv[i + 1] if i + 1 < len(argv) else None
+        if a in ("-m", "--model") and nxt:
+            info["model"] = nxt
+        elif a == "--port" and nxt:
+            info["port"] = int(nxt)
+        elif a in ("-dev", "--device") and nxt:
+            info["device"] = nxt
+        elif a == "--ctx-size" and nxt:
+            info["ctx"] = int(nxt)
+        elif a == "--parallel" and nxt:
+            info["parallel"] = int(nxt)
+        i += 1
+    return info
+
+
+def cgroup_of(pid):
+    try:
+        with open(f"/proc/{pid}/cgroup") as f:
+            line = f.readline().strip()
+    except OSError:
+        return None
+    path = line.split()[-1]  # e.g. "/system.slice/docker-<id>.scope"
+    m = re.search(r"docker-([0-9a-f]{12,})", path)
+    if m:
+        return ("docker", m.group(1))
+    m = re.search(r"([\w.-]+\.service)$", path)
+    if m:
+        return ("service", m.group(1))
+    return ("other", path)
+
+
+def rss_bytes(pid):
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def find_llama_servers():
+    """Scan /proc for llama-server processes and gather their facts."""
+    engines = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                argv = f.read().decode(errors="replace").split("\0")
+        except OSError:
+            continue
+        argv = [a for a in argv if a]
+        if not argv or os.path.basename(argv[0]) != "llama-server":
+            continue
+        pid = int(entry)
+        info = parse_llama_args(argv)
+        cg = cgroup_of(pid)
+        engines.append({
+            "pid": pid,
+            "info": info,
+            "cgroup": cg,
+            "rss": rss_bytes(pid),
+            "argv": argv,
+        })
+    return engines
+
+
+def engine_health(port):
+    ok, data = http_json(f"http://127.0.0.1:{port}/health")
+    return "ok" if ok else "unreachable"
+
+
+def engine_models(port):
+    ok, data = http_json(f"http://127.0.0.1:{port}/v1/models")
+    if not ok:
+        return None, f"/v1/models: {data}"
+    # llama-server lists each model twice: "models" (no meta) and "data"
+    # (with meta). Walk "data" first so the detailed entry wins the dedupe.
+    out = []
+    for m in (data.get("data") or []) + (data.get("models") or []):
+        meta = m.get("meta") or {}
+        out.append({
+            "id": m.get("id") or m.get("name") or "",
+            "params": human_params(meta.get("n_params", 0)) if meta.get("n_params") else None,
+            "quant": _quant(meta.get("ftype")),
+            "size": human_bytes(meta["size"]) if meta.get("size") else None,
+        })
+    # llama-server returns the model under both "models" and "data"; dedupe by id
+    seen, dedup = set(), []
+    for m in out:
+        if m["id"] not in seen:
+            seen.add(m["id"])
+            dedup.append(m)
+    return dedup, None
+
+
+def gpu_vram():
+    rc, out = sh(["nvidia-smi",
+                  "--query-gpu=memory.used,memory.total",
+                  "--format=csv,noheader,nounits"], timeout=10)
+    if rc != 0:
+        return None
+    first = out.strip().splitlines()[0].split(",")
+    return {"used_mib": int(first[0]), "total_mib": int(first[1])}
+
+
+def known_engine_states(container_ids):
+    """State of each known engine source (container / systemd unit)."""
+    states = []
+    for label, kind, name, _hint in KNOWN_ENGINES:
+        if kind == "container":
+            rc, out = sh(["docker", "inspect", "-f", "{{.State.Status}}", name], timeout=5)
+            state = out.strip() if rc == 0 else "missing"
+            cid = None
+            if rc == 0:
+                rc2, out2 = sh(["docker", "inspect", "-f", "{{.Id}}", name], timeout=5)
+                if rc2 == 0:
+                    cid = out2.strip()
+            container_ids[label] = cid
+        else:
+            # is-active exits 0=active, 3=inactive (installed, stopped), 4=not found
+            rc, out = sh(["systemctl", "is-active", name], timeout=5)
+            if rc == 0:
+                state = "running"
+            elif rc == 4:
+                state = "missing"
+            else:
+                state = out.strip() or "inactive"
+        states.append({"label": label, "kind": kind, "name": name, "state": state})
+    return states
+
+
+def build_report(include_stopped):
+    report = {"ok": True, "problems": []}
+
+    result, err = list_containers(include_stopped)
+    if result is None:
+        report["containers"], report["stopped_containers"] = [], []
+        report["problems"].append(f"docker not reachable: {err}")
+    else:
+        running, stopped = result
+        report["containers"] = running
+        report["stopped_containers"] = stopped
+
+    container_ids = {}
+    report["known_engines"] = known_engine_states(container_ids)
+
+    raw = find_llama_servers()
+    vram = gpu_vram()
+    engines = []
+    for e in raw:
+        info = e["info"]
+        port = info["port"]
+        label, source = None, f"pid={e['pid']}"
+        cg = e["cgroup"]
+        for st in report["known_engines"]:
+            if st["state"] != "running":
+                continue
+            if cg and cg[0] == "docker" and st["kind"] == "container" and \
+               container_ids.get(st["label"], "").startswith(cg[1][:12]):
+                label, source = st["label"], f"container={st['name']}"
+            elif cg and cg[0] == "service" and st["kind"] == "unit" and \
+                    st["name"] + ".service" == cg[1]:
+                label, source = st["label"], f"unit={st['name']}"
+        models, err = engine_models(port) if port else (None, "no --port in cmdline")
+        # nvidia-smi describes the dGPU; it belongs to whichever engine runs
+        # on CUDA (the main brain's cmdline omits -dev, so use the label).
+        entry = {
+            "label": label,
+            "source": source,
+            "pid": e["pid"],
+            "port": port,
+            "device": info["device"] or ("CUDA" if label == "main" else None),
+            "model": info["model"],
+            "models": models,
+            "ctx": info["ctx"],
+            "parallel": info["parallel"],
+            "rss_bytes": e["rss"],
+            "vram": vram if (label == "main" or info["device"] == "CUDA") else None,
+            "health": engine_health(port) if port else "no-port",
+        }
+        engines.append(entry)
+        if not models:
+            report["problems"].append(f"engine {source}: {err}")
+        if port and entry["health"] != "ok":
+            report["problems"].append(f"engine {source} (port {port}): health {entry['health']}")
+
+    # known engines that are up but produced no process, or down outright
+    seen_sources = {e["source"] for e in engines}
+    for st in report["known_engines"]:
+        if st["state"] == "running":
+            if not any(e["label"] == st["label"] for e in engines):
+                report["problems"].append(
+                    f"engine {st['kind']}={st['name']} is running but no llama-server process was found")
+        elif st["state"] not in ("running", "missing"):
+            report["problems"].append(f"known engine {st['kind']}={st['name']} is {st['state']}")
+
+    report["engines"] = engines
+    report["ok"] = not report["problems"]
+    return report
+
+
+def print_human(r):
+    now = subprocess.run(["date", "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True).stdout.strip()
+    print(f"STACK {now}")
+    print()
+
+    cs = r["containers"]
+    stopped = r.get("stopped_containers") or []
+    print(f"Containers ({len(cs)} running" + (f", {len(stopped)} stopped" if stopped else "") + "):")
+    if not cs and not stopped:
+        print("  (none — docker not reachable)")
+    for c in cs + stopped:
+        # human view: host-side bind only ("8080", "127.0.0.1:6379"), deduped
+        binds = sorted({p.split("->")[0] for p in c["ports"]})
+        ports = ", ".join(binds) or "-"
+        print(f"  {c['name']:<24} {c['image']:<28} {c['status']:<22} {ports}")
+    print()
+
+    print(f"Loaded models ({len(r['engines'])} engine" + ("s" if len(r["engines"]) != 1 else "") + "):")
+    if not r["engines"]:
+        print("  (none found)")
+    for e in r["engines"]:
+        tag = f"[{e['label']}] " if e["label"] else "        "
+        dev = e["device"] or "?"
+        print(f"  {tag}{e['source']}  port={e['port']}  device={dev}")
+        mm = e["models"] or []
+        for m in mm:
+            bits = [x for x in (m["params"], m["quant"], m["size"]) if x]
+            detail = " ".join(bits)
+            print(f"    model  {m['id']}{'  (' + detail + ')' if detail else ''}")
+        if not mm:
+            print(f"    model  {e['model'] or '?'}  (no /v1/models data)")
+        mem = []
+        if e["rss_bytes"]:
+            mem.append(f"{human_bytes(e['rss_bytes'])} RSS")
+        if e.get("vram"):
+            mem.append(f"GPU {e['vram']['used_mib'] / 1024:.1f}/{e['vram']['total_mib'] / 1024:.1f} GB")
+        if e["ctx"]:
+            mem.append(f"ctx={e['ctx']}")
+        if e["parallel"]:
+            mem.append(f"slots={e['parallel']}")
+        print(f"    info   {'  '.join(mem) if mem else '-'}")
+        print(f"    health {e['health']}")
+    print()
+
+    for st in r["known_engines"]:
+        if st["state"] != "running":
+            print(f"  [DOWN] known engine {st['kind']}={st['name']} — {st['state']}")
+
+    if r["ok"]:
+        print(f"OK: {len(r['engines'])} engine(s) serving, {len(cs)} container(s) running")
+    else:
+        print(f"PROBLEMS ({len(r['problems'])}):")
+        for p in r["problems"]:
+            print(f"  - {p}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Report running containers and loaded models.")
+    ap.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    ap.add_argument("--all", action="store_true", help="include stopped containers")
+    args = ap.parse_args()
+
+    report = build_report(args.all)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print_human(report)
+    sys.exit(0 if report["ok"] else 1)
+
+
+if __name__ == "__main__":
+    main()
