@@ -1,0 +1,175 @@
+Please review the following Python module for correctness, performance and style problems. It is a sliding-window rate limiter used in front of a public API. List the concrete issues in order of severity, refer to the line or function where each one lives, and give a short suggested fix for each. Do not rewrite the whole module — just the issue list.
+
+```python
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Dict, Optional
+
+
+@dataclass
+class _Bucket:
+    limit: int
+    window: float
+    tokens: int = 0
+    hits: int = 0
+    last_refill: float = field(default_factory=time.time)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+class SlidingWindowLimiter:
+    """Per-key sliding-window rate limiter.
+
+    Each key gets ``limit`` tokens per ``window`` seconds. Tokens are
+    refilled proportionally to elapsed time (linear refill). A request
+    is allowed if at least one token is available, which is consumed.
+    """
+
+    def __init__(self, default_limit: int, default_window: float):
+        self._default_limit = default_limit
+        self._default_window = default_window
+        self._buckets: "OrderedDict[str, _Bucket]" = OrderedDict()
+        self._lock = threading.Lock()
+        self._cleanup_interval = 10.0
+        self._last_cleanup = time.time()
+
+    def _get_bucket(self, key: str) -> _Bucket:
+        with self._lock:
+            bucket = self._buckets.get(key)
+            if bucket is None:
+                bucket = _Bucket(self._default_limit, self._default_window)
+                self._buckets[key] = bucket
+            else:
+                self._buckets.move_to_end(key)
+            return bucket
+
+    def _refill(self, bucket: _Bucket) -> None:
+        now = time.time()
+        elapsed = now - bucket.last_refill
+        if elapsed <= 0:
+            return
+        produced = int(elapsed / bucket.window * bucket.limit)
+        if produced > 0:
+            bucket.tokens = min(bucket.limit, bucket.tokens + produced)
+            bucket.last_refill += produced * (bucket.window / bucket.limit)
+
+    def allow(self, key: str, cost: int = 1) -> bool:
+        bucket = self._get_bucket(key)
+        with bucket.lock:
+            self._refill(bucket)
+            if bucket.tokens >= cost:
+                bucket.tokens -= cost
+                bucket.hits += 1
+                return True
+            return False
+
+    def remaining(self, key: str) -> int:
+        bucket = self._get_bucket(key)
+        with bucket.lock:
+            self._refill(bucket)
+            return bucket.tokens
+
+    def reset(self, key: Optional[str] = None) -> None:
+        with self._lock:
+            if key is None:
+                self._buckets.clear()
+            else:
+                self._buckets.pop(key, None)
+
+    def _maybe_cleanup(self) -> None:
+        now = time.time()
+        if now - self._last_cleanup < self._cleanup_interval:
+            return
+        self._last_cleanup = now
+        with self._lock:
+            stale = []
+            for k, b in self._buckets.items():
+                if now - b.last_refill > 2 * b.window:
+                    stale.append(k)
+            for k in stale:
+                self._buckets.pop(k, None)
+
+    def stats(self) -> Dict[str, int]:
+        with self._lock:
+            return {
+                "keys": len(self._buckets),
+                "total_hits": sum(b.hits for b in self._buckets.values()),
+            }
+
+
+class TokenBucketLimiter:
+    """Alternative token-bucket limiter kept for A/B comparison.
+
+    The bucket holds at most ``capacity`` tokens and refills at
+    ``rate`` tokens per second. Used by the legacy gateway.
+    """
+
+    def __init__(self, rate: float, capacity: float):
+        self._rate = rate
+        self._capacity = capacity
+        self._tokens = capacity
+        self._last = time.time()
+        self._lock = threading.Lock()
+
+    def try_acquire(self, n: int = 1) -> bool:
+        with self._lock:
+            now = time.time()
+            self._tokens = min(self._capacity,
+                               self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            if self._tokens >= n:
+                self._tokens -= n
+                return True
+        return False
+
+
+def make_limiter(config: dict) -> SlidingWindowLimiter:
+    return SlidingWindowLimiter(
+        default_limit=config.get("limit", 100),
+        default_window=float(config.get("window", 60.0)),
+    )
+
+
+class LimiterRegistry:
+    """One limiter per (service, plan) pair."""
+
+    def __init__(self, config: dict):
+        self._config = config
+        self._limiters: Dict[str, SlidingWindowLimiter] = {}
+        self._lock = threading.Lock()
+
+    def for_key(self, service: str, plan: str) -> SlidingWindowLimiter:
+        name = service + ":" + plan
+        with self._lock:
+            lim = self._limiters.get(name)
+            if lim is None:
+                cfg = dict(self._config)
+                overrides = self._config.get("overrides", {}).get(name, {})
+                cfg.update(overrides)
+                lim = make_limiter(cfg)
+                self._limiters[name] = lim
+            return lim
+
+    def allow(self, service: str, plan: str, key: str) -> bool:
+        return self.for_key(service, plan).allow(key)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            for lim in self._limiters.values():
+                lim.reset()
+            self._limiters.clear()
+
+
+def main():
+    registry = LimiterRegistry({"limit": 120, "window": 60})
+    for i in range(200):
+        ok = registry.allow("public", "free", "ip-" + str(i % 17))
+        if i % 50 == 0:
+            print(i, ok)
+    print(registry.for_key("public", "free").stats())
+
+
+if __name__ == "__main__":
+    main()
+```
