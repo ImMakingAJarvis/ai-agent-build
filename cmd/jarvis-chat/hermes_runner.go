@@ -14,6 +14,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photomind"
 )
 
 // hermesRunner wraps the Hermes agent for use as a Discord message handler.
@@ -24,6 +25,7 @@ type hermesRunner struct {
 	discord   *chat.Discord
 	modelName string
 	confDir   string
+	photoSvc  *photomind.Service
 }
 
 // newHermesRunner creates a Hermes runner with the given bot configuration.
@@ -63,6 +65,7 @@ func newHermesRunner(botCfg config.BotConfig) *hermesRunner {
 		agent:     agent,
 		modelName: modelName,
 		confDir:   confDir,
+		photoSvc:  photomind.New(ollamaClient, modelName, art.New()),
 	}
 }
 
@@ -96,9 +99,9 @@ func (r *hermesRunner) handleMessage(in chat.Incoming) {
 		return
 	}
 
-	// !photo <prompt> works on the Hermes runner too.
-	if prompt, ok := cutPhoto(content); ok {
-		handlePhoto(r.discord, art.New(), prompt)
+	// !photo / !photoassist / !photocheck work on the Hermes runner too.
+	if mode, prompt, ok := cutPhotoCmd(content); ok {
+		handlePhoto(r.discord, r.photoSvc, mode, prompt)
 		return
 	}
 
