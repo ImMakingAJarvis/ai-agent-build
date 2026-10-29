@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """jarvis-art — generate photos with the local art model (jarvis-art service).
 
-  jarvis-art generate "a photo of ..." [--seed N] [--size 1024x1024]
+  jarvis-art generate "a photo of ..." [--seed N] [--size 1024x1024] [--mind]
+  jarvis-art enhance "a red panda in snow"
   jarvis-art list
 
 The service (127.0.0.1:8120, override with ART_HOST) saves PNGs under
 /var/lib/jarvis/art/out/ and this prints the path of what was made.
 Generations take tens of seconds; this waits for the result.
+
+With --mind (generate) or the enhance subcommand, the request first goes
+through the thinking mind (the local LLM brain), which expands the casual
+words into a detailed prompt before the image model sees it. enhance
+prints the prompt without generating. The brain URL/model come from
+ENGINE_URL / OLLAMA_URL and LOCAL_MODEL (default jarvis-brain).
 """
 
 import argparse
@@ -17,6 +24,31 @@ import urllib.error
 import urllib.request
 
 HOST = os.environ.get("ART_HOST", "127.0.0.1:8120")
+
+# Same engine precedence as internal/models (ENGINE_URL, then OLLAMA_URL).
+_ENGINE = os.environ.get("ENGINE_URL") or os.environ.get("OLLAMA_URL") \
+    or "http://localhost:11434"
+_MODEL = os.environ.get("LOCAL_MODEL", "jarvis-brain")
+
+# Keep in sync with internal/photomind's assistSystem.
+ASSIST_SYSTEM = (
+    "You write prompts for Z-Image-Turbo, a text-to-image model that renders a "
+    "square 1024x1024 photo.\n"
+    "The user's message is a short, casual photo request. Turn it into one rich, "
+    "concrete prompt the model can follow:\n"
+    "- keep the user's core subject and intent exactly;\n"
+    "- add specific visual detail: setting, time of day, natural lighting and "
+    "atmosphere, composition (shot type, angle), camera or lens style, color "
+    "palette, mood;\n"
+    '- default to photographic realism ("a photo of ...") unless the user asks '
+    "for another style;\n"
+    "- never put written text, captions, logos or watermarks in the scene (the "
+    "model renders text badly);\n"
+    "- if the user's request is already a detailed prompt, return it almost "
+    "unchanged, with only light polish.\n"
+    "Reply with the prompt only: no quotes, no labels, no preamble, one paragraph, "
+    "under 120 words."
+)
 
 
 def api(path, payload=None):
@@ -37,6 +69,40 @@ def api(path, payload=None):
         sys.exit(1)
 
 
+def enhance(request):
+    """Run a request through the thinking mind and return the prompt it gives."""
+    body = {
+        "model": _MODEL,
+        "messages": [
+            {"role": "system", "content": ASSIST_SYSTEM},
+            {"role": "user", "content": request},
+        ],
+        "stream": False,
+        "think": False,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    req = urllib.request.Request(
+        _ENGINE + "/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=None) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        body_ = e.read().decode(errors="replace")[:200]
+        print(f"jarvis-art: thinking mind error {e.code}: {body_}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"jarvis-art: cannot reach thinking mind at {_ENGINE}: {e}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        return data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError) as e:
+        print(f"jarvis-art: bad thinking-mind reply: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     p = argparse.ArgumentParser(prog="jarvis-art", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -44,11 +110,20 @@ def main():
     g.add_argument("prompt")
     g.add_argument("--seed", type=int, default=None, help="reproduce a result")
     g.add_argument("--size", default=None, help="WxH, e.g. 1024x1024 (max 1024)")
+    g.add_argument("--mind", action="store_true",
+                   help="expand the request through the thinking mind first")
+    e = sub.add_parser("enhance", help="print the thinking mind's prompt; no image")
+    e.add_argument("request")
     sub.add_parser("list", help="list generated images, newest first")
     a = p.parse_args()
 
     if a.cmd == "generate":
-        body = {"prompt": a.prompt}
+        prompt = a.prompt
+        if a.mind:
+            print("thinking...", file=sys.stderr)
+            prompt = enhance(a.prompt)
+            print(f"prompt: {prompt}\n", file=sys.stderr)
+        body = {"prompt": prompt}
         if a.seed is not None:
             body["seed"] = a.seed
         if a.size:
@@ -56,6 +131,8 @@ def main():
         print("generating...", file=sys.stderr)
         r = api("/generate", body)
         print(f"{r['path']}  ({r['width']}x{r['height']}, seed {r['seed']}, {r['seconds']:.1f}s)")
+    elif a.cmd == "enhance":
+        print(enhance(a.request))
     elif a.cmd == "list":
         for item in api("/images"):
             prompt = (item.get("prompt") or "").replace("\n", " ")

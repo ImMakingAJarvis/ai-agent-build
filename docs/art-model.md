@@ -65,6 +65,37 @@ Images land in `/var/lib/jarvis/art/out/` as `YYYYMMDD-HHMMSS-<seed>.png`
   quality ever needs a bump, the service only changes `ART_MODEL_REPO` +
   re-running `scripts/install_art.sh`.
 
+## Thinking-mind prompts (added 2026-10-29, job chat-1793252974-720f)
+
+Photo requests no longer go straight from the owner's words to
+Z-Image-Turbo. The thinking mind (`jarvis-brain` on the engine) first
+turns a casual request into a detailed image prompt — subject kept
+exact, plus setting, light, composition, camera style, palette and
+mood; no in-scene text (the model renders it badly). Already-detailed
+requests pass through almost unchanged. Code: `internal/photomind`
+(wired into `cmd/jarvis-chat` for both the primary and Hermes bots).
+
+Discord commands:
+
+- `!photo <text>` — the mind expands the prompt, the image is
+  generated, and the caption shows the (truncated) prompt that was
+  actually used.
+- `!photoassist <text>` — same, but the mind's full prompt is also
+  sent as a chat message first, so it can be read, reused, or refined
+  by giving the mind more context.
+- `!photocheck <text>` — iterates with the generator: draft prompt →
+  generate → the mind critiques the prompt against the original
+  request (it cannot see the image, so it judges the prompt) →
+  improved prompt → generate again. The final image is sent with a
+  note. If the critique finds nothing to change, the second pass is
+  skipped; if it dies after the first pass the first image is still
+  sent.
+
+If the brain is unreachable, generation falls back to the owner's raw
+words and the caption says so. CLI equivalents:
+`jarvis-art enhance "<request>"` prints the mind's prompt;
+`jarvis-art generate "<request>" --mind` expands then generates.
+
 ## Operations
 
 - **Install/refresh:** `scripts/install_art.sh` (deploy code to
