@@ -11,15 +11,16 @@ for rollback.
 | Service | What it does | Port (host) | Container | State |
 |---|---|---|---|---|
 | `engine` | The brain: llama.cpp `llama-server` serving the qwen3.8 "jarvis-brain" GGUF, 128k ctx, quantized KV cache, 2 parallel slots | 11434 (127.0.0.1) | `jarvis-engine` (nvidia runtime) | model + templates: `/opt/jarvis-engine`; slots: `/var/lib/jarvis/slots` |
+| `art` | Photo generation: Z-Image-Turbo 6B (diffusers, sequential CPU offload) behind a small FastAPI app; `jarvis-art generate "..."`; Discord `!photo <prompt>` sends the result back as an attachment; photo gallery site at `http://111.1.2.27:8120` | 8120 (all interfaces — the gallery is meant to be opened from the LAN) | `jarvis-art` (nvidia runtime) | code: `/opt/jarvis-art` (pinned deploy point); model: `/var/lib/jarvis/art/model`; images: `/var/lib/jarvis/art/out` |
 | `chat` | Discord bot: replies to owner DMs using the local brain; bridges voice wake events to jobs | — (Discord WS) | `jarvis-chat` | `.config/jarvis` (driver, prompts, `discord.env`), `.local/share/jarvis` (agentjob store) |
 | `dashboard` | Web dashboard: agent jobs, work queue, system state, PWA | 8080 | `jarvis-dashboard` | job store via `.local/share/jarvis` |
 | `ha` | Publishes Jarvis headline sensors to the Home Assistant box via MQTT (auto-discovery) | — (MQTT out) | `jarvis-ha` | job store + `.config/jarvis/ha.env` |
-| `voice` | Voice pipeline: wake word → STT (faster-whisper small) → brain (GLaDOS persona) → TTS (edge-tts); the `jarvis_voice` HA integration POSTs here | 8100 (LAN) | `jarvis-voice` | code: `/opt/jarvis-voice` (pinned deploy point); whisper model: `~/.cache/huggingface` |
+| `voice` | Voice pipeline: wake word → STT (faster-whisper small) → brain (GLaDOS persona) → TTS (edge-tts); the `jarvis_voice` HA integration POSTs here | 8100 (LAN, plain HTTP), 8443 (LAN, HTTPS — browser mic UI) | `jarvis-voice` | code: `/opt/jarvis-voice` (pinned deploy point); whisper model: `~/.cache/huggingface`; TLS cert: `~/.config/jarvis/tls` (bind-mounted) |
 | `memory` | Vector search over work logs/jobs (SQLite + all-MiniLM-L6-v2 ONNX); the agent searches it before grepping | 8101 (127.0.0.1) | `jarvis-memory` | `~/.local/share/jarvis/memory` (db + model) |
 | `memory-reindex` | Re-scans all sources every 15 min (was `jarvis-memory-reindex.timer`) | — | `jarvis-memory-reindex` | same as `memory` |
 | `rabbitmq` | Message broker: AMQP + MQTT (port 1883, LAN-facing for HA) + Prometheus metrics | 5672, 15672, 15692 (127.0.0.1), 1883 (LAN) | `jarvis-rabbitmq` (predates this PR) | named volume `ai-agent-build_rabbitmq_data`; config: `rabbitmq/` |
 | `redis` | Live job streams: the runner XADDs the agent's stream-json output per job (`jarvis:job:<id>`, 20k entries, 24 h TTL after the job ends); the dashboard tails it for the live job view | 6379 (127.0.0.1) | `jarvis-redis` | named volume `redis_data` (AOF) |
-| `worker` *(optional)* | Consumes the raw RabbitMQ job queue and runs agent jobs | — (metrics 9101 when on) | `jarvis-worker` | agentjob store; **not running today** — start with `--profile optional` |
+| `worker` | Consumes the raw RabbitMQ job queue (voice/coding/background) | — (metrics 9101 when on) | `jarvis-worker` | agentjob store; started by `docker compose up -d` / `jarvis-stack` |
 | `wake-queue` *(optional)* | Bridges wake-word events into the job pipeline | — | `jarvis-wake-queue` | **not running today** — start with `--profile optional` |
 | `prometheus` | Scrapes everything below, 15 d retention | 9090 | `jarvis-prometheus` | named volume `prometheus_data`; config: `docker/monitoring/prometheus/` |
 | `grafana` | Dashboards (provisioned from `docker/monitoring/grafana/provisioning/`) | 3000 | `jarvis-grafana` | named volume `grafana_data` |
@@ -46,7 +47,7 @@ cd /home/agent/ai-agent-build          # repo root (project name = ai-agent-buil
 docker compose config                  # sanity check
 docker compose build                   # build the jarvis/* images
 docker compose up -d                   # everything that runs today
-docker compose --profile optional up -d   # also worker + wake-queue
+docker compose --profile optional up -d   # also wake-queue
 docker compose ps
 docker compose logs -f chat            # logs of one service
 docker compose stop voice              # stop one (state survives)
@@ -66,8 +67,10 @@ the driver lib is injected by the nvidia runtime.
 ## Verifying the stack
 
 ```bash
-docker compose ps                 # 12 services (14 with --profile optional)
+docker compose ps                 # 14 services (15 with --profile optional)
 curl -s 127.0.0.1:11434/v1/models | head -c 100                    # engine: serving jarvis-brain
+curl -s 127.0.0.1:8120/health | head -c 200                        # art: model loaded + GPU
+curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8120/            # art gallery: 200
 curl -s 127.0.0.1:8101/health                                       # memory: status + model + db
 curl -s 127.0.0.1:8100/health                                       # voice: brain + whisper ready
 curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8080/            # dashboard: 200
@@ -113,6 +116,7 @@ fallback for the brain.
 |---|---|---|
 | `/opt/jarvis-engine` | llama-server b11815 binary, brain GGUF, chat templates | `scripts/install_engine.sh`, `scripts/pull_models.sh` |
 | `/opt/jarvis-voice` | voice service code + `auth-off.env` | deploy a branch there + `DEPLOYED_FROM` marker (see the drop-in history in `jarvis-voice.service.d/deploy.conf`) |
+| `/opt/jarvis-art` | art service code (`art_service.py`) | `scripts/install_art.sh` (also downloads the model to `/var/lib/jarvis/art/model`) |
 | `/opt/jarvis-memory` | memory service script | copy from the repo/branch; update `DEPLOYED_FROM` |
 
 Env/secrets stay on the host under `/home/agent/.config/jarvis/`
@@ -140,3 +144,9 @@ nothing secret is baked into images or committed.
 - Pre-2026-10-27 the same services ran as native systemd units; the units in
   `systemd/` and `scripts/jarvis-*.service` are the historical definitions and
   the rollback path.
+- **Chat memory** — the `chat` container gets `MEMORY_URL=http://memory:8101`;
+  before replying to a chat message it searches the memory service with the
+  message and appends the top hits to the system prompt (1200-char budget,
+  fails open if the service is down). Hermes additionally registers a
+  `search_memory` action for explicit lookups. Code: `internal/memory`
+  (Go client) and `internal/hermes/memory_action.go`.

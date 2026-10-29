@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -107,6 +108,22 @@ func (d *Discord) Notify(ctx context.Context, text string) error {
 		}
 	}
 	return nil
+}
+
+// SendImage sends text plus one local image file as an attachment in
+// the owner DM. A 1024x1024 PNG from the art model is a few MB, well
+// under Discord's 25 MB upload limit.
+func (d *Discord) SendImage(ctx context.Context, text, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = d.s.ChannelMessageSendComplex(d.dmID, &discordgo.MessageSend{
+		Content: text,
+		Files:   []*discordgo.File{{Name: filepath.Base(path), ContentType: "image/png", Reader: f}},
+	}, discordgo.WithContext(ctx))
+	return err
 }
 
 // Typing sends a typing indicator to the owner's DM channel.

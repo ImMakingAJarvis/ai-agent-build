@@ -5,11 +5,14 @@
 //	jarvis-jobs run <id> [-driver local|sonnet] [-round N] [-note TEXT]
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
-//	jarvis-jobs add -id ID -title T [-driver local|sonnet] [-source S] [-priority N]
+//	jarvis-jobs add -id ID -title T [-driver local|sonnet] [-source S]
+//	                   [-class fix|build|background] [-priority N] [-depends a,b]
 //	jarvis-jobs order [a,b,c]    show or set the runtime band priority order
 //	                              (a permutation of fix, build, background)
 //	jarvis-jobs message [TEXT]   send the agent a message (stdin when TEXT
 //	                              is "-" or absent); injected at its next step
+//	jarvis-jobs restart [--now]  restart the agent-run service (deferred
+//	                              until the current round ends unless --now)
 package main
 
 import (
@@ -18,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
@@ -33,7 +37,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|skip|requeue|show|pause|add|order|message")
+		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -128,6 +132,10 @@ func main() {
 		if err := cmdMessage(args, os.Stdin); err != nil {
 			die("%v", err)
 		}
+	case "restart":
+		if err := cmdRestart(args); err != nil {
+			die("%v", err)
+		}
 	default:
 		die("unknown command %q", cmd)
 	}
@@ -160,6 +168,22 @@ func cmdMessage(args []string, stdin io.Reader) error {
 	}
 	fmt.Printf("queued %s (%d waiting)\n", name, inbox.Count())
 	return nil
+}
+
+// cmdRestart restarts the agent-run service through the agent-run-restart
+// helper (scripts/agent-run-restart, installed to /usr/local/bin by
+// install_agent_run.sh). The helper defers the restart until the current
+// round ends unless --now is passed, and starts the service when it is
+// down, so this works from any shell even while no round process is alive.
+func cmdRestart(args []string) error {
+	const helper = "/usr/local/bin/agent-run-restart"
+	if _, err := os.Stat(helper); err != nil {
+		return fmt.Errorf("helper not installed at %s — run scripts/install_agent_run.sh", helper)
+	}
+	cmd := exec.Command(helper, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // cmdOrder shows or sets the runtime band priority order (highest first).
@@ -198,6 +222,9 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 	r := &agentjob.Runner{Store: store, History: h}
 	if conf := os.Getenv("JARVIS_CONF"); conf != "" {
 		r.SignalFile = conf + "/pause-signal"
+		// !restart DM (jarvis-chat) writes this; the signal watcher kills
+		// the round and re-queues the job for a fresh run.
+		r.RestartSignalFile = conf + "/restart-signal"
 	}
 	// Sample GPU power for the whole round; the total lands in the job
 	// state and history as kWh + $ at the configured JARVIS_POWER_RATE.
@@ -256,11 +283,18 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	priority := fs.Int("priority", 0, "higher runs first within the class")
 	instructions := fs.String("instructions", "", "job body (default: stdin)")
 	effort := fs.String("effort", "", "reasoning effort: off, low, medium, high, xhigh, max (default medium)")
+	depends := fs.String("depends", "", "comma-separated job ids this job waits on (they must be done first)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *id == "" || *title == "" {
 		return fmt.Errorf("add -id ID -title T")
+	}
+	var deps []string
+	for _, d := range strings.Split(*depends, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			deps = append(deps, d)
+		}
 	}
 	switch *class {
 	case "", agentjob.ClassFix, agentjob.ClassBuild, agentjob.ClassBackground:
@@ -279,6 +313,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		ID:              *id,
 		Title:           *title,
 		Instructions:    strings.TrimSpace(body),
+		DependsOn:       deps,
 		Driver:          *driver,
 		Source:          *source,
 		Class:           *class,

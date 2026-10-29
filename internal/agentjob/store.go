@@ -389,6 +389,22 @@ func (s *Store) Pause(id string) error {
 	return s.setState(id, j.State)
 }
 
+// Restart puts a running job back to ready for a fresh run (the "!restart"
+// chat command kills the round and re-queues it). It is the counterpart of
+// Pause, but a no-op when the job is not running: a signal that lands after
+// a clean finish must not re-run a done or skipped job.
+func (s *Store) Restart(id string) error {
+	j, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if j.Status != Running {
+		return nil
+	}
+	j.Status = Ready
+	return s.setState(id, j.State)
+}
+
 // WriteFile stores a named artifact (output.txt, transcript.txt) for a job.
 func (s *Store) WriteFile(id, name string, data []byte) error {
 	if err := os.MkdirAll(s.JobDir(id), 0o755); err != nil {

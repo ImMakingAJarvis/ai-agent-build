@@ -24,9 +24,14 @@ type Client struct {
 }
 
 // NewClient creates an Ollama client pointing at the local instance.
-// Reads OLLAMA_URL from environment; defaults to localhost:11434.
+// Reads ENGINE_URL (the engine's canonical name in the docker stack),
+// then OLLAMA_URL; defaults to localhost:11434. Same precedence as
+// cmd/jarvis-reply and internal/slots.
 func NewClient() *Client {
-	base := os.Getenv("OLLAMA_URL")
+	base := os.Getenv("ENGINE_URL")
+	if base == "" {
+		base = os.Getenv("OLLAMA_URL")
+	}
 	if base == "" {
 		base = defaultOllamaURL
 	}

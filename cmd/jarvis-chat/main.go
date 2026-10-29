@@ -25,9 +25,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -37,9 +39,11 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/art"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
@@ -63,8 +67,9 @@ const (
 
 // Timeouts are variables so tests can shorten them.
 var (
-	busyTimeout = 20 * time.Second // send busy notice after this long
-	maxTimeout  = 4 * time.Minute  // give up after this long
+	busyTimeout  = 20 * time.Second  // send busy notice after this long
+	maxTimeout   = 4 * time.Minute   // give up after this long
+	photoTimeout = 3 * time.Minute   // one photo generation
 )
 
 // sender abstracts the Discord operations handleMessage needs,
@@ -72,6 +77,12 @@ var (
 type sender interface {
 	Notify(context.Context, string) error
 	Typing() error
+}
+
+// photoSender is what handlePhoto needs from the Discord side.
+type photoSender interface {
+	sender
+	SendImage(context.Context, string, string) error
 }
 
 func main() {
@@ -135,6 +146,16 @@ func main() {
 		hermesAgent.Register(action)
 	}
 
+	// Memory service: vector search over work logs, job history, queue.
+	// MEMORY_URL is set by docker-compose (http://memory:8101); the
+	// client fails open when the service is down.
+	memClient := memory.NewClient(os.Getenv("MEMORY_URL"))
+	hermesAgent.Register(hermes.MemoryAction(memClient))
+
+	// Art service: local photo generation for the !photo command.
+	// ART_URL is set by docker-compose (http://art:8120).
+	photoGen := art.New()
+
 	// Conversation history: alternating user/assistant turns.
 	var history []string // [user1, assistant1, user2, assistant2, ...]
 
@@ -176,6 +197,52 @@ func main() {
 					return
 				}
 
+				// !restart is a special command: write the restart-signal file
+				// so the running job's signal watcher kills the round and
+				// re-queues the job — the agent run restarts on a fresh
+				// conversation. Only useful while a round is running; between
+				// rounds the file is cleared before the next round starts.
+				if content == "!restart" {
+					_ = os.WriteFile(confDir+"/restart-signal", []byte("!restart"), 0o644)
+					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+					_ = d.Notify(ctx, "Restarting the agent run: killing the current round and putting its job back in the queue.")
+					cancel()
+					return
+				}
+
+				// !restart-service restarts the agent-run *service* itself,
+				// not just the current round: it runs the agent-run-restart
+				// helper, which defers the restart until the running round
+				// ends (or takes it now with "now"), and starts the service
+				// when it is down.
+				if content == "!restart-service" || content == "!restart-service now" {
+					var helperArgs []string
+					if content == "!restart-service now" {
+						helperArgs = append(helperArgs, "--now")
+					}
+					hctx, hcancel := context.WithTimeout(context.Background(), 60*time.Second)
+					out, herr := exec.CommandContext(hctx, "/usr/local/bin/agent-run-restart", helperArgs...).CombinedOutput()
+					hcancel()
+					msg := strings.TrimSpace(string(out))
+					if herr != nil {
+						msg = "agent-run restart failed: " + msg
+					}
+					if msg == "" {
+						msg = "agent-run restart failed with no output"
+					}
+					nctx, ncancel := context.WithTimeout(context.Background(), 15*time.Second)
+					_ = d.Notify(nctx, msg)
+					ncancel()
+					return
+				}
+
+				// !photo <prompt> generates a photo with the local art
+				// model and sends it back as an attachment.
+				if prompt, ok := cutPhoto(content); ok {
+					handlePhoto(d, photoGen, prompt)
+					return
+				}
+
 				if kind, rest, ok := cutBuildFix(content); ok {
 					class := agentjob.ClassBuild
 					if kind == "fix" {
@@ -197,7 +264,7 @@ func main() {
 					return
 				}
 
-				handleMessage(d, hermesAgent, voice, in, &history)
+				handleMessage(d, hermesAgent, voice, memClient, in, &history)
 			})
 		} else {
 			// Additional bots: Hermes runner with enhanced capabilities.
@@ -267,7 +334,7 @@ func pickOwnerID(bCfg config.BotConfig, confDir string) string {
 	return ""
 }
 
-func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, in chat.Incoming, history *[]string) {
+func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, mem *memory.Client, in chat.Incoming, history *[]string) {
 	content := in.Content
 	ctx, cancel := context.WithTimeout(context.Background(), maxTimeout)
 	defer cancel()
@@ -359,6 +426,15 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, in chat.
 			systemPrompt += "\n\nCurrent status:\n" + status
 		}
 
+		// RAG: pull relevant work-log context from the memory service so
+		// the chat can reference past jobs, decisions and the pending
+		// queue. Fails open — no hits, no context, chat goes on.
+		if hits := mem.Search(ctx, content, 4); len(hits) > 0 {
+			systemPrompt += "\n\nRelevant context from the work logs " +
+				"(memory service; use it when it fits, cite the source):\n" +
+				memory.FormatContext(hits, 1200)
+		}
+
 		answerCh := make(chan string, 1)
 		errCh2 := make(chan error, 1)
 		go func() {
@@ -434,6 +510,80 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, in chat.
 	if err := d.Notify(ctx, answer); err != nil {
 		log.Printf("jarvis-chat: notify: %v", err)
 	}
+}
+
+// handlePhoto runs one photo generation for the !photo command and
+// sends the result to the owner as an attachment. A 1024x1024 image
+// takes tens of seconds; the typing indicator stays up for the whole
+// generation.
+func handlePhoto(d photoSender, gen *art.Client, prompt string) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = d.Notify(ctx, "Need a prompt after !photo — e.g. !photo a photo of a red panda in fresh snow")
+		return
+	}
+
+	typingCtx, typingCancel := context.WithCancel(context.Background())
+	defer typingCancel()
+	go typingLoop(typingCtx, d)
+
+	genCtx, genCancel := context.WithTimeout(context.Background(), photoTimeout)
+	img, err := gen.Generate(genCtx, prompt)
+	genCancel()
+	typingCancel()
+	if err != nil {
+		log.Printf("jarvis-chat: photo: %v", err)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = d.Notify(ctx, photoErrorMessage(err))
+		return
+	}
+
+	if len(prompt) > 300 {
+		prompt = prompt[:300] + "…"
+	}
+	caption := fmt.Sprintf("**%s**\nseed %d · %dx%d · %.0fs\nGallery: %s",
+		prompt, img.Seed, img.Width, img.Height, img.Seconds, art.GalleryURL())
+
+	// Fresh context: the generation ate most of photoTimeout already.
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer sendCancel()
+	if err := d.SendImage(sendCtx, caption, img.Path); err != nil {
+		log.Printf("jarvis-chat: photo send: %v", err)
+		_ = d.Notify(sendCtx, "The photo is done ("+img.Path+") but I could not send the file: "+err.Error())
+	}
+}
+
+// cutPhoto recognizes the "!photo <prompt>" command. A word boundary is
+// required, so "!photograph a sunset" stays a chat message.
+func cutPhoto(content string) (prompt string, ok bool) {
+	rest := strings.TrimPrefix(content, "!photo")
+	if rest == content {
+		return "", false
+	}
+	if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+		return "", false
+	}
+	return strings.TrimSpace(rest), true
+}
+
+// photoErrorMessage turns a generation failure into something the owner
+// can act on.
+func photoErrorMessage(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "Photo generation took too long; try again in a bit."
+	}
+	var busy *art.ErrBusy
+	if errors.As(err, &busy) {
+		return "Another photo is already generating — try again in a minute."
+	}
+	var unavail *art.ErrUnavailable
+	if errors.As(err, &unavail) {
+		return "The art model is not available right now: " + unavail.Detail
+	}
+	return "Photo generation failed; try again in a moment."
 }
 
 // logConversation appends one exchange to the daily conversation log

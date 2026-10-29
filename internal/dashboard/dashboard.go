@@ -228,6 +228,7 @@ type Server struct {
 	authPass     string
 	kanban       *kanbanState
 	redis        *redis.Client // live job streams (nil = file-tail fallback)
+	plans        *plansState
 
 	// Pre-compiled templates (parsed once at startup).
 	tmpl *template.Template
@@ -294,6 +295,7 @@ func New() *Server {
 		tmpl:         tmpl,
 		kanban:       initKanban(historyDir),
 		redis:        redisClient,
+		plans:        initPlans(historyDir),
 	}
 }
 
@@ -380,6 +382,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/queue", s.handleQueue)
 	mux.HandleFunc("POST /api/queue/reorder", s.handleQueueReorder)
 	mux.HandleFunc("POST /api/queue/band-order", s.handleQueueBandOrder)
+	mux.HandleFunc("POST /api/plans", func(w http.ResponseWriter, r *http.Request) { s.plans.handlePlanUpload(s, w, r) })
+	mux.HandleFunc("GET /api/plans", func(w http.ResponseWriter, r *http.Request) { s.plans.handlePlanList(s, w, r) })
+	mux.HandleFunc("GET /html/plans-section", func(w http.ResponseWriter, r *http.Request) { s.plans.handlePlanListHTML(s, w, r) })
 	mux.HandleFunc("GET /logs", s.handleLogsPage)
 	mux.HandleFunc("GET /api/engine/logs", s.handleEngineLogs)
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)

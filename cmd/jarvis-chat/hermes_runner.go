@@ -8,9 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/art"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 )
 
@@ -53,6 +55,10 @@ func newHermesRunner(botCfg config.BotConfig) *hermesRunner {
 		agent.Register(action)
 	}
 
+	// Memory service: vector search over work logs, job history, queue.
+	memClient := memory.NewClient(os.Getenv("MEMORY_URL"))
+	agent.Register(hermes.MemoryAction(memClient))
+
 	return &hermesRunner{
 		agent:     agent,
 		modelName: modelName,
@@ -75,6 +81,24 @@ func (r *hermesRunner) handleMessage(in chat.Incoming) {
 	// !pause works on the Hermes runner too.
 	if content == "!pause" {
 		_ = os.WriteFile(r.confDir+"/pause-signal", []byte("!pause"), 0o644)
+		return
+	}
+
+	// !restart works on the Hermes runner too: kills the running round and
+	// re-queues its job so the agent run starts over.
+	if content == "!restart" {
+		_ = os.WriteFile(r.confDir+"/restart-signal", []byte("!restart"), 0o644)
+		if r.discord != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_ = r.discord.Notify(ctx, "Restarting the agent run: killing the current round and putting its job back in the queue.")
+			cancel()
+		}
+		return
+	}
+
+	// !photo <prompt> works on the Hermes runner too.
+	if prompt, ok := cutPhoto(content); ok {
+		handlePhoto(r.discord, art.New(), prompt)
 		return
 	}
 

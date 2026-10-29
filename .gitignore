@@ -10,10 +10,10 @@
 
 # Temporary files
 tmp/
+__pycache__/
 
 # Dashboard binary (build artifact; source in cmd/dashboard)
 /dashboard
 
 # Verbatim Discord/voice conversation logs (agent notes are tracked)
 notes/conversations/discord-*.md
-__pycache__/

@@ -9,7 +9,7 @@
 #
 # voice_service.py picks it up automatically on (re)start.
 # Re-run after the machine's IP changes (the old SAN list goes stale), then:
-#   sudo systemctl restart jarvis-voice
+#   docker compose up -d voice        (from the repo root)
 set -euo pipefail
 
 TLS_DIR="${TLS_DIR:-$HOME/.config/jarvis/tls}"
@@ -42,4 +42,4 @@ chmod 644 "$TLS_DIR/voice.crt"
 
 echo "Wrote $TLS_DIR/voice.crt + voice.key"
 echo "SAN: $san"
-echo "Restart to apply: sudo systemctl restart jarvis-voice"
+echo "Recreate the container to apply: docker compose up -d voice (from the repo root)"

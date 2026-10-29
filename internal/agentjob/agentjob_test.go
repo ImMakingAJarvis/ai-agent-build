@@ -608,6 +608,80 @@ func TestSignalWatcherDefersReplyWhenSlotFree(t *testing.T) {
 	}
 }
 
+func TestSignalWatcherRestartRequeuesJob(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Instructions: "do a"})
+
+	restartFile := filepath.Join(t.TempDir(), "restart-signal")
+	r := runner(t, s, `while sleep 0.1; do :; done`)
+	r.SignalFile = filepath.Join(t.TempDir(), "pause-signal") // starts the watcher
+	r.RestartSignalFile = restartFile
+
+	type result struct {
+		j   Job
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		j, err := r.Run(context.Background(), "a", "r1", "local", "")
+		done <- result{j, err}
+	}()
+
+	// Wait until the round is actually running, so the signal is acted on.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, _ := s.Get("a")
+		if got.Status == Running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job never reached running: %s", got.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	_ = os.WriteFile(restartFile, []byte("!restart"), 0o644)
+
+	out := <-done
+	if out.err == nil {
+		t.Fatal("want an error from the killed round, got nil")
+	}
+	if out.j.Status != Ready {
+		t.Fatalf("returned job: want ready after restart, got %s", out.j.Status)
+	}
+	got, _ := s.Get("a")
+	if got.Status != Ready {
+		t.Fatalf("stored status: want ready after restart, got %s", got.Status)
+	}
+	// The signal must be consumed, so it cannot kill the next round.
+	if _, err := os.Stat(restartFile); !os.IsNotExist(err) {
+		t.Fatal("restart-signal should be consumed")
+	}
+}
+
+func TestStoreRestartIgnoresFinishedJob(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Instructions: "do a"})
+
+	// A restart that lands when nothing is running is a no-op…
+	if err := s.Restart("a"); err != nil {
+		t.Fatal(err)
+	}
+	// …and a late one can never re-run a finished job.
+	if err := s.SetStatus("a", State{Status: Done}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Restart("a"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get("a")
+	if got.Status != Done {
+		t.Fatalf("done job must stay done, got %s", got.Status)
+	}
+}
+
 func TestReadDocSection(t *testing.T) {
 	// Read J0.9 section from the actual doc file
 	instr, doc := readDocSection("../..", "docs/jobs/j0-queue-work-source.md", "j0.9")

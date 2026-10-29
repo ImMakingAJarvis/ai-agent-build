@@ -15,7 +15,7 @@
     scripts/migrate_tasks_to_queue            # publish (idempotent; needs the NEW worker running)
 
 Run it only after the worker binary from this change is running: an older worker treats agent messages as text jobs.
-Other CLI: `jarvis-jobs list [status] | show <id> | skip <id> | requeue <id>`. `list` takes an optional status (e.g. `jarvis-jobs list failed`) and ends with a `# N jobs: …` line giving per-status totals for the unfiltered set, so a `head`-truncated view still shows how much was cut off.
+Other CLI: `jarvis-jobs list [status] | show <id> | skip <id> | requeue <id> | restart [--now]`. `restart` restarts the agent-run service via the agent-run-restart helper (deferred until the current round ends unless `--now`; starts the service when it is down) — see docs/agent-run.md. `list` takes an optional status (e.g. `jarvis-jobs list failed`) and ends with a `# N jobs: …` line giving per-status totals for the unfiltered set, so a `head`-truncated view still shows how much was cut off.
 
 Set thinking depth when enqueueing or running:
 

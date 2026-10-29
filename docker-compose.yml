@@ -1,7 +1,7 @@
 # Jarvis stack — one compose project for every service on this box.
 #
-#   docker compose up -d                        # everything that runs today
-#   docker compose --profile optional up -d     # + worker, wake-queue
+#   docker compose up -d                        # everything that runs today (includes worker)
+#   docker compose --profile optional up -d     # + wake-queue
 #
 # Run from the repo root: the project name is then "ai-agent-build", which
 # matches the pre-existing rabbitmq container/volume (created 2026-10-24).
@@ -92,6 +92,35 @@ services:
         "--slot-save-path", "/var/lib/jarvis/slots",
         "--log-disable" ]
 
+  # ---------------- art (photo generation, port 8120) ---------------------
+  # Z-Image-Turbo (6B, 8-step turbo) behind a small FastAPI+diffusers app.
+  # The brain owns ~20 GB of the 4090 and the art model doesn't fit in the
+  # rest, so it runs with sequential CPU offload (submodules stream to the
+  # GPU per forward pass); expect tens of seconds per 1024x1024 image.
+  # Code: pinned deploy point /opt/jarvis-art (scripts/install_art.sh).
+  # Model weights + generated images: /var/lib/jarvis/art/{model,out}.
+  art:
+    build:
+      context: .
+      dockerfile: docker/art/Dockerfile
+    image: jarvis/art:local
+    container_name: jarvis-art
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      HOME: /home/agent
+      LISTEN_PORT: "8120"
+    # Bound to all interfaces like the dashboard (8080): port 8120 is
+    # also the photo gallery site, meant to be opened from the LAN.
+    ports:
+      - "8120:8120"
+    working_dir: /opt/jarvis-art
+    command: ["python3", "art_service.py"]
+    volumes:
+      - /opt/jarvis-art:/opt/jarvis-art
+      - /var/lib/jarvis/art:/var/lib/jarvis/art
+
   # ---------------- chat / dashboard / ha ----------------
   chat:
     build:
@@ -109,10 +138,18 @@ services:
       ENGINE_URL: http://engine:11434
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       DASHBOARD_ADDR: dashboard:8080
+      # Vector DB over work logs / job history / queue (RAG + search action).
+      MEMORY_URL: http://memory:8101
+      # Photo generation for the !photo Discord command.
+      ART_URL: http://art:8120
+      ART_GALLERY_URL: http://111.1.2.27:8120
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      # !photo reads the generated PNG from the art service's host dir;
+      # chat needs it mounted (read-only) to attach it to the DM.
+      - /var/lib/jarvis/art:/var/lib/jarvis/art:ro
 
   dashboard:
     build:
@@ -129,6 +166,7 @@ services:
     environment:
       HOME: /home/agent
       JARVIS_CONF: /home/agent/.config/jarvis
+      ENGINE_URL: http://engine:11434
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       # Live job streams (see the redis service above); unset means the
       # dashboard falls back to tailing transcript files.
@@ -166,7 +204,7 @@ services:
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
 
-  # ---------------- voice (STT -> brain -> TTS, port 8100) ----------------
+  # ---------------- voice (STT -> brain -> TTS, ports 8100 + 8443) -------
   # Code is the pinned deploy point /opt/jarvis-voice (see its DEPLOYED_FROM).
   voice:
     build:
@@ -176,7 +214,9 @@ services:
     container_name: jarvis-voice
     restart: unless-stopped
     ports:
-      - "8100:8100"
+      - "8100:8100"   # plain HTTP — HA integration + machine-to-machine
+      - "8443:8443"   # HTTPS — browser UI; the mic (getUserMedia) only works
+                      # in secure contexts, so LAN devices must use this
     working_dir: /opt/jarvis-voice
     command: ["python3", "scripts/voice_service.py"]
     env_file:
@@ -194,6 +234,10 @@ services:
     volumes:
       - /opt/jarvis-voice:/opt/jarvis-voice
       - /home/agent/.cache/huggingface:/home/agent/.cache/huggingface:ro
+      # self-signed TLS cert for the 8443 listener (voice_service.py's default
+      # path ~/.config/jarvis/tls/voice.{crt,key}, HOME is /home/agent here);
+      # regenerate with scripts/gen_voice_cert.sh after the IP changes
+      - /home/agent/.config/jarvis/tls:/home/agent/.config/jarvis/tls:ro
 
   # ---------------- memory (vector search over work logs, port 8101) --------
   memory:
@@ -241,7 +285,6 @@ services:
       args: { BIN: cmd/worker }
     image: jarvis/worker:local
     container_name: jarvis-worker
-    profiles: ["optional"]
     restart: always
     env_file:
       - /home/agent/.config/jarvis/agent.env

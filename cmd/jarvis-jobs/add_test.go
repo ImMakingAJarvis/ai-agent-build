@@ -44,3 +44,33 @@ func TestCmdAddAndDuplicate(t *testing.T) {
 		t.Fatalf("high maps to xhigh for the local template, got %q", h.ReasoningEffort)
 	}
 }
+
+func TestCmdAddDepends(t *testing.T) {
+	s, err := agentjob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdAdd(s, []string{"-id", "p1", "-title", "First", "-driver", "local"}, strings.NewReader("a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdAdd(s, []string{"-id", "p2", "-title", "Second", "-depends", "p1, p3 "}, strings.NewReader("b")); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.Get("p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(j.DependsOn) != 2 || j.DependsOn[0] != "p1" || j.DependsOn[1] != "p3" {
+		t.Fatalf("depends = %v", j.DependsOn)
+	}
+	if err := cmdAdd(s, []string{"-id", "p4", "-title", "None", "-depends", " , "}, strings.NewReader("c")); err != nil {
+		t.Fatal(err)
+	}
+	j4, err := s.Get("p4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(j4.DependsOn) != 0 {
+		t.Fatalf("depends = %v, want none", j4.DependsOn)
+	}
+}
