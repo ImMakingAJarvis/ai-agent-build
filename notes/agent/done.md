@@ -37,3 +37,4 @@
 - 2026-10-28T22:37Z [chat-1793219709-180a] !photo fix: chat container now mounts /var/lib/jarvis/art read-only; generated PNGs reachable by SendImage (PR #101)
 - 2026-10-28T23:01Z [chat-1793219773-c61e] agent-run restart helper: /usr/local/bin/agent-run-restart (deferred via agent-run-restart-later oneshot mid-round; restarts immediately when idle/down; --now hard restart; respects disable/resume-pending) + jarvis-jobs restart [--now] + DM !restart-service [now] (PR #102)
 - 2026-10-29T01:20Z [chat-1793228762-992f] Live worker view: job page streams the agent's thoughts/tool calls in real time (stream-json -> Redis stream -> SSE), with file-tail fallback; new redis:7 compose service (PR #104)
+- 2026-10-29T03:46Z [chat-1793238260-8ce0] Job log 'Human readable' checkbox + stream_event envelope parser fix (PR #106)
