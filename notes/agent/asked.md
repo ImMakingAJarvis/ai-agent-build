@@ -32,3 +32,4 @@
 - 2026-10-29T03:46Z Nathan wants worker logs human readable, not raw stream-json; he confirmed he was on the raw log page when he saw the json
 - 2026-10-29T04:53Z Nathan asked for an output of running containers + currently loaded models; he suspected a qwen2.5 chatbot on the iGPU — confirmed: Qwen2.5-3B Q4_K_M on :11435 is the jarvis-helper model
 - 2026-10-29T07:31Z Nathan (job chat-1793252684-1127): open PRs have merge conflicts — check and fix all open PRs' mergeability
+- 2026-10-29T18:22Z Two helpers (CPU + iGPU)? other models for the box? — answered: deep helper = 30B-A3B on iGPU on-demand, CPU stays free (job chat-1793249102-d283)
