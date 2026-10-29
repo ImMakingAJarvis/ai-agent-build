@@ -23,8 +23,12 @@ the variable under test.
 it — add one and a matching job if it is wanted.)
 
 All four jobs were enqueued 2026-10-29 (job `chat-1793301484-1e78`) as
-`build`-class, priority 5, driver `sonnet` — the sweep must run on an API
-driver because it stops the local brain engine.
+`build`-class, priority 5, driver `sonnet` — the sweep must run off the
+local brain engine, which it stops. Since 2026-10-29 there is a third
+option: the **igpu driver** (`jarvis-jobs run <id> -driver igpu`, or the
+"iGPU model" button in the round checkpoint) runs the round on the small
+iGPU model — no API cost, and fully independent of the 4090, so the sweep
+itself can run while the round works.
 
 ## Method (per point)
 

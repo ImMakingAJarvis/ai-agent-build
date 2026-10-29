@@ -8,6 +8,24 @@ It shares Ollama with `jarvis-chat`. That is expected.
 
 The unit uses `Restart=on-failure`, so a crash or kill (non-zero exit) comes back after 10s; a Discord **Stop** (exit 0) stays stopped.
 
+## Drivers (who runs a round)
+
+Each round runs on one of three drivers, picked in the checkpoint:
+
+- **Local model** (default): `agent-local` on the 27B brain (port 11434).
+- **Igpu model**: the same `agent-local` path pointed at the 3B helper
+  on the Ryzen iGPU (port 11435) with a 32K context — no 4090, no API.
+  Right choice for rounds that must free the GPU (MoE VRAM sweeps).
+  `IGPU_MODEL` / `IGPU_URL` / `IGPU_CONTEXT_TOKENS` override the
+  defaults. Details in docs/local-brain.md.
+- **Sonnet**: the API `claude` binary, for rounds the local models are
+  stuck on.
+
+`jarvis-jobs run <id> -driver local|igpu|sonnet` does the same from the
+command line; the driver of the last round is recorded in
+`~/.config/jarvis/driver` (a reboot mid-round resumes on the same
+driver).
+
 ## Restart from chat (`!restart`)
 
 DM `!restart` to the bot while a round is running: `jarvis-chat` writes
