@@ -28,3 +28,4 @@
 - 2026-10-28T23:01Z Nathan (job chat-1793219773-c61e): service restart must be triggerable from jarvis-jobs interface or Discord even when the daemon is down
 - 2026-10-29T01:20Z Nathan wanted to watch the worker's thought process and progress live in a page; suggested Redis as the transport.
 - 2026-10-29T02:05Z Live worker view re-queued as duplicate (chat-1793228762-fd2a); confirmed live on main via merged PR #104, Nathan said close it
+- 2026-10-29T04:53Z Nathan asked for an output of running containers + currently loaded models; he suspected a qwen2.5 chatbot on the iGPU — confirmed: Qwen2.5-3B Q4_K_M on :11435 is the jarvis-helper model
