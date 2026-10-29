@@ -29,6 +29,38 @@ agent-local -p "your prompt"   # Claude Code on the local model
 agent-local                    # interactive
 ```
 
+## The igpu driver (rounds on the small iGPU model)
+
+`agent-run` can run a stage-3 round on the 3B helper on the Ryzen iGPU
+(`jarvis-engine-igpu`, port 11435, see docs/igpu-model-handler.md)
+instead of the 27B brain or the API. Pick **"IGPU model"** in the round
+checkpoint, or run a job directly:
+
+```
+jarvis-jobs run <job-id> -driver igpu
+```
+
+It is the right choice for rounds that must keep the 4090 free (e.g. the
+MoE VRAM sweeps: the round runs on the iGPU while the sweep owns the
+card) or that should not cost API. The brain may be stopped while an
+igpu round runs — that is expected.
+
+Mechanics: the driver runs the same `agent-local` path as the local
+driver, with `ENGINE_URL` pointed at `http://localhost:11435`,
+`LOCAL_MODEL=jarvis-igpu`, `LOCAL_CONTEXT_TOKENS=32768` (the engine's
+`--ctx-size`) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384` (a single
+response must never overflow the 32K window). `agent-local` honours
+pre-set values over `~/.config/jarvis/local.env`. Overrides:
+`IGPU_MODEL` (model name), `IGPU_URL` (engine URL — e.g. to point at a
+bigger deep-helper engine later), `IGPU_CONTEXT_TOKENS` (keep in sync
+with the unit's `--ctx-size`).
+
+Expectations for the small model: mechanical jobs work well
+(`jarvis-helper --status` for its health); deep design work should
+hand off to the local model or Sonnet. The iGPU has only 512 MB of
+VRAM — weights and KV cache live in shared system RAM, so context size
+costs RAM, not VRAM.
+
 ## Undo
 ```
 sudo systemctl disable --now ollama

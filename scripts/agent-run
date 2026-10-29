@@ -25,9 +25,16 @@
 #   AGENT_STAGE2_MODEL  default sonnet
 #
 # State: $CONF/stage is "1", "1e" (stage 1, escalated), "2" or "3".
-#        $CONF/driver is "local" or "sonnet" (who ran the last stage-3 round).
+#        $CONF/driver is "local", "igpu" or "sonnet" (who ran the last
+#        stage-3 round).
 # Briefs written by bootstrap.sh: $CONF/stage1.txt, stage2.txt,
-#        stage3-local.txt, stage3-sonnet.txt.
+#        stage3-local.txt, stage3-igpu.txt, stage3-sonnet.txt.
+#
+# The igpu driver runs the round on the small always-on iGPU model
+# (jarvis-engine-igpu, port 11435) via agent-local — it needs no 4090
+# and no API, so it is the right choice for rounds that must free the
+# GPU (e.g. the MoE VRAM sweeps) without paying for Sonnet.
+# IGPU_MODEL / IGPU_URL / IGPU_CONTEXT_TOKENS override the defaults.
 
 set -uo pipefail
 
@@ -54,7 +61,16 @@ exit_if_rebooting() {
 run_claude() {
   local model="$1" cont="$2" prompt="$3" cmd=(claude --model "$1")
   local args=(--dangerously-skip-permissions)
-  [[ "$model" == local ]] && cmd=(agent-local)
+  if [[ "$model" == local ]]; then
+    cmd=(agent-local)
+  elif [[ "$model" == igpu ]]; then
+    # The small iGPU model: agent-local pointed at the iGPU engine.
+    # agent-local honours the pre-set values over its local.env.
+    cmd=(env ENGINE_URL="${IGPU_URL:-http://localhost:11435}" \
+         LOCAL_MODEL="${IGPU_MODEL:-jarvis-igpu}" \
+         LOCAL_CONTEXT_TOKENS="${IGPU_CONTEXT_TOKENS:-32768}" \
+         CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384 agent-local)
+  fi
   (( cont )) && args+=(--continue)
   echo "==> $(date '+%F %T') $model continue=$cont"
   "${cmd[@]}" "${args[@]}" -p "$prompt"
@@ -149,7 +165,7 @@ fi
 # A reboot mid-round resumes that round's conversation on the same driver.
 if (( resume )); then
   d=$(cat "$DRIVER" 2>/dev/null || echo local)
-  m=$([[ "$d" == local ]] && echo local || echo "$M2")
+  if [[ "$d" == local || "$d" == igpu ]]; then m="$d"; else m="$M2"; fi
   # Tag the session with the job id (as jarvis-jobs run does) so the
   # owner-message hook injects queue-site messages into this round too.
   resume_p="$(resume_prompt "carry on with what you were doing, following the same rules as before.")"
@@ -217,7 +233,7 @@ while :; do
   if next=$(jarvis-jobs next 2>/dev/null); then
     job_id="${next%%$'\t'*}"; job_title="${next#*$'\t'}"
     q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
-    choices="Local model,Sonnet,Skip,Stop"
+    choices="Local model,iGPU model,Sonnet,Skip,Stop"
   else
     q="No ready jobs in the queue. Type instructions, or Stop."
     choices="Stop"
@@ -240,6 +256,7 @@ $q"); then
              msg="Skipped ${job_id:-nothing}."
              continue ;;
     sonnet)  d=sonnet; note="" ;;
+    "igpu model"|igpu) d=igpu; note="" ;;
     "local model"|local) d=local; note="" ;;
     *)       d=local; note="$answer" ;;
   esac
