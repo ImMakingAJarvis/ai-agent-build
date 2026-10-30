@@ -40,3 +40,4 @@
 - 2026-10-30T01:59Z research all t2i models we could run (even off-VRAM) with blurbs + time estimates; photo gen config check (Z-Image-Turbo, t2i only)
 - 2026-10-30T02:48Z Nathan wants an image-generator benchmark to pick the new art model: 20 prompts (incl. reference-image, img2img, subject-consistency x4), blind Tinder-swipe voting site, full per-image metrics (time, it/s, VRAM, power), avg/best/worst per model, fast UI
 - 2026-10-30T03:13Z Nathan re-sent the image-generator benchmarker design+plan ask (job chat-1793327656-30ec) — duplicate of the 02:48Z plan round; closed with evidence, no rework
+- 2026-10-30T03:44Z Nathan (2026-10-29): t2i model benchmark plan — pick the new art model via 20 fixed prompts, blind Tinder-swipe voting, per-model metrics (plan job plan-jarvis-model-downloader-1793259146)
