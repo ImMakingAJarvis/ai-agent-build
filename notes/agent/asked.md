@@ -37,3 +37,4 @@
 - 2026-10-29T21:11Z Nathan: schedule all of the kanban tasks for MOE benchmarking — the four vram-cache points of epic f4cf6031 (100/150/200/250 MB free VRAM, Qwen3.8-Flash-Next on FreeToken)
 - 2026-10-29T22:29Z Nathan wants the smaller iGPU model as an option for running rounds/jobs (e.g. MOE benchmarks) that need the 4090
 - 2026-10-30T00:33Z Nathan: which image gen model is active and does it support reference images (img2img)? — answer: Z-Image-Turbo, t2i only (job chat-1793307525-a7df)
+- 2026-10-30T01:59Z research all t2i models we could run (even off-VRAM) with blurbs + time estimates; photo gen config check (Z-Image-Turbo, t2i only)
