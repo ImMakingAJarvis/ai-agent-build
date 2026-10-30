@@ -50,3 +50,4 @@
 - 2026-10-30T01:59Z [chat-1793307553-f424] t2i model options research doc — all local image-gen options, reference-image capability, time estimates (PR #115)
 - 2026-10-30T02:48Z T2I benchmarker planned: jarvis-bench design (compose bench, :8121) + 8 queued jobs plan-jarvis-model-downloader-1793259146-1..-8 (skeleton, prompts, downloads, runner, full run, blind UI, metrics, docs) + kanban epic e991aacc (job plan-jarvis-model-downloader-1793259146)
 - 2026-10-30T03:13Z [chat-1793327656-30ec] Closed duplicate t2i benchmarker plan request — design + 8 queued jobs (plan-jarvis-model-downloader-1793259146-1..-8) + kanban epic e991aacc verified in place from the 02:48Z round; notes-only PR
+- 2026-10-30T03:44Z [plan-jarvis-model-downloader-1793259146-1] t2i bench service skeleton: jarvis-bench compose service (jarvis/art image, 127.0.0.1:8121), /health + /api/status, 5-table SQLite schema, YAML config loader, kill switch via /var/lib/jarvis/bench.disabled (PR #117)
