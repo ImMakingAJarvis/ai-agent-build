@@ -4,7 +4,10 @@ datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
-    url: http://localhost:9090
+    # The proxy resolves this URL from inside the jarvis-grafana container,
+    # where localhost is the container itself — use the compose service name
+    # (same reason Prometheus scrapes pin to stable container_names).
+    url: http://prometheus:9090
     isDefault: true
     uid: prometheus
     editable: true
