@@ -1,0 +1,28 @@
+# Candidate t2i models for the bench (plan-jarvis-model-downloader-1793259146).
+#
+# SAMPLE entries so the loader is testable — the real candidate list lands
+# in the "Download candidate models + smoke test" job of this plan
+# (see docs/art-model-options.md for the researched options).
+#
+# One entry per model. model_id is the upsert key and the id used in the
+# generations/votes tables. status: known | downloading | ready | error.
+# caps: JSON list of capabilities, e.g. [t2i, i2i, ref].
+models:
+  - model_id: z-image-turbo
+    repo: Tongyi-MAI/Z-Image-Turbo
+    pipeline_class: ZImagePipeline
+    quant: bf16
+    steps: 8
+    guidance: 0
+    caps: [t2i]
+    size_bytes: 32212254720   # ~31 GB on disk
+    status: known
+  - model_id: flux-1-schnell
+    repo: black-forest-labs/FLUX.1-schnell
+    pipeline_class: FluxSchnellPipeline
+    quant: fp8
+    steps: 4
+    guidance: 0
+    caps: [t2i, i2i]
+    size_bytes: 12884901888   # ~12 GB fp8
+    status: known
