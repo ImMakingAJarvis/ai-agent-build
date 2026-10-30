@@ -38,3 +38,5 @@
 - 2026-10-29T22:29Z Nathan wants the smaller iGPU model as an option for running rounds/jobs (e.g. MOE benchmarks) that need the 4090
 - 2026-10-30T00:33Z Nathan: which image gen model is active and does it support reference images (img2img)? — answer: Z-Image-Turbo, t2i only (job chat-1793307525-a7df)
 - 2026-10-30T01:59Z research all t2i models we could run (even off-VRAM) with blurbs + time estimates; photo gen config check (Z-Image-Turbo, t2i only)
+- 2026-10-30T02:48Z Nathan wants an image-generator benchmark to pick the new art model: 20 prompts (incl. reference-image, img2img, subject-consistency x4), blind Tinder-swipe voting site, full per-image metrics (time, it/s, VRAM, power), avg/best/worst per model, fast UI
+- 2026-10-30T03:13Z Nathan re-sent the image-generator benchmarker design+plan ask (job chat-1793327656-30ec) — duplicate of the 02:48Z plan round; closed with evidence, no rework
