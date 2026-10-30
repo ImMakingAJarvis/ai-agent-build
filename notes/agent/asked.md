@@ -35,3 +35,5 @@
 - 2026-10-29T18:22Z Two helpers (CPU + iGPU)? other models for the box? — answered: deep helper = 30B-A3B on iGPU on-demand, CPU stays free (job chat-1793249102-d283)
 - 2026-10-29T19:51Z Photo workflow: wanted the thinking mind to write much better image-generator prompts from casual requests, with special modes — photoassist for refining prompts with context, photocheck for iterating with the generator (job chat-1793252974-720f)
 - 2026-10-29T21:11Z Nathan: schedule all of the kanban tasks for MOE benchmarking — the four vram-cache points of epic f4cf6031 (100/150/200/250 MB free VRAM, Qwen3.8-Flash-Next on FreeToken)
+- 2026-10-29T22:29Z Nathan wants the smaller iGPU model as an option for running rounds/jobs (e.g. MOE benchmarks) that need the 4090
+- 2026-10-30T00:33Z Nathan: which image gen model is active and does it support reference images (img2img)? — answer: Z-Image-Turbo, t2i only (job chat-1793307525-a7df)
