@@ -41,3 +41,7 @@
 - 2026-10-30T02:48Z Nathan wants an image-generator benchmark to pick the new art model: 20 prompts (incl. reference-image, img2img, subject-consistency x4), blind Tinder-swipe voting site, full per-image metrics (time, it/s, VRAM, power), avg/best/worst per model, fast UI
 - 2026-10-30T03:13Z Nathan re-sent the image-generator benchmarker design+plan ask (job chat-1793327656-30ec) — duplicate of the 02:48Z plan round; closed with evidence, no rework
 - 2026-10-30T03:44Z Nathan (2026-10-29): t2i model benchmark plan — pick the new art model via 20 fixed prompts, blind Tinder-swipe voting, per-model metrics (plan job plan-jarvis-model-downloader-1793259146)
+- 2026-10-30T07:07Z Grafana dashboard metrics were down (job chat-1793338721-45ee, 2026-10-30) — panels all showed no data
+- 2026-10-30T23:28Z Nathan uploaded the Plane work-board plan (2026-10-27): self-hosted Plane CE on the NAS + plane-bridge on the AI box + 'plan:<model>' label-driven planning (Plan/Decompose/Review, approve in Plane, per-location gpu/cpu/igpu execution, one PR per epic); P1 NAS deployment is his manual step
+- 2026-10-31T10:41Z 2026-10-31 Nathan provided the Plane key: first pointed at a NAS folder (unreachable - no NAS creds on AI box), then dropped /home/agent/planekey.txt in the agent home dir; env wiring (PLANE_URL/PLANE_API_KEY) is pending chat job chat-1793441273-bca6
+- 2026-10-31T18:47Z Nathan: add Plane URL+key to the daemon env config (key handed via planekey.txt in the AI-box home dir, NAS folder itself unreachable); keep the key out of the repo and never print it
