@@ -26,3 +26,24 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   box; NFS closed. The Plane key was dropped by Nathan at
   `/home/agent/planekey.txt`. Pending chat job chat-1793441273-bca6 wires
   `PLANE_URL`/`PLANE_API_KEY` into the env config the daemon reads.
+
+## Env wiring (2026-10-31) — PLANE_URL/PLANE_API_KEY in the daemon env config
+
+- Wired into `~/.config/jarvis/agent.env` — the `EnvironmentFile` read by
+  agent-run, agent-resume, jarvis-chat and wake-queue (and optionally by
+  the dashboard/HA units). Daemons pick the vars up at their next service
+  start; nothing consumes them yet (plane-bridge arrives with P2+), so no
+  restart was needed.
+- `PLANE_URL=http://111.1.2.222:8088`. The requested
+  `https://plane.nathan.homes` does not resolve from the AI box
+  (re-checked 2026-10-31, `getent` + curl both fail); the IP URL is the
+  one verified live in P1. Flip `PLANE_URL` to the hostname if the
+  `nathan.homes` DNS record lands.
+- `PLANE_API_KEY` = the 42-char `plane_api_…` key from
+  `/home/agent/planekey.txt`. Caveat for consumers: that file is 5 blank
+  lines + the key on the last line — take the last non-empty line, not the
+  whole file. Key stays out of the repo.
+- Re-verified after wiring: `GET $PLANE_URL/api/v1/users/me/` with
+  `X-Api-Key` → 200 (Nathan's admin account, per P1).
+- The handoff file `/home/agent/planekey.txt` was left in place (Nathan's
+  file); it can be shredded once the P2 bot key replaces it in config.
