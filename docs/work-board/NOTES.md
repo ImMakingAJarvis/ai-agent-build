@@ -94,3 +94,43 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   (`X-Api-Key`) → 1× `ai_agent_build`/AAB, exactly the 8 states in order
   (no duplicates), 1× `epic` label, members = bot2 (+ the credential-less
   zombie bot), 1 pending admin invite (accepted=False).
+
+## P3 (2026-10-31) — Go plane client package
+
+- Package: `internal/plane`. Covers the full P3 scope — create work item
+  and sub-item (`parent` field), set state (PATCH `{"state": id}`), add and
+  remove labels, add "blocked by" relations, add comment, create page —
+  plus the small helpers tests and later phases need (create/list project,
+  list states/labels, list pages).
+- Test strategy: **live test against a per-run scratch project** (the
+  acceptance's first option, chosen because the live board is reachable):
+  `TestLiveScratchProject` (`live_test.go`) creates `p3_test_<unix>` in the
+  `jarvis` workspace, exercises every operation in it, and deletes it in
+  `t.Cleanup` — the board is left exactly as found (re-verified after the
+  run: only `Jarvis` + `ai_agent_build` remain). Credentials come from
+  process env, falling back to `~/.config/jarvis/agent.env`; without them
+  the test skips, so `go test ./...` stays green off this machine. A
+  hermetic httptest suite (`plane_test.go`) models both API surfaces
+  including the quirks below, so behavior stays pinned when the live board
+  is unreachable.
+- Verified API facts for this build (2026-10-31):
+  - v1 list endpoints are paginated (`{"results": [...], "count": N}`);
+    session-API lists (pages) return a bare array.
+  - Work item field names: `state` (not `state_id`), `parent` (not
+    `parent_id`). `labels` is a list of IDs and **PATCH replaces the whole
+    list** — the client GETs, merges, and PATCHes the union for
+    add/remove.
+  - Relations: `POST .../work-items/<id>/relations/` with
+    `{"relation_type": "blocked_by", "issues": [<work-item ids>]}` — the
+    list field is named `issues`; singular per-type fields are rejected.
+  - Comments take `comment_html` on create; `comment_text` is silently
+    ignored (stored empty).
+  - **Pages are session-API only**: there is no v1 pages route (404) and
+    `X-Api-Key` on session routes 401s. Sign-in is form-encoded
+    `POST /auth/sign-in/`; a successful sign-in **302-redirects to the
+    instance's SITE_URL**, which on this deploy is the NAS LAN IP
+    (192.168.1.50) — unreachable from the AI box. The client therefore
+    never follows redirects on sign-in and treats 2xx/3xx + a session
+    `Set-Cookie` as success.
+  - Session cookie is `session-id`; the CSRF token must be re-fetched
+    after login (it moves into the session).
