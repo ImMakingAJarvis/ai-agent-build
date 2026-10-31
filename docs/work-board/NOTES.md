@@ -47,3 +47,50 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   `X-Api-Key` → 200 (Nathan's admin account, per P1).
 - The handoff file `/home/agent/planekey.txt` was left in place (Nathan's
   file); it can be shredded once the P2 bot key replaces it in config.
+
+## P2 (2026-10-31) — idempotent `scripts/plane-setup.sh`
+
+- Script: `scripts/plane-setup.sh` (bash, `set -euo pipefail`). Converges
+  workspace `jarvis`, project `ai_agent_build` (identifier `AAB`), the 8
+  planned states (seq 1000–8000), the `epic` label, the bot member, and the
+  env file. First run creates everything; a re-run is a true no-op (verified:
+  no create/patch/delete, env file untouched, `verify` ✓, exit 0).
+- **`PLANE_API_KEY` now holds the bot's key** (the script rotates a labeled
+  token `jarvis-bot` on the bot account and installs it). Nathan's key is
+  preserved as `PLANE_ADMIN_API_KEY` (with `PLANE_ADMIN_EMAIL`); bot creds
+  live in `PLANE_BOT_EMAIL`/`PLANE_BOT_PASSWORD`. The `planekey.txt` handoff
+  is superseded by the env file.
+- Bot account is **`jarvis-bot2@nathan.homes`**: an aborted first run created
+  `jarvis-bot@` whose generated password was lost (Plane has no password
+  reset without SMTP, no user-delete API) → the zombie account stays a
+  (credential-less) bot member of the workspace; the member-delete endpoint
+  filters `member__is_bot=False`, so it cannot be removed via API. Harmless.
+- **Admin membership is a pending invite, accepted by a human.** Headless
+  member-add is impossible on this build: the invite-join endpoint requires
+  the invitee's own authenticated session *and* the one-time invite token
+  (GHSA-4vj8-p63v-8p24), and no API ever exposes the token
+  (GHSA-86mg-259g-pwgg). The script creates/keeps the pending admin invite
+  (400 `EMAIL_ALREADY_INVITED` = already pending, no-op); no SMTP on the
+  instance, so nathan219@gmail.com accepts it in the Plane UI.
+- Build quirks hit (2026-10-31 deploy, behaves like Plane 1.4.x):
+  - Session cookie is **`session-id`** (hyphen), not `sessionid`; the script
+    matches both. CSRF token must be re-fetched after sign-in (it moves into
+    the session).
+  - Session `GET /api/workspaces/` 400s ("required key does not exist");
+    the working list is `GET /api/users/me/workspaces/` (plain array).
+  - Project **names** forbid hyphens (`FORBIDDEN_IDENTIFIER_CHARS`
+    includes `-`) → `ai_agent_build`; identifier `AAB` is unaffected.
+  - State `sequence` is stored/returned as a **float** (1000.0) — compare
+    against the normalized integer or every run re-PATCHes all states.
+  - This build's auto-created default states are 5 (Backlog, Todo,
+    In Progress, Cancelled, Done); the script removes any state not in the
+    planned set unless a work item references it.
+  - Workspace creation auto-creates a default project named after the
+    workspace (`Jarvis`/`JARVI`); left in place (outside the job's object
+    list — no destructive ops beyond it). Board work targets `AAB`.
+  - State matching is case-insensitive, so the planned "In progress" keeps
+    Plane's default capitalization "In Progress" (PATCHed, not duplicated).
+- Acceptance evidence: independent re-list with the env-file bot key
+  (`X-Api-Key`) → 1× `ai_agent_build`/AAB, exactly the 8 states in order
+  (no duplicates), 1× `epic` label, members = bot2 (+ the credential-less
+  zombie bot), 1 pending admin invite (accepted=False).
