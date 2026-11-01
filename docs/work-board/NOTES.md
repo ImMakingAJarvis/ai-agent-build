@@ -203,3 +203,56 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   stopped must be queued by the catch-up sync after restart. Skips when
   the Plane env is unavailable, so `go test ./...` stays green elsewhere.
   Passes in ~17 s (2026-10-31).
+
+## P5 (2026-11-01) — old board migrated to Plane, old tool retired
+
+- Tool: `cmd/board-migrate` (one-shot Go, re-runnable). Reads the old
+  board via `internal/kanban`, writes through the `internal/plane`
+  client, and ends with a live recount that exits non-zero unless the
+  open item counts match. Flags: `-dry-run`, `-verify-only`,
+  `-board-dir`.
+- **Definition of "open" (the old board has no epic status and no
+  closed state):** every epic counts as open (all 8 migrated), open
+  task = status != done (52 of 53; the one done task, P1, skipped).
+  Three epics have no tasks at all ("Test" scratch epic, "Make new
+  interactive queue dashboard", "Full e2e test and fix of voice chat")
+  — migrated as-is; close them on Plane if they're stale.
+- Mapping: epic -> Backlog work item with the `epic` label; task ->
+  sub-item under its epic (52/52 have a parent). Old status -> state:
+  backlog -> Backlog; in-progress and review -> **In Progress** (the
+  new board's "Plan review" column is for plan approval, not code
+  review). Title/description/content carried over; old status,
+  priority and model recorded in the description.
+- **Idempotency:** every migrated item carries a marker line in its
+  description — `migrated-from: old-board epic=<uuid>` /
+  `task=<uuid> epic=<uuid>` — a re-run matches markers and skips
+  existing items. Evidence: run 1 created 38 then hit a 429
+  (Plane rate-limits v1 writes — the tool now backs off 30 s on 429,
+  up to 10 attempts), run 2 created 22 / skipped 38, run 3
+  `created=0 skippedExisting=60`.
+- Acceptance evidence (recount + independent curl against the live
+  project `AAB`, id `c9336196-3024-4477-a44e-8776df1ff24b`):
+  **60/60 items** — 8 with the epic marker, 52 with the task marker;
+  52/52 sub-items have a parent; sample checks: NoBrakes epic in
+  Backlog with the epic label, the one review task
+  (5ee2c959 "Bench service skeleton") in In Progress with its marker
+  and old metadata intact.
+- **What was disabled (acceptance: old tool no longer starts on boot):**
+  `jarvis-dashboard.service` (the old board UI on :8080). It was
+  *already disabled* (no wants symlink; the journal is truncated so the
+  disable time is unknown), but a running instance was crash-looping —
+  :8080 is held by the t2i-bench docker container, so the dashboard
+  could not bind. This round: `systemctl stop jarvis-dashboard`
+  (now inactive) and the unit's documented inhibit file
+  `/var/lib/jarvis/dashboard.disabled` touched as a second lock. The
+  unit file (repo + /etc copy) carries a RETIRED header.
+- Note: the dashboard also rendered the queue/agent-job views — those
+  are gone with it; the queue is visible via `jarvis-jobs` and Grafana.
+- Stale statuses to tidy on Plane (migrated faithfully, not edited):
+  on "Work board: Plane + Plan with model" cards P2 (#121), P3 (#122),
+  P4 (#123) are already merged; on "T2I image generator benchmark" card
+  5ee2c959 is PR #117 (merged). Close them when reviewing the board.
+- Open decision (PLAN.md): history migration — **open items only, per
+  this job's instruction**; the old board's data stays untouched on disk
+  (~/.local/share/jarvis/kanban), so a later history migration is still
+  possible if wanted.
