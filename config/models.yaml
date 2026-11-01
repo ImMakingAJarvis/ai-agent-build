@@ -1,0 +1,72 @@
+# Model registry — the single source of truth for the model selector,
+# placement and cost display (docs/work-board/PLAN.md, "Model registry").
+# Adding a model is a change to this file, not a code change.
+#
+# Field reference (known values are enforced by internal/registry):
+#   id                 key used in jobs and logs; unique
+#   display_name       shown in the selector
+#   location           local | cloud — groups the dropdown
+#   engine             ollama | llama.cpp | vllm | anthropic | openai-compatible
+#   endpoint           base URL the worker calls
+#   roles              any of: planner, executor, reviewer
+#   context_tokens     caps what the planner packs in
+#   vram_gb / ram_gb   what the model needs to run; 0 for cloud
+#   thinking           budget param name + default ("param:value"); "" = none
+#   cost_per_mtok      USD per million tokens, 0 for local (input price;
+#                      cloud output is typically several times higher)
+#   enabled            false hides the entry without deleting it
+#   home_location      gpu | cpu | igpu | cloud | none — where it always runs
+#   fallback_location  same values — where it goes if home is unavailable
+
+models:
+  # Dense 27B, Q4_K_M, the always-loaded brain model (docs/local-brain.md):
+  # 128K context at ~20.4 GB VRAM on the 4090, served by Ollama on 11434.
+  # Executor, and planner for small epics.
+  - id: qwen3.8-27b
+    display_name: Qwen 3.8 27B (dense)
+    location: local
+    engine: ollama
+    endpoint: http://localhost:11434/v1
+    roles: [executor, planner]
+    context_tokens: 131072
+    vram_gb: 20
+    ram_gb: 0
+    thinking: "thinking_budget:8192"
+    cost_per_mtok: 0
+    enabled: true
+    home_location: gpu
+    fallback_location: cpu
+
+  # ~100 GB IQ4_XS MoE, mostly RAM-resident (docs/freetoken-runner.md); the
+  # engine (ft serve, llama.cpp-compatible) runs on 11435 while it is armed.
+  # Primary local planner once pulled — until then it is hidden, not deleted.
+  - id: qwen3.8-flash-next
+    display_name: Qwen 3.8 Flash Next (MoE)
+    location: local
+    engine: llama.cpp
+    endpoint: http://localhost:11435/v1
+    roles: [planner]
+    context_tokens: 131072
+    vram_gb: 20
+    ram_gb: 80
+    thinking: "thinking_budget:8192"
+    cost_per_mtok: 0
+    enabled: false
+    home_location: gpu
+    fallback_location: cpu
+
+  # Cloud planner and reviewer for big or stuck epics.
+  - id: claude-sonnet-5-5
+    display_name: Claude Sonnet (cloud)
+    location: cloud
+    engine: anthropic
+    endpoint: https://api.anthropic.com/v1
+    roles: [planner, reviewer]
+    context_tokens: 200000
+    vram_gb: 0
+    ram_gb: 0
+    thinking: "thinking.budget_tokens:16384"
+    cost_per_mtok: 3
+    enabled: true
+    home_location: cloud
+    fallback_location: none
