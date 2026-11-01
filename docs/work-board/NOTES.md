@@ -256,3 +256,59 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   this job's instruction**; the old board's data stays untouched on disk
   (~/.local/share/jarvis/kanban), so a later history migration is still
   possible if wanted.
+
+## P6 (2026-10-31) — model-prefixed comments + Discord board links
+
+- CLI: `cmd/jarvis-board` — `link <item>`, `item <item>` (one line:
+  AAB-n [state] title link), `comment <item> [msg...]` posts
+  `<model>: <msg>` as `comment_html` (one `<p>`, HTML-escaped, newlines
+  to `<br>`; model from `--model` → `$JARVIS_MODEL` → "jarvis-brain").
+  Items are addressed by UUID, `AAB-n` or bare `n`; the project from
+  `--project` → `$PLANE_PROJECT` → "AAB". Config via `plane.FromEnv()`
+  (PLANE_* env, falling back to ~/.config/jarvis/agent.env). Flags come
+  BEFORE the positional args (Go flag convention, like jarvis-discord
+  ask); a guard fails loudly when a flag is typed after them, because
+  it would otherwise be posted inside the comment text — hit exactly
+  that in live testing (first scratch comment AAB-61 contained
+  "--model jarvis-brain"; the item was deleted and recreated as AAB-62
+  with a clean comment).
+- `jarvis-discord notify --item AAB-n` appends the item's board link on
+  its own line (same guard for `--item` after the message).
+- `internal/agentjob`: every round's env now carries
+  `JARVIS_MODEL=<ModelFor(driver)>` (stale inherited value stripped
+  first), so a round knows its model name for the prefix.
+- `internal/plane` additions: `FromEnv`/`envValue` (per-call env-file
+  fallback — deliberately no sync.Once, so tests can point PLANE_ENV_FILE
+  at a temp file), `GetProject`, `ProjectByRef` (UUID → single GET;
+  identifier → list + match), `WorkItemByRef` (UUID fast path; display
+  id → ListWorkItems + sequence match, since v1 GETs only accept UUIDs),
+  `ItemLink`, `ListComments`. httptest coverage for all five in
+  plane_test.go (fake gained GET /projects/<id>/ and a paginated
+  comments list).
+- **Board link format (verified live, not guessed):**
+  `<base>/<workspace>/browse/<identifier>-<sequence>`, e.g.
+  `http://111.1.2.222:8088/jarvis/browse/AAB-43`. Evidence: the live
+  SPA route manifest defines `:workspaceSlug/browse/:workItem`, and the
+  issue-detail page chunk redirects to
+  `/${workspaceSlug}/browse/${project_identifier}-${sequence_id}`. The
+  older `.../projects/<projectId>/issues/<issueId>` route still exists
+  but client-side redirects to the browse URL.
+- Acceptance evidence (2026-10-31, live board): scratch item AAB-62
+  (d7b5c1a3-de0e-4baa-8238-6167f8e44b93) in AAB carries the comment
+  `<p>jarvis-brain: P6 acceptance: ...</p>` (verified via the raw v1
+  comments API, not the client); AAB-43 (this job's card) carries a
+  `jarvis-brain:` comment; a Discord status message was sent with
+  `jarvis-discord notify --item AAB-62` and the appended link line
+  `http://111.1.2.222:8088/jarvis/browse/AAB-62`.
+- Scope note: state writeback remains C1's job — P6 does not move
+  items. AAB-62 is left in Backlog as the acceptance artifact (title
+  says "safe to delete").
+- `internal/bridge` live test fix (found by the P6 full-suite run):
+  the admin had accepted the workspace invite since P4, so
+  TestLiveWebhookAndCatchUp's human-edit half now runs — and it 403'd
+  on the admin's work-item rename. On this Plane build a plain member
+  add grants the default viewer role (5); editors are **role 20**
+  (probe: role choices 10/30/40 and the names "editor"/"admin" are all
+  rejected, 20 works). The test now adds the admin with
+  `{"member": id, "role": 20}`; the half passed live (rename 200,
+  event logged, plan job queued).

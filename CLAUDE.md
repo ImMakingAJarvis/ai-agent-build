@@ -58,3 +58,27 @@ chat-1793163063-9121). When it ships, update this section: list the
 task's comments in the read step above, and add that the worker may add
 comments to a kanban task when it has questions while building — post
 the question as a comment rather than blocking the round on it.
+
+## Work board (Plane)
+
+The work board is Plane at `http://111.1.2.222:8088` (workspace `jarvis`,
+project `AAB`, items are `AAB-<n>`). Since P6 the agent identifies itself
+on the board:
+
+- When a job maps to a Plane item (an `AAB-<n>` in the job title, or
+  `board`/`item` fields in the job's state), post a model-prefixed
+  comment whenever the agent touches that item:
+
+      jarvis-board comment --model <model> AAB-<n> "<what changed, why>"
+
+  The model is `$JARVIS_MODEL` from the round env (the CLI defaults to
+  "jarvis-brain"). Comment convention: `<model>: <what and why>`.
+- Discord status messages carry the board link:
+
+      jarvis-discord notify --item AAB-<n> "<status>"
+- Other subcommands: `jarvis-board item AAB-<n>` (one-line summary with
+  state), `jarvis-board link AAB-<n>` (URL only). Items accept a UUID,
+  `AAB-<n>`, or bare `<n>`. Flags go BEFORE the positional args.
+- Link format: `<PLANE_URL>/jarvis/browse/AAB-<n>`.
+- Do not move item states from ad-hoc rounds — state writeback is
+  owned by the C1 phase of the plan.
