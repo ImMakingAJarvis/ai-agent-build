@@ -38,6 +38,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -247,7 +248,8 @@ func escape(s string) string {
 }
 
 // migrate creates any items whose marker is not already on the project.
-// Returns (created, skipped) counts.
+// Returns (created, skipped) counts. Creates are spaced (Plane rate-limits
+// v1 writes) and retried with backoff on 429.
 func migrate(ctx context.Context, c *plane.Client, projectID string, states map[string]string, epicLabelID string, b board) (created, skipped int, err error) {
 	items, err := c.ListWorkItems(ctx, projectID)
 	if err != nil {
@@ -262,7 +264,7 @@ func migrate(ctx context.Context, c *plane.Client, projectID string, states map[
 			skipped++
 			continue
 		}
-		wi, err := c.CreateWorkItem(ctx, projectID, plane.WorkItemCreate{
+		wi, err := createItem(ctx, c, projectID, plane.WorkItemCreate{
 			Name:            e.Title,
 			DescriptionHTML: epicDescription(e),
 			State:           states["Backlog"],
@@ -287,7 +289,7 @@ func migrate(ctx context.Context, c *plane.Client, projectID string, states map[
 			// if not, land it top-level rather than dropping it.
 			fmt.Printf("WARNING: task %s (%s) has no migrated epic; creating top-level\n", t.ID, t.Title)
 		}
-		wi, err := c.CreateWorkItem(ctx, projectID, plane.WorkItemCreate{
+		wi, err := createItem(ctx, c, projectID, plane.WorkItemCreate{
 			Name:            t.Title,
 			DescriptionHTML: taskDescription(t),
 			Parent:          parent,
@@ -300,6 +302,32 @@ func migrate(ctx context.Context, c *plane.Client, projectID string, states map[
 		fmt.Printf("created task  %-50s -> %s (parent %s)\n", truncate(t.Title, 50), wi.ID, parent)
 	}
 	return created, skipped, nil
+}
+
+// createItem wraps CreateWorkItem with 429 backoff: Plane rate-limits v1
+// writes, so a 429 sleeps 30 s and retries (up to 10 times) rather than
+// aborting a partially created migration — the marker-based skip makes the
+// re-run safe.
+func createItem(ctx context.Context, c *plane.Client, projectID string, wi plane.WorkItemCreate) (*plane.WorkItem, error) {
+	var apiErr *plane.APIError
+	for attempt := 1; ; attempt++ {
+		out, err := c.CreateWorkItem(ctx, projectID, wi)
+		if err == nil {
+			return out, nil
+		}
+		if !errors.As(err, &apiErr) || !apiErr.IsStatus(429) {
+			return nil, err
+		}
+		if attempt >= 10 {
+			return nil, fmt.Errorf("still rate-limited after %d attempts: %w", attempt, err)
+		}
+		fmt.Printf("rate-limited (429) on %q; waiting 30 s (attempt %d/10)\n", wi.Name, attempt)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(30 * time.Second):
+		}
+	}
 }
 
 // indexItems maps old-board IDs to Plane item IDs via the description
