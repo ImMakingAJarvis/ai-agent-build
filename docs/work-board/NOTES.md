@@ -429,3 +429,35 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
     with `projectID` the epic item's project. The one-time migrations
     (`board-migrate`, `plane-migrate-projects`) already ran and are
     idempotent/retired; they are not recurring syncs.
+
+## A3 — sync planner models to Plane plan: labels (2026-11-01)
+
+- Job plan-epic-planner-plan-with-m-1793259204-9. One `plan:<model-id>`
+  label per enabled planner model, created when enabled, removed when
+  disabled; runs at bridge start and on every change to
+  `config/models.yaml`. New package `internal/planlabels` (Sync +
+  Watcher), `plane.Client.DeleteLabel`, watcher wired in
+  `cmd/plane-bridge/main.go` (`BRIDGE_MODELS_FILE`, default
+  `/home/agent/ai-agent-build/config/models.yaml`, 15 s poll).
+- **Labels are per-project** in Plane, so Sync runs over the bridge's
+  watched projects (`PLANE_PROJECTS`). New epic projects are covered
+  because `plane-epic create` restarts the bridge, which re-syncs.
+- **Polling, not fsnotify:** no fsnotify dependency in go.mod; mtime+size
+  poll at 15 s is enough (label sync is not latency-critical).
+- **Staggered start:** the watcher's first sync waits for the startup
+  catch-up to finish. Plane rate-limits the shared bot key (429, 30 s
+  pauses in `plane.Client`), and both bursts at boot pushed the key over
+  the limit — the live bridge test's restarted run sat in the 429 retry
+  loop and timed out. After staggering, that test passes in ~30 s.
+- **Watcher retry semantics:** a failed sync retries on the next tick
+  even without a file change (covers Plane outages at boot); a missing or
+  unparseable file keeps the last good state applied and does not abort
+  the watch.
+- **Live-test lock:** `go test ./...` runs packages in parallel, and the
+  live tests in `internal/plane`, `internal/bridge` and
+  `internal/planlabels` share the bot API key — their bursts 429 each
+  other into the tests' timeouts (seen once in a full run).
+  `plane.AcquireLiveLock` (file lock in /tmp, stale after 10 min)
+  serializes them; a test skips if the lock is still held after 5 min.
+- Sync only touches `plan:`-prefixed labels; foreign labels (epic, ...)
+  are left alone, verified hermetically and on the live scratch project.
