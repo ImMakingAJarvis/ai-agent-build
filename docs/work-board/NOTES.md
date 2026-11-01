@@ -312,3 +312,94 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   rejected, 20 works). The test now adds the admin with
   `{"member": id, "role": 20}`; the half passed live (rename 200,
   event logged, plan job queued).
+
+## Board reorg (2026-10-31) — one project per epic
+
+- **Nathan's decision** (via `jarvis-discord ask`, job
+  chat-1793504779-d19c): "One project per epic. Reorganize everything.
+  Make that the standard going forward. Add it to you Claude.md or
+  wherever it should go." Original question: organize the board with
+  Plane projects like epics, or was there a free-plan limit against it?
+- **No limits to worry about:** self-hosted Plane CE — the cloud
+  "free plan" does not apply, and Plane has no project-count cap
+  anyway. Projects are the native unit; there are no epics in Plane
+  (a parent work item stands in — that is the epic item, label
+  `epic`).
+- **The standard:** each epic = one Plane project with a short
+  identifier; the epic is the project's epic work item and its tasks
+  are work items in the same project, parented to it. `AAB`
+  (ai_agent_build) is the legacy single project — it keeps only
+  AAB-62 (the P6 acceptance artifact). New epics: `plane-epic create
+  "<title>" --identifier XXX [--description]` — scaffolds the
+  standard states, the epic label and workspace members as editors,
+  creates the epic item, appends the identifier to `PLANE_PROJECTS`
+  in `~/.config/jarvis/agent.env` and restarts `plane-bridge`. That
+  is the only supported way to add a project.
+- **Migration (plane-migrate-projects):** source of truth = the 60
+  marker-tagged items in AAB (8 epics + 52 tasks; markers
+  `migrated-from: old-board epic=<uuid>` / `task=<uuid> epic=<uuid>`
+  in `description_html`, P5). Each item is recreated in its epic's
+  project carrying a `split-from: AAB-<seq>` twin marker; states are
+  mapped case-insensitively by name (handles AAB's "In Progress");
+  tasks get the new epic item as parent. Run in two passes:
+  `-no-delete` (create + verify), then a second pass that
+  hard-deletes the old AAB items — the delete gate refuses unless the
+  item is marker-tagged AND its twin exists (idempotent; AAB-62 has
+  no marker and is untouched either way).
+- **Project identifiers:** E2E (Full e2e test and fix of voice
+  chat), TST (Test), NBR (NoBrakes), MOE (vram cache benchmarking of
+  MoE models), QDB (Make new interactive queue dashboard), VCH (Own
+  voice channel), T2I (T2I image generator benchmark), WBD (Work
+  board Plane Plan with model).
+- **Plane project-name charset (probed live, create+delete):**
+  REJECTED with 400 "Project name cannot contains special
+  characters.": `. : + ( ) & - , @ ! # % * = ? ; ^ { } |`. ALLOWED:
+  letters, digits, space and `/ _ ' "` and a few others. Consistent
+  with P2's FORBIDDEN_IDENTIFIER_CHARS note (hyphen is rejected too).
+  Work-item names have no such restriction — only project names.
+  `planeepic.SanitizeProjectName` implements the allowlist (anything
+  else becomes a space, runs collapsed); `EnsureProject` sanitizes
+  before lookup and create, so lookups match the stored name.
+- **New projects auto-create 5 default states** (Backlog, Todo,
+  In Progress, Cancelled, Done) — a freshly scaffolded board shows
+  10 states until the extras are gone. `planeepic.EnsureBoard` now
+  prunes non-standard states that no work item references (same rule
+  as scripts/plane-setup.sh), after creating the standard set.
+- **Rate limit:** Plane 429s bursty v1 traffic
+  (`{"error_code":5900,"error_message":"RATE_LIMIT_EXCEEDED"}`) — on
+  reads and writes alike (hit live mid-migration on a state create AND
+  a states list). Backoff is therefore in the client itself:
+  `plane.Client.do`/`doList` retry a 429 with a 30 s pause, up to 10
+  attempts, ctx-aware, so every call in every tool rides out a throttle
+  window. (An earlier design wrapped individual write calls in
+  `plane.WithBackoff`; that was removed when the retry moved down.)
+- **Multi-project bridge:** `plane-bridge` watches every project in
+  `PLANE_PROJECTS` (comma-separated; falls back to `PLANE_PROJECT`,
+  then `AAB`). Webhooks are workspace-level, so `HandleWebhook` gates
+  on the event's project being watched (`isWatched`) and `CatchUp`
+  loops all watched projects. Bot-actor events are still ignored
+  (`isBot`), so the migration — which acts with the bot key — queued
+  zero bridge jobs.
+- **Prefixed item refs:** `T2I-3` resolves its own project by
+  identifier prefix (case-insensitive) via `plane.ResolveItemRef`;
+  UUIDs and bare sequences fall back to `--project` /
+  `$PLANE_PROJECT` / `AAB`. Used by `jarvis-board` and
+  `jarvis-discord notify --item`, so no `--project` flag is needed for
+  prefixed refs.
+- **Deleting a parent work item cascade-deletes its children.**
+  Pass 2 deleted the 8 epic items and the 52 tasks vanished with
+  them (the AAB-9 delete then 404'd "The requested resource does not
+  exist."). The delete gate therefore treats a 404 as already-gone
+  (log and continue), which also makes re-runs idempotent.
+- Verification: pass 1 (`-no-delete`) — `done: 60 created, 0 skipped
+  (twins), 0 deleted, 1 untouched`, exit 0; per-project verify E2E 1,
+  TST 1, NBR 7, MOE 5, QDB 1, VCH 13, T2I 9, WBD 23. Pass 2 — the 8
+  epics deleted explicitly, the 52 tasks gone by cascade. AAB was left
+  with exactly one item: AAB-62 (untouched, unmarked). Independent
+  curl recount against the v1 API: 8 projects, 60 items total, each
+  project exactly 1 epic (null parent) + its tasks (all parented to
+  it), every item carrying a `split-from: AAB-<seq>` marker. Idempotent
+  re-run: `done: 0 created, 0 skipped (twins), 0 deleted, 1
+  untouched`, exit 0. New bridge (8 projects in `PLANE_PROJECTS`)
+  restarted: startup catch-up `projects: 8, items: 60, queued: 0`,
+  `/healthz` ok.
