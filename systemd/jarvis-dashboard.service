@@ -1,3 +1,7 @@
+# RETIRED 2026-10-31 (P5, docs/work-board/PLAN.md): the kanban board moved
+# to Plane and the unit is disabled + inhibited. Keep the file for the
+# inhibit mechanism and history; re-enabling it would also need :8080
+# (currently held by the t2i-bench container).
 [Unit]
 Description=Jarvis dashboard (http://0.0.0.0:8080)
 After=network-online.target
