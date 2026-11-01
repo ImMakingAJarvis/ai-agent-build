@@ -515,6 +515,12 @@ func (c *Client) LabelByName(ctx context.Context, projectID, name string) (*Labe
 	return nil, fmt.Errorf("plane: label %q not found in project %s", name, projectID)
 }
 
+// DeleteLabel removes a project label (by label ID). Work items that
+// carry the label lose it — Plane drops the association with the label.
+func (c *Client) DeleteLabel(ctx context.Context, projectID, labelID string) error {
+	return c.do(ctx, "DELETE", c.projectPath(projectID, "/labels/"+labelID+"/"), nil, nil)
+}
+
 // --- work items ----------------------------------------------------------------
 
 // CreateWorkItem creates a work item; with WorkItemCreate.Parent set it

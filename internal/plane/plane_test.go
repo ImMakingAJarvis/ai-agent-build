@@ -267,6 +267,23 @@ func (f *fakePlane) routeV1(w http.ResponseWriter, r *http.Request, rest string)
 				json.NewEncoder(w).Encode(st)
 				return
 			}
+		case strings.HasPrefix(rest2, "labels/") && len(rest2) > len("labels/"):
+			// DELETE /projects/<id>/labels/<label-id>/
+			if r.Method != http.MethodDelete {
+				http.Error(w, "unrouted v1 path "+rest, http.StatusNotFound)
+				return
+			}
+			lid := strings.TrimSuffix(strings.TrimPrefix(rest2, "labels/"), "/")
+			f.mu.Lock()
+			for i, l := range f.labels[pid] {
+				if l["id"] == lid {
+					f.labels[pid] = append(f.labels[pid][:i], f.labels[pid][i+1:]...)
+					break
+				}
+			}
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
 		case strings.HasPrefix(rest2, "labels") && (rest2 == "labels" || rest2 == "labels/"):
 			if r.Method == http.MethodGet {
 				f.mu.Lock()
@@ -666,6 +683,29 @@ func TestAddRemoveLabels(t *testing.T) {
 	}
 	if len(got.Labels) != 1 || got.Labels[0] != b.ID {
 		t.Errorf("labels after remove(a) = %v, want [%s]", got.Labels, b.ID)
+	}
+}
+
+func TestDeleteLabel(t *testing.T) {
+	c, _, _ := newTestClient(t)
+	pid := mustProject(t, c)
+	keep, err := c.CreateLabel(context.Background(), pid, "keep", "#111111")
+	if err != nil {
+		t.Fatalf("CreateLabel keep: %v", err)
+	}
+	drop, err := c.CreateLabel(context.Background(), pid, "drop", "#222222")
+	if err != nil {
+		t.Fatalf("CreateLabel drop: %v", err)
+	}
+	if err := c.DeleteLabel(context.Background(), pid, drop.ID); err != nil {
+		t.Fatalf("DeleteLabel: %v", err)
+	}
+	labels, err := c.ListLabels(context.Background(), pid)
+	if err != nil {
+		t.Fatalf("ListLabels: %v", err)
+	}
+	if len(labels) != 1 || labels[0].ID != keep.ID {
+		t.Errorf("labels after delete = %+v, want only keep %s", labels, keep.ID)
 	}
 }
 
