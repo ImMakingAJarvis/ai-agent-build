@@ -6,12 +6,14 @@
 //	jarvis-board item <item>                one line: AAB-4 [state] title link
 //	jarvis-board comment <item> [msg...]    post "<model>: <msg>" (stdin if no msg)
 //
-// <item> is a work-item reference: a UUID or a display id like "AAB-43"
-// (a bare sequence "43" also works).
+// <item> is a work-item reference: a UUID, a display id like "AAB-43",
+// or a bare sequence "43". A prefixed display id selects its project by
+// identifier prefix, so "T2I-3" works with no --project flag.
 //
 // Flags:
 //
-//	--project <ref>   project to look items up in (default $PLANE_PROJECT, "AAB")
+//	--project <ref>   project for UUID and bare-sequence refs
+//	                  (default $PLANE_PROJECT, "AAB")
 //	--model <name>    model name for the comment prefix (default $JARVIS_MODEL,
 //	                  "jarvis-brain")
 //
@@ -83,11 +85,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	p, err := plane.ProjectByRef(ctx, c, o.project)
+	// A prefixed display id (T2I-3) selects its project by identifier;
+	// UUIDs and bare sequences fall back to --project.
+	p, itemRef, err := plane.ResolveItemRef(ctx, c, o.project, args[0])
 	if err != nil {
 		fail(err.Error())
 	}
-	wi, err := plane.WorkItemByRef(ctx, c, p.ID, args[0])
+	wi, err := plane.WorkItemByRef(ctx, c, p.ID, itemRef)
 	if err != nil {
 		fail(err.Error())
 	}

@@ -1,8 +1,10 @@
 // plane-bridge receives Plane webhooks and turns board changes into agent
 // jobs (P4 of docs/work-board/PLAN.md). It runs as a systemd service
 // (systemd/plane-bridge.service) and, on every start, runs a catch-up
-// sync over the watched project so events missed while it was down are
-// picked up.
+// sync over all watched projects so events missed while it was down are
+// picked up. The board standard is one Plane project per epic, so the
+// watched set usually grows as epics are added (plane-epic keeps
+// PLANE_PROJECTS in sync).
 //
 // Environment (from ~/.config/jarvis/agent.env):
 //
@@ -10,7 +12,9 @@
 //	PLANE_API_KEY    v1 API key (required; the Jarvis bot key — the bot
 //	                 owns the workspace, so it may manage webhooks too)
 //	PLANE_WORKSPACE  workspace slug (default "jarvis")
-//	PLANE_PROJECT    project id or identifier to watch (default "AAB")
+//	PLANE_PROJECTS   comma-separated project ids or identifiers to watch
+//	                 (default: $PLANE_PROJECT, "AAB")
+//	PLANE_PROJECT    single-project fallback for PLANE_PROJECTS
 //	PLANE_BOT_EMAIL  bot account whose events are ignored
 //	PLANE_BOT_PASSWORD bot session password (required — webhook management
 //	                 lives on the session API in this Plane build, so the
@@ -47,6 +51,23 @@ func envOr(key, def string) string {
 	return def
 }
 
+// watchProjectRefs returns the project refs to watch: the comma-separated
+// PLANE_PROJECTS list, falling back to the single-project PLANE_PROJECT
+// (default "AAB").
+func watchProjectRefs() []string {
+	raw := strings.TrimSpace(os.Getenv("PLANE_PROJECTS"))
+	if raw == "" {
+		raw = envOr("PLANE_PROJECT", "AAB")
+	}
+	var refs []string
+	for _, part := range strings.Split(raw, ",") {
+		if ref := strings.TrimSpace(part); ref != "" {
+			refs = append(refs, ref)
+		}
+	}
+	return refs
+}
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil)).With("service", "plane-bridge")
 	if err := run(log); err != nil {
@@ -62,7 +83,7 @@ func run(log *slog.Logger) error {
 		return errors.New("PLANE_URL and PLANE_API_KEY must be set")
 	}
 	workspace := envOr("PLANE_WORKSPACE", "jarvis")
-	project := envOr("PLANE_PROJECT", "AAB")
+	projectRefs := watchProjectRefs()
 	botEmail := strings.TrimSpace(os.Getenv("PLANE_BOT_EMAIL"))
 	botPassword := strings.TrimSpace(os.Getenv("PLANE_BOT_PASSWORD"))
 	listen := envOr("BRIDGE_LISTEN", ":8102")
@@ -77,12 +98,20 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	// Resolve the watched project to an id (accept an identifier too).
-	projectID, projectName, err := resolveProject(client, workspace, project)
-	if err != nil {
-		return fmt.Errorf("resolving project %q: %w", project, err)
+	// Resolve each watched project to an id (identifiers accepted).
+	var projectIDs []string
+	projectNames := map[string]string{}
+	var identifiers []string
+	for _, ref := range projectRefs {
+		id, name, err := resolveProject(client, workspace, ref)
+		if err != nil {
+			return fmt.Errorf("resolving project %q: %w", ref, err)
+		}
+		projectIDs = append(projectIDs, id)
+		projectNames[id] = name
+		identifiers = append(identifiers, name)
 	}
-	log.Info("watching project", "project", projectName, "id", projectID, "board", planeURL)
+	log.Info("watching projects", "projects", identifiers, "board", planeURL)
 
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -99,17 +128,17 @@ func run(log *slog.Logger) error {
 	}
 
 	br, err := bridge.New(bridge.Config{
-		Plane:       client,
-		Store:       store,
-		Log:         log,
-		ProjectID:   projectID,
-		ProjectName: projectName,
-		WebhookURL:  webhookURL,
-		SecretFile:  secretFile,
-		BotEmail:    botEmail,
-		BoardURL:    planeURL,
-		Workspace:   workspace,
-		EventsFile:  eventsFile,
+		Plane:        client,
+		Store:        store,
+		Log:          log,
+		Projects:     projectIDs,
+		ProjectNames: projectNames,
+		WebhookURL:   webhookURL,
+		SecretFile:   secretFile,
+		BotEmail:     botEmail,
+		BoardURL:     planeURL,
+		Workspace:    workspace,
+		EventsFile:   eventsFile,
 	})
 	if err != nil {
 		return err

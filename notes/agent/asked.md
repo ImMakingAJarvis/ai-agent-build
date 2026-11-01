@@ -49,3 +49,4 @@
 - 2026-11-01T02:24Z Nathan: hearing 'bonking noises' on a camera (10-31 22:13PDT) — asked for backdoor UniFi camera diagnosis incl. reconnect loops, audio track issues, processes writing to the stream
 - 2026-11-01T03:09Z P5 decision (job plan-epic-planner-plan-with-m-1793259204-5): migrate open items only to Plane, not history; queue a follow-up if Nathan wants history. Open-item definition: every epic counts as open (old board has no closed state); task open = status != done.
 - 2026-11-01T04:40Z P6 of the work-board plan: agent identity on the Plane board — model-prefixed comments on touched items, Discord status messages carry the board link.
+- 2026-11-01T06:58Z one project per epic — Nathan's decision 2026-10-31, now the board standard (reorganize everything, put it in CLAUDE.md)

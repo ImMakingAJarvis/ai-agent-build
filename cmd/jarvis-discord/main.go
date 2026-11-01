@@ -13,8 +13,9 @@
 //
 // notify flags:
 //
-//	-item <ref>  Plane work item (UUID or display id like AAB-43) whose
-//	            board link is appended on its own line
+//	-item <ref>  Plane work item (UUID, display id like AAB-43, or bare
+//	            sequence) whose board link is appended on its own line. A
+//	            prefixed id (T2I-3) selects its project by identifier.
 //
 // Config comes from DISCORD_BOT_TOKEN and DISCORD_OWNER_ID, or from the file
 // named by JARVIS_DISCORD_ENV (default ~/.config/jarvis/discord.env) holding
@@ -176,11 +177,11 @@ func boardItemLink(ctx context.Context, ref string) (string, error) {
 	if project == "" {
 		project = "AAB"
 	}
-	p, err := plane.ProjectByRef(ctx, c, project)
+	p, itemRef, err := plane.ResolveItemRef(ctx, c, project, ref)
 	if err != nil {
 		return "", err
 	}
-	wi, err := plane.WorkItemByRef(ctx, c, p.ID, ref)
+	wi, err := plane.WorkItemByRef(ctx, c, p.ID, itemRef)
 	if err != nil {
 		return "", err
 	}

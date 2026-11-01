@@ -1008,6 +1008,58 @@ func TestWorkItemByRef(t *testing.T) {
 	}
 }
 
+func TestResolveItemRef(t *testing.T) {
+	c, _, _ := newTestClient(t)
+	p1, err := c.CreateProject(context.Background(), "one", "TST")
+	if err != nil {
+		t.Fatalf("CreateProject TST: %v", err)
+	}
+	p2, err := c.CreateProject(context.Background(), "two", "T2I")
+	if err != nil {
+		t.Fatalf("CreateProject T2I: %v", err)
+	}
+	wi2, err := c.CreateWorkItem(context.Background(), p2.ID, WorkItemCreate{Name: "t2i item"})
+	if err != nil {
+		t.Fatalf("CreateWorkItem: %v", err)
+	}
+
+	// prefixed display id: the prefix selects the project (default is TST)
+	p, itemRef, err := ResolveItemRef(context.Background(), c, "TST", "T2I-1")
+	if err != nil {
+		t.Fatalf("ResolveItemRef(T2I-1): %v", err)
+	}
+	if p.ID != p2.ID || itemRef != "T2I-1" {
+		t.Errorf("ResolveItemRef(T2I-1) = (%+v, %q), want project T2I", p, itemRef)
+	}
+	got, err := WorkItemByRef(context.Background(), c, p.ID, itemRef)
+	if err != nil || got.ID != wi2.ID {
+		t.Errorf("WorkItemByRef through resolved project = (%+v, %v), want T2I item", got, err)
+	}
+
+	// prefix match is case-insensitive
+	p, _, err = ResolveItemRef(context.Background(), c, "TST", "t2i-1")
+	if err != nil || p.ID != p2.ID {
+		t.Errorf("ResolveItemRef(t2i-1) = (%+v, %v), want project T2I", p, err)
+	}
+
+	// UUID and bare sequence: default project, ref unchanged
+	uuid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	p, itemRef, err = ResolveItemRef(context.Background(), c, "TST", uuid)
+	if err != nil || p.ID != p1.ID || itemRef != uuid {
+		t.Errorf("ResolveItemRef(uuid) = (%+v, %q, %v), want project TST, ref unchanged", p, itemRef, err)
+	}
+	p, itemRef, err = ResolveItemRef(context.Background(), c, "TST", "1")
+	if err != nil || p.ID != p1.ID || itemRef != "1" {
+		t.Errorf("ResolveItemRef(1) = (%+v, %q, %v), want project TST, ref unchanged", p, itemRef, err)
+	}
+
+	// prefix matching no project: fall through to the default project
+	p, itemRef, err = ResolveItemRef(context.Background(), c, "TST", "NOPE-1")
+	if err != nil || p.ID != p1.ID || itemRef != "NOPE-1" {
+		t.Errorf("ResolveItemRef(NOPE-1) = (%+v, %q, %v), want fall-through to TST", p, itemRef, err)
+	}
+}
+
 func TestListComments(t *testing.T) {
 	c, _, _ := newTestClient(t)
 	pid := mustProject(t, c)

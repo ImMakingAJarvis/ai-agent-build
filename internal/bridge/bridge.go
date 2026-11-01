@@ -12,9 +12,12 @@
 //   - run_task: a sub-item (has a parent) in the Ready state with no job
 //     yet → an execution job (Phase C handles it).
 //
-// The same check runs on every webhook for the watched project and as a
-// catch-up sync over the whole project on every start, so changes made
-// while the bridge was down (webhook lost) are picked up on the next boot.
+// The bridge watches a set of projects (one Plane project per epic, per
+// the board standard — see docs/work-board/NOTES.md): webhooks are
+// workspace-wide, so the same check runs on every webhook for a watched
+// project and as a catch-up sync over all watched projects on every
+// start, so changes made while the bridge was down (webhook lost) are
+// picked up on the next boot.
 package bridge
 
 import (
@@ -49,11 +52,14 @@ type Config struct {
 	Plane *plane.Client
 	Store *agentjob.Store
 	Log   *slog.Logger
-	// ProjectID is the project whose items are checked for triggers.
-	ProjectID string
-	// ProjectName is the project identifier for human-readable job titles
-	// (e.g. "AAB"); may be empty.
-	ProjectName string
+	// Projects are the project IDs whose items are checked for triggers
+	// (the board standard is one project per epic, so this is usually
+	// more than one). Webhooks are workspace-wide, so events for other
+	// projects are logged but never acted on.
+	Projects []string
+	// ProjectNames maps a project id to its identifier for human-readable
+	// job titles (e.g. "T2I"); ids not present fall back to "plane".
+	ProjectNames map[string]string
 	// WebhookURL is the full URL Plane posts events to (must match the
 	// registered webhook).
 	WebhookURL string
@@ -88,7 +94,7 @@ type Bridge struct {
 	wg sync.WaitGroup // in-flight trigger checks
 }
 
-// New builds a Bridge. cfg.Plane, cfg.Store, cfg.ProjectID,
+// New builds a Bridge. cfg.Plane, cfg.Store, cfg.Projects,
 // cfg.WebhookURL and cfg.SecretFile are required.
 func New(cfg Config) (*Bridge, error) {
 	if cfg.Plane == nil {
@@ -97,8 +103,8 @@ func New(cfg Config) (*Bridge, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("bridge: job store is required")
 	}
-	if cfg.ProjectID == "" || cfg.WebhookURL == "" || cfg.SecretFile == "" {
-		return nil, errors.New("bridge: ProjectID, WebhookURL and SecretFile are required")
+	if len(cfg.Projects) == 0 || cfg.WebhookURL == "" || cfg.SecretFile == "" {
+		return nil, errors.New("bridge: Projects, WebhookURL and SecretFile are required")
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
@@ -266,7 +272,7 @@ type Actor struct {
 
 // HandleWebhook is the http.Handler for the webhook endpoint. It verifies
 // the signature before anything else, ignores bot events, logs the rest,
-// and runs the trigger check for issue events in the watched project.
+// and runs the trigger check for issue events in a watched project.
 // It always answers quickly: the trigger check runs in the background.
 func (b *Bridge) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -299,14 +305,15 @@ func (b *Bridge) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.logEvent(&p)
-	if p.Event == "issue" && p.Data != nil && p.Data.ProjectID == b.cfg.ProjectID {
+	if p.Event == "issue" && p.Data != nil && b.isWatched(p.Data.ProjectID) {
+		projectID := p.Data.ProjectID
 		itemID := p.Data.ID
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		b.wg.Add(1)
 		go func() {
 			defer cancel()
 			defer b.wg.Done()
-			if n, err := b.CheckItem(ctx, itemID); err != nil {
+			if n, err := b.CheckItem(ctx, projectID, itemID); err != nil {
 				b.cfg.Log.Error("trigger check failed", "item", itemID, "err", err)
 			} else if n > 0 {
 				b.cfg.Log.Info("trigger check queued jobs", "item", itemID, "queued", n)
@@ -319,6 +326,16 @@ func (b *Bridge) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 // Wait blocks until in-flight trigger checks finish (for tests and
 // shutdown).
 func (b *Bridge) Wait() { b.wg.Wait() }
+
+// isWatched reports whether projectID is one of the watched projects.
+func (b *Bridge) isWatched(projectID string) bool {
+	for _, id := range b.cfg.Projects {
+		if id == projectID {
+			return true
+		}
+	}
+	return false
+}
 
 func readBody(r *http.Request, limit int64) ([]byte, error) {
 	defer r.Body.Close()
@@ -417,38 +434,42 @@ func (p *Payload) fieldName() string {
 
 // CheckItem re-reads the item from the API and queues jobs for any trigger
 // state it is in. It is idempotent: already-queued items queue nothing.
-func (b *Bridge) CheckItem(ctx context.Context, itemID string) (int, error) {
-	item, err := b.cfg.Plane.GetWorkItem(ctx, b.cfg.ProjectID, itemID)
+func (b *Bridge) CheckItem(ctx context.Context, projectID, itemID string) (int, error) {
+	item, err := b.cfg.Plane.GetWorkItem(ctx, projectID, itemID)
 	if err != nil {
 		return 0, err
 	}
-	return b.evaluate(ctx, item)
+	return b.evaluate(ctx, projectID, item)
 }
 
-// CatchUp runs the trigger check over every item in the watched project.
+// CatchUp runs the trigger check over every item in every watched project.
 // It is called on every start; it returns how many jobs were queued.
 func (b *Bridge) CatchUp(ctx context.Context) (int, error) {
 	b.invalidateMeta() // fresh board metadata after downtime
-	items, err := b.cfg.Plane.ListWorkItems(ctx, b.cfg.ProjectID)
-	if err != nil {
-		return 0, fmt.Errorf("bridge: listing work items: %w", err)
-	}
-	total := 0
-	for i := range items {
-		n, err := b.evaluate(ctx, &items[i])
+	total, items := 0, 0
+	for _, projectID := range b.cfg.Projects {
+		projectItems, err := b.cfg.Plane.ListWorkItems(ctx, projectID)
 		if err != nil {
-			b.cfg.Log.Warn("catch-up: item check failed", "item", items[i].ID, "err", err)
-			continue
+			return 0, fmt.Errorf("bridge: listing work items: %w", err)
 		}
-		total += n
+		items += len(projectItems)
+		for i := range projectItems {
+			n, err := b.evaluate(ctx, projectID, &projectItems[i])
+			if err != nil {
+				b.cfg.Log.Warn("catch-up: item check failed", "item", projectItems[i].ID, "err", err)
+				continue
+			}
+			total += n
+		}
 	}
-	b.cfg.Log.Info("catch-up sync done", "items", len(items), "queued", total)
+	b.cfg.Log.Info("catch-up sync done", "projects", len(b.cfg.Projects),
+		"items", items, "queued", total)
 	return total, nil
 }
 
-// evaluate decides whether item is in a trigger state and queues the
-// matching job(s).
-func (b *Bridge) evaluate(ctx context.Context, item *plane.WorkItem) (int, error) {
+// evaluate decides whether item (of projectID) is in a trigger state and
+// queues the matching job(s).
+func (b *Bridge) evaluate(ctx context.Context, projectID string, item *plane.WorkItem) (int, error) {
 	names, err := b.labelNames(ctx, item)
 	if err != nil {
 		return 0, err
@@ -460,12 +481,12 @@ func (b *Bridge) evaluate(ctx context.Context, item *plane.WorkItem) (int, error
 	var queued int
 	modelID := modelLabel(names)
 	if hasLabel(names, "epic") && modelID != "" && strings.EqualFold(stateName, "Backlog") {
-		if b.enqueue(ctx, TriggerPlan, item, modelID, names) {
+		if b.enqueue(ctx, projectID, TriggerPlan, item, modelID, names) {
 			queued++
 		}
 	}
 	if item.Parent != "" && strings.EqualFold(stateName, "Ready") {
-		if b.enqueue(ctx, TriggerRun, item, "", names) {
+		if b.enqueue(ctx, projectID, TriggerRun, item, "", names) {
 			queued++
 		}
 	}
@@ -494,20 +515,20 @@ func hasLabel(names []string, want string) bool {
 // enqueue stores the job for this trigger+item, or reports it already
 // exists. Job ids are deterministic (plane-<trigger>-<item id>), so
 // redelivered webhooks and repeated catch-ups never duplicate.
-func (b *Bridge) enqueue(ctx context.Context, trigger string, item *plane.WorkItem, modelID string, labelNames []string) bool {
+func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *plane.WorkItem, modelID string, labelNames []string) bool {
 	id := "plane-" + trigger + "-" + item.ID
 	if _, err := b.cfg.Store.Get(id); err == nil {
 		return false // a job for this trigger+item already exists
 	}
 	spec := agentjob.Spec{
 		ID:       id,
-		Title:    b.title(trigger, item, modelID),
+		Title:    b.title(projectID, trigger, item, modelID),
 		Class:    agentjob.ClassBackground,
 		Priority: 100, // front of the background band; conversation work still
 		// runs first (it is a different system)
 		Source:       "plane-bridge",
 		CreatedAt:    time.Now().UTC(),
-		Instructions: instructions(trigger, b.cfg, item, modelID, labelNames),
+		Instructions: instructions(trigger, b.cfg, projectID, item, modelID, labelNames),
 	}
 	added, err := b.cfg.Store.Ingest(spec)
 	if err != nil {
@@ -521,8 +542,8 @@ func (b *Bridge) enqueue(ctx context.Context, trigger string, item *plane.WorkIt
 	return added
 }
 
-func (b *Bridge) title(trigger string, item *plane.WorkItem, modelID string) string {
-	code := b.cfg.ProjectName
+func (b *Bridge) title(projectID, trigger string, item *plane.WorkItem, modelID string) string {
+	code := b.cfg.ProjectNames[projectID]
 	if code == "" {
 		code = "plane"
 	}
@@ -537,14 +558,14 @@ func (b *Bridge) title(trigger string, item *plane.WorkItem, modelID string) str
 
 // instructions is the JSON body of the queued job — the contract later
 // phases (B1, C1) consume.
-func instructions(trigger string, cfg Config, item *plane.WorkItem, modelID string, labelNames []string) string {
+func instructions(trigger string, cfg Config, projectID string, item *plane.WorkItem, modelID string, labelNames []string) string {
 	body := map[string]any{
 		"trigger": trigger,
 		"board": map[string]string{
 			"url":        cfg.BoardURL,
 			"workspace":  cfg.Workspace,
-			"project":    cfg.ProjectName,
-			"project_id": cfg.ProjectID,
+			"project":    cfg.ProjectNames[projectID],
+			"project_id": projectID,
 		},
 		"item": map[string]any{
 			"id":          item.ID,
@@ -630,23 +651,30 @@ func (b *Bridge) invalidateMeta() {
 	b.mu.Unlock()
 }
 
-// refreshLocked reloads the project's labels and states. Callers hold mu.
+// refreshLocked reloads labels and states for every watched project.
+// Label and state ids are globally unique, so the union map is safe.
+// Callers hold mu; a client-side 429 backoff (30 s) inside the list
+// calls briefly stalls sibling evaluations while the lock is held,
+// which is acceptable — the alternative (trigger items missed in a
+// throttle window) is worse.
 func (b *Bridge) refreshLocked(ctx context.Context) error {
-	labels, err := b.cfg.Plane.ListLabels(ctx, b.cfg.ProjectID)
-	if err != nil {
-		return fmt.Errorf("bridge: listing labels: %w", err)
-	}
-	states, err := b.cfg.Plane.ListStates(ctx, b.cfg.ProjectID)
-	if err != nil {
-		return fmt.Errorf("bridge: listing states: %w", err)
-	}
-	b.labels = make(map[string]string, len(labels))
-	for _, l := range labels {
-		b.labels[l.ID] = l.Name
-	}
-	b.states = make(map[string]string, len(states))
-	for _, s := range states {
-		b.states[s.ID] = s.Name
+	b.labels = make(map[string]string)
+	b.states = make(map[string]string)
+	for _, projectID := range b.cfg.Projects {
+		labels, err := b.cfg.Plane.ListLabels(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("bridge: listing labels: %w", err)
+		}
+		states, err := b.cfg.Plane.ListStates(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("bridge: listing states: %w", err)
+		}
+		for _, l := range labels {
+			b.labels[l.ID] = l.Name
+		}
+		for _, s := range states {
+			b.states[s.ID] = s.Name
+		}
 	}
 	return nil
 }
