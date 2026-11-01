@@ -93,7 +93,13 @@ func main() {
 		fs := flag.NewFlagSet("notify", flag.ExitOnError)
 		item := fs.String("item", "", "Plane work item whose board link is appended")
 		fs.Parse(os.Args[2:])
-		text := message(fs.Args())
+		args := fs.Args()
+		for _, a := range args {
+			if a == "-item" || a == "--item" {
+				fail("--item must come before the message, e.g.\n  jarvis-discord notify --item AAB-43 <message>")
+			}
+		}
+		text := message(args)
 		if *item != "" {
 			link, err := boardItemLink(ctx, *item)
 			if err != nil {

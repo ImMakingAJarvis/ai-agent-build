@@ -32,7 +32,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
 )
 
-const usage = `usage:
+const usage = `usage (flags go before the positional args):
   jarvis-board link <item>
   jarvis-board item <item>
   jarvis-board comment <item> [message...]
@@ -63,6 +63,15 @@ func main() {
 	if len(args) < 1 {
 		fail(usage)
 	}
+	// Go's flag package stops at the first positional, so a flag typed after
+	// the subcommand's args would silently land in the comment text. Fail
+	// loudly instead of posting it.
+	for _, a := range args {
+		if a == "-model" || a == "--model" || a == "-project" || a == "--project" {
+			fail(`flags must come before the positional args, e.g.
+  jarvis-board comment --model jarvis-brain AAB-4 <message>`)
+		}
+	}
 
 	o.project = firstNonEmpty(o.project, os.Getenv("PLANE_PROJECT"), "AAB")
 	o.model = firstNonEmpty(o.model, os.Getenv("JARVIS_MODEL"), "jarvis-brain")
@@ -85,7 +94,7 @@ func main() {
 	link := c.ItemLink(p, wi)
 	ref := fmt.Sprintf("%s-%d", p.Identifier, wi.SequenceID)
 
-	switch args[0] {
+	switch os.Args[1] {
 	case "link":
 		fmt.Println(link)
 
