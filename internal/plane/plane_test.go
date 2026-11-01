@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +29,8 @@ type fakePlane struct {
 	relations map[string][]map[string]string
 	comments  []string
 	pages     []map[string]string
+	// webhooks[id] = {id, url, is_active, secret_key, issue, issue_comment, ...}
+	webhooks map[string]map[string]any
 
 	// server-side observation of what the client sent
 	lastLabelPatch []string
@@ -50,6 +53,7 @@ func newFakePlane() *fakePlane {
 		items:     map[string]map[string]any{},
 		relations: map[string][]map[string]string{},
 		pages:     []map[string]string{},
+		webhooks:  map[string]map[string]any{},
 	}
 }
 
@@ -145,6 +149,25 @@ func (f *fakePlane) handler() http.Handler {
 		json.NewEncoder(w).Encode(f.pages) // bare array, like session endpoints
 	})
 
+	// --- session API: workspace webhooks (cookie + CSRF required) ---
+	// Like the real build, the webhook endpoints are session-API only and
+	// admin-only; the v1 external API has no webhook routes.
+	webhook := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f.sessionCookie(r) != "fakesess" {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"detail": "Authentication credentials were not provided."})
+			return
+		}
+		if r.Method != http.MethodGet && r.Header.Get("X-CSRFToken") != "csrf-post-login" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte("CSRF Failed"))
+			return
+		}
+		rest := strings.TrimPrefix(r.URL.Path, "/api/workspaces/testws/webhooks")
+		f.routeWebhook(w, r, rest)
+	})
+	mux.Handle("/api/workspaces/testws/webhooks/", webhook)
+
 	return mux
 }
 
@@ -163,6 +186,14 @@ func (f *fakePlane) sessionCookie(r *http.Request) string {
 // workspace prefix, e.g. "projects/" or "projects/<id>/states/").
 func (f *fakePlane) routeV1(w http.ResponseWriter, r *http.Request, rest string) {
 	rest = "/" + rest
+	// /members/ — the workspace member list (one bot member, like the
+	// real jarvis workspace before the admin invite is accepted).
+	if (rest == "/members" || rest == "/members/") && r.Method == http.MethodGet {
+		json.NewEncoder(w).Encode(map[string]any{"results": []map[string]any{
+			{"id": "user-bot", "email": "bot@example.com", "role": 20},
+		}, "count": 1})
+		return
+	}
 	// /projects/ and /projects/{id}/...
 	if rest == "/projects" || rest == "/projects/" {
 		if r.Method == http.MethodGet {
@@ -212,6 +243,28 @@ func (f *fakePlane) routeV1(w http.ResponseWriter, r *http.Request, rest string)
 				json.NewEncoder(w).Encode(map[string]any{"results": out, "count": len(out)})
 				return
 			}
+			if r.Method == http.MethodPost {
+				var body struct {
+					Name     string  `json:"name"`
+					Group    string  `json:"group"`
+					Color    string  `json:"color"`
+					Sequence float64 `json:"sequence"`
+				}
+				json.NewDecoder(r.Body).Decode(&body)
+				st := map[string]any{
+					"id": fmt.Sprintf("st-%d", len(f.states[pid])+1), "name": body.Name,
+					"group": body.Group, "sequence": body.Sequence,
+				}
+				if body.Color != "" {
+					st["color"] = body.Color
+				}
+				f.mu.Lock()
+				f.states[pid] = append(f.states[pid], st)
+				f.mu.Unlock()
+				w.WriteHeader(http.StatusCreated)
+				json.NewEncoder(w).Encode(st)
+				return
+			}
 		case strings.HasPrefix(rest2, "labels") && (rest2 == "labels" || rest2 == "labels/"):
 			if r.Method == http.MethodGet {
 				f.mu.Lock()
@@ -243,10 +296,137 @@ func (f *fakePlane) routeV1(w http.ResponseWriter, r *http.Request, rest string)
 	http.Error(w, fmt.Sprintf("unrouted v1 path %s", rest), http.StatusNotFound)
 }
 
+// routeWebhook handles the workspace webhook routes: list, create,
+// retrieve, delete, and secret regeneration.
+func (f *fakePlane) routeWebhook(w http.ResponseWriter, r *http.Request, rest string) {
+	rest = strings.TrimSuffix(strings.TrimPrefix(rest, "/"), "/")
+	id, _, _ := strings.Cut(rest, "/")
+	if id == "" {
+		switch r.Method {
+		case http.MethodGet:
+			f.mu.Lock()
+			out := make([]map[string]any, 0, len(f.webhooks))
+			for _, wh := range f.webhooks {
+				// the real API never returns the secret on list
+				cp := map[string]any{}
+				for k, v := range wh {
+					if k != "secret_key" {
+						cp[k] = v
+					}
+				}
+				out = append(out, cp)
+			}
+			f.mu.Unlock()
+			sort.Slice(out, func(i, j int) bool {
+				return out[i]["id"].(string) < out[j]["id"].(string)
+			})
+			json.NewEncoder(w).Encode(out)
+		case http.MethodPost:
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			url, _ := body["url"].(string)
+			if url == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]any{"url": []string{"This field is required."}})
+				return
+			}
+			f.mu.Lock()
+			for _, wh := range f.webhooks {
+				if wh["url"] == url {
+					f.mu.Unlock()
+					w.WriteHeader(http.StatusConflict)
+					json.NewEncoder(w).Encode(map[string]string{"error": "URL already exists for the workspace"})
+					return
+				}
+			}
+			wh := map[string]any{
+				"id": fmt.Sprintf("wh-%d", len(f.webhooks)+1), "url": url, "is_active": true,
+				"secret_key": fmt.Sprintf("plane_wh-%d", len(f.webhooks)+1),
+				"issue":      body["issue"] == true, "issue_comment": body["issue_comment"] == true,
+			}
+			f.webhooks[wh["id"].(string)] = wh
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(wh) // secret revealed on create
+		}
+		return
+	}
+	switch {
+	case rest == id:
+		switch r.Method {
+		case http.MethodGet:
+			f.mu.Lock()
+			wh, ok := f.webhooks[id]
+			f.mu.Unlock()
+			if !ok {
+				http.Error(w, `{"detail":"Not found."}`, http.StatusNotFound)
+				return
+			}
+			cp := map[string]any{}
+			for k, v := range wh {
+				if k != "secret_key" {
+					cp[k] = v
+				}
+			}
+			json.NewEncoder(w).Encode(cp)
+		case http.MethodDelete:
+			f.mu.Lock()
+			delete(f.webhooks, id)
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		}
+	case strings.TrimSuffix(rest, "/regenerate") == id && strings.HasSuffix(rest, "/regenerate"):
+		f.mu.Lock()
+		wh, ok := f.webhooks[id]
+		if ok {
+			wh["secret_key"] = fmt.Sprintf("plane_wh-%d", len(f.webhooks)+100)
+		}
+		f.mu.Unlock()
+		if !ok {
+			http.Error(w, `{"detail":"Not found."}`, http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(wh) // secret revealed on regenerate
+	}
+}
+
 // routeWorkItem handles /work-items and /work-items/{id}[/{relations,comments}].
 func (f *fakePlane) routeWorkItem(w http.ResponseWriter, r *http.Request, pid, rest2 string) {
 	sub := strings.Trim(strings.TrimPrefix(rest2, "work-items"), "/")
 	if sub == "" {
+		if r.Method == http.MethodGet {
+			// paginated list (limit/page), sorted by sequence_id
+			f.mu.Lock()
+			all := make([]map[string]any, 0, len(f.items))
+			for _, it := range f.items {
+				all = append(all, it)
+			}
+			f.mu.Unlock()
+			sort.Slice(all, func(i, j int) bool {
+				si, _ := all[i]["sequence_id"].(int)
+				sj, _ := all[j]["sequence_id"].(int)
+				return si < sj
+			})
+			q := r.URL.Query()
+			limit, _ := strconv.Atoi(q.Get("limit"))
+			if limit <= 0 {
+				limit = 25
+			}
+			page, _ := strconv.Atoi(q.Get("page"))
+			if page <= 0 {
+				page = 1
+			}
+			start := (page - 1) * limit
+			if start > len(all) {
+				start = len(all)
+			}
+			end := start + limit
+			if end > len(all) {
+				end = len(all)
+			}
+			json.NewEncoder(w).Encode(all[start:end])
+			return
+		}
 		if r.Method == http.MethodPost {
 			var body WorkItemCreate
 			json.NewDecoder(r.Body).Decode(&body)
@@ -566,6 +746,118 @@ func TestNewRequiresBaseURLAndWorkspace(t *testing.T) {
 	}
 	if _, err := New(Config{BaseURL: "http://x"}); err == nil {
 		t.Error("New without Workspace should fail")
+	}
+}
+
+func TestListWorkItemsPaginated(t *testing.T) {
+	c, fake, _ := newTestClient(t)
+	proj := mustProject(t, c)
+	for i := 0; i < 105; i++ {
+		if _, err := c.CreateWorkItem(context.Background(), proj, WorkItemCreate{Name: fmt.Sprintf("item %03d", i)}); err != nil {
+			t.Fatalf("CreateWorkItem: %v", err)
+		}
+	}
+	_ = fake
+	got, err := c.ListWorkItems(context.Background(), proj)
+	if err != nil {
+		t.Fatalf("ListWorkItems: %v", err)
+	}
+	if len(got) != 105 {
+		t.Fatalf("ListWorkItems returned %d items, want 105 (pagination must follow all pages)", len(got))
+	}
+	// sorted by sequence id
+	if got[0].Name != "item 000" || got[104].Name != "item 104" {
+		t.Errorf("order = %q ... %q, want item 000 ... item 104", got[0].Name, got[104].Name)
+	}
+}
+
+func TestListWorkspaceMembers(t *testing.T) {
+	c, _, _ := newTestClient(t)
+	members, err := c.ListWorkspaceMembers(context.Background())
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers: %v", err)
+	}
+	if len(members) != 1 || members[0].Email != "bot@example.com" {
+		t.Fatalf("members = %+v, want one bot@example.com member", members)
+	}
+}
+
+func TestCreateState(t *testing.T) {
+	c, _, _ := newTestClient(t)
+	proj := mustProject(t, c)
+	s, err := c.CreateState(context.Background(), proj, "Review", "started", "#FEE74C", 1500)
+	if err != nil {
+		t.Fatalf("CreateState: %v", err)
+	}
+	if s.Name != "Review" || s.Group != "started" {
+		t.Errorf("state = %+v, want name Review group started", s)
+	}
+	states, err := c.ListStates(context.Background(), proj)
+	if err != nil {
+		t.Fatalf("ListStates: %v", err)
+	}
+	found := false
+	for _, st := range states {
+		if st.ID == s.ID && st.Name == "Review" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("created state not in ListStates: %v", states)
+	}
+}
+
+func TestWebhookLifecycle(t *testing.T) {
+	c, _, _ := newTestClient(t)
+	wh, err := c.CreateWebhook(context.Background(), "http://bridge:8102/webhook/plane", "issue", "issue_comment")
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+	if wh.SecretKey == "" {
+		t.Fatal("create must reveal the secret key")
+	}
+	if !wh.IsActive || !wh.Issue || !wh.IssueComment {
+		t.Errorf("webhook flags = %+v, want active issue+issue_comment", wh)
+	}
+
+	// list must NOT include the secret
+	list, err := c.ListWebhooks(context.Background())
+	if err != nil {
+		t.Fatalf("ListWebhooks: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != wh.ID {
+		t.Fatalf("ListWebhooks = %+v, want one webhook %s", list, wh.ID)
+	}
+	if list[0].SecretKey != "" {
+		t.Errorf("list leaked the secret key")
+	}
+
+	// regenerate reveals a new secret
+	wh2, err := c.RegenerateWebhookSecret(context.Background(), wh.ID)
+	if err != nil {
+		t.Fatalf("RegenerateWebhookSecret: %v", err)
+	}
+	if wh2.SecretKey == "" || wh2.SecretKey == wh.SecretKey {
+		t.Errorf("regenerated secret = %q, want non-empty and different", wh2.SecretKey)
+	}
+
+	if err := c.DeleteWebhook(context.Background(), wh.ID); err != nil {
+		t.Fatalf("DeleteWebhook: %v", err)
+	}
+	list, err = c.ListWebhooks(context.Background())
+	if err != nil {
+		t.Fatalf("ListWebhooks after delete: %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("list after delete = %+v, want empty", list)
+	}
+}
+
+func TestWebhookCreateRejectsMissingURL(t *testing.T) {
+	c, _, _ := newTestClient(t)
+	_, err := c.CreateWebhook(context.Background(), "", "issue")
+	if err == nil {
+		t.Fatal("CreateWebhook with empty URL should fail")
 	}
 }
 

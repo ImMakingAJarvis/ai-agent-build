@@ -134,3 +134,72 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
     `Set-Cookie` as success.
   - Session cookie is `session-id`; the CSRF token must be re-fetched
     after login (it moves into the session).
+
+## P4 (2026-10-31) — plane-bridge service (webhooks + catch-up)
+
+- Service: `cmd/plane-bridge` + `internal/bridge` (core) — receives Plane
+  webhooks, verifies the HMAC-SHA256 `X-Plane-Signature` (hex over the raw
+  body, secret per webhook), ignores events whose actor is the Jarvis bot
+  (`PLANE_BOT_EMAIL`, case-insensitive) so bridge and bot never loop, logs
+  every event it acts on to a JSONL events file, and enqueues agent jobs
+  for items in a trigger state: `plan_epic` (item with `epic` + a
+  `plan:<model>` label still in Backlog) and `run_task` (sub-item with a
+  parent in Ready, no job yet). Job ids are `plane-<trigger>-<item.ID>`,
+  enqueue idempotent.
+- **Catch-up sync on every start** re-runs the same trigger check over the
+  whole watched project, so changes made while the bridge was down are
+  picked up at boot. Trigger checks are actor-agnostic by design.
+- The trigger check also runs in the background on every `issue` webhook
+  for the watched project; the HTTP handler always answers 200 fast (bad
+  signature → 403, both logged).
+- systemd: `systemd/plane-bridge.service` (`/usr/local/bin/plane-bridge`,
+  `EnvironmentFile=/home/agent/.config/jarvis/agent.env`, restart
+  on-failure). Installed and enabled 2026-10-31: healthz 200 on :8102,
+  watching `AAB`, webhook registered for `http://111.1.2.27:8102/webhook/plane`.
+- Env: `PLANE_URL`, `PLANE_API_KEY` (bot key), `PLANE_BOT_EMAIL`,
+  `PLANE_BOT_PASSWORD` (the session used for webhook management),
+  `PLANE_WORKSPACE` (default `jarvis`), `PLANE_PROJECT` (default `AAB`),
+  `BRIDGE_LISTEN` (default `:8102`), `BRIDGE_WEBHOOK_URL` (default
+  auto: `http://<lan-ip>:<port>/webhook/plane`), `BRIDGE_SECRET_FILE`
+  (default `~/.config/jarvis/plane-webhook-secret`, 0600),
+  `BRIDGE_EVENTS_FILE` (default
+  `~/.local/share/jarvis/plane-bridge/events.jsonl`).
+- **Webhook payload shape (verified byte-exact from a live delivery, via
+  tcpdump + HMAC against the stored secret):** `data.state` is an OBJECT
+  `{"id","name","group"}` and `data.labels` is a list of OBJECTS
+  `{"id","name","color"}` — not bare ids; the project reference is
+  **`"project"`, not `"project_id"`**; `action` values are
+  `created`/`updated`/`deleted`; the actor sits under
+  `activity.actor.email`. The first version of the bridge's `Data` struct
+  assumed the bare-id shape and failed `json.Unmarshal` on every real
+  event — the handler answered 400 **without logging**, which is why the
+  live test looked like "no delivery" until a pcap on :8193 showed the
+  POSTs arriving and being rejected. Lesson: the "bad payload" path now
+  logs a warning; delivery latency on this NAS is ~100 ms, so a missing
+  event is a parse/verify problem, not a transport one.
+- Webhook management (list/create/retrieve/regenerate/delete) is
+  **session-API only** (`/api/workspaces/<slug>/webhooks/`, workspace
+  ADMIN) — there are no webhook routes on the v1 external API. The API
+  reveals the `secret_key` only on create and regenerate, so the bridge
+  stores it in `BRIDGE_SECRET_FILE` and treats EnsureWebhook as
+  idempotent (URL match → no-op).
+- **Membership reality (blocked the "human edit" acceptance half):**
+  editing a work item (v1 PATCH) requires PROJECT membership; adding a
+  project member requires WORKSPACE membership
+  (`POST .../projects/<id>/members/` → 400 "Member not found in workspace"
+  for non-members). `nathan219@gmail.com` is a PENDING invite on workspace
+  `jarvis` (created by P2) that only a human can accept in the Plane UI —
+  the invite token is not exposed via any API, so headless member-add is
+  impossible. The live test detects membership via
+  `plane.ListWorkspaceMembers` (new, v1) and runs its human-edit
+  assertions only when the admin is a member; accepting the invite in the
+  UI enables them automatically on the next run.
+- Live test (`TestLiveWebhookAndCatchUp`): per-run scratch project
+  `p4_live_<rand>` in workspace `jarvis`, cleaned up in `t.Cleanup`.
+  Headless half: bot events (create + label add on an epic in Backlog)
+  must be delivered, signature-verified and **ignored** (the
+  "webhook ignored (bot event)" log line is the live delivery proof; no
+  event line, no job). Stop-window half: an epic made while the bridge is
+  stopped must be queued by the catch-up sync after restart. Skips when
+  the Plane env is unavailable, so `go test ./...` stays green elsewhere.
+  Passes in ~17 s (2026-10-31).

@@ -244,6 +244,24 @@ func (c *Client) DeleteProject(ctx context.Context, projectID string) error {
 	return c.do(ctx, "DELETE", c.wsPath("/projects/")+projectID+"/", nil, nil)
 }
 
+// WorkspaceMember is one entry of the v1 workspace member list.
+type WorkspaceMember struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	Role  int    `json:"role"`
+}
+
+// ListWorkspaceMembers lists the workspace members (v1). The live test
+// uses it to detect when the human admin account has joined the
+// workspace (its pending invite was accepted in the Plane UI).
+func (c *Client) ListWorkspaceMembers(ctx context.Context) ([]WorkspaceMember, error) {
+	var out []WorkspaceMember
+	if err := c.doList(ctx, "GET", c.wsPath("/members/"), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // --- states -------------------------------------------------------------------
 
 // ListStates lists a project's states, in sequence order (first page).
@@ -432,6 +450,114 @@ func (c *Client) ListPages(ctx context.Context, projectID string) ([]Page, error
 		return nil, err
 	}
 	return out, nil
+}
+
+// --- work items (list) ------------------------------------------------------------
+
+// ListWorkItems lists a project's work items, following the pagination.
+func (c *Client) ListWorkItems(ctx context.Context, projectID string) ([]WorkItem, error) {
+	const limit = 100
+	var all []WorkItem
+	for page := 1; ; page++ {
+		q := fmt.Sprintf("?limit=%d&page=%d", limit, page)
+		var out []WorkItem
+		if err := c.doList(ctx, "GET", c.projectPath(projectID, "/work-items/"+q), &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out...)
+		if len(out) < limit {
+			break
+		}
+	}
+	return all, nil
+}
+
+// --- states (create) ----------------------------------------------------------------
+
+// CreateState creates a work-item state (column) in a project. Sequence is
+// a float — this build stores and returns it as one (see P2 notes).
+func (c *Client) CreateState(ctx context.Context, projectID, name, group, color string, sequence float64) (*State, error) {
+	body := map[string]any{"name": name, "group": group, "sequence": sequence, "description": ""}
+	if color != "" {
+		body["color"] = color
+	}
+	var s State
+	if err := c.do(ctx, "POST", c.projectPath(projectID, "/states/"), body, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// --- webhooks -----------------------------------------------------------------------
+
+// Webhook is a workspace webhook. SecretKey (the HMAC signing secret) is
+// only returned by the API on create and secret regeneration — never on
+// list or retrieve — so callers must persist it when they get it.
+type Webhook struct {
+	ID           string `json:"id"`
+	URL          string `json:"url"`
+	IsActive     bool   `json:"is_active"`
+	SecretKey    string `json:"secret_key,omitempty"`
+	Project      bool   `json:"project"`
+	Issue        bool   `json:"issue"`
+	IssueComment bool   `json:"issue_comment"`
+}
+
+// The webhook endpoints are not on the v1 external API in this Plane
+// build — they exist only on the session API under
+// /api/workspaces/<slug>/webhooks/ and require a workspace ADMIN. All four
+// methods below therefore authenticate with the configured session
+// credentials (Email/Password in Config), not the API key.
+
+// ListWebhooks lists the workspace's webhooks (secrets not included).
+func (c *Client) ListWebhooks(ctx context.Context) ([]Webhook, error) {
+	var out []Webhook
+	if err := c.doSessionList(ctx, "GET", c.sessionPath("/workspaces/%s/webhooks/", c.workspace), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateWebhook registers a workspace webhook for the given event types
+// ("issue", "issue_comment", "project", "cycle", "module") and returns the
+// reply with the generated SecretKey — the only moment the API reveals it
+// (besides RegenerateWebhookSecret).
+func (c *Client) CreateWebhook(ctx context.Context, url string, eventTypes ...string) (*Webhook, error) {
+	body := map[string]any{"url": url, "is_active": true}
+	for _, e := range eventTypes {
+		switch e {
+		case "issue":
+			body["issue"] = true
+		case "issue_comment":
+			body["issue_comment"] = true
+		case "project":
+			body["project"] = true
+		case "cycle":
+			body["cycle"] = true
+		case "module":
+			body["module"] = true
+		}
+	}
+	var w Webhook
+	if err := c.doSession(ctx, "POST", c.sessionPath("/workspaces/%s/webhooks/", c.workspace), body, &w); err != nil {
+		return nil, err
+	}
+	return &w, nil
+}
+
+// RegenerateWebhookSecret rotates a webhook's HMAC secret and returns the
+// new one — the other moment the API reveals it.
+func (c *Client) RegenerateWebhookSecret(ctx context.Context, webhookID string) (*Webhook, error) {
+	var w Webhook
+	if err := c.doSession(ctx, "POST", c.sessionPath("/workspaces/%s/webhooks/%s/regenerate/", c.workspace, webhookID), nil, &w); err != nil {
+		return nil, err
+	}
+	return &w, nil
+}
+
+// DeleteWebhook removes a workspace webhook.
+func (c *Client) DeleteWebhook(ctx context.Context, webhookID string) error {
+	return c.doSession(ctx, "DELETE", c.sessionPath("/workspaces/%s/webhooks/%s/", c.workspace, webhookID), nil, nil)
 }
 
 // --- HTTP plumbing ------------------------------------------------------------------
