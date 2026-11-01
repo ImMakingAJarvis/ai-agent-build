@@ -56,3 +56,4 @@
 - 2026-10-31T10:41Z [plan-epic-planner-plan-with-m-1793259204-1] P1 Plane work board: verified Plane CE live on NAS (TempleOfTime 111.1.2.222:8088) - login page 200 + X-Api-Key /api/v1/users/me/ 200 from AI box; plan doc at docs/work-board/PLAN.md, shared branch phase-work-board-plane for all 23 jobs (PR #119)
 - 2026-10-31T18:47Z [chat-1793441273-bca6] Plane wired into daemon env config: PLANE_URL/PLANE_API_KEY in ~/.config/jarvis/agent.env, key verified live (PR #120)
 - 2026-11-01T01:44Z [plan-epic-planner-plan-with-m-1793259204-4] plane-bridge service (P4): Plane webhooks HMAC-verified, bot events ignored, JSONL event log, trigger check (plan_epic/run_task), catch-up sync on start; systemd unit active+enabled on :8102, live end-to-end test ~17s (PR #123)
+- 2026-11-01T02:03Z [chat-1793484795-2f4c] check-camera-logs (chat-1793484795-2f4c): no camera devices or 24h camera logs, no unexpected video-device access, audio stack clean; investigation job, note PR #125

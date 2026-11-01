@@ -45,3 +45,4 @@
 - 2026-10-30T23:28Z Nathan uploaded the Plane work-board plan (2026-10-27): self-hosted Plane CE on the NAS + plane-bridge on the AI box + 'plan:<model>' label-driven planning (Plan/Decompose/Review, approve in Plane, per-location gpu/cpu/igpu execution, one PR per epic); P1 NAS deployment is his manual step
 - 2026-10-31T10:41Z 2026-10-31 Nathan provided the Plane key: first pointed at a NAS folder (unreachable - no NAS creds on AI box), then dropped /home/agent/planekey.txt in the agent home dir; env wiring (PLANE_URL/PLANE_API_KEY) is pending chat job chat-1793441273-bca6
 - 2026-10-31T18:47Z Nathan: add Plane URL+key to the daemon env config (key handed via planekey.txt in the AI-box home dir, NAS folder itself unreachable); keep the key out of the repo and never print it
+- 2026-11-01T02:03Z Nathan asked to audit last-24h camera logs and flag any process unexpectedly touching camera devices or producing audio artifacts (2026-10-31)
