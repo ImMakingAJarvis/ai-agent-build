@@ -52,3 +52,4 @@
 - 2026-11-01T04:40Z P6 of the work-board plan: agent identity on the Plane board — model-prefixed comments on touched items, Discord status messages carry the board link.
 - 2026-11-01T06:58Z one project per epic — Nathan's decision 2026-10-31, now the board standard (reorganize everything, put it in CLAUDE.md)
 - 2026-11-01T07:27Z Nathan: fix PR 109 — it was CONFLICTING after main moved on (Plane/epic-projects rounds); resolved by merging main into the branch, all notes entries kept (job chat-1793508467-d4d3)
+- 2026-11-01T09:05Z Enforce one Plane project per epic — convention file + sync scripts (chat-1793508833-9f69)
