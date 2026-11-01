@@ -332,7 +332,7 @@ func TestLiveWebhookAndCatchUp(t *testing.T) {
 			"PLANE_URL=" + planeURL,
 			"PLANE_API_KEY=" + botKey,
 			"PLANE_WORKSPACE=jarvis",
-			"PLANE_PROJECT=" + proj.ID,
+			"PLANE_PROJECTS=" + proj.ID,
 			"PLANE_BOT_EMAIL=" + botEmail,
 			"PLANE_BOT_PASSWORD=" + botPassword,
 			"BRIDGE_LISTEN=:" + liveTestPort,
@@ -493,6 +493,8 @@ func TestLiveWebhookAndCatchUp(t *testing.T) {
 	waitFor(t, 120*time.Second, "catch-up to queue item 2", func() bool {
 		_, err := store.Get("plane-plan_epic-" + item2.ID)
 		return err == nil
+	}, func() string {
+		return "bridge log tail:\n" + readTail(logFile)
 	})
 	if _, err := store.Get("plane-plan_epic-" + item2.ID); err != nil {
 		t.Fatalf("catch-up did not queue the stopped-window item: %v (bridge log below)\n%s", err, readTail(logFile))

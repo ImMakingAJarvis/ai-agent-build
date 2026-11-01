@@ -33,9 +33,9 @@ const (
 
 type fakePlane struct {
 	mu       sync.Mutex
-	labels   map[string]string // id -> name
-	states   map[string]string // id -> name
-	items    map[string]map[string]any
+	labels   map[string]string                    // id -> name (shared across projects)
+	states   map[string]string                    // id -> name
+	items    map[string]map[string]map[string]any // project id -> item id -> item
 	whID     string
 	whURL    string
 	whSecret string
@@ -47,7 +47,7 @@ func newFakePlane() *fakePlane {
 	return &fakePlane{
 		labels: map[string]string{"lbl-epic": "epic", "lbl-model": "plan:opus"},
 		states: map[string]string{"st-backlog": "Backlog", "st-ready": "Ready"},
-		items:  map[string]map[string]any{},
+		items:  map[string]map[string]map[string]any{},
 	}
 }
 
@@ -59,11 +59,15 @@ func (f *fakePlane) sessionCookie(r *http.Request) string {
 	return ""
 }
 
-// setItem stores a work item with the given state id and label ids.
-func (f *fakePlane) setItem(id, name, stateID, parent string, seq int, labels ...string) {
+// setItem stores a work item in projectID with the given state id and
+// label ids.
+func (f *fakePlane) setItem(projectID, id, name, stateID, parent string, seq int, labels ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.items[id] = map[string]any{
+	if f.items[projectID] == nil {
+		f.items[projectID] = map[string]map[string]any{}
+	}
+	f.items[projectID][id] = map[string]any{
 		"id": id, "name": name, "state": stateID, "parent": parent,
 		"labels": labels, "sequence_id": seq,
 	}
@@ -111,7 +115,7 @@ func (f *fakePlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := r.URL.Path[len(prefix):]
-	_, rest2, _ := strings.Cut(strings.TrimPrefix(rest, "projects/"), "/")
+	proj, rest2, _ := strings.Cut(strings.TrimPrefix(rest, "projects/"), "/")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch {
@@ -129,15 +133,16 @@ func (f *fakePlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"results": out, "count": len(out)})
 	case strings.HasPrefix(rest2, "work-items"):
 		id := strings.Trim(strings.TrimPrefix(rest2, "work-items/"), "/")
+		items := f.items[proj]
 		if id == "" {
-			all := make([]map[string]any, 0, len(f.items))
-			for _, it := range f.items {
+			all := make([]map[string]any, 0, len(items))
+			for _, it := range items {
 				all = append(all, it)
 			}
 			json.NewEncoder(w).Encode(all)
 			return
 		}
-		it, ok := f.items[id]
+		it, ok := items[id]
 		if !ok {
 			http.Error(w, `{"detail":"Not found."}`, http.StatusNotFound)
 			return
@@ -241,16 +246,16 @@ func newBridge(t *testing.T, botEmail string) (*Bridge, *fakePlane, *agentjob.St
 	}
 	dir := t.TempDir()
 	b, err := New(Config{
-		Plane:       c,
-		Store:       store,
-		ProjectID:   "proj-1",
-		ProjectName: "AAB",
-		WebhookURL:  "http://bridge:8102/webhook/plane",
-		SecretFile:  filepath.Join(dir, "secret"),
-		BotEmail:    botEmail,
-		BoardURL:    srv.URL,
-		Workspace:   "testws",
-		EventsFile:  filepath.Join(dir, "events.jsonl"),
+		Plane:        c,
+		Store:        store,
+		Projects:     []string{"proj-1"},
+		ProjectNames: map[string]string{"proj-1": "AAB"},
+		WebhookURL:   "http://bridge:8102/webhook/plane",
+		SecretFile:   filepath.Join(dir, "secret"),
+		BotEmail:     botEmail,
+		BoardURL:     srv.URL,
+		Workspace:    "testws",
+		EventsFile:   filepath.Join(dir, "events.jsonl"),
 	})
 	if err != nil {
 		t.Fatalf("bridge.New: %v", err)
@@ -312,7 +317,7 @@ func TestHandleWebhookRejectsBadSignature(t *testing.T) {
 // a bot edit of a trigger item is ignored — no log line, no job.
 func TestHandleWebhookBotEventIgnored(t *testing.T) {
 	b, f, store, dir := newBridge(t, "jarvis-bot@x")
-	f.setItem("wi-1", "epic", "st-backlog", "", 1, "lbl-epic", "lbl-model")
+	f.setItem("proj-1", "wi-1", "epic", "st-backlog", "", 1, "lbl-epic", "lbl-model")
 
 	body := eventBody("wi-1", "proj-1", "Jarvis-Bot@x", "labels") // case-insensitive match
 	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
@@ -331,7 +336,7 @@ func TestHandleWebhookBotEventIgnored(t *testing.T) {
 // of the same item is logged and queues the plan job.
 func TestHandleWebhookHumanEventLogsAndQueues(t *testing.T) {
 	b, f, store, dir := newBridge(t, "jarvis-bot@x")
-	f.setItem("wi-1", "Ship the widget", "st-backlog", "", 7, "lbl-epic", "lbl-model")
+	f.setItem("proj-1", "wi-1", "Ship the widget", "st-backlog", "", 7, "lbl-epic", "lbl-model")
 
 	body := eventBody("wi-1", "proj-1", "nathan@x", "labels")
 	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
@@ -361,7 +366,7 @@ func TestHandleWebhookHumanEventLogsAndQueues(t *testing.T) {
 // logged but never run the trigger check.
 func TestHandleWebhookOtherProjectNotChecked(t *testing.T) {
 	b, f, store, dir := newBridge(t, "jarvis-bot@x")
-	f.setItem("wi-9", "epic", "st-backlog", "", 1, "lbl-epic", "lbl-model")
+	f.setItem("proj-1", "wi-9", "epic", "st-backlog", "", 1, "lbl-epic", "lbl-model")
 
 	body := eventBody("wi-9", "proj-other", "nathan@x", "labels")
 	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
@@ -382,12 +387,12 @@ func TestHandleWebhookOtherProjectNotChecked(t *testing.T) {
 func TestCatchUpQueuesTriggerJobs(t *testing.T) {
 	b, f, store, _ := newBridge(t, "jarvis-bot@x")
 	// in trigger states:
-	f.setItem("epic-1", "Big epic", "st-backlog", "", 1, "lbl-epic", "lbl-model")
-	f.setItem("sub-1", "Sub task", "st-ready", "epic-1", 2)
+	f.setItem("proj-1", "epic-1", "Big epic", "st-backlog", "", 1, "lbl-epic", "lbl-model")
+	f.setItem("proj-1", "sub-1", "Sub task", "st-ready", "epic-1", 2)
 	// not in trigger states:
-	f.setItem("plain-1", "Plain backlog item", "st-backlog", "", 3)                   // no labels
-	f.setItem("noplan-1", "Epic without plan label", "st-backlog", "", 4, "lbl-epic") // no plan:<model>
-	f.setItem("orphan-1", "Ready but no parent", "st-ready", "", 5)                   // not a sub-item
+	f.setItem("proj-1", "plain-1", "Plain backlog item", "st-backlog", "", 3)                   // no labels
+	f.setItem("proj-1", "noplan-1", "Epic without plan label", "st-backlog", "", 4, "lbl-epic") // no plan:<model>
+	f.setItem("proj-1", "orphan-1", "Ready but no parent", "st-ready", "", 5)                   // not a sub-item
 
 	n, err := b.CatchUp(context.Background())
 	if err != nil {
@@ -479,7 +484,7 @@ func TestNewRequiresConfig(t *testing.T) {
 		return Config{
 			Plane:      nil,
 			Store:      store,
-			ProjectID:  "p",
+			Projects:   []string{"p"},
 			WebhookURL: "http://x",
 			SecretFile: t.TempDir() + "/s",
 		}
@@ -493,8 +498,52 @@ func TestNewRequiresConfig(t *testing.T) {
 		t.Error("New without Store should fail")
 	}
 	c = base()
-	c.ProjectID = ""
+	c.Projects = nil
 	if _, err := New(c); err == nil {
-		t.Error("New without ProjectID should fail")
+		t.Error("New without Projects should fail")
+	}
+}
+
+// TestCatchUpCoversAllWatchedProjects verifies the multi-project behavior:
+// one project per epic means the catch-up must sweep every watched
+// project, and job titles carry the project's own identifier.
+func TestCatchUpCoversAllWatchedProjects(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	b.cfg.Projects = []string{"proj-1", "proj-2"}
+	b.cfg.ProjectNames = map[string]string{"proj-1": "AAB", "proj-2": "T2I"}
+
+	// one trigger item per project, plus a non-trigger item in proj-2
+	f.setItem("proj-1", "epic-a", "Epic A", "st-backlog", "", 1, "lbl-epic", "lbl-model")
+	f.setItem("proj-2", "epic-b", "Epic B", "st-backlog", "", 1, "lbl-epic", "lbl-model")
+	f.setItem("proj-2", "plain", "Plain item", "st-backlog", "", 2)
+
+	n, err := b.CatchUp(context.Background())
+	if err != nil {
+		t.Fatalf("CatchUp: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("CatchUp queued %d jobs, want 2 (one per project)", n)
+	}
+	jobA, err := store.Get("plane-plan_epic-epic-a")
+	if err != nil {
+		t.Fatalf("missing job for proj-1 item: %v", err)
+	}
+	if !strings.Contains(jobA.Title, "AAB-1") {
+		t.Errorf("job title = %q, want AAB-1 in it", jobA.Title)
+	}
+	jobB, err := store.Get("plane-plan_epic-epic-b")
+	if err != nil {
+		t.Fatalf("missing job for proj-2 item: %v", err)
+	}
+	if !strings.Contains(jobB.Title, "T2I-1") {
+		t.Errorf("job title = %q, want T2I-1 in it", jobB.Title)
+	}
+	var instB map[string]any
+	if err := json.Unmarshal([]byte(jobB.Instructions), &instB); err != nil {
+		t.Fatalf("job instructions are not JSON: %v", err)
+	}
+	board, _ := instB["board"].(map[string]any)
+	if board["project"] != "T2I" {
+		t.Errorf("instructions board.project = %v, want T2I", board["project"])
 	}
 }
