@@ -123,6 +123,10 @@ func defaultCommand(driver, prompt, effort string) *exec.Cmd {
 	}
 	canon := queue.CanonicalEffort(effort, "coding")
 	env := append([]string{}, os.Environ()...)
+	// JARVIS_MODEL tells the round which model is driving it, so the agent
+	// can prefix its board comments with the model name (P6).
+	env = stripEnv(env, "JARVIS_MODEL")
+	env = append(env, "JARVIS_MODEL="+ModelFor(driver))
 	if driver == "igpu" {
 		// The small iGPU model: agent-local pointed at the iGPU engine.
 		// agent-local honours pre-set LOCAL_MODEL/ENGINE_URL/

@@ -2,12 +2,19 @@
 // Discord.
 //
 //	jarvis-discord notify <message>          send a message (stdin if no args)
+//	jarvis-discord notify --item AAB-4 <msg> send the message with the Plane
+//	                                       board link for the item appended
 //	jarvis-discord ask [flags] <question>    send a question, print the answer
 //
 // ask flags:
 //
 //	-choices "yes,no"   show buttons; a typed reply is accepted too
 //	-timeout 2h         give up after this long (exit 3); default waits forever
+//
+// notify flags:
+//
+//	-item <ref>  Plane work item (UUID or display id like AAB-43) whose
+//	            board link is appended on its own line
 //
 // Config comes from DISCORD_BOT_TOKEN and DISCORD_OWNER_ID, or from the file
 // named by JARVIS_DISCORD_ENV (default ~/.config/jarvis/discord.env) holding
@@ -29,10 +36,11 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
 )
 
 const usage = `usage:
-  jarvis-discord notify <message>
+  jarvis-discord notify [--item AAB-43] <message>
   jarvis-discord ask [-choices a,b,c] [-timeout 2h] <question>
   jarvis-discord watch
   jarvis-discord parrot <channelID> <messageID>`
@@ -82,7 +90,18 @@ func main() {
 		}
 
 	case "notify":
-		if err := d.Notify(ctx, message(os.Args[2:])); err != nil {
+		fs := flag.NewFlagSet("notify", flag.ExitOnError)
+		item := fs.String("item", "", "Plane work item whose board link is appended")
+		fs.Parse(os.Args[2:])
+		text := message(fs.Args())
+		if *item != "" {
+			link, err := boardItemLink(ctx, *item)
+			if err != nil {
+				fail(err.Error())
+			}
+			text = text + "\n" + link
+		}
+		if err := d.Notify(ctx, text); err != nil {
 			fail(err.Error())
 		}
 
@@ -135,6 +154,31 @@ func main() {
 	default:
 		fail(usage)
 	}
+}
+
+// boardItemLink resolves a Plane work item to its browser URL (P6: status
+// messages carry the board link). Config comes from the PLANE_* environment
+// or the daemon env file, like jarvis-board.
+func boardItemLink(ctx context.Context, ref string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	c, err := plane.FromEnv()
+	if err != nil {
+		return "", err
+	}
+	project := strings.TrimSpace(os.Getenv("PLANE_PROJECT"))
+	if project == "" {
+		project = "AAB"
+	}
+	p, err := plane.ProjectByRef(ctx, c, project)
+	if err != nil {
+		return "", err
+	}
+	wi, err := plane.WorkItemByRef(ctx, c, p.ID, ref)
+	if err != nil {
+		return "", err
+	}
+	return c.ItemLink(p, wi), nil
 }
 
 // message joins args, or reads stdin when there are none.

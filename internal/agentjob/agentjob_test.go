@@ -166,6 +166,37 @@ func TestDefaultCommandMapsEffort(t *testing.T) {
 	}
 }
 
+// TestDefaultCommandSetsJarvisModel is the P6 hook: every round's env
+// carries JARVIS_MODEL with the model driving it, so the agent can prefix
+// its board comments with the model name. Stale inherited values are
+// replaced, not duplicated.
+func TestDefaultCommandSetsJarvisModel(t *testing.T) {
+	t.Setenv("JARVIS_MODEL", "stale-model")
+	t.Setenv("LOCAL_MODEL", "")
+
+	cmd := defaultCommand("local", "do it", "off")
+	n := 0
+	for _, kv := range cmd.Env {
+		if v, ok := strings.CutPrefix(kv, "JARVIS_MODEL="); ok {
+			n++
+			if v != "jarvis-brain" {
+				t.Errorf("JARVIS_MODEL = %q, want jarvis-brain", v)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("JARVIS_MODEL appears %d times in env, want 1", n)
+	}
+
+	if got := ModelFor("sonnet"); got != "sonnet" {
+		t.Errorf("ModelFor(sonnet) = %q, want sonnet", got)
+	}
+	cmd = defaultCommand("sonnet", "do it", "off")
+	if !strings.Contains(strings.Join(cmd.Env, "\n"), "JARVIS_MODEL=sonnet") {
+		t.Error("sonnet driver env lacks JARVIS_MODEL=sonnet")
+	}
+}
+
 func TestModelForIgpu(t *testing.T) {
 	t.Setenv("LOCAL_MODEL", "jarvis-brain")
 	if got := ModelFor("igpu"); got != "jarvis-igpu" {
