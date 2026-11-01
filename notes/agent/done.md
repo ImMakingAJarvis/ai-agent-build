@@ -66,3 +66,4 @@
 - 2026-11-01T09:05Z [chat-1793508833-9f69] One-project-per-epic enforcement documented (CLAUDE.md + NOTES.md); verified no code change needed — plane-epic is the only create path, no task-sync script yet (PR #129)
 - 2026-11-01T09:27Z [plan-epic-planner-plan-with-m-1793259204-7] work-board Phase A1: config/models.yaml registry + internal/registry load/validate test (PR #130)
 - 2026-11-01T09:40Z [plan-epic-planner-plan-with-m-1793259204-8] Work-board A2: registry.ByRole(role) — enabled models per role, disabled skipped, unknown-role error (PR #131)
+- 2026-11-01T10:20Z [plan-epic-planner-plan-with-m-1793259204-9] A3: sync planner models to Plane plan: labels — planlabels pkg (Sync + 15s mtime poll), DeleteLabel, bridge wiring staggered after catch-up; live-verified enable/disable on the 8 watched projects (PR #131 with A2)
