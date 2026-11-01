@@ -53,3 +53,5 @@
 - 2026-11-01T06:58Z one project per epic — Nathan's decision 2026-10-31, now the board standard (reorganize everything, put it in CLAUDE.md)
 - 2026-11-01T07:27Z Nathan: fix PR 109 — it was CONFLICTING after main moved on (Plane/epic-projects rounds); resolved by merging main into the branch, all notes entries kept (job chat-1793508467-d4d3)
 - 2026-11-01T09:05Z Enforce one Plane project per epic — convention file + sync scripts (chat-1793508833-9f69)
+- 2026-11-01T09:27Z Nathan asked for work-board Phase A model registry: config/models.yaml with PLAN.md schema, planner role gates the selector, disabled entries hidden not deleted
+- 2026-11-01T10:20Z Work-board plan Phase A continues per PLAN.md task order (A2 merged as PR #131 content, A3 shipped in PR #131); A4 next (VRAM/RAM fit check).

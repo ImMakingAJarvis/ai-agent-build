@@ -221,6 +221,9 @@ func TestLiveWebhookAndCatchUp(t *testing.T) {
 	if err := probe.Close(); err != nil {
 		t.Skipf("port %s probe close: %v", liveTestPort, err)
 	}
+	// Serialize with the other live Plane test (internal/plane): they
+	// share the bot API key, and the board rate-limits bursts.
+	defer plane.AcquireLiveLock(t, 5*time.Minute)()
 
 	lanIP, err := lanTestIP()
 	if err != nil {
@@ -316,6 +319,13 @@ func TestLiveWebhookAndCatchUp(t *testing.T) {
 	dataDir := filepath.Join(work, "data")
 	secretFile := filepath.Join(work, "secret")
 	eventsFile := filepath.Join(work, "events.jsonl")
+	// A3: the bridge also watches a models file for plan: labels. Point it
+	// at an empty registry so the real planner labels never touch this
+	// scratch project (label sync is covered by planlabels' own live test).
+	modelsFile := filepath.Join(work, "models.yaml")
+	if err := os.WriteFile(modelsFile, []byte("models: []\n"), 0o644); err != nil {
+		t.Fatalf("models file: %v", err)
+	}
 	logFile, err := os.Create(filepath.Join(work, "bridge.log"))
 	if err != nil {
 		t.Fatalf("log file: %v", err)
@@ -339,6 +349,7 @@ func TestLiveWebhookAndCatchUp(t *testing.T) {
 			"BRIDGE_WEBHOOK_URL=" + webhookURL,
 			"BRIDGE_SECRET_FILE=" + secretFile,
 			"BRIDGE_EVENTS_FILE=" + eventsFile,
+			"BRIDGE_MODELS_FILE=" + modelsFile,
 			"JARVIS_DATA_DIR=" + dataDir,
 			"HOME=/home/agent",
 		}

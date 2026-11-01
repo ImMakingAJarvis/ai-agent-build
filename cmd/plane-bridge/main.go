@@ -23,6 +23,8 @@
 //	BRIDGE_WEBHOOK_URL   full webhook URL (default: http://<lan-ip>:<port>/webhook/plane)
 //	BRIDGE_SECRET_FILE   webhook HMAC secret file (default ~/.config/jarvis/plane-webhook-secret)
 //	BRIDGE_EVENTS_FILE   JSONL event log (default ~/.local/share/jarvis/plane-bridge/events.jsonl)
+//	BRIDGE_MODELS_FILE   model registry to keep plan: labels in sync with
+//	                 (default /home/agent/ai-agent-build/config/models.yaml)
 //	JARVIS_DATA_DIR      agent job store dir (default ~/.local/share/jarvis)
 package main
 
@@ -42,6 +44,8 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/bridge"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/planlabels"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 )
 
 func envOr(key, def string) string {
@@ -166,6 +170,7 @@ func run(log *slog.Logger) error {
 
 	// Catch-up sync on every start; retried until the first success so a
 	// Plane outage at boot does not lose the catch-up.
+	catchUpDone := make(chan struct{})
 	go func() {
 		for {
 			n, err := br.CatchUp(ctx)
@@ -173,13 +178,36 @@ func run(log *slog.Logger) error {
 				log.Warn("catch-up sync failed, retrying", "err", err)
 				select {
 				case <-ctx.Done():
+					close(catchUpDone)
 					return
 				case <-time.After(60 * time.Second):
 				}
 				continue
 			}
 			log.Info("startup catch-up complete", "queued", n)
+			close(catchUpDone)
 			return
+		}
+	}()
+
+	// Keep the plan:<model> labels in sync with the enabled planner models
+	// (A3): one label per enabled planner, removed when it is disabled.
+	// Runs on every change to the models file (15 s poll); the first sync
+	// waits for the startup catch-up so the two bursts do not share the
+	// Plane rate limit at boot.
+	modelsFile := envOr("BRIDGE_MODELS_FILE", "/home/agent/ai-agent-build/config/models.yaml")
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-catchUpDone:
+		}
+		w := planlabels.NewWatcher(modelsFile, 15*time.Second, log,
+			func(ctx context.Context, f *registry.File) error {
+				return planlabels.Sync(ctx, client, projectIDs, f, log)
+			})
+		if err := w.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Error("plan-label watcher stopped", "err", err)
 		}
 	}()
 

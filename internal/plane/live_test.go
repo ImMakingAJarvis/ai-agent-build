@@ -48,6 +48,7 @@ func TestLiveScratchProject(t *testing.T) {
 	if !ok {
 		t.Skip("PLANE_URL/PLANE_API_KEY unavailable (process env or ~/.config/jarvis/agent.env)")
 	}
+	defer AcquireLiveLock(t, 5*time.Minute)()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 

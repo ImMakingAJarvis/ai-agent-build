@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -210,5 +211,126 @@ func TestParseRejectsUnparseableYAML(t *testing.T) {
 func TestValidateRejectsEmptyRegistry(t *testing.T) {
 	if _, err := Parse([]byte("models: []")); err == nil {
 		t.Fatal("Parse accepted an empty registry")
+	}
+}
+
+// modelEntry is a complete valid registry entry with the given roles and
+// enabled flag, for ByRole tests.
+func modelEntry(id, roles string, enabled bool) string {
+	on := "false"
+	if enabled {
+		on = "true"
+	}
+	return fmt.Sprintf(`  - id: %s
+    display_name: %s
+    location: local
+    engine: ollama
+    endpoint: http://localhost:11434/v1
+    roles: [%s]
+    context_tokens: 1024
+    vram_gb: 4
+    ram_gb: 0
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: %s
+    home_location: gpu
+    fallback_location: cpu
+`, id, id, roles, on)
+}
+
+func idsOf(models []Model) []string {
+	ids := make([]string, 0, len(models))
+	for _, m := range models {
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestByRoleRealRegistry(t *testing.T) {
+	f, err := Load(registryPath(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cases := []struct {
+		role string
+		want []string
+	}{
+		// qwen3.8-flash-next is a planner but disabled, so it must not appear.
+		{"planner", []string{"qwen3.8-27b", "claude-sonnet-5-5"}},
+		{"executor", []string{"qwen3.8-27b"}},
+		{"reviewer", []string{"claude-sonnet-5-5"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			got, err := f.ByRole(tc.role)
+			if err != nil {
+				t.Fatalf("ByRole(%q): %v", tc.role, err)
+			}
+			if !sameStrings(idsOf(got), tc.want) {
+				t.Fatalf("ByRole(%q) = %v, want %v (file order)", tc.role, idsOf(got), tc.want)
+			}
+		})
+	}
+}
+
+func TestByRoleSkipsDisabledModels(t *testing.T) {
+	doc := "models:\n" +
+		modelEntry("on", "planner,executor", true) +
+		modelEntry("off", "planner", false) +
+		modelEntry("on2", "executor,planner", true)
+	f, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, role := range []string{"planner", "executor"} {
+		got, err := f.ByRole(role)
+		if err != nil {
+			t.Fatalf("ByRole(%q): %v", role, err)
+		}
+		want := []string{"on", "on2"}
+		if !sameStrings(idsOf(got), want) {
+			t.Errorf("ByRole(%q) = %v, want %v (disabled entry skipped, file order kept)", role, idsOf(got), want)
+		}
+	}
+}
+
+func TestByRoleEmptyWhenNothingEnabledForRole(t *testing.T) {
+	doc := "models:\n" + modelEntry("only-planner", "planner", false)
+	f, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := f.ByRole("planner")
+	if err != nil {
+		t.Fatalf("ByRole(planner): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ByRole(planner) = %v, want empty (only entry is disabled)", idsOf(got))
+	}
+}
+
+func TestByRoleUnknownRole(t *testing.T) {
+	f, err := Parse([]byte(validDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	_, err = f.ByRole("wizard")
+	if err == nil {
+		t.Fatal("ByRole accepted an unknown role")
+	}
+	if !strings.Contains(err.Error(), "unknown role") {
+		t.Fatalf("error %q does not mention unknown role", err)
 	}
 }
