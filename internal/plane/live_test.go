@@ -4,10 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -19,69 +15,20 @@ import (
 //
 // Credentials come from the process environment, falling back to the
 // daemon env file that scripts/plane-setup.sh writes
-// (~/.config/jarvis/agent.env). Without them the test skips, so
-// `go test ./...` stays green off this machine.
+// (~/.config/jarvis/agent.env), via FromEnv. Without them the test
+// skips, so `go test ./...` stays green off this machine.
 
-var (
-	envFileOnce sync.Once
-	envFileVals map[string]string
-)
-
-// envFileValue parses KEY=VALUE lines from the daemon env file once.
-func envFileValue(key string) string {
-	envFileOnce.Do(func() {
-		path := os.Getenv("PLANE_ENV_FILE")
-		if path == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return
-			}
-			path = filepath.Join(home, ".config", "jarvis", "agent.env")
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return
-		}
-		vals := map[string]string{}
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			k, v, ok := strings.Cut(line, "=")
-			if !ok {
-				continue
-			}
-			vals[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
-		}
-		envFileVals = vals
-	})
-	if envFileVals == nil {
-		return ""
-	}
-	return envFileVals[key]
-}
-
-// liveConfig resolves the live Plane config; ok is false when the
+// liveClient returns a client for the live board; ok is false when the
 // minimum (URL + API key) is unavailable.
-func liveConfig() (Config, bool) {
-	get := func(k string) string {
-		if v := os.Getenv(k); v != "" {
-			return v
-		}
-		return envFileValue(k)
+func liveClient() (*Client, bool) {
+	c, err := FromEnv()
+	if err != nil {
+		return nil, false
 	}
-	url, key := get("PLANE_URL"), get("PLANE_API_KEY")
-	if url == "" || key == "" {
-		return Config{}, false
+	if c.apiKey == "" {
+		return nil, false
 	}
-	return Config{
-		BaseURL:   url,
-		APIKey:    key,
-		Workspace: "jarvis",
-		Email:     get("PLANE_BOT_EMAIL"),
-		Password:  get("PLANE_BOT_PASSWORD"),
-	}, true
+	return c, true
 }
 
 // randomIdentifier builds a unique 5-char project identifier (Plane
@@ -97,13 +44,9 @@ func randomIdentifier(t *testing.T) string {
 }
 
 func TestLiveScratchProject(t *testing.T) {
-	cfg, ok := liveConfig()
+	c, ok := liveClient()
 	if !ok {
 		t.Skip("PLANE_URL/PLANE_API_KEY unavailable (process env or ~/.config/jarvis/agent.env)")
-	}
-	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -215,7 +158,7 @@ func TestLiveScratchProject(t *testing.T) {
 	}
 
 	// --- page (session API) ---
-	if cfg.Email == "" || cfg.Password == "" {
+	if c.email == "" || c.password == "" {
 		t.Skip("PLANE_BOT_EMAIL/PLANE_BOT_PASSWORD unavailable; page step needs a session")
 	}
 	pg, err := c.CreatePage(ctx, proj.ID, PageCreate{

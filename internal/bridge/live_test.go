@@ -434,8 +434,10 @@ func TestLiveWebhookAndCatchUp(t *testing.T) {
 		// item 1, edited by the ADMIN (a human, as far as the bridge is
 		// concerned): must be logged and must queue the plan job.
 		// Project membership is per-project, so add the admin to the
-		// scratch project first.
-		if err := v1Post(ctx, planeURL, botKey, fmt.Sprintf("/api/v1/workspaces/jarvis/projects/%s/members/", proj.ID), map[string]string{"member": adminID}); err != nil {
+		// scratch project first — as editor (role 20). A plain add grants
+		// the default viewer role (5) on this Plane build, whose members
+		// cannot edit work items (the rename below would 403).
+		if err := v1Post(ctx, planeURL, botKey, fmt.Sprintf("/api/v1/workspaces/jarvis/projects/%s/members/", proj.ID), map[string]any{"member": adminID, "role": 20}); err != nil {
 			t.Fatalf("add admin to project: %v", err)
 		}
 		patchPath := fmt.Sprintf("/api/v1/workspaces/jarvis/projects/%s/work-items/%s/", proj.ID, item1.ID)
