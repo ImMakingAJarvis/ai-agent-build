@@ -93,6 +93,23 @@ func Parse(data []byte) (*File, error) {
 	return &f, nil
 }
 
+// ByRole returns the enabled models tagged with role, in file order.
+// role must be one of Roles (Validate already guarantees the file's own
+// roles are known, so an unknown role here is a caller bug); a model with
+// no enabled entry for the role yields an empty slice, not an error.
+func (f *File) ByRole(role string) ([]Model, error) {
+	if !contains(Roles, role) {
+		return nil, fmt.Errorf("unknown role %q (want one of %s)", role, strings.Join(Roles, ", "))
+	}
+	out := []Model{}
+	for _, m := range f.Models {
+		if m.Enabled && contains(m.Roles, role) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
 // Validate checks known values and entry semantics.
 func (f *File) Validate() error {
 	if len(f.Models) == 0 {
