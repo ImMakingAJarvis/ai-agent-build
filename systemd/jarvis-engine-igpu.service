@@ -13,7 +13,7 @@ ExecStart=/opt/jarvis-igpu/bin/llama-server \
     --port 11435 \
     -dev Vulkan1 \
     -ngl 99 \
-    --ctx-size 8192 \
+    --ctx-size 32768 \
     --jinja \
     --log-disable
 Restart=always

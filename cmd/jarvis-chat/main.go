@@ -45,6 +45,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photomind"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
 
@@ -70,6 +71,9 @@ var (
 	busyTimeout  = 20 * time.Second  // send busy notice after this long
 	maxTimeout   = 4 * time.Minute   // give up after this long
 	photoTimeout = 3 * time.Minute   // one photo generation
+	// photoCheckTimeout covers the photocheck loop: two generations plus
+	// two thinking-mind calls.
+	photoCheckTimeout = 6 * time.Minute
 )
 
 // sender abstracts the Discord operations handleMessage needs,
@@ -156,6 +160,11 @@ func main() {
 	// ART_URL is set by docker-compose (http://art:8120).
 	photoGen := art.New()
 
+	// Photo requests go through the thinking mind first: it expands the
+	// owner's casual words into a detailed prompt for the image model
+	// (and, for !photocheck, iterates on it).
+	photoSvc := photomind.New(ollamaClient, modelName, photoGen)
+
 	// Conversation history: alternating user/assistant turns.
 	var history []string // [user1, assistant1, user2, assistant2, ...]
 
@@ -236,10 +245,11 @@ func main() {
 					return
 				}
 
-				// !photo <prompt> generates a photo with the local art
-				// model and sends it back as an attachment.
-				if prompt, ok := cutPhoto(content); ok {
-					handlePhoto(d, photoGen, prompt)
+				// !photo / !photoassist / !photocheck generate a photo
+				// with the local art model (prompt expanded by the
+				// thinking mind) and send it back as an attachment.
+				if mode, prompt, ok := cutPhotoCmd(content); ok {
+					handlePhoto(d, photoSvc, mode, prompt)
 					return
 				}
 
@@ -512,16 +522,27 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, mem *mem
 	}
 }
 
-// handlePhoto runs one photo generation for the !photo command and
-// sends the result to the owner as an attachment. A 1024x1024 image
-// takes tens of seconds; the typing indicator stays up for the whole
-// generation.
-func handlePhoto(d photoSender, gen *art.Client, prompt string) {
+// handlePhoto runs a photo request through the thinking mind and then
+// the art service, and sends the result to the owner as an attachment.
+// mode selects the flavor: "" (plain) expands the prompt with the mind,
+// "assist" also sends the mind's full prompt as a chat message, and
+// "check" iterates draft -> generate -> critique -> improve -> generate.
+// When the brain is unreachable it falls back to the owner's raw words.
+// A 1024x1024 image takes tens of seconds; the typing indicator stays
+// up for the whole run.
+func handlePhoto(d photoSender, svc *photomind.Service, mode, prompt string) {
 	prompt = strings.TrimSpace(prompt)
+	cmdName := "!photo"
+	switch mode {
+	case "assist":
+		cmdName = "!photoassist"
+	case "check":
+		cmdName = "!photocheck"
+	}
 	if prompt == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		_ = d.Notify(ctx, "Need a prompt after !photo — e.g. !photo a photo of a red panda in fresh snow")
+		_ = d.Notify(ctx, "Need a prompt after "+cmdName+" — e.g. "+cmdName+" a photo of a red panda in fresh snow")
 		return
 	}
 
@@ -529,44 +550,107 @@ func handlePhoto(d photoSender, gen *art.Client, prompt string) {
 	defer typingCancel()
 	go typingLoop(typingCtx, d)
 
-	genCtx, genCancel := context.WithTimeout(context.Background(), photoTimeout)
-	img, err := gen.Generate(genCtx, prompt)
+	timeout := photoTimeout
+	if mode == "check" {
+		timeout = photoCheckTimeout
+	}
+	genCtx, genCancel := context.WithTimeout(context.Background(), timeout)
+
+	var (
+		img        *art.Image
+		usedPrompt = prompt
+		note       string
+		err        error
+	)
+
+	switch {
+	case !svc.Healthy():
+		note = "thinking mind is down — I used your words as-is"
+		img, err = svc.Art.Generate(genCtx, prompt)
+	case mode == "assist":
+		usedPrompt, err = svc.Assist(genCtx, prompt)
+		if err == nil {
+			_ = d.Notify(genCtx, "Here's the prompt I came up with:\n\n"+usedPrompt)
+			img, err = svc.Art.Generate(genCtx, usedPrompt)
+		}
+	case mode == "check":
+		var res *photomind.CheckResult
+		res, err = svc.Check(genCtx, prompt)
+		if res != nil {
+			img, usedPrompt = res.Image, res.Prompt
+			if len(res.Drafts) > 1 {
+				note = "photocheck: 2 passes — critiqued the first prompt, improved it, re-generated"
+			}
+		}
+	default:
+		img, usedPrompt, err = svc.GenerateAssisted(genCtx, prompt)
+	}
 	genCancel()
 	typingCancel()
+
 	if err != nil {
-		log.Printf("jarvis-chat: photo: %v", err)
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_ = d.Notify(ctx, photoErrorMessage(err))
-		return
+		if img == nil {
+			log.Printf("jarvis-chat: photo: %v", err)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_ = d.Notify(ctx, photoErrorMessage(err))
+			return
+		}
+		// A check loop that died after the first pass: show what we have.
+		note += " — " + photoErrorMessage(err)
 	}
 
-	if len(prompt) > 300 {
-		prompt = prompt[:300] + "…"
-	}
-	caption := fmt.Sprintf("**%s**\nseed %d · %dx%d · %.0fs\nGallery: %s",
-		prompt, img.Seed, img.Width, img.Height, img.Seconds, art.GalleryURL())
-
-	// Fresh context: the generation ate most of photoTimeout already.
+	// Fresh context: the generation ate most of the timeout already.
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer sendCancel()
+	caption := photoCaption(img, usedPrompt, note)
 	if err := d.SendImage(sendCtx, caption, img.Path); err != nil {
 		log.Printf("jarvis-chat: photo send: %v", err)
 		_ = d.Notify(sendCtx, "The photo is done ("+img.Path+") but I could not send the file: "+err.Error())
 	}
 }
 
-// cutPhoto recognizes the "!photo <prompt>" command. A word boundary is
-// required, so "!photograph a sunset" stays a chat message.
-func cutPhoto(content string) (prompt string, ok bool) {
-	rest := strings.TrimPrefix(content, "!photo")
-	if rest == content {
-		return "", false
+// photoCaption builds the caption under a generated photo: an optional
+// note (brain fallback / check-loop outcome), the prompt that was
+// actually sent to the image model (truncated; the full prompt is in
+// the gallery), the generation stats, and the gallery link.
+func photoCaption(img *art.Image, usedPrompt, note string) string {
+	if len(usedPrompt) > 600 {
+		usedPrompt = usedPrompt[:600] + "…"
 	}
-	if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
-		return "", false
+	caption := ""
+	if note != "" {
+		caption = note + "\n"
 	}
-	return strings.TrimSpace(rest), true
+	caption += "**" + usedPrompt + "**\n" +
+		fmt.Sprintf("seed %d · %dx%d · %.0fs\n", img.Seed, img.Width, img.Height, img.Seconds) +
+		"Gallery: " + art.GalleryURL()
+	return caption
+}
+
+// cutPhotoCmd recognizes the photo commands. A word boundary is
+// required, so "!photograph a sunset" stays a chat message. mode is ""
+// for plain !photo, "assist" for !photoassist, "check" for !photocheck.
+// The longer commands are tried first.
+func cutPhotoCmd(content string) (mode, prompt string, ok bool) {
+	for _, c := range []struct {
+		cmd  string
+		mode string
+	}{
+		{"!photocheck", "check"},
+		{"!photoassist", "assist"},
+		{"!photo", ""},
+	} {
+		rest := strings.TrimPrefix(content, c.cmd)
+		if rest == content {
+			continue
+		}
+		if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+			continue
+		}
+		return c.mode, strings.TrimSpace(rest), true
+	}
+	return "", "", false
 }
 
 // photoErrorMessage turns a generation failure into something the owner

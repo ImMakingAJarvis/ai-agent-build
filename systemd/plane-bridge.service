@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis Plane Bridge (Plane webhooks → agent job queue)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+EnvironmentFile=/home/agent/.config/jarvis/agent.env
+ExecStart=/usr/local/bin/plane-bridge
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=plane-bridge
+
+[Install]
+WantedBy=multi-user.target

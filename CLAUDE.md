@@ -58,3 +58,44 @@ chat-1793163063-9121). When it ships, update this section: list the
 task's comments in the read step above, and add that the worker may add
 comments to a kanban task when it has questions while building — post
 the question as a comment rather than blocking the round on it.
+
+## Work board (Plane)
+
+The work board is Plane at `http://111.1.2.222:8088` (workspace `jarvis`).
+**Board standard (2026-10-31, Nathan's call): one project per epic.**
+Each epic is its own Plane project with a short identifier prefix
+(currently E2E, TST, NBR, MOE, QDB, VCH, T2I, WBD — see
+`docs/work-board/NOTES.md`); the epic is the project's epic work item
+(label `epic`) and its tasks live in the same project, parented to it.
+`AAB` (ai_agent_build) is the legacy single project — no new work goes
+there.
+
+- New epic = `plane-epic create "<title>" --identifier XXX
+  [--description]`. It scaffolds the project (standard states, epic
+  label, workspace members as editors), creates the epic item, adds the
+  identifier to `PLANE_PROJECTS` in `~/.config/jarvis/agent.env` and
+  restarts `plane-bridge`. That is the only supported way to add a
+  project — do not create projects by hand or API.
+- Item refs use the prefix: `T2I-3` selects its own project
+  (case-insensitive), so `jarvis-board comment T2I-3 "..."` needs no
+  `--project`. UUIDs and bare sequences fall back to `--project` →
+  `$PLANE_PROJECT` → `AAB`.
+- When a job maps to a Plane item (a prefixed id in the job title, or
+  `board`/`item` fields in the job's state), post a model-prefixed
+  comment whenever the agent touches that item:
+
+      jarvis-board comment --model <model> T2I-3 "<what changed, why>"
+
+  The model is `$JARVIS_MODEL` from the round env (the CLI defaults to
+  "jarvis-brain"). Comment convention: `<model>: <what and why>`.
+- Discord status messages carry the board link:
+
+      jarvis-discord notify --item T2I-3 "<status>"
+- Other subcommands: `jarvis-board item <ref>` (one-line summary with
+  state), `jarvis-board link <ref>` (URL only). Flags go BEFORE the
+  positional args.
+- Link format: `<PLANE_URL>/jarvis/browse/<PREFIX-<n>>` (browse works
+  for any project in the workspace).
+- `plane-bridge` watches every project in `PLANE_PROJECTS` (workspace
+  webhooks, gated per project). Do not move item states from ad-hoc
+  rounds — state writeback is owned by the C1 phase of the plan.

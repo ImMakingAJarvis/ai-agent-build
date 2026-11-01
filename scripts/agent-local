@@ -14,6 +14,10 @@
 #   OLLAMA_URL         default http://localhost:11434
 #   ENGINE_URL         when set, overrides OLLAMA_URL (llama.cpp engine)
 #
+# LOCAL_MODEL, ENGINE_URL and LOCAL_CONTEXT_TOKENS may also be pre-set in
+# the environment — the igpu driver does this to point a round at the
+# small iGPU model. Pre-set values win over local.env.
+#
 # When the coder differs from the brain, a "coder" subagent is defined
 # that runs on it. Claude Code subagents pick models by tier alias, so the
 # sonnet/opus tiers are mapped to the coder and haiku (quick background
@@ -23,8 +27,15 @@ set -euo pipefail
 
 CONF="${JARVIS_CONF:-$HOME/.config/jarvis}"
 [[ -r "$CONF/local.env" ]] || { echo "agent-local: $CONF/local.env not found (stage 2 writes it)" >&2; exit 1; }
+# A driver (e.g. igpu) can pre-set these; they win over local.env.
+_ovr_local_model="${LOCAL_MODEL-}"
+_ovr_engine_url="${ENGINE_URL-}"
+_ovr_ctx_tokens="${LOCAL_CONTEXT_TOKENS-}"
 # shellcheck disable=SC1091
 source "$CONF/local.env"
+[[ -n "$_ovr_local_model" ]] && LOCAL_MODEL="$_ovr_local_model"
+[[ -n "$_ovr_engine_url" ]] && ENGINE_URL="$_ovr_engine_url"
+[[ -n "$_ovr_ctx_tokens" ]] && LOCAL_CONTEXT_TOKENS="$_ovr_ctx_tokens"
 [[ -n "${LOCAL_MODEL:-}" ]] || { echo "agent-local: LOCAL_MODEL not set in $CONF/local.env" >&2; exit 1; }
 CODER="${LOCAL_CODER_MODEL:-$LOCAL_MODEL}"
 

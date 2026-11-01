@@ -166,6 +166,107 @@ func TestDefaultCommandMapsEffort(t *testing.T) {
 	}
 }
 
+// TestDefaultCommandSetsJarvisModel is the P6 hook: every round's env
+// carries JARVIS_MODEL with the model driving it, so the agent can prefix
+// its board comments with the model name. Stale inherited values are
+// replaced, not duplicated.
+func TestDefaultCommandSetsJarvisModel(t *testing.T) {
+	t.Setenv("JARVIS_MODEL", "stale-model")
+	t.Setenv("LOCAL_MODEL", "")
+
+	cmd := defaultCommand("local", "do it", "off")
+	n := 0
+	for _, kv := range cmd.Env {
+		if v, ok := strings.CutPrefix(kv, "JARVIS_MODEL="); ok {
+			n++
+			if v != "jarvis-brain" {
+				t.Errorf("JARVIS_MODEL = %q, want jarvis-brain", v)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("JARVIS_MODEL appears %d times in env, want 1", n)
+	}
+
+	if got := ModelFor("sonnet"); got != "sonnet" {
+		t.Errorf("ModelFor(sonnet) = %q, want sonnet", got)
+	}
+	cmd = defaultCommand("sonnet", "do it", "off")
+	if !strings.Contains(strings.Join(cmd.Env, "\n"), "JARVIS_MODEL=sonnet") {
+		t.Error("sonnet driver env lacks JARVIS_MODEL=sonnet")
+	}
+}
+
+func TestModelForIgpu(t *testing.T) {
+	t.Setenv("LOCAL_MODEL", "jarvis-brain")
+	if got := ModelFor("igpu"); got != "jarvis-igpu" {
+		t.Errorf("ModelFor(igpu) = %q, want jarvis-igpu", got)
+	}
+	t.Setenv("IGPU_MODEL", "qwen3-30b-a3b")
+	if got := ModelFor("igpu"); got != "qwen3-30b-a3b" {
+		t.Errorf("ModelFor(igpu) with IGPU_MODEL = %q", got)
+	}
+	// local/sonnet are unaffected by the igpu env.
+	t.Setenv("IGPU_URL", "http://elsewhere:1")
+	t.Setenv("IGPU_CONTEXT_TOKENS", "1")
+	if got := ModelFor("local"); got != "jarvis-brain" {
+		t.Errorf("ModelFor(local) = %q, want jarvis-brain", got)
+	}
+}
+
+// TestDefaultCommandIgpuDriver is the acceptance test for the iGPU
+// driver: the round runs through agent-local (not the API claude binary)
+// pointed at the iGPU engine, with a context cap that fits the engine's
+// --ctx-size, and with stale inherited values for the overridden vars
+// removed so the child sees each exactly once.
+func TestDefaultCommandIgpuDriver(t *testing.T) {
+	// A stale brain URL must not leak into the igpu command.
+	t.Setenv("ENGINE_URL", "http://stale:11434")
+	t.Setenv("LOCAL_MODEL", "jarvis-brain")
+	t.Setenv("LOCAL_CONTEXT_TOKENS", "131072")
+	cmd := defaultCommand("igpu", "do it", "off")
+	if cmd.Args[0] != "agent-local" {
+		t.Fatalf("igpu driver must run agent-local, got %q", cmd.Args[0])
+	}
+	env := strings.Join(cmd.Env, "\n")
+	for _, want := range []string{
+		"ENGINE_URL=http://localhost:11435",
+		"LOCAL_MODEL=jarvis-igpu",
+		"LOCAL_CONTEXT_TOKENS=32768",
+		"CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384",
+	} {
+		if !strings.Contains(env, "\n"+want+"\n") && !strings.HasPrefix(env, want+"\n") && !strings.HasSuffix(env, "\n"+want) {
+			t.Errorf("env lacks %q in %s", want, env)
+		}
+	}
+	for _, stale := range []string{"http://stale:11434", "LOCAL_MODEL=jarvis-brain", "LOCAL_CONTEXT_TOKENS=131072"} {
+		if strings.Contains(env, stale) {
+			t.Errorf("stale value %q leaked into env", stale)
+		}
+	}
+	// Each overridden key appears exactly once.
+	for _, key := range []string{"ENGINE_URL", "LOCAL_MODEL", "LOCAL_CONTEXT_TOKENS"} {
+		n := 0
+		for _, kv := range cmd.Env {
+			if strings.HasPrefix(kv, key+"=") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s appears %d times in env, want 1", key, n)
+		}
+	}
+	// Overrides are honoured.
+	t.Setenv("IGPU_URL", "http://deep:11436")
+	t.Setenv("IGPU_CONTEXT_TOKENS", "65536")
+	cmd = defaultCommand("igpu", "do it", "off")
+	env = strings.Join(cmd.Env, "\n")
+	if !strings.Contains(env, "ENGINE_URL=http://deep:11436") ||
+		!strings.Contains(env, "LOCAL_CONTEXT_TOKENS=65536") {
+		t.Errorf("IGPU_URL/IGPU_CONTEXT_TOKENS not honoured:\n%s", env)
+	}
+}
+
 func TestPromptHasRulesJobAndNote(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir()) // don't drain the real inbox
 	r := &Runner{Brief: func(string) string { return "RULES" }}

@@ -12,6 +12,7 @@ for rollback.
 |---|---|---|---|---|
 | `engine` | The brain: llama.cpp `llama-server` serving the qwen3.8 "jarvis-brain" GGUF, 128k ctx, quantized KV cache, 2 parallel slots | 11434 (127.0.0.1) | `jarvis-engine` (nvidia runtime) | model + templates: `/opt/jarvis-engine`; slots: `/var/lib/jarvis/slots` |
 | `art` | Photo generation: Z-Image-Turbo 6B (diffusers, sequential CPU offload) behind a small FastAPI app; `jarvis-art generate "..."`; Discord `!photo <prompt>` sends the result back as an attachment; photo gallery site at `http://111.1.2.27:8120` | 8120 (all interfaces — the gallery is meant to be opened from the LAN) | `jarvis-art` (nvidia runtime) | code: `/opt/jarvis-art` (pinned deploy point); model: `/var/lib/jarvis/art/model`; images: `/var/lib/jarvis/art/out` |
+| `bench` | T2I model benchmark (picking the next art model): candidate models × fixed prompt set, blind swipe voting, per-model metrics; skeleton only for now (no generation yet), API at `/health` + `/api/status` | 8121 (127.0.0.1) | `jarvis-bench` (nvidia runtime, reuses the `jarvis/art:local` image) | code: `/opt/jarvis-bench` (pinned deploy point, `scripts/install_bench.sh`); db: `~/.local/share/jarvis/bench/bench.db`; images/weights: `/var/lib/jarvis/bench/{imgs,models}`; kill switch: `touch /var/lib/jarvis/bench.disabled` (idles, API 503, self re-enables on rm) |
 | `chat` | Discord bot: replies to owner DMs using the local brain; bridges voice wake events to jobs | — (Discord WS) | `jarvis-chat` | `.config/jarvis` (driver, prompts, `discord.env`), `.local/share/jarvis` (agentjob store) |
 | `dashboard` | Web dashboard: agent jobs, work queue, system state, PWA | 8080 | `jarvis-dashboard` | job store via `.local/share/jarvis` |
 | `ha` | Publishes Jarvis headline sensors to the Home Assistant box via MQTT (auto-discovery) | — (MQTT out) | `jarvis-ha` | job store + `.config/jarvis/ha.env` |
@@ -132,6 +133,7 @@ were left running: just re-run the script).
 | `/opt/jarvis-voice` | voice service code + `auth-off.env` | deploy a branch there + `DEPLOYED_FROM` marker (see the drop-in history in `jarvis-voice.service.d/deploy.conf`) |
 | `/opt/jarvis-art` | art service code (`art_service.py`) | `scripts/install_art.sh` (also downloads the model to `/var/lib/jarvis/art/model`) |
 | `/opt/jarvis-memory` | memory service script | copy from the repo/branch; update `DEPLOYED_FROM` |
+| `/opt/jarvis-bench` | t2i bench service code (`app.py`, `config.py`, `schema.sql`, `*.yaml`) | `scripts/install_bench.sh` (no model download; weights land in `/var/lib/jarvis/bench/models` in a later job) |
 
 Env/secrets stay on the host under `/home/agent/.config/jarvis/`
 (`agent.env`, `local.env`, `ha.env`, `discord.env`) and are bind-mounted —

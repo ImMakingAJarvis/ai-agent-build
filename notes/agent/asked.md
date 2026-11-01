@@ -33,3 +33,21 @@
 - 2026-10-29T04:53Z Nathan asked for an output of running containers + currently loaded models; he suspected a qwen2.5 chatbot on the iGPU — confirmed: Qwen2.5-3B Q4_K_M on :11435 is the jarvis-helper model
 - 2026-10-29T07:31Z Nathan (job chat-1793252684-1127): open PRs have merge conflicts — check and fix all open PRs' mergeability
 - 2026-10-29T07:59Z Nathan asked to benchmark the Qwen2.5-3B helper model on the CPU against the iGPU (the CPU-offload trade-off)
+- 2026-10-29T18:22Z Two helpers (CPU + iGPU)? other models for the box? — answered: deep helper = 30B-A3B on iGPU on-demand, CPU stays free (job chat-1793249102-d283)
+- 2026-10-29T19:51Z Photo workflow: wanted the thinking mind to write much better image-generator prompts from casual requests, with special modes — photoassist for refining prompts with context, photocheck for iterating with the generator (job chat-1793252974-720f)
+- 2026-10-29T21:11Z Nathan: schedule all of the kanban tasks for MOE benchmarking — the four vram-cache points of epic f4cf6031 (100/150/200/250 MB free VRAM, Qwen3.8-Flash-Next on FreeToken)
+- 2026-10-29T22:29Z Nathan wants the smaller iGPU model as an option for running rounds/jobs (e.g. MOE benchmarks) that need the 4090
+- 2026-10-30T00:33Z Nathan: which image gen model is active and does it support reference images (img2img)? — answer: Z-Image-Turbo, t2i only (job chat-1793307525-a7df)
+- 2026-10-30T01:59Z research all t2i models we could run (even off-VRAM) with blurbs + time estimates; photo gen config check (Z-Image-Turbo, t2i only)
+- 2026-10-30T02:48Z Nathan wants an image-generator benchmark to pick the new art model: 20 prompts (incl. reference-image, img2img, subject-consistency x4), blind Tinder-swipe voting site, full per-image metrics (time, it/s, VRAM, power), avg/best/worst per model, fast UI
+- 2026-10-30T03:13Z Nathan re-sent the image-generator benchmarker design+plan ask (job chat-1793327656-30ec) — duplicate of the 02:48Z plan round; closed with evidence, no rework
+- 2026-10-30T03:44Z Nathan (2026-10-29): t2i model benchmark plan — pick the new art model via 20 fixed prompts, blind Tinder-swipe voting, per-model metrics (plan job plan-jarvis-model-downloader-1793259146)
+- 2026-10-30T07:07Z Grafana dashboard metrics were down (job chat-1793338721-45ee, 2026-10-30) — panels all showed no data
+- 2026-10-30T23:28Z Nathan uploaded the Plane work-board plan (2026-10-27): self-hosted Plane CE on the NAS + plane-bridge on the AI box + 'plan:<model>' label-driven planning (Plan/Decompose/Review, approve in Plane, per-location gpu/cpu/igpu execution, one PR per epic); P1 NAS deployment is his manual step
+- 2026-10-31T10:41Z 2026-10-31 Nathan provided the Plane key: first pointed at a NAS folder (unreachable - no NAS creds on AI box), then dropped /home/agent/planekey.txt in the agent home dir; env wiring (PLANE_URL/PLANE_API_KEY) is pending chat job chat-1793441273-bca6
+- 2026-10-31T18:47Z Nathan: add Plane URL+key to the daemon env config (key handed via planekey.txt in the AI-box home dir, NAS folder itself unreachable); keep the key out of the repo and never print it
+- 2026-11-01T02:03Z Nathan asked to audit last-24h camera logs and flag any process unexpectedly touching camera devices or producing audio artifacts (2026-10-31)
+- 2026-11-01T02:24Z Nathan: hearing 'bonking noises' on a camera (10-31 22:13PDT) — asked for backdoor UniFi camera diagnosis incl. reconnect loops, audio track issues, processes writing to the stream
+- 2026-11-01T03:09Z P5 decision (job plan-epic-planner-plan-with-m-1793259204-5): migrate open items only to Plane, not history; queue a follow-up if Nathan wants history. Open-item definition: every epic counts as open (old board has no closed state); task open = status != done.
+- 2026-11-01T04:40Z P6 of the work-board plan: agent identity on the Plane board — model-prefixed comments on touched items, Discord status messages carry the board link.
+- 2026-11-01T06:58Z one project per epic — Nathan's decision 2026-10-31, now the board standard (reorganize everything, put it in CLAUDE.md)

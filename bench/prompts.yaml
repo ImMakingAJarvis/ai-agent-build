@@ -1,0 +1,23 @@
+# Fixed prompt set for the bench (plan-jarvis-model-downloader-1793259146).
+#
+# SAMPLE entries so the loader is testable — the real 20-prompt set (incl.
+# reference-image, img2img and subject-consistency tests) lands in the
+# "20-prompt set + input image assets" job of this plan.
+#
+# One entry per prompt. id is the upsert key and the id used in the
+# generations table. caps: capabilities the model must have; images: input
+# image file names (for img2img/ref prompts), relative to bench/imgs.
+prompts:
+  - id: p01-portrait
+    title: Portrait
+    category: t2i
+    prompt_text: >-
+      A portrait of an elderly lighthouse keeper at dusk, weathered face,
+      oil painting style
+    caps: [t2i]
+  - id: p02-landscape
+    title: Landscape
+    category: t2i
+    prompt_text: >-
+      A foggy pine forest at dawn, wide angle, soft light, photographic
+    caps: [t2i]

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photomind"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
 
@@ -568,36 +570,83 @@ func TestHandleMessage_MemoryContext(t *testing.T) {
 	}
 }
 
-// fakeArtServer emulates the art service's /generate endpoint.
-func fakeArtServer(t *testing.T, status int, body string) *httptest.Server {
+// fakeArtServer emulates the art service's /generate endpoint. When
+// prompts is non-nil it records the prompt of every request, in order.
+func fakeArtServer(t *testing.T, status int, body string, prompts *[]string) *httptest.Server {
 	t.Helper()
+	var mu sync.Mutex
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/generate" || r.Method != http.MethodPost {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
+		}
+		if prompts != nil {
+			b, _ := io.ReadAll(r.Body)
+			var req struct {
+				Prompt string `json:"prompt"`
+			}
+			_ = json.Unmarshal(b, &req)
+			mu.Lock()
+			*prompts = append(*prompts, req.Prompt)
+			mu.Unlock()
 		}
 		w.WriteHeader(status)
 		fmt.Fprint(w, body)
 	}))
 }
 
-func TestCutPhoto(t *testing.T) {
+// fakePhotoBrain is a scripted thinking mind for the photo tests.
+type fakePhotoBrain struct {
+	replies []string
+	err     error
+	healthy bool
+	calls   int
+}
+
+func (f *fakePhotoBrain) Chat(_ string, _ []models.ChatMessage) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	i := f.calls
+	f.calls++
+	if i >= len(f.replies) {
+		return "", errors.New("fakePhotoBrain: out of scripted replies")
+	}
+	return f.replies[i], nil
+}
+
+func (f *fakePhotoBrain) Healthcheck() bool { return f.healthy }
+
+// photoTestService wires the fake brain to the fake art service.
+func photoTestService(t *testing.T, brain *fakePhotoBrain, artURL string) *photomind.Service {
+	t.Helper()
+	return photomind.New(brain, "test-model", art.NewWithURL(artURL))
+}
+
+func TestCutPhotoCmd(t *testing.T) {
 	cases := []struct {
 		in   string
+		mode string
 		want string
 		ok   bool
 	}{
-		{"!photo a red panda in snow", "a red panda in snow", true},
-		{"!photo    spaced out  ", "spaced out", true},
-		{"!photo", "", true},
-		{"!photograph a sunset", "", false},
-		{"hello !photo x", "", false},
-		{"!build something", "", false},
+		{"!photo a red panda in snow", "", "a red panda in snow", true},
+		{"!photo    spaced out  ", "", "spaced out", true},
+		{"!photo", "", "", true},
+		{"!photoassist a red panda", "assist", "a red panda", true},
+		{"!photoassist", "assist", "", true},
+		{"!photocheck a red panda", "check", "a red panda", true},
+		{"!photocheck", "check", "", true},
+		{"!photograph a sunset", "", "", false},
+		{"!photochecker a sunset", "", "", false},
+		{"hello !photo x", "", "", false},
+		{"!build something", "", "", false},
 	}
 	for _, c := range cases {
-		got, ok := cutPhoto(c.in)
-		if ok != c.ok || (ok && got != c.want) {
-			t.Errorf("cutPhoto(%q) = %q, %v; want %q, %v", c.in, got, ok, c.want, c.ok)
+		mode, got, ok := cutPhotoCmd(c.in)
+		if ok != c.ok || (ok && (got != c.want || mode != c.mode)) {
+			t.Errorf("cutPhotoCmd(%q) = %q, %q, %v; want mode %q, prompt %q, ok %v",
+				c.in, mode, got, ok, c.mode, c.want, c.ok)
 		}
 	}
 }
@@ -608,12 +657,15 @@ func TestHandlePhotoSendsImage(t *testing.T) {
 	if err := os.WriteFile(png, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	expanded := "A photo of a red panda sitting in fresh snow at dawn, soft blue light."
+	var prompts []string
 	srv := fakeArtServer(t, http.StatusOK,
-		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":42,"steps":9,"seconds":25.3}`, png))
+		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":42,"steps":9,"seconds":25.3}`, png), &prompts)
 	defer srv.Close()
 
 	d := &testDiscord{}
-	handlePhoto(d, art.NewWithURL(srv.URL), "a red panda in fresh snow")
+	brain := &fakePhotoBrain{replies: []string{expanded}, healthy: true}
+	handlePhoto(d, photoTestService(t, brain, srv.URL), "", "a red panda in fresh snow")
 
 	ph, ok := d.lastPhoto()
 	if !ok {
@@ -622,7 +674,12 @@ func TestHandlePhotoSendsImage(t *testing.T) {
 	if ph.path != png {
 		t.Errorf("sent path %q, want %q", ph.path, png)
 	}
-	for _, want := range []string{"a red panda in fresh snow", "seed 42", "1024x1024", "25s"} {
+	// The art service must receive the thinking mind's expanded prompt,
+	// not the owner's raw words.
+	if len(prompts) != 1 || prompts[0] != expanded {
+		t.Errorf("art service got %v, want the expanded prompt", prompts)
+	}
+	for _, want := range []string{expanded, "seed 42", "1024x1024", "25s"} {
 		if !strings.Contains(ph.text, want) {
 			t.Errorf("caption missing %q:\n%s", want, ph.text)
 		}
@@ -632,12 +689,127 @@ func TestHandlePhotoSendsImage(t *testing.T) {
 	}
 }
 
-func TestHandlePhotoBusy(t *testing.T) {
-	srv := fakeArtServer(t, http.StatusConflict, `{"detail":"a generation is already running"}`)
+func TestHandlePhotoBrainDown(t *testing.T) {
+	png := filepath.Join(t.TempDir(), "x.png")
+	if err := os.WriteFile(png, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var prompts []string
+	srv := fakeArtServer(t, http.StatusOK,
+		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":7,"steps":9,"seconds":10}`, png), &prompts)
 	defer srv.Close()
 
 	d := &testDiscord{}
-	handlePhoto(d, art.NewWithURL(srv.URL), "a red panda")
+	brain := &fakePhotoBrain{replies: []string{"MUST NOT BE USED"}, healthy: false}
+	handlePhoto(d, photoTestService(t, brain, srv.URL), "", "a red panda")
+
+	ph, ok := d.lastPhoto()
+	if !ok {
+		t.Fatalf("no image sent; notifies: %v", d.notifyMsgs)
+	}
+	if len(prompts) != 1 || prompts[0] != "a red panda" {
+		t.Errorf("art service got %v, want the raw prompt", prompts)
+	}
+	if !strings.Contains(ph.text, "thinking mind is down") {
+		t.Errorf("caption missing the fallback note:\n%s", ph.text)
+	}
+	if brain.calls != 0 {
+		t.Error("the brain should not have been called while down")
+	}
+}
+
+func TestHandlePhotoAssistSendsPromptMessage(t *testing.T) {
+	png := filepath.Join(t.TempDir(), "x.png")
+	if err := os.WriteFile(png, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	expanded := "A photo of a red panda in fresh snow, dawn light, 85mm lens."
+	srv := fakeArtServer(t, http.StatusOK,
+		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":42,"steps":9,"seconds":1}`, png), nil)
+	defer srv.Close()
+
+	d := &testDiscord{}
+	brain := &fakePhotoBrain{replies: []string{expanded}, healthy: true}
+	handlePhoto(d, photoTestService(t, brain, srv.URL), "assist", "red panda in snow")
+
+	// The full prompt goes out as a chat message before the image, so
+	// the owner can read and reuse it.
+	if got := d.lastNotify(); !strings.Contains(got, expanded) {
+		t.Errorf("prompt message = %q", got)
+	}
+	ph, ok := d.lastPhoto()
+	if !ok {
+		t.Fatalf("no image sent; notifies: %v", d.notifyMsgs)
+	}
+	if !strings.Contains(ph.text, expanded) {
+		t.Errorf("caption missing the prompt:\n%s", ph.text)
+	}
+}
+
+func TestHandlePhotoCheckIterates(t *testing.T) {
+	png := filepath.Join(t.TempDir(), "x.png")
+	if err := os.WriteFile(png, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p1 := "A photo of a red panda."
+	p2 := "A photo of a red panda in fresh snow at dawn, close-up, 85mm."
+	var prompts []string
+	srv := fakeArtServer(t, http.StatusOK,
+		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":42,"steps":9,"seconds":1}`, png), &prompts)
+	defer srv.Close()
+
+	d := &testDiscord{}
+	brain := &fakePhotoBrain{replies: []string{p1, p2}, healthy: true}
+	handlePhoto(d, photoTestService(t, brain, srv.URL), "check", "red panda in snow")
+
+	ph, ok := d.lastPhoto()
+	if !ok {
+		t.Fatalf("no image sent; notifies: %v", d.notifyMsgs)
+	}
+	if len(prompts) != 2 || prompts[0] != p1 || prompts[1] != p2 {
+		t.Errorf("art service got %v, want the draft then the improved prompt", prompts)
+	}
+	for _, want := range []string{"2 passes", p2} {
+		if !strings.Contains(ph.text, want) {
+			t.Errorf("caption missing %q:\n%s", want, ph.text)
+		}
+	}
+}
+
+func TestHandlePhotoCheckSinglePassWhenUnchanged(t *testing.T) {
+	png := filepath.Join(t.TempDir(), "x.png")
+	if err := os.WriteFile(png, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := "A photo of a red panda in fresh snow at dawn."
+	var prompts []string
+	srv := fakeArtServer(t, http.StatusOK,
+		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":42,"steps":9,"seconds":1}`, png), &prompts)
+	defer srv.Close()
+
+	d := &testDiscord{}
+	brain := &fakePhotoBrain{replies: []string{p, p}, healthy: true} // critique finds nothing to fix
+	handlePhoto(d, photoTestService(t, brain, srv.URL), "check", "red panda in snow")
+
+	if len(prompts) != 1 {
+		t.Errorf("expected 1 generation, got %d: %v", len(prompts), prompts)
+	}
+	ph, ok := d.lastPhoto()
+	if !ok {
+		t.Fatalf("no image sent; notifies: %v", d.notifyMsgs)
+	}
+	if strings.Contains(ph.text, "2 passes") {
+		t.Errorf("caption should not claim 2 passes:\n%s", ph.text)
+	}
+}
+
+func TestHandlePhotoBusy(t *testing.T) {
+	srv := fakeArtServer(t, http.StatusConflict, `{"detail":"a generation is already running"}`, nil)
+	defer srv.Close()
+
+	d := &testDiscord{}
+	brain := &fakePhotoBrain{replies: []string{"expanded"}, healthy: true}
+	handlePhoto(d, photoTestService(t, brain, srv.URL), "", "a red panda")
 	if got := d.lastNotify(); !strings.Contains(got, "already generating") {
 		t.Errorf("busy reply = %q", got)
 	}
@@ -648,7 +820,8 @@ func TestHandlePhotoBusy(t *testing.T) {
 
 func TestHandlePhotoUnavailable(t *testing.T) {
 	d := &testDiscord{}
-	handlePhoto(d, art.NewWithURL("http://127.0.0.1:1"), "a red panda")
+	brain := &fakePhotoBrain{replies: []string{"expanded"}, healthy: true}
+	handlePhoto(d, photoTestService(t, brain, "http://127.0.0.1:1"), "", "a red panda")
 	if got := d.lastNotify(); got == "" || strings.Contains(got, "seed") {
 		t.Errorf("unavailable reply = %q", got)
 	}
@@ -656,8 +829,9 @@ func TestHandlePhotoUnavailable(t *testing.T) {
 
 func TestHandlePhotoEmptyPrompt(t *testing.T) {
 	d := &testDiscord{}
-	handlePhoto(d, art.NewWithURL("http://127.0.0.1:1"), "   ")
-	if got := d.lastNotify(); !strings.Contains(got, "Need a prompt") {
+	brain := &fakePhotoBrain{healthy: true}
+	handlePhoto(d, photoTestService(t, brain, "http://127.0.0.1:1"), "assist", "   ")
+	if got := d.lastNotify(); !strings.Contains(got, "Need a prompt after !photoassist") {
 		t.Errorf("empty prompt reply = %q", got)
 	}
 }
@@ -668,11 +842,12 @@ func TestHandlePhotoSendFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := fakeArtServer(t, http.StatusOK,
-		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":42,"steps":9,"seconds":1}`, png))
+		fmt.Sprintf(`{"path":%q,"width":1024,"height":1024,"seed":42,"steps":9,"seconds":1}`, png), nil)
 	defer srv.Close()
 
 	d := &testDiscord{sendImageErr: errors.New("discord down")}
-	handlePhoto(d, art.NewWithURL(srv.URL), "a red panda")
+	brain := &fakePhotoBrain{replies: []string{"expanded"}, healthy: true}
+	handlePhoto(d, photoTestService(t, brain, srv.URL), "", "a red panda")
 	if got := d.lastNotify(); !strings.Contains(got, "could not send") {
 		t.Errorf("send failure reply = %q", got)
 	}

@@ -27,7 +27,8 @@ type Runner struct {
 	Store *Store
 	History *queue.History
 	// Command builds the agent command for a driver, full prompt, and reasoning
-	// effort level. The default is agent-local (local) or claude --model $AGENT_STAGE2_MODEL.
+	// effort level. The default is agent-local (local, and igpu pointed at the
+	// iGPU engine) or claude --model $AGENT_STAGE2_MODEL (sonnet).
 	Command func(driver, prompt, effort string) *exec.Cmd
 	// PRLookup finds a PR URL for a branch when the output has none. The
 	// default asks gh. Return "" if there is none.
@@ -83,10 +84,34 @@ func ModelFor(driver string) string {
 		}
 		return "sonnet"
 	}
+	if driver == "igpu" {
+		if m := os.Getenv("IGPU_MODEL"); m != "" {
+			return m
+		}
+		return "jarvis-igpu"
+	}
 	if m := os.Getenv("LOCAL_MODEL"); m != "" {
 		return m
 	}
 	return "jarvis-brain"
+}
+
+// igpuURL is the base URL of the small always-on iGPU engine.
+func igpuURL() string {
+	if u := os.Getenv("IGPU_URL"); u != "" {
+		return u
+	}
+	return "http://localhost:11435"
+}
+
+// igpuContextTokens is the iGPU engine's context size (its --ctx-size),
+// which caps the Claude Code context window for an iGPU round. Keep it in
+// sync with the jarvis-engine-igpu unit (systemd/jarvis-engine-igpu.service).
+func igpuContextTokens() string {
+	if v := os.Getenv("IGPU_CONTEXT_TOKENS"); v != "" {
+		return v
+	}
+	return "32768"
 }
 
 func defaultCommand(driver, prompt, effort string) *exec.Cmd {
@@ -98,6 +123,28 @@ func defaultCommand(driver, prompt, effort string) *exec.Cmd {
 	}
 	canon := queue.CanonicalEffort(effort, "coding")
 	env := append([]string{}, os.Environ()...)
+	// JARVIS_MODEL tells the round which model is driving it, so the agent
+	// can prefix its board comments with the model name (P6).
+	env = stripEnv(env, "JARVIS_MODEL")
+	env = append(env, "JARVIS_MODEL="+ModelFor(driver))
+	if driver == "igpu" {
+		// The small iGPU model: agent-local pointed at the iGPU engine.
+		// agent-local honours pre-set LOCAL_MODEL/ENGINE_URL/
+		// LOCAL_CONTEXT_TOKENS over its local.env, so strip any stale
+		// copies from the inherited environment first. Max output is
+		// capped well under the iGPU context so one response can never
+		// overflow it.
+		env = stripEnv(env, "ENGINE_URL")
+		env = stripEnv(env, "LOCAL_MODEL")
+		env = stripEnv(env, "LOCAL_CONTEXT_TOKENS")
+		env = stripEnv(env, "CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+		env = append(env,
+			"ENGINE_URL="+igpuURL(),
+			"LOCAL_MODEL="+ModelFor("igpu"),
+			"LOCAL_CONTEXT_TOKENS="+igpuContextTokens(),
+			"CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384",
+		)
+	}
 	if canon == queue.EffortOff {
 		env = append(env, "CLAUDE_CODE_DISABLE_THINKING=1", "MAX_THINKING_TOKENS=0")
 	} else if ce := queue.ClaudeEffort(canon); ce != "" {

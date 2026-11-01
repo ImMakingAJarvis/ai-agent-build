@@ -45,13 +45,20 @@ func run() error {
 	defer conn.Close()
 	log.Printf("worker: connected to RabbitMQ")
 
-	// Ollama client for local model routing.
+	// Engine client for local model routing (Ollama or llama.cpp).
 	ollama := models.NewClient()
 
-	// Idle unloader for the local model.
-	idleUnload := models.NewIdleUnload(ollama, "jarvis-brain")
-	idleUnload.Start()
-	defer idleUnload.Stop()
+	// Idle unloader for the local model. A llama.cpp engine has no unload
+	// API and keeps its model resident — which is what we want for the
+	// dedicated brain container — so the unloader only runs for Ollama.
+	var idleUnload *models.IdleUnload
+	if ollama.IsOllama() {
+		idleUnload = models.NewIdleUnload(ollama, "jarvis-brain")
+		idleUnload.Start()
+		defer idleUnload.Stop()
+	} else {
+		log.Printf("worker: engine is not Ollama — idle-unload disabled (llama.cpp keeps its model resident)")
+	}
 
 	// Stream watcher detects active Sunshine/Steam streams so we can free
 	// GPU memory while a stream is active.
@@ -132,8 +139,9 @@ func run() error {
 		}
 	}()
 
-	// Periodic model info poller: queries Ollama /api/ps every 30 seconds
-	// and updates model info gauges for the Grafana dashboard.
+	// Periodic model info poller: queries the engine's model info every
+	// 30 seconds (Ollama /api/ps or llama.cpp /v1/models) and updates the
+	// model info gauges for the Grafana dashboard.
 	stopModelInfo := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -259,7 +267,9 @@ func run() error {
 			return nil // recorded as failed; ack so it is not redelivered
 		}
 
-		idleUnload.MarkUsed()
+		if idleUnload != nil {
+			idleUnload.MarkUsed()
+		}
 		log.Printf("worker: job %s → %s (prompt: %s)", msg.ID, modelName, prompt)
 		resp, err := ollama.Generate(modelName, prompt)
 		if err != nil {

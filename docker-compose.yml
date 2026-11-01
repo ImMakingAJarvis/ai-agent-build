@@ -121,6 +121,46 @@ services:
       - /opt/jarvis-art:/opt/jarvis-art
       - /var/lib/jarvis/art:/var/lib/jarvis/art
 
+  # ---------------- t2i model benchmark (port 8121) ---------------------
+  # Bench harness for picking the next art model: candidate t2i models
+  # (bench/models.yaml) x a fixed prompt set (bench/prompts.yaml), blind
+  # swipe voting, per-model metrics (plan-jarvis-model-downloader-1793259146).
+  # Skeleton only for now — no generation yet. Reuses the art image
+  # (py3.12 + torch cu128 + diffusers), so it must come up after art has
+  # built jarvis/art:local (the boot unit's `up -d` covers this).
+  # Code: pinned deploy point /opt/jarvis-bench (scripts/install_bench.sh).
+  # DB: ~/.local/share/jarvis/bench/bench.db; images /var/lib/jarvis/bench/imgs,
+  # candidate weights /var/lib/jarvis/bench/models.
+  # Kill switch (the box's standard boot inhibit): touch
+  # /var/lib/jarvis/bench.disabled -> service idles (no GPU, API 503) until
+  # the file is removed (it re-enables itself within ~30 s).
+  bench:
+    image: jarvis/art:local
+    container_name: jarvis-bench
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      HOME: /home/agent
+      BENCH_HOST: "0.0.0.0"
+      BENCH_PORT: "8121"
+    # Loopback-only from the host (like memory on 8101): the bench site is
+    # for local review, not a LAN service.
+    ports:
+      - "127.0.0.1:8121:8121"
+    working_dir: /opt/jarvis-bench
+    command: ["python3", "app.py"]
+    volumes:
+      - /opt/jarvis-bench:/opt/jarvis-bench
+      - /var/lib/jarvis/bench:/var/lib/jarvis/bench
+      - /home/agent/.local/share/jarvis/bench:/home/agent/.local/share/jarvis/bench
+      # Read the standard kill-switch file; the /var/lib/jarvis/bench mount
+      # above stays writable on top of the read-only parent.
+      - /var/lib/jarvis:/var/lib/jarvis:ro
+      # nvidia-smi for /health VRAM without paying the CUDA context cost
+      # (same mount as the ha service).
+      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
+
   # ---------------- chat / dashboard / ha ----------------
   chat:
     build:
