@@ -190,6 +190,31 @@ func (e *APIError) Error() string {
 // IsStatus reports whether the error is an APIError with the given status.
 func (e *APIError) IsStatus(code int) bool { return e.Status == code }
 
+// Rate-limit backoff parameters. Plane on this instance rate-limits
+// bursty v1 traffic (HTTP 429 RATE_LIMIT_EXCEEDED) on reads and writes
+// alike, so do/doList wait out the window and retry — callers need no
+// backoff of their own.
+const (
+	rateLimitPause  = 30 * time.Second
+	maxRateAttempts = 10
+)
+
+// isRateLimited reports whether err is a Plane 429 rate-limit response.
+func isRateLimited(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.IsStatus(http.StatusTooManyRequests)
+}
+
+// waitRateLimit sleeps out one rate-limit window, honouring ctx.
+func waitRateLimit(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(rateLimitPause):
+		return nil
+	}
+}
+
 // Project is a Plane project (a board).
 type Project struct {
 	ID         string `json:"id"`
@@ -226,16 +251,24 @@ type WorkItem struct {
 	Parent          string   `json:"parent"` // parent work item ID, "" if none
 	SequenceID      int      `json:"sequence_id"`
 	CreatedAt       string   `json:"created_at"`
+	// Priority is one of "urgent", "high", "medium", "low", "none"
+	// ("none" when unset).
+	Priority string `json:"priority"`
+	// Assignees holds user IDs (workspace members of the item's project).
+	Assignees []string `json:"assignees"`
 }
 
 // WorkItemCreate is the payload for CreateWorkItem. Parent, when set,
-// makes the item a sub-item of the parent.
+// makes the item a sub-item of the parent. Assignees must be project
+// members.
 type WorkItemCreate struct {
 	Name            string   `json:"name"`
 	DescriptionHTML string   `json:"description_html,omitempty"`
 	Parent          string   `json:"parent,omitempty"`
 	State           string   `json:"state,omitempty"`
 	Labels          []string `json:"labels,omitempty"`
+	Priority        string   `json:"priority,omitempty"`
+	Assignees       []string `json:"assignees,omitempty"`
 }
 
 // RelationRef names one end of a relation as returned by the relations
@@ -332,6 +365,33 @@ func ProjectByRef(ctx context.Context, c *Client, ref string) (*Project, error) 
 	return nil, fmt.Errorf("plane: no project %q in workspace %s", ref, c.workspace)
 }
 
+// ResolveItemRef resolves an item reference to (project, item ref) for
+// the one-project-per-epic board. A prefixed display id ("T2I-3") selects
+// the project by its identifier prefix (case-insensitive), so one ref can
+// address any project without --project. UUIDs and bare sequences use
+// projectRef instead. A prefix that matches no project falls through to
+// projectRef, which then fails with the usual "no work item" error.
+func ResolveItemRef(ctx context.Context, c *Client, projectRef, itemRef string) (*Project, string, error) {
+	if !isUUID(itemRef) {
+		if prefix, _, ok := strings.Cut(itemRef, "-"); ok && prefix != "" {
+			projects, err := c.ListProjects(ctx)
+			if err != nil {
+				return nil, "", err
+			}
+			for i := range projects {
+				if strings.EqualFold(projects[i].Identifier, prefix) {
+					return &projects[i], itemRef, nil
+				}
+			}
+		}
+	}
+	p, err := ProjectByRef(ctx, c, projectRef)
+	if err != nil {
+		return nil, "", err
+	}
+	return p, itemRef, nil
+}
+
 // isUUID reports whether s looks like a Plane UUID (8-4-4-4-12 hex).
 func isUUID(s string) bool {
 	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
@@ -364,6 +424,31 @@ func (c *Client) ListWorkspaceMembers(ctx context.Context) ([]WorkspaceMember, e
 		return nil, err
 	}
 	return out, nil
+}
+
+// ProjectMember is one entry of the v1 project member list (a user; the
+// project role is not in the response).
+type ProjectMember struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+}
+
+// ListProjectMembers lists a project's members (v1, bare array).
+func (c *Client) ListProjectMembers(ctx context.Context, projectID string) ([]ProjectMember, error) {
+	var out []ProjectMember
+	if err := c.doList(ctx, "GET", c.projectPath(projectID, "/members/"), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AddProjectMember adds a workspace member to a project. Role is the Plane
+// project role code (5 viewer, 20 editor, 30 admin) — a bare add grants
+// the default viewer role on this build, whose members cannot edit work
+// items, so pass the role explicitly. Adding a current member is a 400.
+func (c *Client) AddProjectMember(ctx context.Context, projectID, memberID string, role int) error {
+	body := map[string]any{"member": memberID, "role": role}
+	return c.do(ctx, "POST", c.projectPath(projectID, "/members/"), body, nil)
 }
 
 // --- states -------------------------------------------------------------------
@@ -451,6 +536,15 @@ func (c *Client) GetWorkItem(ctx context.Context, projectID, itemID string) (*Wo
 	return &out, nil
 }
 
+// DeleteWorkItem hard-deletes a work item. This build has no archive
+// (PATCH archived_at is a 400, the session PATCH route 404s), so the
+// delete is immediate and irreversible — callers should keep a record of
+// what they delete (the project-split migration records one in the
+// recreated item's split-from marker).
+func (c *Client) DeleteWorkItem(ctx context.Context, projectID, itemID string) error {
+	return c.do(ctx, "DELETE", c.itemPath(projectID, itemID), nil, nil)
+}
+
 // WorkItemByRef resolves a work item by UUID, by display id like "AAB-43",
 // or by bare sequence number "43". This build's v1 API only takes a UUID
 // directly (a display id 404s), so the other forms fall back to a list and
@@ -482,7 +576,7 @@ func WorkItemByRef(ctx context.Context, c *Client, projectID, ref string) (*Work
 		return nil, err
 	}
 	for i := range items {
-		if items[i].SequenceID == seq && (prefix == "" || prefix == ident) {
+		if items[i].SequenceID == seq && (prefix == "" || strings.EqualFold(prefix, ident)) {
 			return &items[i], nil
 		}
 	}
@@ -647,6 +741,13 @@ func (c *Client) CreateState(ctx context.Context, projectID, name, group, color 
 	return &s, nil
 }
 
+// DeleteState removes a work-item state (column) from a project. Only
+// safe when no work item references the state (the caller must check —
+// the API does not).
+func (c *Client) DeleteState(ctx context.Context, projectID, stateID string) error {
+	return c.do(ctx, "DELETE", c.projectPath(projectID, "/states/"+stateID+"/"), nil, nil)
+}
+
 // --- webhooks -----------------------------------------------------------------------
 
 // Webhook is a workspace webhook. SecretKey (the HMAC signing secret) is
@@ -742,16 +843,26 @@ func (c *Client) sessionPath(format string, args ...any) string {
 }
 
 // do performs a v1-API request with the API key and decodes the reply
-// into out (if non-nil).
+// into out (if non-nil). 429s (rate limit) are retried with a pause, so
+// a single call rides out a throttle window.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	if c.apiKey == "" {
 		return errors.New("plane: APIKey is required")
 	}
-	req, err := c.newRequest(ctx, method, path, body, c.apiKey)
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		req, err := c.newRequest(ctx, method, path, body, c.apiKey)
+		if err != nil {
+			return err
+		}
+		lastErr = c.execute(req, out)
+		if !isRateLimited(lastErr) || attempt >= maxRateAttempts-1 {
+			return lastErr
+		}
+		if err := waitRateLimit(ctx); err != nil {
+			return err
+		}
 	}
-	return c.execute(req, out)
 }
 
 // doSession performs a session-API request, signing in on first use and
@@ -790,11 +901,20 @@ func (c *Client) doList(ctx context.Context, method, path string, out any) error
 	if c.apiKey == "" {
 		return errors.New("plane: APIKey is required")
 	}
-	req, err := c.newRequest(ctx, method, path, nil, c.apiKey)
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		req, err := c.newRequest(ctx, method, path, nil, c.apiKey)
+		if err != nil {
+			return err
+		}
+		lastErr = c.executeList(req, out)
+		if !isRateLimited(lastErr) || attempt >= maxRateAttempts-1 {
+			return lastErr
+		}
+		if err := waitRateLimit(ctx); err != nil {
+			return err
+		}
 	}
-	return c.executeList(req, out)
 }
 
 func (c *Client) doSessionList(ctx context.Context, method, path string, out any) error {
