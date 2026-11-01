@@ -63,3 +63,4 @@
 - 2026-11-01T04:40Z [plan-epic-planner-plan-with-m-1793259204-6] P6: model-prefixed Plane comments (jarvis-board CLI) + Discord board links (notify --item), JARVIS_MODEL in round env; bridge live-test human-edit half fixed (PR #127)
 - 2026-11-01T06:58Z [chat-1793504779-d19c] One Plane project per epic: 60 AAB items migrated to 8 projects (E2E/TST/NBR/MOE/QDB/VCH/T2I/WBD), AAB retired to AAB-62; plane-epic create is the standard, bridge watches PLANE_PROJECTS, 429 retry client-side (PR #128)
 - 2026-11-01T07:27Z [chat-1793508467-d4d3] Fixed PR #109 (3B CPU vs iGPU bench doc) merge conflict: merged origin/main into phase-bench-qwen3b-cpu-igpu, resolved 4 notes-file conflicts keeping all entries (PR #109)
+- 2026-11-01T09:05Z [chat-1793508833-9f69] One-project-per-epic enforcement documented (CLAUDE.md + NOTES.md); verified no code change needed — plane-epic is the only create path, no task-sync script yet (PR #129)

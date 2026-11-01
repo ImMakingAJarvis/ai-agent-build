@@ -67,6 +67,9 @@ Each epic is its own Plane project with a short identifier prefix
 (currently E2E, TST, NBR, MOE, QDB, VCH, T2I, WBD — see
 `docs/work-board/NOTES.md`); the epic is the project's epic work item
 (label `epic`) and its tasks live in the same project, parented to it.
+The project is named after the epic title, and `plane-epic` resolves an
+existing project by name (case-insensitive) before creating, so a re-run
+cannot create a second project for the same epic.
 `AAB` (ai_agent_build) is the legacy single project — no new work goes
 there.
 
