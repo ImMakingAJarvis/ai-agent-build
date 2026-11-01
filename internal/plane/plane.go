@@ -26,6 +26,9 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -106,6 +109,65 @@ func New(cfg Config) (*Client, error) {
 		http:      transport,
 		login:     login,
 	}, nil
+}
+
+// envValue resolves a Plane setting: the process environment first, then
+// the KEY=VALUE daemon env file that scripts/plane-setup.sh writes
+// (~/.config/jarvis/agent.env, or the path in PLANE_ENV_FILE). The file is
+// small and CLIs are short-lived, so it is re-read on every miss.
+func envValue(key string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	path := os.Getenv("PLANE_ENV_FILE")
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		path = filepath.Join(home, ".config", "jarvis", "agent.env")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(k) == key {
+			return strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+	}
+	return ""
+}
+
+// FromEnv builds a Client from the process environment:
+//
+//	PLANE_URL       Plane instance, e.g. http://111.1.2.222:8088 (required)
+//	PLANE_API_KEY   v1 external API key (required)
+//	PLANE_WORKSPACE workspace slug (default "jarvis")
+//	PLANE_BOT_EMAIL / PLANE_BOT_PASSWORD  session creds for pages (optional)
+//
+// Missing values fall back to the daemon env file (see envValue), so CLIs
+// run from a plain shell work without exporting anything.
+func FromEnv() (*Client, error) {
+	ws := envValue("PLANE_WORKSPACE")
+	if ws == "" {
+		ws = "jarvis"
+	}
+	return New(Config{
+		BaseURL:   envValue("PLANE_URL"),
+		APIKey:    envValue("PLANE_API_KEY"),
+		Workspace: ws,
+		Email:     envValue("PLANE_BOT_EMAIL"),
+		Password:  envValue("PLANE_BOT_PASSWORD"),
+	})
 }
 
 // APIError is a non-2xx reply from Plane. Body is the raw response
@@ -244,6 +306,48 @@ func (c *Client) DeleteProject(ctx context.Context, projectID string) error {
 	return c.do(ctx, "DELETE", c.wsPath("/projects/")+projectID+"/", nil, nil)
 }
 
+// GetProject fetches one project by UUID.
+func (c *Client) GetProject(ctx context.Context, projectID string) (*Project, error) {
+	var p Project
+	if err := c.do(ctx, "GET", c.wsPath("/projects/"+projectID+"/"), nil, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// ProjectByRef resolves a project by UUID or by identifier (e.g. "AAB").
+func ProjectByRef(ctx context.Context, c *Client, ref string) (*Project, error) {
+	if isUUID(ref) {
+		return c.GetProject(ctx, ref)
+	}
+	projects, err := c.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range projects {
+		if projects[i].Identifier == ref || projects[i].ID == ref {
+			return &projects[i], nil
+		}
+	}
+	return nil, fmt.Errorf("plane: no project %q in workspace %s", ref, c.workspace)
+}
+
+// isUUID reports whether s looks like a Plane UUID (8-4-4-4-12 hex).
+func isUUID(s string) bool {
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return false
+	}
+	for i, r := range s {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue
+		}
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // WorkspaceMember is one entry of the v1 workspace member list.
 type WorkspaceMember struct {
 	ID    string `json:"id"`
@@ -347,6 +451,52 @@ func (c *Client) GetWorkItem(ctx context.Context, projectID, itemID string) (*Wo
 	return &out, nil
 }
 
+// WorkItemByRef resolves a work item by UUID, by display id like "AAB-43",
+// or by bare sequence number "43". This build's v1 API only takes a UUID
+// directly (a display id 404s), so the other forms fall back to a list and
+// match; the prefix, when given, is checked against the project identifier.
+func WorkItemByRef(ctx context.Context, c *Client, projectID, ref string) (*WorkItem, error) {
+	if isUUID(ref) {
+		return c.GetWorkItem(ctx, projectID, ref)
+	}
+	var prefix, seqPart string
+	if i := strings.LastIndex(ref, "-"); i >= 0 {
+		prefix, seqPart = ref[:i], ref[i+1:]
+	} else {
+		seqPart = ref
+	}
+	seq, err := strconv.Atoi(seqPart)
+	if err != nil {
+		return nil, fmt.Errorf("plane: %q is neither a UUID nor a display id like %q", ref, "AAB-43")
+	}
+	var ident string
+	if prefix != "" {
+		p, err := c.GetProject(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		ident = p.Identifier
+	}
+	items, err := c.ListWorkItems(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		if items[i].SequenceID == seq && (prefix == "" || prefix == ident) {
+			return &items[i], nil
+		}
+	}
+	return nil, fmt.Errorf("plane: no work item %q in project %s", ref, projectID)
+}
+
+// ItemLink returns the browser URL of a work item on this instance. The
+// 2026 Plane UI resolves /<workspace>/browse/<identifier>-<sequence>; the
+// older /projects/.../issues/... URLs redirect there, so browse is the
+// canonical shareable form.
+func (c *Client) ItemLink(p *Project, wi *WorkItem) string {
+	return fmt.Sprintf("%s/%s/browse/%s-%d", c.baseURL, c.workspace, p.Identifier, wi.SequenceID)
+}
+
 // SetState moves a work item to the given state (by state ID).
 func (c *Client) SetState(ctx context.Context, projectID, itemID, stateID string) (*WorkItem, error) {
 	var out WorkItem
@@ -421,6 +571,15 @@ func (c *Client) AddComment(ctx context.Context, projectID, itemID, html string)
 		return nil, err
 	}
 	return &cm, nil
+}
+
+// ListComments lists a work item's comments, oldest first.
+func (c *Client) ListComments(ctx context.Context, projectID, itemID string) ([]Comment, error) {
+	var out []Comment
+	if err := c.doList(ctx, "GET", c.itemPath(projectID, itemID)+"comments/", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // --- pages (session API) ----------------------------------------------------------

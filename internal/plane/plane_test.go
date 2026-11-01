@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -291,6 +293,19 @@ func (f *fakePlane) routeV1(w http.ResponseWriter, r *http.Request, rest string)
 		case strings.HasPrefix(rest2, "work-items") || rest2 == "work-items" || rest2 == "work-items/":
 			f.routeWorkItem(w, r, pid, rest2)
 			return
+		case rest2 == "" || rest2 == "/":
+			// GET /projects/<id>/ — single project by UUID
+			if r.Method == http.MethodGet {
+				f.mu.Lock()
+				p, ok := f.projects[pid]
+				f.mu.Unlock()
+				if !ok {
+					http.Error(w, `{"detail":"Not found."}`, http.StatusNotFound)
+					return
+				}
+				json.NewEncoder(w).Encode(p)
+				return
+			}
 		}
 	}
 	http.Error(w, fmt.Sprintf("unrouted v1 path %s", rest), http.StatusNotFound)
@@ -511,7 +526,17 @@ func (f *fakePlane) routeWorkItem(w http.ResponseWriter, r *http.Request, pid, r
 			json.NewEncoder(w).Encode(out)
 		}
 	case "comments":
-		if r.Method == http.MethodPost {
+		switch r.Method {
+		case http.MethodGet:
+			// paginated list, like the v1 list endpoints
+			f.mu.Lock()
+			out := make([]map[string]string, 0, len(f.comments))
+			for i, html := range f.comments {
+				out = append(out, map[string]string{"id": fmt.Sprintf("cm-%d", i+1), "comment_html": html, "created_at": "2026-10-31T00:00:00Z"})
+			}
+			f.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"results": out, "count": len(out)})
+		case http.MethodPost:
 			var raw map[string]any
 			json.NewDecoder(r.Body).Decode(&raw)
 			f.mu.Lock()
@@ -875,4 +900,172 @@ func containsAll(have []string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+// --- P6: item refs, board links, comments list, env config ---
+
+func TestItemLink(t *testing.T) {
+	c, _, srv := newTestClient(t)
+	p, err := c.CreateProject(context.Background(), "t", "TST")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	wi, err := c.CreateWorkItem(context.Background(), p.ID, WorkItemCreate{Name: "x"})
+	if err != nil {
+		t.Fatalf("CreateWorkItem: %v", err)
+	}
+	got := c.ItemLink(p, wi)
+	want := fmt.Sprintf("%s/testws/browse/TST-%d", srv.URL, wi.SequenceID)
+	if got != want {
+		t.Errorf("ItemLink = %q, want %q", got, want)
+	}
+}
+
+func TestProjectByRef(t *testing.T) {
+	c, f, _ := newTestClient(t)
+	p, err := c.CreateProject(context.Background(), "t", "TST")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// by identifier (list + match)
+	got, err := ProjectByRef(context.Background(), c, "TST")
+	if err != nil {
+		t.Fatalf("ProjectByRef(TST): %v", err)
+	}
+	if got.ID != p.ID || got.Identifier != "TST" {
+		t.Errorf("ProjectByRef(TST) = %+v, want id %s", got, p.ID)
+	}
+
+	// by UUID (fast path, single GET)
+	uuid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	f.mu.Lock()
+	f.projects[uuid] = map[string]string{"id": uuid, "name": "uuid proj", "identifier": "UPR"}
+	f.mu.Unlock()
+	got, err = ProjectByRef(context.Background(), c, uuid)
+	if err != nil {
+		t.Fatalf("ProjectByRef(uuid): %v", err)
+	}
+	if got.Identifier != "UPR" {
+		t.Errorf("ProjectByRef(uuid) = %+v, want identifier UPR", got)
+	}
+
+	// unknown ref
+	if _, err := ProjectByRef(context.Background(), c, "NOPE"); err == nil {
+		t.Error("ProjectByRef(NOPE) should fail")
+	}
+}
+
+func TestWorkItemByRef(t *testing.T) {
+	c, f, _ := newTestClient(t)
+	p, err := c.CreateProject(context.Background(), "t", "TST")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	wi, err := c.CreateWorkItem(context.Background(), p.ID, WorkItemCreate{Name: "one"})
+	if err != nil {
+		t.Fatalf("CreateWorkItem: %v", err)
+	}
+
+	// display id with prefix (list + match on sequence + identifier)
+	got, err := WorkItemByRef(context.Background(), c, p.ID, "TST-1")
+	if err != nil {
+		t.Fatalf("WorkItemByRef(TST-1): %v", err)
+	}
+	if got.ID != wi.ID {
+		t.Errorf("WorkItemByRef(TST-1).ID = %q, want %q", got.ID, wi.ID)
+	}
+
+	// bare sequence (no prefix check)
+	got, err = WorkItemByRef(context.Background(), c, p.ID, "1")
+	if err != nil {
+		t.Fatalf("WorkItemByRef(1): %v", err)
+	}
+	if got.ID != wi.ID {
+		t.Errorf("WorkItemByRef(1).ID = %q, want %q", got.ID, wi.ID)
+	}
+
+	// UUID fast path (single GET, no list)
+	uuid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	f.mu.Lock()
+	f.items[uuid] = map[string]any{"id": uuid, "name": "uuid item", "state": "st-1", "labels": []string{}, "sequence_id": 7, "created_at": "2026-10-31T00:00:00Z"}
+	f.mu.Unlock()
+	got, err = WorkItemByRef(context.Background(), c, p.ID, uuid)
+	if err != nil {
+		t.Fatalf("WorkItemByRef(uuid): %v", err)
+	}
+	if got.ID != uuid || got.SequenceID != 7 {
+		t.Errorf("WorkItemByRef(uuid) = %+v, want id %s seq 7", got, uuid)
+	}
+
+	// malformed ref (no dash-separated sequence)
+	if _, err := WorkItemByRef(context.Background(), c, p.ID, "nope"); err == nil {
+		t.Error("WorkItemByRef(nope) should fail")
+	}
+	// unknown sequence
+	if _, err := WorkItemByRef(context.Background(), c, p.ID, "TST-99"); err == nil {
+		t.Error("WorkItemByRef(TST-99) should fail")
+	}
+}
+
+func TestListComments(t *testing.T) {
+	c, _, _ := newTestClient(t)
+	pid := mustProject(t, c)
+	wi, err := c.CreateWorkItem(context.Background(), pid, WorkItemCreate{Name: "x"})
+	if err != nil {
+		t.Fatalf("CreateWorkItem: %v", err)
+	}
+	for _, html := range []string{"<p>first</p>", "<p>second</p>"} {
+		if _, err := c.AddComment(context.Background(), pid, wi.ID, html); err != nil {
+			t.Fatalf("AddComment(%s): %v", html, err)
+		}
+	}
+	comments, err := c.ListComments(context.Background(), pid, wi.ID)
+	if err != nil {
+		t.Fatalf("ListComments: %v", err)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("ListComments = %d comments, want 2", len(comments))
+	}
+	if comments[0].CommentHTML != "<p>first</p>" || comments[1].CommentHTML != "<p>second</p>" {
+		t.Errorf("comments = %+v, want first/second in order", comments)
+	}
+}
+
+func TestFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(envFile, []byte("# daemon env file\nPLANE_URL = 'http://file.example:1'\nPLANE_API_KEY=\"filekey\"\nPLANE_BOT_EMAIL=bot@file.example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PLANE_ENV_FILE", envFile)
+	for _, k := range []string{"PLANE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE", "PLANE_BOT_EMAIL", "PLANE_BOT_PASSWORD"} {
+		t.Setenv(k, "") // force the file fallback
+	}
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	if c.baseURL != "http://file.example:1" {
+		t.Errorf("baseURL = %q, want the file value", c.baseURL)
+	}
+	if c.apiKey != "filekey" {
+		t.Errorf("apiKey = %q, want filekey", c.apiKey)
+	}
+	if c.email != "bot@file.example" {
+		t.Errorf("email = %q, want bot@file.example", c.email)
+	}
+	if c.workspace != "jarvis" {
+		t.Errorf("workspace = %q, want default jarvis", c.workspace)
+	}
+
+	// process env wins over the file
+	t.Setenv("PLANE_URL", "http://proc.example:2")
+	c2, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv (proc env): %v", err)
+	}
+	if c2.baseURL != "http://proc.example:2" {
+		t.Errorf("baseURL = %q, want the process-env value", c2.baseURL)
+	}
 }
