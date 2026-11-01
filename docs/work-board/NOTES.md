@@ -403,3 +403,29 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   untouched`, exit 0. New bridge (8 projects in `PLANE_PROJECTS`)
   restarted: startup catch-up `projects: 8, items: 60, queued: 0`,
   `/healthz` ok.
+
+## One project per epic — enforcement check (2026-11-01)
+
+- Job chat-1793508833-9f69 asked to enforce the standard. Verified it is
+  already enforced end-to-end; no code change was needed (the standard and
+  the migration shipped in PR #128, job chat-1793504779-d19c). What was
+  added this round is the enforcement wording in `CLAUDE.md` + this note,
+  so future implementations follow the rule:
+  - **Convention:** `CLAUDE.md` "Work board (Plane)" + this file's "Board
+    reorg" section state the rule — one project per epic, the project named
+    after the epic, every task in that project and parented to the epic.
+  - **Single creation path:** `plane-epic create` is the only supported way
+    to add a project. `planeepic.EnsureProject` resolves an existing project
+    by name (case-insensitive, sanitized) or identifier before creating, so
+    a re-run — or a second run with a different identifier for the same
+    title — cannot create a second project for the same epic. The epic item
+    is created in that project and its identifier is registered in
+    `PLANE_PROJECTS` (bridge restarted to watch it).
+  - **No task-sync script exists yet.** Task sub-items are created by humans
+    in the Plane UI (inside the epic's project) and, when Phase B4 ("create
+    the tasks as sub-items in Plan review") is built, by it. B4 is not built;
+    when it is, it must create sub-items in the epic's project —
+    `plane.Client.CreateWorkItem(projectID, WorkItemCreate{Parent: epicID})`
+    with `projectID` the epic item's project. The one-time migrations
+    (`board-migrate`, `plane-migrate-projects`) already ran and are
+    idempotent/retired; they are not recurring syncs.
