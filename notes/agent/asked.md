@@ -32,6 +32,7 @@
 - 2026-10-29T03:46Z Nathan wants worker logs human readable, not raw stream-json; he confirmed he was on the raw log page when he saw the json
 - 2026-10-29T04:53Z Nathan asked for an output of running containers + currently loaded models; he suspected a qwen2.5 chatbot on the iGPU — confirmed: Qwen2.5-3B Q4_K_M on :11435 is the jarvis-helper model
 - 2026-10-29T07:31Z Nathan (job chat-1793252684-1127): open PRs have merge conflicts — check and fix all open PRs' mergeability
+- 2026-10-29T07:59Z Nathan asked to benchmark the Qwen2.5-3B helper model on the CPU against the iGPU (the CPU-offload trade-off)
 - 2026-10-29T18:22Z Two helpers (CPU + iGPU)? other models for the box? — answered: deep helper = 30B-A3B on iGPU on-demand, CPU stays free (job chat-1793249102-d283)
 - 2026-10-29T19:51Z Photo workflow: wanted the thinking mind to write much better image-generator prompts from casual requests, with special modes — photoassist for refining prompts with context, photocheck for iterating with the generator (job chat-1793252974-720f)
 - 2026-10-29T21:11Z Nathan: schedule all of the kanban tasks for MOE benchmarking — the four vram-cache points of epic f4cf6031 (100/150/200/250 MB free VRAM, Qwen3.8-Flash-Next on FreeToken)
@@ -50,3 +51,4 @@
 - 2026-11-01T03:09Z P5 decision (job plan-epic-planner-plan-with-m-1793259204-5): migrate open items only to Plane, not history; queue a follow-up if Nathan wants history. Open-item definition: every epic counts as open (old board has no closed state); task open = status != done.
 - 2026-11-01T04:40Z P6 of the work-board plan: agent identity on the Plane board — model-prefixed comments on touched items, Discord status messages carry the board link.
 - 2026-11-01T06:58Z one project per epic — Nathan's decision 2026-10-31, now the board standard (reorganize everything, put it in CLAUDE.md)
+- 2026-11-01T07:27Z Nathan: fix PR 109 — it was CONFLICTING after main moved on (Plane/epic-projects rounds); resolved by merging main into the branch, all notes entries kept (job chat-1793508467-d4d3)
