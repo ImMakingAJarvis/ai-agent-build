@@ -9,12 +9,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -25,7 +27,9 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/notifier"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/notify"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/planworker"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/router"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/streamwatcher"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -200,12 +204,73 @@ func run() error {
 		return fmt.Errorf("job store: %w", err)
 	}
 
+	// Plan worker (B2): plan_epic jobs are dispatched here to the planner
+	// model named in them — a local planner is swapped in and restored, a
+	// cloud planner runs on its API (internal/planworker). Without a
+	// registry the worker stays up and plan jobs fall back to the
+	// agent-run loop, as before B2.
+	planHandler, err := newPlanHandler()
+	if err != nil {
+		log.Printf("worker: plan handler unavailable (%v) — plan_epic jobs fall back to the agent-run loop", err)
+		planHandler = nil
+	}
+
+	// planMu serializes plan runs: a swap moves the one big model that
+	// fits in VRAM, so two concurrent plan jobs must not race the engine.
+	var planMu sync.Mutex
+
+	handlePlan := func(msg queue.Message, job *planworker.Job) error {
+		planMu.Lock()
+		defer planMu.Unlock()
+
+		local := true
+		for i := range planHandler.Models.Models {
+			if planHandler.Models.Models[i].ID == job.ModelID {
+				local = planHandler.Models.Models[i].Location != "cloud"
+				break
+			}
+		}
+		rec := history.Start(msg, job.ModelID, local, msg.Type)
+		log.Printf("worker: plan job %s → model %s (local=%v, effort=%s)",
+			msg.ID, job.ModelID, local, job.Effort)
+
+		jobStart := time.Now()
+		res, err := planHandler.Run(context.Background(), job)
+		if err != nil {
+			log.Printf("worker: plan job %s failed: %v", msg.ID, err)
+			history.Fail(rec, err)
+			ntf.OnFail(rec, err)
+			jobMetrics.ObserveFailed(msg.Type, job.ModelID)
+			resolvePlanJobStore(jobStore, msg, job.ModelID, "", err.Error())
+			return nil // recorded as failed; ack so it is not redelivered
+		}
+
+		if err := jobStore.WriteFile(msg.ID, "plan.md", []byte(res.Plan)); err != nil {
+			log.Printf("worker: plan job %s: store plan: %v", msg.ID, err)
+		}
+		rec.Summary = agentjob.Summary(res.Plan)
+		history.Complete(rec)
+		jobMetrics.ObserveCompleted(msg.Type, job.ModelID, time.Since(jobStart).Seconds())
+		ntf.OnComplete(rec)
+		resolvePlanJobStore(jobStore, msg, job.ModelID, res.Plan, "")
+		return nil
+	}
+
 	handle := func(msg queue.Message) error {
 		// Agent jobs are build work run by the agent-run loop. Claim means
 		// write the job to the store (ready, idempotent), then ack right
 		// away: never hold a message unacked for a whole round, the broker's
 		// ack timeout would close the channel and redeliver it.
 		if msg.Kind == queue.KindAgent {
+			// A plan_epic job is run here, not by the agent-run loop (B2):
+			// it dispatches to the planner model named in the job.
+			if job, perr := planworker.Parse(msg.Instructions); perr == nil {
+				if planHandler == nil {
+					log.Printf("worker: plan job %s: no plan handler — leaving it to the agent-run loop", msg.ID)
+				} else {
+					return handlePlan(msg, job)
+				}
+			}
 			added, err := jobStore.Ingest(agentjob.Spec{
 				ID: msg.ID, Title: msg.Title, Instructions: msg.Instructions,
 				Branch: msg.Branch, DependsOn: msg.DependsOn, Driver: msg.Driver,
@@ -347,6 +412,89 @@ func run() error {
 	consumer.Stop()
 	locWorkers.Stop()
 	return nil
+}
+
+// newPlanHandler builds the B2 plan dispatcher: the registry from
+// WORKER_MODELS_FILE (default config/models.yaml, repo root), one engine
+// client per registry endpoint, the cloud caller for the registry's cloud
+// engines, and the BasicPlanner pipeline until B3 replaces it.
+//
+// When the worker runs beside the engine (docker compose), the registry's
+// host-local endpoints (localhost:11434) are not reachable from the
+// container, so ENGINE_URL / OLLAMA_URL take precedence over them — the
+// same convention as models.NewClient.
+func newPlanHandler() (*planworker.Handler, error) {
+	regPath := os.Getenv("WORKER_MODELS_FILE")
+	if regPath == "" {
+		regPath = "config/models.yaml"
+	}
+	reg, err := registry.Load(regPath)
+	if err != nil {
+		return nil, fmt.Errorf("load model registry %s: %w", regPath, err)
+	}
+	engineBase := os.Getenv("ENGINE_URL")
+	if engineBase == "" {
+		engineBase = os.Getenv("OLLAMA_URL")
+	}
+	engines := map[string]planworker.Engine{}
+	var mu sync.Mutex
+	frontEnd := os.Getenv("JARVIS_FRONTEND_MODEL")
+	if frontEnd == "" {
+		// The iGPU helper, by the name its llama.cpp engine reports.
+		frontEnd = "jarvis-igpu.gguf"
+	}
+	return &planworker.Handler{
+		Models: reg,
+		Engines: func(endpoint string) planworker.Engine {
+			base := endpoint
+			if engineBase != "" {
+				base = engineBase
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if e, ok := engines[base]; ok {
+				return e
+			}
+			e := planworker.NewClientEngine(base)
+			engines[base] = e
+			return e
+		},
+		Cloud:    planworker.NewAPI(),
+		Planner:  planworker.BasicPlanner{},
+		FrontEnd: frontEnd,
+	}, nil
+}
+
+// resolvePlanJobStore settles a plan job's agentjob store entry so the
+// agent-run loop never picks it up as a build round: B1 ingests plan jobs
+// as ready (store-only anchor) and the loop claims ready jobs. A missing
+// entry (the bridge ingest has not landed) is created first, so the store
+// stays whole.
+func resolvePlanJobStore(store *agentjob.Store, msg queue.Message, model, summary, runErr string) {
+	st := agentjob.State{
+		Status:     agentjob.Done,
+		Model:      model,
+		Summary:    summary,
+		FinishedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if runErr != "" {
+		st.Status = agentjob.Failed
+		st.Error = runErr
+		st.Summary = ""
+	}
+	if _, err := store.Get(msg.ID); err != nil {
+		if _, ierr := store.Ingest(agentjob.Spec{
+			ID: msg.ID, Title: msg.Title, Instructions: msg.Instructions,
+			Branch: msg.Branch, DependsOn: msg.DependsOn, Driver: msg.Driver,
+			Class: msg.Class, Priority: msg.Priority, CreatedAt: msg.CreatedAt, Source: msg.Source,
+			ReasoningEffort: msg.ReasoningEffort,
+		}); ierr != nil {
+			log.Printf("worker: plan job %s: store ingest for resolution: %v", msg.ID, ierr)
+		}
+	}
+	if err := store.SetStatus(msg.ID, st); err != nil {
+		log.Printf("worker: plan job %s: store resolution: %v", msg.ID, err)
+	}
 }
 
 // getQueueDepths queries RabbitMQ for the pending message count on each
