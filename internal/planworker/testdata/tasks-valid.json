@@ -1,0 +1,25 @@
+{
+  "epic": "wi-1",
+  "tasks": [
+    {
+      "id": "add-schema",
+      "title": "Add the task JSON schema and Go types",
+      "description": "Create prompts/task.schema.json and the Task/TaskList types with schema-based validation.",
+      "files": ["prompts/task.schema.json", "internal/planworker/schema.go"],
+      "dependencies": [],
+      "acceptance_check": "go test ./internal/planworker/ -run TestSchemaValidation",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "wire-pipeline",
+      "title": "Wire the planning pipeline into the worker",
+      "description": "Replace the placeholder planner in cmd/worker with the Pipeline and store the task list on success.",
+      "files": ["cmd/worker/main.go"],
+      "dependencies": ["add-schema"],
+      "acceptance_check": "go build ./...",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    }
+  ]
+}

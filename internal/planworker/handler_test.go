@@ -138,13 +138,13 @@ func (s *stubEngine) Chat(ctx context.Context, model string, messages []models.C
 }
 
 // stubPlanner is a stub planning pipeline: one chat call, the reply is
-// the plan.
+// the plan (no tasks).
 type stubPlanner struct{ gotPrompt string }
 
-func (p *stubPlanner) Plan(ctx context.Context, model Model, job *Job) (string, error) {
+func (p *stubPlanner) Plan(ctx context.Context, model Model, job *Job) (*PlanOutput, error) {
 	out, err := model.Chat(ctx, []models.ChatMessage{{Role: "user", Content: "plan " + job.Item.Name}})
 	p.gotPrompt = job.Item.Name
-	return out, err
+	return &PlanOutput{Plan: out}, err
 }
 
 // stubCloud is a stub cloud API.

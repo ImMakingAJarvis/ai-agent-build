@@ -43,12 +43,13 @@ type Board struct {
 
 // Item is the epic the plan is for.
 type Item struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	SequenceID int      `json:"sequence_id"`
-	Parent     string   `json:"parent"`
-	State      string   `json:"state"`
-	Labels     []string `json:"labels"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	SequenceID  int      `json:"sequence_id"`
+	Parent      string   `json:"parent"`
+	State       string   `json:"state"`
+	Labels      []string `json:"labels"`
 }
 
 // Parse decodes the instructions JSON of a plan_epic job. It rejects
