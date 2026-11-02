@@ -124,8 +124,8 @@ Run these in order, one per fresh context, with each ending in a commit and its 
 
 - [x] B1. In the bridge, when a `plan:<id>` label is added to an item labeled `epic`, publish a `plan_epic` job (epic id, model id, effort from an `effort:` label, default high) at the front of the background queue, move the epic to Planning, and comment its queue position. It never preempts a running job, and the conversation queue still comes first. Check: integration test publishes a normal job then a plan\_epic job and sees plan\_epic consumed first.
 - [x] B2. Worker handler: swap in the chosen local model if needed (unload, load, restore afterward), or call the cloud API. Check: test with a stub model.
-- [ ] B3. Implement the Plan, Decompose and Review prompts as files in `prompts/`, with the task JSON schema. Check: schema validation test on a sample output.
-- [ ] B4. Deliver the plan: create a Plane page with the plan and link it from the epic, create the tasks as sub-items in Plan review with "blocked by" relations and a model: label on each (no run: label; placement comes from the registry), and move the epic to Plan review. Check: a toy epic ends up with a page and sub-items.
+- [x] B3. Implement the Plan, Decompose and Review prompts as files in `prompts/`, with the task JSON schema. Check: schema validation test on a sample output.
+- [x] B4. Deliver the plan: create a Plane page with the plan and link it from the epic, create the tasks as sub-items in Plan review with "blocked by" relations and a model: label on each (no run: label; placement comes from the registry), and move the epic to Plan review. Check: a toy epic ends up with a page and sub-items.
 - [ ] B5. Approval and re-plan: epic moved to Plan approved moves its sub-items to Ready; epic moved back to Planning re-runs planning with the epic's comments added to the prompt. Check: both paths on the toy epic.
 
 **Phase C: Execution**
