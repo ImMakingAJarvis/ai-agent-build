@@ -77,6 +77,24 @@ func (c *Conn) Channel() *amqp.Channel {
 	return c.channel
 }
 
+// NewChannel opens a dedicated AMQP channel on this connection. The
+// location workers (A6) each use one so their prefetch=1 is independent
+// of the main consumer's shared channel: a job running on one queue can
+// never hold another queue's delivery slot.
+func (c *Conn) NewChannel() (*amqp.Channel, error) {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil || conn.IsClosed() {
+		return nil, fmt.Errorf("not connected")
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		return nil, fmt.Errorf("open channel: %w", err)
+	}
+	return ch, nil
+}
+
 // QueueDepth inspects one queue on a throwaway channel so a missing
 // queue (AMQP 404) cannot close the consumer's channel.
 func (c *Conn) QueueDepth(name string) (int, error) {
