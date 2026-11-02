@@ -134,7 +134,7 @@ func (f *fakePlane) handler() http.Handler {
 		pg.CreatedAt = "2026-10-31T00:00:00Z"
 		f.mu.Lock()
 		f.pages = append(f.pages, map[string]string{
-			"id": pg.ID, "name": pg.Name, "content_html": pg.ContentHTML, "created_at": pg.CreatedAt,
+			"id": pg.ID, "name": pg.Name, "description_html": pg.DescriptionHTML, "created_at": pg.CreatedAt,
 		})
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
@@ -148,7 +148,31 @@ func (f *fakePlane) handler() http.Handler {
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		json.NewEncoder(w).Encode(f.pages) // bare array, like session endpoints
+		// Like the real build, the list omits the page body.
+		out := make([]map[string]string, 0, len(f.pages))
+		for _, p := range f.pages {
+			q := map[string]string{"id": p["id"], "name": p["name"], "created_at": p["created_at"]}
+			out = append(out, q)
+		}
+		json.NewEncoder(w).Encode(out) // bare array, like session endpoints
+	})
+	mux.HandleFunc("GET /api/workspaces/testws/projects/{pid}/pages/{id}/", func(w http.ResponseWriter, r *http.Request) {
+		if f.sessionCookie(r) != "fakesess" {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"detail": "Authentication credentials were not provided."})
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		id := r.PathValue("id")
+		for _, p := range f.pages {
+			if p["id"] == id {
+				json.NewEncoder(w).Encode(p)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"detail": "Not found."})
 	})
 
 	// --- session API: workspace webhooks (cookie + CSRF required) ---
@@ -763,7 +787,7 @@ func TestCreatePageUsesSession(t *testing.T) {
 	c, fake, _ := newTestClient(t)
 	pid := mustProject(t, c)
 
-	pg, err := c.CreatePage(context.Background(), pid, PageCreate{Name: "P3 test page", ContentHTML: "<p>body</p>"})
+	pg, err := c.CreatePage(context.Background(), pid, PageCreate{Name: "P3 test page", DescriptionHTML: "<p>body</p>"})
 	if err != nil {
 		t.Fatalf("CreatePage: %v", err)
 	}
@@ -790,6 +814,34 @@ func TestCreatePageUsesSession(t *testing.T) {
 	if len(pages) != 1 || pages[0].Name != "P3 test page" {
 		t.Errorf("ListPages = %+v", pages)
 	}
+}
+
+func TestGetPage(t *testing.T) {
+	c, fake, _ := newTestClient(t)
+	pid := mustProject(t, c)
+	created, err := c.CreatePage(context.Background(), pid, PageCreate{Name: "Body page", DescriptionHTML: "<p>the body</p>"})
+	if err != nil {
+		t.Fatalf("CreatePage: %v", err)
+	}
+	pg, err := c.GetPage(context.Background(), pid, created.ID)
+	if err != nil {
+		t.Fatalf("GetPage: %v", err)
+	}
+	if pg.ID != created.ID || pg.Name != "Body page" {
+		t.Errorf("GetPage = %+v", pg)
+	}
+	if pg.DescriptionHTML != "<p>the body</p>" {
+		t.Errorf("GetPage description_html = %q, want the body", pg.DescriptionHTML)
+	}
+	// The list omits the body — GetPage is the only way to read it back.
+	pages, err := c.ListPages(context.Background(), pid)
+	if err != nil {
+		t.Fatalf("ListPages: %v", err)
+	}
+	if len(pages) != 1 || pages[0].DescriptionHTML != "" {
+		t.Errorf("ListPages = %+v, want the page with no body", pages)
+	}
+	_ = fake
 }
 
 func TestAPIErrorOn404(t *testing.T) {
