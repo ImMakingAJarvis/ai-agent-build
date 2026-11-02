@@ -118,7 +118,7 @@ Run these in order, one per fresh context, with each ending in a commit and its 
 - [x] A3. Sync planner models to Plane labels: one `plan:<id>` label per enabled planner model, removed when disabled; runs at bridge start and when the file changes. Check: enabling a model adds its label.
 - [x] A4. Add a VRAM/RAM fit check using `nvidia-smi` and free memory, returning `fits`, `needs_offload` or `too_big` per model; post the result as a comment when a planning job is queued. Check: test with mocked readings.
 - [x] A5. Placement rules: add a `placement` function that takes a model id plus live state (free VRAM, GPU paused by the watchdog, location present) and returns a location from the registry's home and fallback, honoring a `run:` override label when present. Sync one `model:<id>` label per enabled executor model and the `run:` override labels, only for locations the AI box actually has, detected at start. Check: table tests for home, fallback when the GPU is paused, a valid override, and an invalid override returning Blocked.
-- [ ] A6. Per-location queues and workers: `jobs.gpu`, `jobs.cpu`, `jobs.igpu`, each with its own Go worker so CPU and iGPU jobs run in parallel with the GPU job. The game watchdog pauses only the GPU queue. Check: a CPU job finishes while a long GPU job is still running.
+- [x] A6. Per-location queues and workers: `jobs.gpu`, `jobs.cpu`, `jobs.igpu`, each with its own Go worker so CPU and iGPU jobs run in parallel with the GPU job. The game watchdog pauses only the GPU queue. Check: a CPU job finishes while a long GPU job is still running.
 
 **Phase B: Plan with model**
 
