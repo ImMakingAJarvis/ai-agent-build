@@ -29,7 +29,7 @@
       "durable": true,
       "auto_delete": false,
       "arguments": {
-        "x-priority": 10
+        "x-max-priority": 10
       }
     },
     {
@@ -38,7 +38,7 @@
       "durable": true,
       "auto_delete": false,
       "arguments": {
-        "x-priority": 5
+        "x-max-priority": 5
       }
     },
     {
@@ -47,7 +47,7 @@
       "durable": true,
       "auto_delete": false,
       "arguments": {
-        "x-priority": 1
+        "x-max-priority": 10
       }
     },
     {

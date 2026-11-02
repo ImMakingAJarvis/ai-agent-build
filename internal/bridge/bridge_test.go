@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/fit"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
 // fakePlane is a minimal in-memory Plane server covering exactly the
@@ -35,16 +37,17 @@ const (
 )
 
 type fakePlane struct {
-	mu       sync.Mutex
-	labels   map[string]string                    // id -> name (shared across projects)
-	states   map[string]string                    // id -> name
-	items    map[string]map[string]map[string]any // project id -> item id -> item
-	comments []fakeComment
-	whID     string
-	whURL    string
-	whSecret string
-	created  int // webhook creations
-	regen    int // secret regenerations
+	mu         sync.Mutex
+	labels     map[string]string                    // id -> name (shared across projects)
+	states     map[string]string                    // id -> name
+	items      map[string]map[string]map[string]any // project id -> item id -> item
+	comments   []fakeComment
+	stateMoves []fakeStateMove
+	whID       string
+	whURL      string
+	whSecret   string
+	created    int // webhook creations
+	regen      int // secret regenerations
 }
 
 // fakeComment is a comment captured by the fake server.
@@ -54,6 +57,13 @@ type fakeComment struct {
 	html    string
 }
 
+// fakeStateMove is a state change applied through the fake SetState API.
+type fakeStateMove struct {
+	project string
+	item    string
+	state   string // state id
+}
+
 // Comments returns the comments captured so far.
 func (f *fakePlane) Comments() []fakeComment {
 	f.mu.Lock()
@@ -61,10 +71,17 @@ func (f *fakePlane) Comments() []fakeComment {
 	return append([]fakeComment(nil), f.comments...)
 }
 
+// StateMoves returns the state changes applied so far, in order.
+func (f *fakePlane) StateMoves() []fakeStateMove {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeStateMove(nil), f.stateMoves...)
+}
+
 func newFakePlane() *fakePlane {
 	return &fakePlane{
 		labels: map[string]string{"lbl-epic": "epic", "lbl-model": "plan:opus"},
-		states: map[string]string{"st-backlog": "Backlog", "st-ready": "Ready"},
+		states: map[string]string{"st-backlog": "Backlog", "st-planning": "Planning", "st-ready": "Ready"},
 		items:  map[string]map[string]map[string]any{},
 	}
 }
@@ -162,6 +179,22 @@ func (f *fakePlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.comments = append(f.comments, fakeComment{project: proj, item: id, html: body["comment_html"]})
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]string{"id": "cm-" + strconv.Itoa(len(f.comments))})
+			return
+		}
+		if trail == "" && r.Method == http.MethodPatch {
+			// SetState: PATCH the item with {"state": <state id>}
+			it, ok := f.items[proj][id]
+			if !ok {
+				http.Error(w, `{"detail":"Not found."}`, http.StatusNotFound)
+				return
+			}
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["state"] != "" {
+				f.stateMoves = append(f.stateMoves, fakeStateMove{project: proj, item: id, state: body["state"]})
+				it["state"] = body["state"]
+			}
+			json.NewEncoder(w).Encode(it)
 			return
 		}
 		items := f.items[proj]
@@ -701,5 +734,189 @@ func TestCatchUpCoversAllWatchedProjects(t *testing.T) {
 	board, _ := instB["board"].(map[string]any)
 	if board["project"] != "T2I" {
 		t.Errorf("instructions board.project = %v, want T2I", board["project"])
+	}
+}
+
+// FakePlanQueue is a PlanQueuePublisher for tests: it records what the
+// bridge tried to publish and plays back a fixed outcome.
+type FakePlanQueue struct {
+	mu        sync.Mutex
+	Published []queue.Message
+	Behind    int
+	Err       error
+}
+
+func (q *FakePlanQueue) PublishPlan(_ context.Context, m queue.Message) (int, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.Err != nil {
+		return 0, q.Err
+	}
+	q.Published = append(q.Published, m)
+	return q.Behind, nil
+}
+
+func (q *FakePlanQueue) published() []queue.Message {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]queue.Message(nil), q.Published...)
+}
+
+// TestPlanJobPublishesToFrontOfBackgroundQueue covers B1: the planning
+// job is published at the front of the background queue with the plan
+// priority, the epic moves to Planning, and the epic gets a queue-
+// position comment. A redelivered webhook re-runs none of it.
+func TestPlanJobPublishesToFrontOfBackgroundQueue(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	fq := &FakePlanQueue{Behind: 2}
+	b.cfg.PlanQueue = fq
+
+	f.setItem("proj-1", "wi-1", "Ship the widget", "st-backlog", "", 7, "lbl-epic", "lbl-model")
+	body := eventBody("wi-1", "proj-1", "nathan@x", "labels")
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("webhook: status %d, want 200", code)
+	}
+	b.Wait()
+
+	// the store job, with the effort defaulting to high
+	job, err := store.Get("plane-plan_epic-wi-1")
+	if err != nil {
+		t.Fatalf("planning job not queued: %v", err)
+	}
+	var inst map[string]any
+	if err := json.Unmarshal([]byte(job.Instructions), &inst); err != nil {
+		t.Fatalf("instructions not JSON: %v", err)
+	}
+	if inst["model_id"] != "opus" || inst["effort"] != "high" {
+		t.Errorf("instructions model_id/effort = %v/%v, want opus/high", inst["model_id"], inst["effort"])
+	}
+
+	// one publish, with the shape the worker's ingest path expects
+	pubs := fq.published()
+	if len(pubs) != 1 {
+		t.Fatalf("queue publishes = %d, want 1: %+v", len(pubs), pubs)
+	}
+	m := pubs[0]
+	if m.ID != job.ID || m.Type != queue.BackgroundQueue || m.Priority != queue.PlanEpicPriority {
+		t.Errorf("published id/type/priority = %s/%s/%d, want %s/%s/%d",
+			m.ID, m.Type, m.Priority, job.ID, queue.BackgroundQueue, queue.PlanEpicPriority)
+	}
+	if m.Kind != queue.KindAgent || m.Class != agentjob.ClassBackground {
+		t.Errorf("published kind/class = %s/%s, want %s/%s", m.Kind, m.Class, queue.KindAgent, agentjob.ClassBackground)
+	}
+	if m.ReasoningEffort != queue.EffortHigh {
+		t.Errorf("published reasoning_effort = %q, want %s", m.ReasoningEffort, queue.EffortHigh)
+	}
+	if !strings.Contains(m.Title, "plan epic AAB-7") {
+		t.Errorf("published title = %q, want it to name the epic", m.Title)
+	}
+
+	// the epic moved to Planning
+	moves := f.StateMoves()
+	if len(moves) != 1 || moves[0].item != "wi-1" || moves[0].state != "st-planning" {
+		t.Errorf("state moves = %+v, want wi-1 -> st-planning", moves)
+	}
+
+	// the position comment (no models file, so no fit comment alongside)
+	cs := f.Comments()
+	if len(cs) != 1 {
+		t.Fatalf("comments = %d, want 1: %+v", len(cs), cs)
+	}
+	if !strings.Contains(cs[0].html, "front of the background queue") {
+		t.Errorf("position comment missing the queue: %s", cs[0].html)
+	}
+	if !strings.Contains(cs[0].html, "2 jobs behind") {
+		t.Errorf("position comment missing the count: %s", cs[0].html)
+	}
+
+	// a redelivered webhook re-runs nothing
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("replayed webhook: status %d, want 200", code)
+	}
+	b.Wait()
+	if n := len(fq.published()); n != 1 {
+		t.Errorf("queue publishes after replay = %d, want 1 (idempotent)", n)
+	}
+	if n := len(f.StateMoves()); n != 1 {
+		t.Errorf("state moves after replay = %d, want 1 (idempotent)", n)
+	}
+	if n := len(f.Comments()); n != 1 {
+		t.Errorf("comments after replay = %d, want 1 (idempotent)", n)
+	}
+}
+
+// TestPlanJobEffortLabel covers B1's effort: label — effort:low rides
+// into the job, and an unknown value falls back to the PLAN.md default
+// (high) instead of reaching the model.
+func TestPlanJobEffortLabel(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	fq := &FakePlanQueue{}
+	b.cfg.PlanQueue = fq
+	f.mu.Lock()
+	f.labels["lbl-effort-low"] = "effort:low"
+	f.labels["lbl-effort-weird"] = "effort:banana"
+	f.mu.Unlock()
+
+	f.setItem("proj-1", "wi-low", "Low effort epic", "st-backlog", "", 1, "lbl-epic", "lbl-model", "lbl-effort-low")
+	f.setItem("proj-1", "wi-weird", "Weird effort epic", "st-backlog", "", 2, "lbl-epic", "lbl-model", "lbl-effort-weird")
+	for _, itemID := range []string{"wi-low", "wi-weird"} {
+		body := eventBody(itemID, "proj-1", "nathan@x", "labels")
+		if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+			t.Fatalf("webhook for %s: status %d, want 200", itemID, code)
+		}
+	}
+	b.Wait()
+
+	wantEffort := map[string]string{
+		"plane-plan_epic-wi-low":   queue.EffortLow,
+		"plane-plan_epic-wi-weird": queue.EffortHigh,
+	}
+	for id, want := range wantEffort {
+		job, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("missing job %s: %v", id, err)
+		}
+		var inst map[string]any
+		if err := json.Unmarshal([]byte(job.Instructions), &inst); err != nil {
+			t.Fatalf("instructions not JSON: %v", err)
+		}
+		if inst["effort"] != want {
+			t.Errorf("%s instructions effort = %v, want %s", id, inst["effort"], want)
+		}
+	}
+	got := map[string]string{}
+	for _, m := range fq.published() {
+		got[m.ID] = m.ReasoningEffort
+	}
+	for id, want := range wantEffort {
+		if got[id] != want {
+			t.Errorf("published %s reasoning_effort = %q, want %s", id, got[id], want)
+		}
+	}
+}
+
+// TestPlanJobPublishFailureFallsBackToStore covers B1's broker-down
+// path: the queue publish fails, the job still lands in the store, the
+// epic still moves to Planning, and no position comment is posted (the
+// job is not actually in the queue).
+func TestPlanJobPublishFailureFallsBackToStore(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	b.cfg.PlanQueue = &FakePlanQueue{Err: errors.New("broker down")}
+
+	f.setItem("proj-1", "wi-1", "Ship the widget", "st-backlog", "", 7, "lbl-epic", "lbl-model")
+	body := eventBody("wi-1", "proj-1", "nathan@x", "labels")
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("webhook: status %d, want 200", code)
+	}
+	b.Wait()
+
+	if _, err := store.Get("plane-plan_epic-wi-1"); err != nil {
+		t.Fatalf("planning job missing from store: %v", err)
+	}
+	if moves := f.StateMoves(); len(moves) != 1 || moves[0].state != "st-planning" {
+		t.Errorf("state moves = %+v, want wi-1 -> st-planning", moves)
+	}
+	if cs := f.Comments(); len(cs) != 0 {
+		t.Errorf("failed publish still posted %d comments, want 0", len(cs))
 	}
 }

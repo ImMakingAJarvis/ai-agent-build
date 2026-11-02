@@ -481,7 +481,7 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   iGPU keep running.
 - Phase A handler in the worker logs + acks; the model-swap / cloud
   dispatch that runs a location job is B2/C1's job. Queues added to
-  `rabbitmq/definitions.json` (no x-priority, bound like the others).
+  `rabbitmq/definitions.json` (no x-max-priority, bound like the others).
 - **Tests:** `LocationQueueFor` + pause-routing are hermetic;
   `TestLocationWorkers_CPUFinishesWhileGPURunning` (the acceptance
   check) and `TestLocationWorkers_PausedGPUQueueDoesNotBlockCPU` run

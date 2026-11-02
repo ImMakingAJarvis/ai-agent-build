@@ -6,13 +6,13 @@ func TestQueueDeclareArgsMatchBroker(t *testing.T) {
 	want := map[string]int64{
 		VoiceQueue:      10,
 		CodingQueue:     5,
-		BackgroundQueue: 1,
+		BackgroundQueue: 10,
 	}
 	for name, pri := range want {
 		args := queueDeclareArgs(name)
-		got, ok := args["x-priority"].(int64)
+		got, ok := args["x-max-priority"].(int64)
 		if !ok || got != pri {
-			t.Errorf("%s x-priority = %v (%T), want %d", name, args["x-priority"], args["x-priority"], pri)
+			t.Errorf("%s x-max-priority = %v (%T), want %d", name, args["x-max-priority"], args["x-max-priority"], pri)
 		}
 	}
 	if args := queueDeclareArgs(FixQueue); args != nil {

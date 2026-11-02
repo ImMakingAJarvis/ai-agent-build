@@ -77,6 +77,14 @@ const (
 // AllQueues lists the queues in priority order (highest first).
 var AllQueues = []string{VoiceQueue, FixQueue, CodingQueue, BackgroundQueue}
 
+// PlanEpicPriority is the AMQP priority of plan_epic jobs published to the
+// background queue (B1): the maximum the background queue accepts
+// (x-max-priority 10), so a planning job sits at the front of the background
+// queue. It only orders pending deliveries — it never preempts a running
+// job — and the scheduler still keeps the conversation queues (voice, fix,
+// coding) ahead of the background queue.
+const PlanEpicPriority = 10
+
 // QueueForType returns the RabbitMQ queue name for a given job type.
 func QueueForType(jobType string) string {
 	switch jobType {
