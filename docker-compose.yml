@@ -338,10 +338,16 @@ services:
       ENGINE_URL: http://engine:11434
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       DASHBOARD_ADDR: dashboard:8080
+      # B2 plan worker: the registry is read from the host config dir so
+      # model changes do not need an image rebuild. ENGINE_URL already
+      # takes the worker to the engine for the registry's host-local
+      # endpoints (see newPlanHandler in cmd/worker).
+      WORKER_MODELS_FILE: /config/models.yaml
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /home/agent/ai-agent-build/config:/config:ro
 
   wake-queue:
     build:
