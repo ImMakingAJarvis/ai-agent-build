@@ -461,3 +461,34 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   serializes them; a test skips if the lock is still held after 5 min.
 - Sync only touches `plan:`-prefixed labels; foreign labels (epic, ...)
   are left alone, verified hermetically and on the live scratch project.
+
+## A6 — per-location queues and workers (2026-11-01)
+
+- Job plan-epic-planner-plan-with-m-1793259204-12. `jobs.gpu`, `jobs.cpu`,
+  `jobs.igpu` queues on the existing `tasks` topic exchange (bound `q +
+  ".#"` like the priority queues), each consumed by its own
+  `queue.LocationWorker` — started by `cmd/worker` via
+  `queue.LocationWorkers`, one per queue.
+- **Dedicated AMQP channel per worker** (`Conn.NewChannel`): the main
+  consumer shares one channel, so its `Qos(1,0)` prefetch is one delivery
+  slot across all four priority queues. A location worker on its own
+  channel with prefetch=1 is what makes per-location parallelism real —
+  a long GPU job cannot hold the CPU/iGPU queues' delivery slots.
+- **Pause is per queue**: `Pause()` holds an arriving delivery unacked;
+  with prefetch=1 on the worker's own channel that holding is what stops
+  the queue. The game watchdog (streamwatcher in `cmd/worker`) pauses
+  only `jobs.gpu` on stream start and resumes it on stream end; CPU and
+  iGPU keep running.
+- Phase A handler in the worker logs + acks; the model-swap / cloud
+  dispatch that runs a location job is B2/C1's job. Queues added to
+  `rabbitmq/definitions.json` (no x-priority, bound like the others).
+- **Tests:** `LocationQueueFor` + pause-routing are hermetic;
+  `TestLocationWorkers_CPUFinishesWhileGPURunning` (the acceptance
+  check) and `TestLocationWorkers_PausedGPUQueueDoesNotBlockCPU` run
+  against the live broker and skip when it is unreachable. They use
+  per-run `a6test.*` queues so their routing keys never match the real
+  `jobs.*` bindings (no race with the deployed worker's location
+  consumers).
+- Follow-up (not A6): the dashboard's queue view still lists only
+  voice/coding/background; add the `jobs.*` queues when the queue view
+  is next touched.

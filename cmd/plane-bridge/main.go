@@ -43,6 +43,7 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/bridge"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/placement"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/planlabels"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
@@ -192,23 +193,29 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
-	// Keep the plan:<model> labels in sync with the enabled planner models
-	// (A3): one label per enabled planner, removed when it is disabled.
-	// Runs on every change to the models file (15 s poll); the first sync
-	// waits for the startup catch-up so the two bursts do not share the
-	// Plane rate limit at boot.
+	// Keep the board labels in sync with the registry and the box:
+	// plan:<model> with the enabled planner models (A3), model:<id> with
+	// the enabled executor models and run:<loc> with the locations this
+	// box actually has (A5). Runs on every change to the models file
+	// (15 s poll); the first sync waits for the startup catch-up so the
+	// bursts do not share the Plane rate limit at boot.
 	go func() {
 		select {
 		case <-ctx.Done():
 			return
 		case <-catchUpDone:
 		}
+		present := placement.Detect(ctx)
+		log.Info("box locations detected", "locations", placement.Names(present))
 		w := planlabels.NewWatcher(modelsFile, 15*time.Second, log,
 			func(ctx context.Context, f *registry.File) error {
-				return planlabels.Sync(ctx, client, projectIDs, f, log)
+				if err := planlabels.Sync(ctx, client, projectIDs, f, log); err != nil {
+					return err
+				}
+				return placement.Sync(ctx, client, projectIDs, f, present, log)
 			})
 		if err := w.Run(ctx); err != nil && ctx.Err() == nil {
-			log.Error("plan-label watcher stopped", "err", err)
+			log.Error("board-label watcher stopped", "err", err)
 		}
 	}()
 

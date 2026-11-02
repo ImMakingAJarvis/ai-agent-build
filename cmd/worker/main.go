@@ -2,7 +2,10 @@
 //
 // It connects to RabbitMQ, consumes from voice/coding/background queues,
 // routes each job to the appropriate model via pickModel, and records
-// job history (start, finish, model, duration).
+// job history (start, finish, model, duration). It also runs one
+// location worker per jobs.gpu/jobs.cpu/jobs.igpu queue (A6) so jobs on
+// different locations run in parallel; the game watchdog pauses only the
+// GPU queue while a stream is active.
 package main
 
 import (
@@ -60,6 +63,16 @@ func run() error {
 		log.Printf("worker: engine is not Ollama — idle-unload disabled (llama.cpp keeps its model resident)")
 	}
 
+	// Location workers (A6): one worker per jobs.gpu/jobs.cpu/jobs.igpu
+	// queue so CPU and iGPU jobs run in parallel with the GPU job instead
+	// of waiting behind it. In Phase A the handler records the job and
+	// acks; the model-swap / cloud dispatch that actually runs a location
+	// job arrives with Phase B (B2) and C1.
+	locWorkers := queue.NewLocationWorkers(conn, func(msg queue.Message) error {
+		log.Printf("worker: location job %s (type=%s) received — executor lands in Phase B/C", msg.ID, msg.Type)
+		return nil
+	})
+
 	// Stream watcher detects active Sunshine/Steam streams so we can free
 	// GPU memory while a stream is active.
 	streamCh := make(chan streamwatcher.StateChange, 1)
@@ -80,17 +93,22 @@ func run() error {
 	go func() {
 		for change := range streamCh {
 			if change.Stream != streamwatcher.NoStream {
-				// Stream started — stop the engine to free ~22GB VRAM.
-				log.Printf("worker: stream %s started — stopping engine", change.Stream)
+				// Stream started — stop the engine to free ~22GB VRAM and
+				// pause the GPU location queue. The game watchdog pauses
+				// only the GPU queue: CPU and iGPU jobs keep running (A6).
+				log.Printf("worker: stream %s started — stopping engine, pausing GPU queue", change.Stream)
+				locWorkers.Pause(queue.JobsGPUQueue)
 				if err := engMgr.StopService(); err != nil {
 					log.Printf("worker: stop engine: %v", err)
 				} else {
 					streamBlocked.Store(true)
 				}
 			} else {
-				// Stream ended — restart the engine.
-				log.Printf("worker: stream ended — restarting engine")
+				// Stream ended — restart the engine and resume the GPU
+				// location queue.
+				log.Printf("worker: stream ended — restarting engine, resuming GPU queue")
 				streamBlocked.Store(false)
+				locWorkers.Resume(queue.JobsGPUQueue)
 				if err := engMgr.StartService(); err != nil {
 					log.Printf("worker: start engine: %v", err)
 				}
@@ -303,6 +321,11 @@ func run() error {
 		}
 	}()
 
+	// Start location workers (one per jobs.gpu/jobs.cpu/jobs.igpu queue).
+	if err := locWorkers.Start(); err != nil {
+		return fmt.Errorf("location workers start: %w", err)
+	}
+
 	// Start consumer.
 	consumer := queue.NewConsumer(conn, handle)
 	if err := consumer.Start(); err != nil {
@@ -322,6 +345,7 @@ func run() error {
 	streamWatcher.Stop()
 	close(streamCh)
 	consumer.Stop()
+	locWorkers.Stop()
 	return nil
 }
 

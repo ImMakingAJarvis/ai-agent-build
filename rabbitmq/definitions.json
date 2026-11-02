@@ -49,6 +49,27 @@
       "arguments": {
         "x-priority": 1
       }
+    },
+    {
+      "name": "jobs.gpu",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "jobs.cpu",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "jobs.igpu",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
     }
   ],
   "permissions": [
@@ -83,6 +104,30 @@
       "destination": "background",
       "destination_type": "queue",
       "routing_key": "background.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "jobs.gpu",
+      "destination_type": "queue",
+      "routing_key": "jobs.gpu.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "jobs.cpu",
+      "destination_type": "queue",
+      "routing_key": "jobs.cpu.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "jobs.igpu",
+      "destination_type": "queue",
+      "routing_key": "jobs.igpu.#",
       "arguments": {}
     }
   ]
