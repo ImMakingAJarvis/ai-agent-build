@@ -46,6 +46,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/placement"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/planlabels"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 )
 
@@ -124,6 +125,19 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("opening job store: %w", err)
 	}
 
+	// B1: plan_epic jobs jump to the front of the background queue. A
+	// RabbitMQ outage must not stop the bridge — the store ingest is the
+	// idempotency anchor — so a failed connect degrades to store-only.
+	var planQueue bridge.PlanQueuePublisher
+	qconn, err := queue.NewConn()
+	if err != nil {
+		log.Warn("rabbitmq unavailable; planning jobs are store-only", "err", err)
+	} else {
+		defer qconn.Close()
+		planQueue = queue.NewPlanPublisher(qconn, queue.BackgroundQueue)
+		log.Info("plan queue publisher ready", "queue", queue.BackgroundQueue)
+	}
+
 	webhookURL := envOr("BRIDGE_WEBHOOK_URL", "")
 	if webhookURL == "" {
 		ip, err := lanIP()
@@ -146,6 +160,7 @@ func run(log *slog.Logger) error {
 		Workspace:    workspace,
 		EventsFile:   eventsFile,
 		ModelsFile:   modelsFile,
+		PlanQueue:    planQueue,
 	})
 	if err != nil {
 		return err

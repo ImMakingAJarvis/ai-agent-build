@@ -351,6 +351,12 @@ func TestLiveWebhookAndCatchUp(t *testing.T) {
 			"BRIDGE_EVENTS_FILE=" + eventsFile,
 			"BRIDGE_MODELS_FILE=" + modelsFile,
 			"JARVIS_DATA_DIR=" + dataDir,
+			// B1: the bridge also connects to RabbitMQ to publish plan
+			// jobs. Point it at a dead port so the test bridge can never
+			// put real messages on the production queues — with the broker
+			// unreachable it degrades to store-only, which is what these
+			// assertions exercise.
+			"RABBITMQ_URL=amqp://jarvis:jarvis-local@localhost:5673",
 			"HOME=/home/agent",
 		}
 		cmd.Stdout = logFile

@@ -40,6 +40,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/fit"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 )
 
@@ -84,6 +85,17 @@ type Config struct {
 	// FitSource reads the live free memory for the fit comment; nil
 	// uses fit.Live (nvidia-smi + /proc/meminfo).
 	FitSource fit.Source
+	// PlanQueue publishes plan_epic jobs at the front of the background
+	// queue (B1). Nil keeps the store-only path: the job still lands in
+	// the store, which is the idempotency anchor either way.
+	PlanQueue PlanQueuePublisher
+}
+
+// PlanQueuePublisher publishes a plan_epic job at the front of the
+// background queue and reports how many jobs line up behind it. The
+// implementation is queue.PlanPublisher; tests use a fake.
+type PlanQueuePublisher interface {
+	PublishPlan(ctx context.Context, m queue.Message) (int, error)
 }
 
 // Bridge verifies, logs and routes Plane webhooks and runs the trigger
@@ -523,10 +535,22 @@ func hasLabel(names []string, want string) bool {
 // enqueue stores the job for this trigger+item, or reports it already
 // exists. Job ids are deterministic (plane-<trigger>-<item id>), so
 // redelivered webhooks and repeated catch-ups never duplicate.
+//
+// A planning job (B1) takes a second path on top of the store: it is
+// published at the front of the background queue (PlanEpicPriority), it
+// moves the epic to Planning, and it comments its queue position. The
+// order is chosen so partial failures self-repair: if the store ingest
+// fails, the next redelivery re-runs the whole unit (the duplicate queue
+// message is harmless — the worker's ingest is idempotent), while the
+// store write is the anchor that makes a redelivery a no-op.
 func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *plane.WorkItem, modelID string, labelNames []string) bool {
 	id := "plane-" + trigger + "-" + item.ID
 	if _, err := b.cfg.Store.Get(id); err == nil {
 		return false // a job for this trigger+item already exists
+	}
+	effort := ""
+	if trigger == TriggerPlan {
+		effort = effortLabel(labelNames)
 	}
 	spec := agentjob.Spec{
 		ID:       id,
@@ -536,7 +560,34 @@ func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *p
 		// runs first (it is a different system)
 		Source:       "plane-bridge",
 		CreatedAt:    time.Now().UTC(),
-		Instructions: instructions(trigger, b.cfg, projectID, item, modelID, labelNames),
+		Instructions: instructions(trigger, b.cfg, projectID, item, modelID, effort, labelNames),
+	}
+	// Queue path (B1): the plan job jumps to the front of the background
+	// queue itself, so the worker ingests it ahead of normal background
+	// work. The publish failure is not fatal — the store ingest below is
+	// the anchor and the agent-run loop reads from it (store-only mode).
+	published, behind := false, 0
+	if trigger == TriggerPlan && b.cfg.PlanQueue != nil {
+		pos, err := b.cfg.PlanQueue.PublishPlan(ctx, queue.Message{
+			ID:              id,
+			Type:            queue.BackgroundQueue,
+			Priority:        queue.PlanEpicPriority,
+			Kind:            queue.KindAgent,
+			Class:           spec.Class,
+			Title:           spec.Title,
+			Instructions:    spec.Instructions,
+			ReasoningEffort: effort,
+			Source:          "plane-bridge",
+			CreatedAt:       spec.CreatedAt,
+		})
+		if err != nil {
+			b.cfg.Log.Warn("plan job queue publish failed; store-only", "job", id, "err", err)
+		} else {
+			published, behind = true, pos
+		}
+	}
+	if trigger == TriggerPlan {
+		b.moveToPlanning(ctx, projectID, item)
 	}
 	added, err := b.cfg.Store.Ingest(spec)
 	if err != nil {
@@ -547,10 +598,66 @@ func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *p
 		b.cfg.Log.Info("queued job from trigger state", "job", id, "trigger", trigger,
 			"item", item.ID, "name", item.Name, "model", modelID)
 		if trigger == TriggerPlan {
+			if published {
+				b.postPositionComment(ctx, projectID, item, behind)
+			}
 			b.postFitComment(ctx, projectID, item, modelID)
 		}
 	}
 	return added
+}
+
+// effortLabel reads the planning effort from an effort:<v> label
+// (low/medium/high per PLAN.md, default high). The value is stored
+// verbatim — deliberately not run through queue.CanonicalEffort, which
+// would rewrite "high" to "xhigh".
+func effortLabel(names []string) string {
+	for _, n := range names {
+		if v, ok := strings.CutPrefix(n, "effort:"); ok {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if v == queue.EffortLow || v == queue.EffortMedium || v == queue.EffortHigh {
+				return v
+			}
+		}
+	}
+	return queue.EffortHigh
+}
+
+// moveToPlanning moves the epic to the Planning state once its planning
+// job is queued (B1). The bridge ignores bot-actor events, so the state
+// move cannot retrigger itself. A failure is logged and dropped: the job
+// is on its way and the planning job updates the board as it progresses.
+func (b *Bridge) moveToPlanning(ctx context.Context, projectID string, item *plane.WorkItem) {
+	st, err := b.cfg.Plane.StateByName(ctx, projectID, "Planning")
+	if err != nil {
+		b.cfg.Log.Warn("planning state lookup failed", "project", projectID, "err", err)
+		return
+	}
+	if _, err := b.cfg.Plane.SetState(ctx, projectID, item.ID, st.ID); err != nil {
+		b.cfg.Log.Warn("move to Planning failed", "item", item.ID, "err", err)
+		return
+	}
+	b.cfg.Log.Info("epic moved to Planning", "item", item.ID)
+}
+
+// postPositionComment posts the B1 queue-position comment on the epic
+// whose planning job was just published to the front of the background
+// queue. Like the fit comment, any failure is logged and dropped — a
+// courtesy, never a gate.
+func (b *Bridge) postPositionComment(ctx context.Context, projectID string, item *plane.WorkItem, behind int) {
+	plural := "jobs"
+	if behind == 1 {
+		plural = "job"
+	}
+	html := fmt.Sprintf(
+		"<p>Planning job queued at the front of the background queue — %d %s behind. "+
+			"It starts as soon as the current background job finishes; conversation jobs still come first.</p>",
+		behind, plural)
+	if _, err := b.cfg.Plane.AddComment(ctx, projectID, item.ID, html); err != nil {
+		b.cfg.Log.Warn("position comment failed", "item", item.ID, "err", err)
+		return
+	}
+	b.cfg.Log.Info("position comment posted", "item", item.ID, "behind", behind)
 }
 
 // postFitComment posts the A4 VRAM/RAM fit verdict for modelID on the
@@ -611,8 +718,9 @@ func (b *Bridge) title(projectID, trigger string, item *plane.WorkItem, modelID 
 }
 
 // instructions is the JSON body of the queued job — the contract later
-// phases (B1, C1) consume.
-func instructions(trigger string, cfg Config, projectID string, item *plane.WorkItem, modelID string, labelNames []string) string {
+// phases (B2, C1) consume. effort (low/medium/high) rides along with
+// planning jobs; it defaults to high in the bridge, never empty.
+func instructions(trigger string, cfg Config, projectID string, item *plane.WorkItem, modelID, effort string, labelNames []string) string {
 	body := map[string]any{
 		"trigger": trigger,
 		"board": map[string]string{
@@ -630,8 +738,11 @@ func instructions(trigger string, cfg Config, projectID string, item *plane.Work
 			"labels":      labelNames,
 		},
 	}
-	if modelID != "" {
-		body["model_id"] = modelID
+	if trigger == TriggerPlan {
+		if modelID != "" {
+			body["model_id"] = modelID
+		}
+		body["effort"] = effort
 	}
 	raw, err := json.MarshalIndent(body, "", "  ")
 	if err != nil {

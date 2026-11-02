@@ -81,16 +81,23 @@ func (c *Consumer) Start() error {
 }
 
 // queueDeclareArgs matches rabbitmq/definitions.json. A declare with nil
-// args against an existing x-priority queue fails and kills the worker.
-// RabbitMQ stores these as AMQP long (int64), not int32.
+// args against an existing x-max-priority queue fails and kills the
+// worker. x-max-priority (not x-priority) is the argument that makes
+// RabbitMQ treat a classic queue as a priority queue; its value is the
+// highest per-message priority the queue accepts. RabbitMQ stores these
+// as AMQP long (int64), not int32.
 func queueDeclareArgs(name string) amqp.Table {
 	switch name {
 	case VoiceQueue:
-		return amqp.Table{"x-priority": int64(10)}
+		return amqp.Table{"x-max-priority": int64(10)}
 	case CodingQueue:
-		return amqp.Table{"x-priority": int64(5)}
+		return amqp.Table{"x-max-priority": int64(5)}
 	case BackgroundQueue:
-		return amqp.Table{"x-priority": int64(1)}
+		// 10 (not 1): B1 publishes plan_epic jobs at PlanEpicPriority (10),
+		// the front of the background queue, and RabbitMQ rejects a publish
+		// whose priority exceeds the queue's x-max-priority. Normal background
+		// jobs still publish at priority 1, so they line up behind plans.
+		return amqp.Table{"x-max-priority": int64(10)}
 	default:
 		return nil
 	}

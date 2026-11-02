@@ -40,10 +40,23 @@ func NewClient() *Client {
 	if base == "" {
 		base = defaultOllamaURL
 	}
+	return NewClientWithBase(base)
+}
+
+// NewClientWithBase creates a client for the engine at baseURL — one
+// engine per registry endpoint (plan worker, B2).
+func NewClientWithBase(baseURL string) *Client {
+	return NewClientWithBaseTimeout(baseURL, defaultTimeout)
+}
+
+// NewClientWithBaseTimeout is NewClientWithBase with an explicit request
+// timeout: planning calls on a 27B can run for many minutes, far past the
+// chat default.
+func NewClientWithBaseTimeout(baseURL string, timeout time.Duration) *Client {
 	return &Client{
-		baseURL: base,
+		baseURL: baseURL,
 		http: &http.Client{
-			Timeout: defaultTimeout,
+			Timeout: timeout,
 		},
 	}
 }
