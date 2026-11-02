@@ -920,3 +920,35 @@ func TestPlanJobPublishFailureFallsBackToStore(t *testing.T) {
 		t.Errorf("failed publish still posted %d comments, want 0", len(cs))
 	}
 }
+
+// TestInstructionsDescription: the plan job's contract carries the epic's
+// description as plain text (the B3 plan prompt reads it).
+func TestInstructionsDescription(t *testing.T) {
+	cfg := Config{BoardURL: "http://plane", Workspace: "jarvis",
+		ProjectNames: map[string]string{"p1": "T2I"}}
+	item := &plane.WorkItem{ID: "wi-1", Name: "Epic", SequenceID: 3,
+		DescriptionHTML: "<p>Build the <b>widget</b> &amp; ship it.</p>"}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(instructions(TriggerPlan, cfg, "p1", item, "opus", "high", []string{"epic"})), &body); err != nil {
+		t.Fatalf("instructions not JSON: %v", err)
+	}
+	got, _ := body["item"].(map[string]any)
+	if got["description"] != "Build the widget & ship it." {
+		t.Fatalf("description = %v, want stripped plain text", got["description"])
+	}
+}
+
+func TestStripHTML(t *testing.T) {
+	cases := map[string]string{
+		"<p>a &amp; b</p>\n":    "a & b",
+		"plain":                 "plain",
+		"":                      "",
+		"a&nbsp;b":              "a b",
+		"<ul><li>one</li></ul>": "one",
+	}
+	for in, want := range cases {
+		if got := stripHTML(in); got != want {
+			t.Errorf("stripHTML(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

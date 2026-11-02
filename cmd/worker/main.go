@@ -417,7 +417,8 @@ func run() error {
 // newPlanHandler builds the B2 plan dispatcher: the registry from
 // WORKER_MODELS_FILE (default config/models.yaml, repo root), one engine
 // client per registry endpoint, the cloud caller for the registry's cloud
-// engines, and the BasicPlanner pipeline until B3 replaces it.
+// engines, and the B3 planning pipeline (the Plan/Decompose/Review prompts
+// plus the task JSON schema, prompts/).
 //
 // When the worker runs beside the engine (docker compose), the registry's
 // host-local endpoints (localhost:11434) are not reachable from the
@@ -443,6 +444,16 @@ func newPlanHandler() (*planworker.Handler, error) {
 		// The iGPU helper, by the name its llama.cpp engine reports.
 		frontEnd = "jarvis-igpu.gguf"
 	}
+	promptsDir := os.Getenv("WORKER_PROMPTS_DIR")
+	if promptsDir == "" {
+		promptsDir = "prompts"
+	}
+	// WORKER_REPO_ROOT is the repo the plan step summarises for the model
+	// (the worker runs with the repo root as its CWD by default).
+	pipe, err := planworker.NewPipeline(promptsDir, os.Getenv("WORKER_REPO_ROOT"), reg)
+	if err != nil {
+		return nil, fmt.Errorf("planning pipeline: %w", err)
+	}
 	return &planworker.Handler{
 		Models: reg,
 		Engines: func(endpoint string) planworker.Engine {
@@ -460,7 +471,7 @@ func newPlanHandler() (*planworker.Handler, error) {
 			return e
 		},
 		Cloud:    planworker.NewAPI(),
-		Planner:  planworker.BasicPlanner{},
+		Planner:  pipe,
 		FrontEnd: frontEnd,
 	}, nil
 }

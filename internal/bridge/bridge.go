@@ -732,6 +732,7 @@ func instructions(trigger string, cfg Config, projectID string, item *plane.Work
 		"item": map[string]any{
 			"id":          item.ID,
 			"name":        item.Name,
+			"description": stripHTML(item.DescriptionHTML),
 			"sequence_id": item.SequenceID,
 			"parent":      item.Parent,
 			"state":       item.State,
@@ -749,6 +750,37 @@ func instructions(trigger string, cfg Config, projectID string, item *plane.Work
 		return fmt.Sprintf(`{"trigger": %q, "item_id": %q}`, trigger, item.ID)
 	}
 	return string(raw)
+}
+
+// stripHTML reduces a Plane description (description_html) to plain text
+// for the plan job's contract: tags dropped, common entities decoded. It
+// is deliberately dependency-free — the description only needs to be
+// readable by the planning model, not perfectly rendered.
+func stripHTML(s string) string {
+	var b strings.Builder
+	inTag := false
+	for _, r := range s {
+		switch {
+		case r == '<':
+			inTag = true
+		case r == '>':
+			inTag = false
+		case !inTag:
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	for _, ent := range []struct{ s, r string }{
+		{"&nbsp;", " "},
+		{"&lt;", "<"},
+		{"&gt;", ">"},
+		{"&quot;", `"`},
+		{"&#39;", "'"},
+		{"&amp;", "&"}, // last: "&amp;lt;" must become "&lt;", not "<"
+	} {
+		out = strings.ReplaceAll(out, ent.s, ent.r)
+	}
+	return strings.TrimSpace(out)
 }
 
 // --- board metadata (label/state name maps) -------------------------------------------
