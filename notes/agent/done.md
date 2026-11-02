@@ -67,3 +67,4 @@
 - 2026-11-01T09:27Z [plan-epic-planner-plan-with-m-1793259204-7] work-board Phase A1: config/models.yaml registry + internal/registry load/validate test (PR #130)
 - 2026-11-01T09:40Z [plan-epic-planner-plan-with-m-1793259204-8] Work-board A2: registry.ByRole(role) — enabled models per role, disabled skipped, unknown-role error (PR #131)
 - 2026-11-01T10:20Z [plan-epic-planner-plan-with-m-1793259204-9] A3: sync planner models to Plane plan: labels — planlabels pkg (Sync + 15s mtime poll), DeleteLabel, bridge wiring staggered after catch-up; live-verified enable/disable on the 8 watched projects (PR #131 with A2)
+- 2026-11-01T21:19Z [plan-epic-planner-plan-with-m-1793259204-10] A4 VRAM/RAM fit check: internal/fit package (fits/needs_offload/too_big from nvidia-smi + MemAvailable vs registry vram_gb/ram_gb), plane-bridge posts verdict comment when a plan_epic job is queued (PR #132)

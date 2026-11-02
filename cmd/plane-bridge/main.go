@@ -93,6 +93,7 @@ func run(log *slog.Logger) error {
 	listen := envOr("BRIDGE_LISTEN", ":8102")
 	secretFile := envOr("BRIDGE_SECRET_FILE", defaultSecretFile())
 	eventsFile := envOr("BRIDGE_EVENTS_FILE", defaultEventsFile())
+	modelsFile := envOr("BRIDGE_MODELS_FILE", "/home/agent/ai-agent-build/config/models.yaml")
 
 	client, err := plane.New(plane.Config{
 		BaseURL: planeURL, APIKey: apiKey, Workspace: workspace,
@@ -143,6 +144,7 @@ func run(log *slog.Logger) error {
 		BoardURL:     planeURL,
 		Workspace:    workspace,
 		EventsFile:   eventsFile,
+		ModelsFile:   modelsFile,
 	})
 	if err != nil {
 		return err
@@ -195,7 +197,6 @@ func run(log *slog.Logger) error {
 	// Runs on every change to the models file (15 s poll); the first sync
 	// waits for the startup catch-up so the two bursts do not share the
 	// Plane rate limit at boot.
-	modelsFile := envOr("BRIDGE_MODELS_FILE", "/home/agent/ai-agent-build/config/models.yaml")
 	go func() {
 		select {
 		case <-ctx.Done():

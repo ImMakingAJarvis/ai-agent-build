@@ -6,15 +6,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/fit"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
 )
 
@@ -36,11 +39,26 @@ type fakePlane struct {
 	labels   map[string]string                    // id -> name (shared across projects)
 	states   map[string]string                    // id -> name
 	items    map[string]map[string]map[string]any // project id -> item id -> item
+	comments []fakeComment
 	whID     string
 	whURL    string
 	whSecret string
 	created  int // webhook creations
 	regen    int // secret regenerations
+}
+
+// fakeComment is a comment captured by the fake server.
+type fakeComment struct {
+	project string
+	item    string
+	html    string
+}
+
+// Comments returns the comments captured so far.
+func (f *fakePlane) Comments() []fakeComment {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeComment(nil), f.comments...)
 }
 
 func newFakePlane() *fakePlane {
@@ -132,7 +150,20 @@ func (f *fakePlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"results": out, "count": len(out)})
 	case strings.HasPrefix(rest2, "work-items"):
-		id := strings.Trim(strings.TrimPrefix(rest2, "work-items/"), "/")
+		rest3 := strings.Trim(strings.TrimPrefix(rest2, "work-items"), "/")
+		id, trail, _ := strings.Cut(rest3, "/")
+		if trail == "comments" {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			f.comments = append(f.comments, fakeComment{project: proj, item: id, html: body["comment_html"]})
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"id": "cm-" + strconv.Itoa(len(f.comments))})
+			return
+		}
 		items := f.items[proj]
 		if id == "" {
 			all := make([]map[string]any, 0, len(items))
@@ -501,6 +532,131 @@ func TestNewRequiresConfig(t *testing.T) {
 	c.Projects = nil
 	if _, err := New(c); err == nil {
 		t.Error("New without Projects should fail")
+	}
+}
+
+// fixedReadings is a fit.Source that returns the same snapshot every
+// time, standing in for nvidia-smi + /proc/meminfo in tests.
+type fixedReadings struct{ r fit.Readings }
+
+func (s fixedReadings) Readings(context.Context) (fit.Readings, error) {
+	return s.r, nil
+}
+
+// writeTestRegistry writes a minimal valid models.yaml with one planner
+// model named id at path.
+func writeTestRegistry(t *testing.T, path, id string, vramGB, ramGB int) {
+	t.Helper()
+	reg := fmt.Sprintf(`models:
+  - id: %s
+    display_name: Test Model
+    location: local
+    engine: ollama
+    endpoint: http://localhost:1/v1
+    roles: [planner]
+    context_tokens: 1000
+    vram_gb: %d
+    ram_gb: %d
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: true
+    home_location: gpu
+    fallback_location: cpu
+`, id, vramGB, ramGB)
+	if err := os.WriteFile(path, []byte(reg), 0o644); err != nil {
+		t.Fatalf("writing test registry: %v", err)
+	}
+}
+
+// TestPlanningJobQueuedPostsFitComment covers A4 end to end: when a
+// planning job is queued, the bridge reads (mocked) live memory, checks
+// the planned model's registry requirements, and posts the verdict as a
+// comment on the item.
+func TestPlanningJobQueuedPostsFitComment(t *testing.T) {
+	b, f, store, dir := newBridge(t, "jarvis-bot@x")
+	modelsFile := filepath.Join(dir, "models.yaml")
+	writeTestRegistry(t, modelsFile, "opus", 20, 80)
+	b.cfg.ModelsFile = modelsFile
+	b.cfg.FitSource = fixedReadings{fit.Readings{FreeVRAMGB: 10, FreeRAMGB: 100}}
+
+	f.setItem("proj-1", "wi-1", "Ship the widget", "st-backlog", "", 7, "lbl-epic", "lbl-model")
+	body := eventBody("wi-1", "proj-1", "nathan@x", "labels")
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("webhook: status %d, want 200", code)
+	}
+	b.Wait()
+
+	if _, err := store.Get("plane-plan_epic-wi-1"); err != nil {
+		t.Fatalf("planning job not queued: %v", err)
+	}
+	cs := f.Comments()
+	if len(cs) != 1 {
+		t.Fatalf("comments = %d, want 1: %+v", len(cs), cs)
+	}
+	if cs[0].project != "proj-1" || cs[0].item != "wi-1" {
+		t.Errorf("comment on %s/%s, want proj-1/wi-1", cs[0].project, cs[0].item)
+	}
+	// 10 GiB free VRAM < 20 needed, 100 GiB free RAM >= 80 needed.
+	if !strings.Contains(cs[0].html, "needs_offload") {
+		t.Errorf("comment missing needs_offload verdict: %s", cs[0].html)
+	}
+	if !strings.Contains(cs[0].html, "Test Model") {
+		t.Errorf("comment missing the model name: %s", cs[0].html)
+	}
+
+	// a redelivered webhook queues nothing and posts no second comment
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("replayed webhook: status %d, want 200", code)
+	}
+	b.Wait()
+	if cs := f.Comments(); len(cs) != 1 {
+		t.Errorf("comments after replay = %d, want 1 (idempotent)", len(cs))
+	}
+}
+
+// TestRunTaskJobNoFitComment: the fit comment goes with planning jobs
+// only; a run_task job queues without one.
+func TestRunTaskJobNoFitComment(t *testing.T) {
+	b, f, store, dir := newBridge(t, "jarvis-bot@x")
+	modelsFile := filepath.Join(dir, "models.yaml")
+	writeTestRegistry(t, modelsFile, "opus", 20, 80)
+	b.cfg.ModelsFile = modelsFile
+	b.cfg.FitSource = fixedReadings{fit.Readings{FreeVRAMGB: 10, FreeRAMGB: 100}}
+
+	f.setItem("proj-1", "sub-1", "Sub task", "st-ready", "epic-1", 2)
+	body := eventBody("sub-1", "proj-1", "nathan@x", "state")
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("webhook: status %d, want 200", code)
+	}
+	b.Wait()
+
+	if _, err := store.Get("plane-run_task-sub-1"); err != nil {
+		t.Fatalf("run task job not queued: %v", err)
+	}
+	if cs := f.Comments(); len(cs) != 0 {
+		t.Errorf("run task posted %d comments, want 0: %+v", len(cs), cs)
+	}
+}
+
+// TestFitCommentSkippedOnProblems: a missing models file never blocks or
+// fails the queue — the job goes in, the comment is dropped.
+func TestFitCommentSkippedOnProblems(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	b.cfg.ModelsFile = filepath.Join(t.TempDir(), "missing.yaml")
+	b.cfg.FitSource = fixedReadings{fit.Readings{FreeVRAMGB: 10, FreeRAMGB: 100}}
+
+	f.setItem("proj-1", "wi-1", "Ship the widget", "st-backlog", "", 7, "lbl-epic", "lbl-model")
+	body := eventBody("wi-1", "proj-1", "nathan@x", "labels")
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("webhook: status %d, want 200", code)
+	}
+	b.Wait()
+
+	if _, err := store.Get("plane-plan_epic-wi-1"); err != nil {
+		t.Fatalf("planning job not queued despite missing models file: %v", err)
+	}
+	if cs := f.Comments(); len(cs) != 0 {
+		t.Errorf("missing models file still posted %d comments", len(cs))
 	}
 }
 

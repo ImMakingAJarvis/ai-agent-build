@@ -38,7 +38,9 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/fit"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 )
 
 // Trigger names recorded in queued job specs.
@@ -76,6 +78,12 @@ type Config struct {
 	// EventsFile is an optional JSONL file that receives one line per
 	// event the bridge acted on (not bot events, not bad signatures).
 	EventsFile string
+	// ModelsFile is the model registry (config/models.yaml) for the A4
+	// fit check; empty disables the fit comment.
+	ModelsFile string
+	// FitSource reads the live free memory for the fit comment; nil
+	// uses fit.Live (nvidia-smi + /proc/meminfo).
+	FitSource fit.Source
 }
 
 // Bridge verifies, logs and routes Plane webhooks and runs the trigger
@@ -538,8 +546,54 @@ func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *p
 	if added {
 		b.cfg.Log.Info("queued job from trigger state", "job", id, "trigger", trigger,
 			"item", item.ID, "name", item.Name, "model", modelID)
+		if trigger == TriggerPlan {
+			b.postFitComment(ctx, projectID, item, modelID)
+		}
 	}
 	return added
+}
+
+// postFitComment posts the A4 VRAM/RAM fit verdict for modelID on the
+// item whose planning job was just queued. Any problem (missing or
+// unparseable models file, model unknown to the registry, unreadable
+// memory, failed comment) is logged and dropped: the job is already
+// queued and the comment is a courtesy, never a gate.
+func (b *Bridge) postFitComment(ctx context.Context, projectID string, item *plane.WorkItem, modelID string) {
+	if b.cfg.ModelsFile == "" {
+		return
+	}
+	f, err := registry.Load(b.cfg.ModelsFile)
+	if err != nil {
+		b.cfg.Log.Warn("fit comment skipped: models file", "err", err)
+		return
+	}
+	var m *registry.Model
+	for i := range f.Models {
+		if f.Models[i].ID == modelID {
+			m = &f.Models[i]
+			break
+		}
+	}
+	if m == nil {
+		b.cfg.Log.Warn("fit comment skipped: model not in registry", "model", modelID)
+		return
+	}
+	src := b.cfg.FitSource
+	if src == nil {
+		src = fit.Live{}
+	}
+	r, err := src.Readings(ctx)
+	if err != nil {
+		b.cfg.Log.Warn("fit comment skipped: reading free memory", "err", err)
+		return
+	}
+	o := fit.Decision(*m, r)
+	if _, err := b.cfg.Plane.AddComment(ctx, projectID, item.ID, fit.Comment(*m, r, o)); err != nil {
+		b.cfg.Log.Warn("fit comment failed", "item", item.ID, "err", err)
+		return
+	}
+	b.cfg.Log.Info("fit comment posted", "item", item.ID, "model", modelID,
+		"outcome", string(o), "free_vram_gb", r.FreeVRAMGB, "free_ram_gb", r.FreeRAMGB)
 }
 
 func (b *Bridge) title(projectID, trigger string, item *plane.WorkItem, modelID string) string {
