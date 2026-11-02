@@ -492,3 +492,53 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
 - Follow-up (not A6): the dashboard's queue view still lists only
   voice/coding/background; add the `jobs.*` queues when the queue view
   is next touched.
+
+## B2 — planning worker handler (2026-11-02)
+
+- Job plan-epic-planner-plan-with-m-1793259204-14. New
+  `internal/planworker`: `Parse` (the B1 instructions contract),
+  `Handler.Run` (dispatch), `Engine` + `ClientEngine` (one client per
+  registry endpoint, 30-min planning timeout — `models.NewClientWithBaseTimeout`,
+  the chat default of 120 s is far too short for a 27B plan), `Cloud` +
+  `API` (anthropic Messages API with thinking budget from the registry's
+  `thinking: "thinking.budget_tokens:N"`, openai-compatible chat
+  completions), `Planner` + `BasicPlanner` (B2 default: one completion;
+  B3 replaces it with the Plan/Decompose/Review pipeline).
+- **Swap semantics** (the loading rule): a local planner that is not
+  loaded unloads the current work model, loads the planner, and the
+  handle's `Release` unloads the planner and reloads the previous model
+  — Release runs even when the plan fails, and a failed load restores
+  the previous model before the error surfaces. The front-end model
+  (`FrontEnd`, default `jarvis-igpu.gguf`) is never the unload target.
+  Already-loaded planner → no swap at all. Cloud planner → engine is
+  never touched.
+- **Worker wiring** (`cmd/worker`): a `KindAgent` message whose
+  instructions `Parse` as a plan job runs in `handlePlan` instead of
+  being left for the agent-run loop; runs are serialized (`planMu` — one
+  big model fits in VRAM). Result goes to history + metrics + HA notify,
+  the plan document to the job's `plan.md`, and the agentjob store entry
+  is resolved to done/failed so the loop never claims a plan job (B1
+  ingests it as ready). No registry → loud log, plan jobs fall back to
+  the agent-run loop as before B2.
+- **Container reality:** the worker image carries only the binary, so
+  the registry is mounted read-only (`/config:ro` in compose,
+  `WORKER_MODELS_FILE=/config/models.yaml`) — model changes need no
+  rebuild. The registry's host-local endpoints (localhost:11434) are not
+  reachable in-container, so `ENGINE_URL`/`OLLAMA_URL` override them for
+  the engine clients (same precedence as `models.NewClient`).
+- **Naming convention (open for D1):** the registry id is the name the
+  worker calls a local model by. Today the engines report GGUF base
+  names (`jarvis-brain.gguf`, `jarvis-igpu.gguf`) and ollama is
+  inactive — a plan job for `qwen3.8-27b` cannot truly swap until the
+  planner model is on an engine serving it under its registry id (Phase
+  D). Until then the cloud planner (`claude-sonnet-5-5`, enabled) is the
+  one that really runs.
+- **Tests:** all hermetic. Handler runs against a stub engine that
+  records the exact op sequence — the acceptance checks:
+  `TestRunLocalSwap` (unload brain → load planner → chat → unload
+  planner → load brain, front-end untouched), restore-on-load-failure
+  (both failure orders), restore-on-plan-failure, already-loaded
+  (no swap), cloud (engine never touched). `TestClientEngineOllama` /
+  `TestClientEngineLlamaCPP` drive the adapter against fake engines in
+  both API dialects; `cloud_test.go` checks the request/response shapes
+  of both cloud APIs via httptest.
