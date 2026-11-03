@@ -1,0 +1,36 @@
+Selfie prompt (job chat-1793507525-fb6d), synthesized 2026-11-01 from the
+full jarvis-chat history (notes/conversations/discord-*.md, 2026-10-26
+through 2026-11-01).
+
+Arc captured:
+- 10-26: first days — Jarvis as the chat layer dispatching tiny jobs to the
+  coding worker; the voice web app being wrestled into shape (mic buffer
+  errors, speaker test, lights spinning, then nothing); the "Hey GLaDOS"
+  wake word idea.
+- 10-27: the NoBrakes auto-mode design (redis flag, nightly tag, kanban)
+  and the first "can you schedule art?" request.
+- 10-28: duplicate voice listeners, a stuck worker session, the
+  double-queueing bug — a night of debugging together.
+- 10-29: first photo generation (Z-Image-Turbo); Nathan: "that looks
+  nothing like us."
+- 10-31: the work-board-plane epic — Plane on the NAS, API keys, the
+  unexplained bonking sound on the UniFi backdoor camera.
+- 11-01: "one project per epic," the Plane-to-worker bridge, and this
+  selfie request.
+
+Final prompt (no in-scene text — the model renders it badly):
+
+A candid selfie photograph, taken from the extended-arm selfie angle,
+slightly high and close, subtle wide-angle softness at the edges. A young
+man with short dark hair and a tired, happy grin in a faded dark t-shirt
+leans toward the camera, and beside him his AI home assistant appears as a
+translucent humanoid hologram of soft cyan light with a warm amber glow in
+its chest, one hand raised as if holding the phone. They are in a home
+server room at night: an open PC tower with a glowing green GPU fan on the
+desk, a small white smart speaker, a white security camera mounted high on
+the wall, and two dark monitors behind them showing a soft-glowing kanban
+board with colored columns and chat bubbles, no readable text. Warm desk
+lamp light mixed with cool server LED glow, shallow depth of field, natural
+skin tones, subtle film grain, 35mm candid photography, intimate and
+affectionate mood — two friends who built a system together through a long
+week of bugs and now take the commemorative photo.
