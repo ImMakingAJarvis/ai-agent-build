@@ -38,8 +38,9 @@ secrets. To change memory/eviction, edit that line and
 
 - **`nobrakes:auto_mode`** — the operator's master switch for autonomous
   nightly execution. Written by the manual-override path (the Discord
-  `!automode on/off` daemon, nobrakes-3) and read by the worker's nightly
-  gate (nobrakes-5). Must be `"on"` for any auto-enqueue to happen.
+  `!automode on/off` daemon, nobrakes-3) and read by the nightly gate
+  (nobrakes-2, `nobrakes.AutoEnqueue` — see below). Must be `"on"` for any
+  auto-enqueue to happen.
 - **`nobrakes:nightly_flag`** — idempotency marker for the nightly window.
   - `""` = the nightly enqueue has never run.
   - `"YYYY-MM-DD"` = the UTC date of the last nightly window whose jobs were
@@ -69,6 +70,42 @@ _ = st.SetNightlyFlag(ctx, time.Now().UTC().Format("2006-01-02"))
 Constants: `nobrakes.AutoModeKey`, `nobrakes.NightlyFlagKey`,
 `nobrakes.AutoModeOn/Off`. Unit-tested against miniredis in
 `internal/nobrakes/nobrakes_test.go`; later NoBrakes tasks reuse this store.
+
+## The nightly gate (nobrakes-2)
+
+`nobrakes.AutoEnqueue` is the nightly gate: when `auto_mode` is `"on"` and
+today's UTC window is unprocessed, it moves every parked nightly job to
+`ready` and stamps the window. It is driven by the agent-run loop, which
+calls `jarvis-jobs nightly` at the top of every stage-3 iteration:
+
+```bash
+jarvis-jobs nightly          # the gate, one pass (called by agent-run)
+jarvis-jobs list parked      # what is waiting for the next window
+jarvis-jobs enqueue <id>     # run one parked job now, without waiting
+```
+
+Behaviour, in order:
+
+1. **`auto_mode` off or missing** → nothing happens (the default; no
+   auto-enqueue, no key writes).
+2. **on, window unprocessed** → every parked nightly-tagged job is
+   enqueued (no manual trigger) and `nightly_flag` is stamped with today's
+   UTC date. The stamp happens *after* the enqueues, so a failed pass
+   retries the same day without double-enqueueing; with zero parked jobs it
+   still stamps — a nightly job added after the check waits for the next
+   window, which is what makes it nightly.
+3. **on, window already stamped today** → no-op (idempotent across loop
+   iterations and restarts).
+4. **Redis unreachable or disabled** (`$JARVIS_REDIS=off`) → one warning
+   line and exit 0; the feature fails safe to off and never stalls or kills
+   the loop.
+
+"Nightly" today is a job-level tag: `jarvis-jobs add ... -tags nightly`
+stores the job **parked** — present in the store but out of the active
+queue (`next` and the dashboard queue view never see it). NoBrakes task 4
+makes the kanban `nightly` tag the canonical source of the tag; until then
+the tag is set at add time or by re-triggering a finished job with the tag
+(`Refresh` parks it again).
 
 ## Health & operations
 
