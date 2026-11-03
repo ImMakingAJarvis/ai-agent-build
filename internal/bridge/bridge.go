@@ -46,8 +46,16 @@ import (
 
 // Trigger names recorded in queued job specs.
 const (
-	TriggerPlan = "plan_epic"
-	TriggerRun  = "run_task"
+	TriggerPlan   = "plan_epic"
+	TriggerReplan = "replan_epic"
+	TriggerRun    = "run_task"
+)
+
+// The epic states the B5 approval/re-plan paths key on (same names the
+// planeepic standard states use).
+const (
+	planReviewState = "Plan review"
+	readyState      = "Ready"
 )
 
 // Config configures a Bridge.
@@ -107,6 +115,7 @@ type Bridge struct {
 	secretKey []byte            // loaded from cfg.SecretFile
 	labels    map[string]string // label id → name
 	states    map[string]string // state id → name
+	botMember string            // workspace member id of cfg.BotEmail (B5 comment filter)
 
 	evMu   sync.Mutex
 	events *os.File
@@ -500,9 +509,24 @@ func (b *Bridge) evaluate(ctx context.Context, projectID string, item *plane.Wor
 	}
 	var queued int
 	modelID := modelLabel(names)
-	if hasLabel(names, "epic") && modelID != "" && strings.EqualFold(stateName, "Backlog") {
+	isEpic := hasLabel(names, "epic") && item.Parent == ""
+	if isEpic && modelID != "" && strings.EqualFold(stateName, "Backlog") {
 		if b.enqueue(ctx, projectID, TriggerPlan, item, modelID, names) {
 			queued++
+		}
+	}
+	// B5, "Approval in Plane": an epic moved to Plan approved moves its
+	// planned sub-items to Ready, and an epic with a delivered plan moved
+	// back to Planning is re-planned with its comments as feedback.
+	if isEpic {
+		if strings.EqualFold(stateName, "Plan approved") {
+			queued += b.approveSubItems(ctx, projectID, item)
+		}
+		if modelID != "" && strings.EqualFold(stateName, "Planning") &&
+			strings.Contains(item.DescriptionHTML, plane.PlanPageMarker) {
+			if b.enqueueReplan(ctx, projectID, item, modelID, names) {
+				queued++
+			}
 		}
 	}
 	if item.Parent != "" && strings.EqualFold(stateName, "Ready") {
@@ -560,7 +584,7 @@ func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *p
 		// runs first (it is a different system)
 		Source:       "plane-bridge",
 		CreatedAt:    time.Now().UTC(),
-		Instructions: instructions(trigger, b.cfg, projectID, item, modelID, effort, labelNames),
+		Instructions: instructions(trigger, b.cfg, projectID, item, modelID, effort, labelNames, nil),
 	}
 	// Queue path (B1): the plan job jumps to the front of the background
 	// queue itself, so the worker ingests it ahead of normal background
@@ -605,6 +629,174 @@ func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *p
 		}
 	}
 	return added
+}
+
+// approveSubItems is the B5 approval: an epic moved to "Plan approved"
+// moves its sub-items that are still in Plan review to Ready, and
+// enqueues the run_task job for each of them (a Ready sub-item is a
+// trigger state — without this the cards would sit there until the next
+// catch-up). Cards in other states are left alone: Nathan may have
+// blocked one, and one already in Ready or Done needs no move. The
+// bridge ignores bot-actor events, so the moves cannot retrigger
+// themselves. It returns how many run_task jobs were queued.
+func (b *Bridge) approveSubItems(ctx context.Context, projectID string, epic *plane.WorkItem) int {
+	review, err := b.cfg.Plane.StateByName(ctx, projectID, planReviewState)
+	if err != nil {
+		b.cfg.Log.Warn("approval: state lookup failed", "project", projectID, "err", err)
+		return 0
+	}
+	ready, err := b.cfg.Plane.StateByName(ctx, projectID, readyState)
+	if err != nil {
+		b.cfg.Log.Warn("approval: state lookup failed", "project", projectID, "state", readyState, "err", err)
+		return 0
+	}
+	items, err := b.cfg.Plane.ListWorkItems(ctx, projectID)
+	if err != nil {
+		b.cfg.Log.Warn("approval: listing sub-items failed", "project", projectID, "err", err)
+		return 0
+	}
+	var queued int
+	for i := range items {
+		it := &items[i]
+		if it.Parent != epic.ID || it.State != review.ID {
+			continue
+		}
+		if _, err := b.cfg.Plane.SetState(ctx, projectID, it.ID, ready.ID); err != nil {
+			b.cfg.Log.Warn("approval: move to Ready failed", "item", it.ID, "err", err)
+			continue
+		}
+		b.cfg.Log.Info("approved sub-item moved to Ready", "item", it.ID, "name", it.Name)
+		names, err := b.labelNames(ctx, it)
+		if err != nil {
+			b.cfg.Log.Warn("approval: label lookup failed", "item", it.ID, "err", err)
+			continue
+		}
+		if b.enqueue(ctx, projectID, TriggerRun, it, "", names) {
+			queued++
+		}
+	}
+	return queued
+}
+
+// enqueueReplan queues the B5 re-plan: an epic with a delivered plan (a
+// plan-page: line in its description) that was moved back to Planning is
+// planned again, with the epic's comments as feedback. The job id is
+// deterministic per epic; a finished re-plan is refreshed in place
+// (Store.Refresh) with the new comments, so a second round of feedback
+// re-runs it, while a re-plan that is already in flight (ready/claimed/
+// running/paused) makes a new trigger a no-op.
+func (b *Bridge) enqueueReplan(ctx context.Context, projectID string, item *plane.WorkItem, modelID string, labelNames []string) bool {
+	comments, err := b.replanComments(ctx, projectID, item.ID)
+	if err != nil {
+		b.cfg.Log.Warn("re-plan: listing epic comments failed", "item", item.ID, "err", err)
+		return false
+	}
+	effort := effortLabel(labelNames)
+	spec := agentjob.Spec{
+		ID:           "plane-" + TriggerReplan + "-" + item.ID,
+		Title:        b.title(projectID, TriggerReplan, item, modelID),
+		Class:        agentjob.ClassBackground,
+		Priority:     100, // front of the background band, as plan_epic
+		Source:       "plane-bridge",
+		CreatedAt:    time.Now().UTC(),
+		Instructions: instructions(TriggerReplan, b.cfg, projectID, item, modelID, effort, labelNames, comments),
+	}
+	existing, err := b.cfg.Store.Get(spec.ID)
+	var added bool
+	switch {
+	case err != nil:
+		if added, err = b.cfg.Store.Ingest(spec); err != nil {
+			b.cfg.Log.Error("queuing re-plan failed", "job", spec.ID, "err", err)
+			return false
+		}
+	case existing.Status == agentjob.Done || existing.Status == agentjob.Failed || existing.Status == agentjob.Skipped:
+		if err := b.cfg.Store.Refresh(spec); err != nil {
+			b.cfg.Log.Error("refreshing re-plan failed", "job", spec.ID, "err", err)
+			return false
+		}
+		added = true
+	default:
+		b.cfg.Log.Info("re-plan already in flight, skipping", "job", spec.ID, "status", existing.Status)
+		return false
+	}
+	// Queue path, as plan_epic: the re-plan jumps to the front of the
+	// background queue. A publish failure is not fatal — the store is the
+	// anchor and the agent-run loop reads from it (store-only mode).
+	if b.cfg.PlanQueue != nil {
+		pos, err := b.cfg.PlanQueue.PublishPlan(ctx, queue.Message{
+			ID:              spec.ID,
+			Type:            queue.BackgroundQueue,
+			Priority:        queue.PlanEpicPriority,
+			Kind:            queue.KindAgent,
+			Class:           spec.Class,
+			Title:           spec.Title,
+			Instructions:    spec.Instructions,
+			ReasoningEffort: effort,
+			Source:          "plane-bridge",
+			CreatedAt:       spec.CreatedAt,
+		})
+		if err != nil {
+			b.cfg.Log.Warn("re-plan queue publish failed; store-only", "job", spec.ID, "err", err)
+		} else {
+			b.postPositionComment(ctx, projectID, item, pos)
+		}
+	}
+	b.cfg.Log.Info("queued job from trigger state", "job", spec.ID, "trigger", TriggerReplan,
+		"item", item.ID, "name", item.Name, "model", modelID, "comments", len(comments))
+	return added
+}
+
+// replanComments returns the epic's comments as plain text, oldest first,
+// with the bot's own comments dropped — the bot's machine notes (queue
+// position, fit verdict, "Plan ready") are not planning feedback. When
+// the bot's member id cannot be resolved everything is kept: dropping
+// human feedback is worse than carrying a line of machine noise.
+func (b *Bridge) replanComments(ctx context.Context, projectID, itemID string) ([]string, error) {
+	comments, err := b.cfg.Plane.ListComments(ctx, projectID, itemID)
+	if err != nil {
+		return nil, err
+	}
+	botID, _ := b.botMemberID(ctx) // "" = unresolvable: keep all
+	out := make([]string, 0, len(comments))
+	for _, c := range comments {
+		if botID != "" && c.CreatedBy == botID {
+			continue
+		}
+		if text := stripHTML(c.CommentHTML); text != "" {
+			out = append(out, text)
+		}
+	}
+	return out, nil
+}
+
+// botMemberID resolves cfg.BotEmail to the workspace member id — the
+// comment serializer carries only the author's member id, not the email.
+// The result is cached for the bridge's lifetime: membership rarely
+// changes, and a miss just means bot comments ride along.
+func (b *Bridge) botMemberID(ctx context.Context) (string, error) {
+	b.mu.Lock()
+	if b.botMember != "" {
+		id := b.botMember
+		b.mu.Unlock()
+		return id, nil
+	}
+	b.mu.Unlock()
+	if b.cfg.BotEmail == "" {
+		return "", nil
+	}
+	members, err := b.cfg.Plane.ListWorkspaceMembers(ctx)
+	if err != nil {
+		return "", err
+	}
+	for i := range members {
+		if strings.EqualFold(members[i].Email, b.cfg.BotEmail) {
+			b.mu.Lock()
+			b.botMember = members[i].ID
+			b.mu.Unlock()
+			return members[i].ID, nil
+		}
+	}
+	return "", fmt.Errorf("bridge: bot %s is not a workspace member", b.cfg.BotEmail)
 }
 
 // effortLabel reads the planning effort from an effort:<v> label
@@ -711,6 +903,8 @@ func (b *Bridge) title(projectID, trigger string, item *plane.WorkItem, modelID 
 	switch trigger {
 	case TriggerPlan:
 		return fmt.Sprintf("Plane: plan epic %s-%d (%s) with %s", code, item.SequenceID, item.Name, modelID)
+	case TriggerReplan:
+		return fmt.Sprintf("Plane: re-plan epic %s-%d (%s) with %s", code, item.SequenceID, item.Name, modelID)
 	case TriggerRun:
 		return fmt.Sprintf("Plane: run task %s-%d (%s)", code, item.SequenceID, item.Name)
 	}
@@ -719,8 +913,9 @@ func (b *Bridge) title(projectID, trigger string, item *plane.WorkItem, modelID 
 
 // instructions is the JSON body of the queued job — the contract later
 // phases (B2, C1) consume. effort (low/medium/high) rides along with
-// planning jobs; it defaults to high in the bridge, never empty.
-func instructions(trigger string, cfg Config, projectID string, item *plane.WorkItem, modelID, effort string, labelNames []string) string {
+// planning jobs; it defaults to high in the bridge, never empty. comments
+// (re-plan feedback, B5) rides along with replan_epic jobs only.
+func instructions(trigger string, cfg Config, projectID string, item *plane.WorkItem, modelID, effort string, labelNames, comments []string) string {
 	body := map[string]any{
 		"trigger": trigger,
 		"board": map[string]string{
@@ -732,23 +927,58 @@ func instructions(trigger string, cfg Config, projectID string, item *plane.Work
 		"item": map[string]any{
 			"id":          item.ID,
 			"name":        item.Name,
+			"description": stripHTML(item.DescriptionHTML),
 			"sequence_id": item.SequenceID,
 			"parent":      item.Parent,
 			"state":       item.State,
 			"labels":      labelNames,
 		},
 	}
-	if trigger == TriggerPlan {
+	if trigger == TriggerPlan || trigger == TriggerReplan {
 		if modelID != "" {
 			body["model_id"] = modelID
 		}
 		body["effort"] = effort
+		if trigger == TriggerReplan {
+			body["comments"] = comments
+		}
 	}
 	raw, err := json.MarshalIndent(body, "", "  ")
 	if err != nil {
 		return fmt.Sprintf(`{"trigger": %q, "item_id": %q}`, trigger, item.ID)
 	}
 	return string(raw)
+}
+
+// stripHTML reduces a Plane description (description_html) to plain text
+// for the plan job's contract: tags dropped, common entities decoded. It
+// is deliberately dependency-free — the description only needs to be
+// readable by the planning model, not perfectly rendered.
+func stripHTML(s string) string {
+	var b strings.Builder
+	inTag := false
+	for _, r := range s {
+		switch {
+		case r == '<':
+			inTag = true
+		case r == '>':
+			inTag = false
+		case !inTag:
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	for _, ent := range []struct{ s, r string }{
+		{"&nbsp;", " "},
+		{"&lt;", "<"},
+		{"&gt;", ">"},
+		{"&quot;", `"`},
+		{"&#39;", "'"},
+		{"&amp;", "&"}, // last: "&amp;lt;" must become "&lt;", not "<"
+	} {
+		out = strings.ReplaceAll(out, ent.s, ent.r)
+	}
+	return strings.TrimSpace(out)
 }
 
 // --- board metadata (label/state name maps) -------------------------------------------

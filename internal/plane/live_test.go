@@ -163,8 +163,8 @@ func TestLiveScratchProject(t *testing.T) {
 		t.Skip("PLANE_BOT_EMAIL/PLANE_BOT_PASSWORD unavailable; page step needs a session")
 	}
 	pg, err := c.CreatePage(ctx, proj.ID, PageCreate{
-		Name:        "P3 live test page",
-		ContentHTML: "<p>plane client created this page</p>",
+		Name:            "P3 live test page",
+		DescriptionHTML: "<p>plane client created this page</p>",
 	})
 	if err != nil {
 		t.Fatalf("CreatePage: %v", err)

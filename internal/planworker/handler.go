@@ -25,8 +25,12 @@ type Model interface {
 
 // Result is what a plan run produced.
 type Result struct {
-	// Plan is the pipeline's output (the plan document).
+	// Plan is the pipeline's plan document (PLAN.md).
 	Plan string
+	// Tasks is the validated task list the pipeline produced.
+	Tasks TaskList
+	// Reviewed is true when a different model ran the review step.
+	Reviewed bool
 	// Model is the registry entry that ran the job.
 	Model registry.Model
 	// Local is true when the job ran on a local engine.
@@ -88,7 +92,13 @@ func (h *Handler) Run(ctx context.Context, job *Job) (*Result, error) {
 	if planErr != nil {
 		return nil, planErr
 	}
-	return &Result{Plan: out, Model: m, Local: local}, nil
+	return &Result{
+		Plan:     out.Plan,
+		Tasks:    out.Tasks,
+		Reviewed: out.Reviewed,
+		Model:    m,
+		Local:    local,
+	}, nil
 }
 
 // model looks up the job's planner in the registry. The planner only

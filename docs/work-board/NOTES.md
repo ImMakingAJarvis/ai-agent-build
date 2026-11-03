@@ -542,3 +542,118 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   `TestClientEngineLlamaCPP` drive the adapter against fake engines in
   both API dialects; `cloud_test.go` checks the request/response shapes
   of both cloud APIs via httptest.
+
+## B3 — planning prompts + task schema + pipeline (2026-11-02)
+
+- PR #136. `prompts/plan.md`, `decompose.md`, `review.md` ({{TOKEN}}
+  templates) plus `prompts/task.schema.json` (draft-07: task ids
+  `[a-z][a-z0-9-]*`, S/M sizes, runnable acceptance checks, executor
+  drawn from the registry). `internal/planworker`: `TaskSchema`
+  (jsonschema plus cross-task rules, with location-bearing error text)
+  and `Pipeline`, which replaced the B2 `BasicPlanner`: Plan (epic +
+  repo summary → PLAN.md) → Decompose (same model; an invalid JSON
+  reply is retried up to 2 times with the parse error, then the job
+  fails) → Review (a different model when `Pipeline.Reviewer` is set
+  and differs from the planner — otherwise skipped; its fixes are
+  applied once, and a bad review keeps the decomposed list).
+- Worker wiring: the worker stores `tasks.json` next to `plan.md`;
+  compose mounts `prompts/` and the repo read-only
+  (`WORKER_PROMPTS_DIR`, `WORKER_REPO_ROOT`); the bridge carries the
+  epic description (HTML stripped) in the job. The reviewer is left
+  unset in the worker for now (cloud review spend cap is an open
+  decision).
+
+## B4 — deliver the plan to the board (page + sub-items) (2026-11-02)
+
+- Job plan-epic-planner-plan-with-m-1793259204-16.
+  `planworker.Deliverer` (`internal/planworker/deliver.go`): the plan
+  document becomes a project page named `Plan: <epic name>` whose body
+  is the plan in a `<pre>` block (it is Markdown and go.mod has no md
+  library — the page editor takes HTML, so it is escaped and rendered
+  verbatim); the epic's description gets a `plan-page: <url>` line; a
+  model-prefixed "Plan ready" summary comment goes on the epic; each
+  task becomes a sub-item of the epic in **Plan review** whose first
+  description line is `plan-task: <task-id>`, with a blocked-by
+  relation per dependency and one `model:<executor>` label (created in
+  `placement.ModelColor` if the project does not have it) — never a
+  `run:` label, placement comes from the registry (A5). The epic moves
+  to Plan review only after everything else succeeded — that state is
+  the "ready for approval" signal B5 acts on.
+- **Plane page quirks (verified live):** the create input field is
+  `description_html` — `content_html` is silently ignored (the page is
+  created empty). The page list endpoint omits the body entirely; only
+  the single-page GET returns it → `plane.GetPage` added, plus
+  `Client.PageLink` (`/{ws}/projects/{projectUUID}/pages/{pageUUID}`,
+  the format the UI uses). The plane_test fake now models the
+  list-omits-body quirk so a regression is caught.
+- **Convergence:** re-delivery reuses sub-items (via the `plan-task:`
+  marker) and the page (by name), re-asserts state/labels and replaces
+  the plan-page line instead of appending — a partially failed
+  delivery can be retried without duplicating cards. The summary
+  comment is the only append-only artifact on re-delivery (accepted).
+- **Label gating:** an executor model that is not an enabled executor
+  in the registry fails the whole delivery — `placement.Sync` would
+  delete the label again and C1 could not route a job to it.
+- **Worker wiring** (`cmd/worker`): the Deliverer is built from
+  `plane.FromEnv()` whenever the plan handler is (the worker
+  container has the PLANE_* env from agent.env); a delivery failure
+  records the job failed through the normal fail path (the plan is
+  already stored as plan.md), and missing board credentials make plan
+  jobs fail on delivery with a loud log line.
+- **B5 caveat:** page reuse is by name; a re-plan with different
+  content needs an UpdatePage/DeletePage, which the client does not
+  have yet.
+
+## B5 — approval and re-plan (2026-11-02)
+
+- Job plan-epic-planner-plan-with-m-1793259204-17. Two bridge
+  transitions, both on epics that already carry a delivered plan (the
+  `plan-page:` line in the description is the "has a plan" marker):
+  - **Plan approved → Ready.** `approveSubItems` moves every
+    Plan-review sub-item to **Ready** and queues a `run_task` job for
+    each. Idempotent on re-check (a second pass finds nothing left in
+    Plan review). run_task jobs go to the store only — the PlanQueue
+    is for planning, so approval publishes nothing to RabbitMQ.
+  - **Planning + has a plan → re-plan.** `enqueueReplan` collects the
+    epic's comments, queues a `replan_epic` job (deterministic id
+    `plane-replan_epic-<id>`) and publishes it to the PlanQueue at the
+    same front-of-queue priority as a first plan. A plain move back to
+    Planning *without* a delivered plan is a no-op — it is just
+    "start planning", which the original `plan_epic` label trigger
+    already covers.
+- **Comment filtering:** `replanComments` lists the epic's comments,
+  strips HTML, and drops the ones authored by the bot (matched by
+  member id, resolved from `cfg.BotEmail` via `ListWorkspaceMembers`
+  and cached in `b.botMember`). So the re-plan prompt carries only
+  human feedback — not the bot's own "Plan ready" / position notes.
+  The bot's id is resolved lazily on the first re-plan; if it cannot be
+  resolved the comments are kept unfiltered (a missing filter must not
+  block a re-plan).
+- **`Store.Refresh`** (new, `internal/agentjob`): re-queues a *finished*
+  job (Done/Failed/Skipped) in place with new instructions and puts it
+  back to Ready. An in-flight or missing job is refused ("not
+  finished") so a live re-plan never clobbers a running one. The
+  deterministic id means a re-trigger of the same epic lands on the
+  same job record.
+- **Planworker side:** `Parse` accepts `replan_epic` as well as
+  `plan_epic`; `Job.Comments` carries the human feedback and the
+  planning prompt gains a "Comments (feedback):" block (rendered as
+  "(no comments)" when empty) — see `prompts/plan.md`. The Deliverer's
+  re-plan path reuses the page (updates its body via `UpdatePage`) and
+  the kept cards (in place, via `SetDescriptionHTML`), and deletes the
+  cards the new plan dropped — but only when they are still in Plan
+  review or Ready; a card someone already moved to work is left alone.
+- **Live-verified this round:** the page body update (session PATCH)
+  and work-item deletion (v1 `DELETE`) — the two client methods B4
+  flagged as not yet exercised. The B5 acceptance
+  (`internal/bridge/b5_live_test.go`) runs the whole arc on a scratch
+  project: deliver a 2-task plan → approve (cards to Ready, run_task
+  jobs, no queue publish) → comment + move to Planning (re-plan job
+  carries the human comment, bot's filtered) → deliver the re-plan
+  (page updated, kept card refreshed, dropped card deleted, new card
+  created, single `plan-page:` line kept).
+- **Plane quirk (verified live):** commenting requires project
+  membership with at least the editor role — a plain member add grants
+  the viewer role (5), which gets a 403 on comment POST. The live test
+  adds the admin to the scratch project as editor (role 20) first,
+  mirroring `live_test.go`.

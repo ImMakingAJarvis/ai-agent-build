@@ -290,26 +290,44 @@ type Relations struct {
 	FinishBefore []RelationRef `json:"finish_before"`
 }
 
-// Comment is a work-item comment.
+// Comment is a work-item comment. CreatedBy is the author's workspace
+// member id (the serializer also carries it as "actor"); compare it with
+// a workspace member id to tell bot comments from human ones — the
+// serializer does not carry the author's email.
 type Comment struct {
 	ID          string `json:"id"`
 	CommentHTML string `json:"comment_html"`
 	CreatedAt   string `json:"created_at"`
+	CreatedBy   string `json:"created_by"`
 }
 
-// Page is a project page (a Plane doc).
+// Page is a project page (a Plane doc). The page body is description_html
+// on both create and detail; the list endpoint omits it entirely (use
+// GetPage for the body).
 type Page struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	ContentHTML string `json:"content_html"`
-	CreatedAt   string `json:"created_at"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	DescriptionHTML string `json:"description_html"`
+	CreatedAt       string `json:"created_at"`
 }
 
-// PageCreate is the payload for CreatePage.
+// PageCreate is the payload for CreatePage. The body field is
+// description_html — content_html is silently ignored by this build.
 type PageCreate struct {
-	Name        string `json:"name"`
-	ContentHTML string `json:"content_html,omitempty"`
+	Name            string `json:"name"`
+	DescriptionHTML string `json:"description_html,omitempty"`
 }
+
+// Marker lines in a description_html that mark items the planning
+// delivery (B4) wrote (the P5/P6 marker convention): a delivered task
+// sub-item starts with "plan-task: <task-id>", and the epic carries a
+// "plan-page: <url>" line pointing at its plan page. Both the bridge
+// (which recognises an epic as already planned) and the delivery (which
+// converges re-runs and cleans up a re-plan's cards, B5) match on them.
+const (
+	PlanTaskMarker = "plan-task: "
+	PlanPageMarker = "plan-page: "
+)
 
 // --- projects -----------------------------------------------------------------
 
@@ -597,6 +615,18 @@ func (c *Client) ItemLink(p *Project, wi *WorkItem) string {
 	return fmt.Sprintf("%s/%s/browse/%s-%d", c.baseURL, c.workspace, p.Identifier, wi.SequenceID)
 }
 
+// SetDescriptionHTML replaces a work item's description (description_html)
+// after creation, e.g. to add the plan-page: link line to an epic's
+// description (B4).
+func (c *Client) SetDescriptionHTML(ctx context.Context, projectID, itemID, html string) (*WorkItem, error) {
+	var out WorkItem
+	body := map[string]string{"description_html": html}
+	if err := c.do(ctx, "PATCH", c.itemPath(projectID, itemID), body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SetState moves a work item to the given state (by state ID).
 func (c *Client) SetState(ctx context.Context, projectID, itemID, stateID string) (*WorkItem, error) {
 	var out WorkItem
@@ -709,6 +739,43 @@ func (c *Client) ListPages(ctx context.Context, projectID string) ([]Page, error
 		return nil, err
 	}
 	return out, nil
+}
+
+// GetPage fetches one project page by id (session API). Unlike ListPages,
+// the detail endpoint returns the page body (description_html).
+func (c *Client) GetPage(ctx context.Context, projectID, pageID string) (*Page, error) {
+	if c.email == "" || c.password == "" {
+		return nil, errors.New("plane: pages need session credentials (Email/Password)")
+	}
+	var out Page
+	path := c.sessionPath("/workspaces/%s/projects/%s/pages/%s/", c.workspace, projectID, pageID)
+	if err := c.doSession(ctx, "GET", path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdatePage replaces a project page's body (session API, PATCH). The
+// payload is the same as CreatePage: the body field is description_html.
+func (c *Client) UpdatePage(ctx context.Context, projectID, pageID string, pg PageCreate) (*Page, error) {
+	if c.email == "" || c.password == "" {
+		return nil, errors.New("plane: pages need session credentials (Email/Password)")
+	}
+	var out Page
+	path := c.sessionPath("/workspaces/%s/projects/%s/pages/%s/", c.workspace, projectID, pageID)
+	if err := c.doSession(ctx, "PATCH", path, pg, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PageLink returns the browser URL of a project page on this instance:
+// /<workspace>/projects/<projectID>/pages/<pageID>, with the project's
+// UUID (not its identifier — work items get the browse URL via ItemLink,
+// pages do not). Verified against this build's SPA route and the upstream
+// pages component (see docs/work-board/NOTES.md, "Page URL format").
+func (c *Client) PageLink(projectID string, pg *Page) string {
+	return fmt.Sprintf("%s/%s/projects/%s/pages/%s", c.baseURL, c.workspace, projectID, pg.ID)
 }
 
 // --- work items (list) ------------------------------------------------------------

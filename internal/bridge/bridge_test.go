@@ -29,11 +29,13 @@ import (
 // the secret is only revealed on create/regenerate, like the real API)
 // on the session API, behind cookie + CSRF auth like the real build.
 const (
-	fakeEmail  = "bot@fake"
-	fakePasswd = "pw"
-	fakeCSRF   = "csrf"
-	fakeSess   = "fakesess"
-	sessionWS  = "/api/workspaces/testws/"
+	fakeEmail         = "bot@fake"
+	fakePasswd        = "pw"
+	fakeCSRF          = "csrf"
+	fakeSess          = "fakesess"
+	sessionWS         = "/api/workspaces/testws/"
+	fakeBotMemberID   = "mb-bot"   // member id of the bot's v1 key ("testkey")
+	fakeAdminMemberID = "mb-admin" // member id of any other v1 key
 )
 
 type fakePlane struct {
@@ -42,6 +44,7 @@ type fakePlane struct {
 	states     map[string]string                    // id -> name
 	items      map[string]map[string]map[string]any // project id -> item id -> item
 	comments   []fakeComment
+	members    []fakeMember
 	stateMoves []fakeStateMove
 	whID       string
 	whURL      string
@@ -50,11 +53,61 @@ type fakePlane struct {
 	regen      int // secret regenerations
 }
 
-// fakeComment is a comment captured by the fake server.
+// fakeComment is a comment stored by the fake server (GET + POST).
 type fakeComment struct {
-	project string
-	item    string
-	html    string
+	project   string
+	item      string
+	html      string
+	createdBy string // workspace member id of the author
+}
+
+// fakeMember is a workspace member for the members endpoint.
+type fakeMember struct{ id, email string }
+
+// addMember adds a workspace member (the bot is added by newBridge).
+func (f *fakePlane) addMember(id, email string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.members = append(f.members, fakeMember{id: id, email: email})
+}
+
+// setDesc sets a work item's description_html (B5: the plan-page: line).
+func (f *fakePlane) setDesc(projectID, id, html string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.items[projectID][id]["description_html"] = html
+}
+
+// setState moves a work item to a state (test setup, not recorded as a
+// bridge state move).
+func (f *fakePlane) setState(projectID, id, stateID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.items[projectID][id]["state"] = stateID
+}
+
+// addComment stores a comment with a fixed author (a human posting while
+// the bot's own comments come in through the POST route).
+func (f *fakePlane) addComment(projectID, itemID, html, createdBy string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.comments = append(f.comments, fakeComment{project: projectID, item: itemID, html: html, createdBy: createdBy})
+}
+
+// itemState returns an item's current state id.
+func (f *fakePlane) itemState(projectID, id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.items[projectID][id]["state"].(string)
+}
+
+// itemExists reports whether the work item is still in the fake (it is
+// gone after a DELETE).
+func (f *fakePlane) itemExists(projectID, id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.items[projectID][id]
+	return ok
 }
 
 // fakeStateMove is a state change applied through the fake SetState API.
@@ -81,8 +134,13 @@ func (f *fakePlane) StateMoves() []fakeStateMove {
 func newFakePlane() *fakePlane {
 	return &fakePlane{
 		labels: map[string]string{"lbl-epic": "epic", "lbl-model": "plan:opus"},
-		states: map[string]string{"st-backlog": "Backlog", "st-planning": "Planning", "st-ready": "Ready"},
-		items:  map[string]map[string]map[string]any{},
+		states: map[string]string{
+			"st-backlog": "Backlog", "st-planning": "Planning", "st-ready": "Ready",
+			"st-review": "Plan review", "st-approved": "Plan approved",
+			"st-progress": "In progress", "st-done": "Done",
+		},
+		items:   map[string]map[string]map[string]any{},
+		members: []fakeMember{{id: fakeBotMemberID, email: fakeEmail}},
 	}
 }
 
@@ -150,9 +208,18 @@ func (f *fakePlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := r.URL.Path[len(prefix):]
-	proj, rest2, _ := strings.Cut(strings.TrimPrefix(rest, "projects/"), "/")
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	switch rest {
+	case "members", "members/":
+		var out []map[string]any
+		for _, m := range f.members {
+			out = append(out, map[string]any{"id": m.id, "email": m.email, "role": 10})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"results": out, "count": len(out)})
+		return
+	}
+	proj, rest2, _ := strings.Cut(strings.TrimPrefix(rest, "projects/"), "/")
 	switch {
 	case rest2 == "labels" || rest2 == "labels/":
 		var out []map[string]string
@@ -170,15 +237,36 @@ func (f *fakePlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rest3 := strings.Trim(strings.TrimPrefix(rest2, "work-items"), "/")
 		id, trail, _ := strings.Cut(rest3, "/")
 		if trail == "comments" {
-			if r.Method != http.MethodPost {
-				w.WriteHeader(http.StatusMethodNotAllowed)
+			switch r.Method {
+			case http.MethodGet:
+				var out []map[string]any
+				for i, cm := range f.comments {
+					if cm.project != proj || cm.item != id {
+						continue
+					}
+					out = append(out, map[string]any{
+						"id":           "cm-" + strconv.Itoa(i+1),
+						"comment_html": cm.html,
+						"created_by":   cm.createdBy,
+					})
+				}
+				json.NewEncoder(w).Encode(map[string]any{"results": out, "count": len(out)})
+				return
+			case http.MethodPost:
+				var body map[string]string
+				json.NewDecoder(r.Body).Decode(&body)
+				// the author is the key's member: the bot's key ("testkey")
+				// posts as the bot, anything else as the human admin
+				author := fakeAdminMemberID
+				if r.Header.Get("X-Api-Key") == "testkey" {
+					author = fakeBotMemberID
+				}
+				f.comments = append(f.comments, fakeComment{project: proj, item: id, html: body["comment_html"], createdBy: author})
+				w.WriteHeader(http.StatusCreated)
+				json.NewEncoder(w).Encode(map[string]string{"id": "cm-" + strconv.Itoa(len(f.comments))})
 				return
 			}
-			var body map[string]string
-			json.NewDecoder(r.Body).Decode(&body)
-			f.comments = append(f.comments, fakeComment{project: proj, item: id, html: body["comment_html"]})
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]string{"id": "cm-" + strconv.Itoa(len(f.comments))})
+			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		if trail == "" && r.Method == http.MethodPatch {
@@ -292,6 +380,13 @@ func eventBody(itemID, projectID, actorEmail, field string) []byte {
 func newBridge(t *testing.T, botEmail string) (*Bridge, *fakePlane, *agentjob.Store, string) {
 	t.Helper()
 	f := newFakePlane()
+	if botEmail != "" {
+		// the bot's v1 key ("testkey") resolves to this member, so the
+		// comment filter (B5) can match its email
+		f.mu.Lock()
+		f.members = []fakeMember{{id: fakeBotMemberID, email: botEmail}}
+		f.mu.Unlock()
+	}
 	f.whID = "wh-1"
 	f.whURL = "http://bridge:8102/webhook/plane"
 	f.whSecret = "s3cret"
@@ -918,5 +1013,263 @@ func TestPlanJobPublishFailureFallsBackToStore(t *testing.T) {
 	}
 	if cs := f.Comments(); len(cs) != 0 {
 		t.Errorf("failed publish still posted %d comments, want 0", len(cs))
+	}
+}
+
+// TestInstructionsDescription: the plan job's contract carries the epic's
+// description as plain text (the B3 plan prompt reads it).
+func TestInstructionsDescription(t *testing.T) {
+	cfg := Config{BoardURL: "http://plane", Workspace: "jarvis",
+		ProjectNames: map[string]string{"p1": "T2I"}}
+	item := &plane.WorkItem{ID: "wi-1", Name: "Epic", SequenceID: 3,
+		DescriptionHTML: "<p>Build the <b>widget</b> &amp; ship it.</p>"}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(instructions(TriggerPlan, cfg, "p1", item, "opus", "high", []string{"epic"}, nil)), &body); err != nil {
+		t.Fatalf("instructions not JSON: %v", err)
+	}
+	got, _ := body["item"].(map[string]any)
+	if got["description"] != "Build the widget & ship it." {
+		t.Fatalf("description = %v, want stripped plain text", got["description"])
+	}
+}
+
+func TestStripHTML(t *testing.T) {
+	cases := map[string]string{
+		"<p>a &amp; b</p>\n":    "a & b",
+		"plain":                 "plain",
+		"":                      "",
+		"a&nbsp;b":              "a b",
+		"<ul><li>one</li></ul>": "one",
+	}
+	for in, want := range cases {
+		if got := stripHTML(in); got != want {
+			t.Errorf("stripHTML(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestApprovalMovesSubItemsToReady covers B5's approval path: an epic
+// moved to Plan approved moves its planned sub-items (those still in Plan
+// review) to Ready and queues a run_task job for each. Cards Nathan has
+// moved on and children of other epics are left alone.
+func TestApprovalMovesSubItemsToReady(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+
+	// A delivered plan: the epic and its sub-items sit in Plan review,
+	// the epic carries the plan-page: line, and one sub-item has already
+	// been moved on by hand.
+	f.setItem("proj-1", "epic-1", "Toy epic", "st-review", "", 1, "lbl-epic", "lbl-model")
+	f.setDesc("proj-1", "epic-1", "<p>Build a toy.</p>\n<p>plan-page: http://plane/p/1</p>")
+	f.setItem("proj-1", "sub-1", "Task one", "st-review", "epic-1", 2)
+	f.setItem("proj-1", "sub-2", "Task two", "st-review", "epic-1", 3)
+	f.setItem("proj-1", "sub-3", "Task in progress", "st-progress", "epic-1", 4)
+	f.setItem("proj-1", "sub-4", "Child of another epic", "st-review", "epic-2", 5)
+
+	// Nathan moves the epic to Plan approved.
+	f.setState("proj-1", "epic-1", "st-approved")
+	n, err := b.CheckItem(context.Background(), "proj-1", "epic-1")
+	if err != nil {
+		t.Fatalf("CheckItem: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("CheckItem queued %d jobs, want 2 (one run_task per approved sub-item)", n)
+	}
+	if got := f.itemState("proj-1", "sub-1"); got != "st-ready" {
+		t.Errorf("sub-1 state = %s, want st-ready", got)
+	}
+	if got := f.itemState("proj-1", "sub-2"); got != "st-ready" {
+		t.Errorf("sub-2 state = %s, want st-ready", got)
+	}
+	if got := f.itemState("proj-1", "sub-3"); got != "st-progress" {
+		t.Errorf("sub-3 state = %s, want st-progress (in-flight work is not touched)", got)
+	}
+	if got := f.itemState("proj-1", "sub-4"); got != "st-review" {
+		t.Errorf("sub-4 state = %s, want st-review (another epic's child)", got)
+	}
+	for _, id := range []string{"plane-run_task-sub-1", "plane-run_task-sub-2"} {
+		if _, err := store.Get(id); err != nil {
+			t.Errorf("missing run_task job %s: %v", id, err)
+		}
+	}
+	if _, err := store.Get("plane-run_task-sub-3"); err == nil {
+		t.Error("in-progress sub-item must not queue a run_task job")
+	}
+
+	// A re-delivered check moves and queues nothing (idempotent).
+	n, err = b.CheckItem(context.Background(), "proj-1", "epic-1")
+	if err != nil {
+		t.Fatalf("second CheckItem: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("second CheckItem queued %d jobs, want 0", n)
+	}
+}
+
+// TestReplanQueuesJobWithComments covers B5's re-plan path: an epic with a
+// delivered plan (the plan-page: line) moved back to Planning queues a
+// replan_epic job carrying the human comments as feedback — the bot's own
+// comments are filtered out by member id.
+func TestReplanQueuesJobWithComments(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	fq := &FakePlanQueue{}
+	b.cfg.PlanQueue = fq
+
+	f.setItem("proj-1", "epic-1", "Toy epic", "st-review", "", 1, "lbl-epic", "lbl-model")
+	f.setDesc("proj-1", "epic-1", "<p>Build a toy.</p>\n<p>plan-page: http://plane/p/1</p>")
+	// The comments so far: the bot's notes, and Nathan's feedback.
+	f.addComment("proj-1", "epic-1", "<p>Planning job queued at the front of the background queue — 0 jobs behind.</p>", fakeBotMemberID)
+	f.addComment("proj-1", "epic-1", "<p>Split task one in two; drop the cache task.</p>", fakeAdminMemberID)
+	f.addComment("proj-1", "epic-1", "<p>opus: Plan ready — 3 task(s) in Plan review for review. Plan: http://plane/p/1</p>", fakeBotMemberID)
+
+	// Nathan moves the epic back to Planning.
+	f.setState("proj-1", "epic-1", "st-planning")
+	n, err := b.CheckItem(context.Background(), "proj-1", "epic-1")
+	if err != nil {
+		t.Fatalf("CheckItem: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("CheckItem queued %d jobs, want 1 (the re-plan)", n)
+	}
+	job, err := store.Get("plane-replan_epic-epic-1")
+	if err != nil {
+		t.Fatalf("re-plan job not queued: %v", err)
+	}
+	var inst map[string]any
+	if err := json.Unmarshal([]byte(job.Instructions), &inst); err != nil {
+		t.Fatalf("instructions not JSON: %v", err)
+	}
+	if inst["trigger"] != TriggerReplan {
+		t.Errorf("instructions trigger = %v, want %s", inst["trigger"], TriggerReplan)
+	}
+	if inst["model_id"] != "opus" {
+		t.Errorf("instructions model_id = %v, want opus", inst["model_id"])
+	}
+	comments, _ := inst["comments"].([]any)
+	if len(comments) != 1 {
+		t.Fatalf("instructions comments = %v, want only the human one", comments)
+	}
+	if comments[0] != "Split task one in two; drop the cache task." {
+		t.Errorf("instructions comments = %v, want Nathan's feedback", comments)
+	}
+
+	// The re-plan publishes to the front of the background queue, as a
+	// first plan does, and gets its position comment.
+	pubs := fq.published()
+	if len(pubs) != 1 {
+		t.Fatalf("queue publishes = %d, want 1: %+v", len(pubs), pubs)
+	}
+	if pubs[0].ID != job.ID || pubs[0].Priority != queue.PlanEpicPriority || pubs[0].Kind != queue.KindAgent {
+		t.Errorf("published id/priority/kind = %s/%d/%s, want %s/%d/%s",
+			pubs[0].ID, pubs[0].Priority, pubs[0].Kind, job.ID, queue.PlanEpicPriority, queue.KindAgent)
+	}
+	if cs := f.Comments(); len(cs) != 4 {
+		t.Errorf("comments = %d, want 4 (3 + the position note)", len(cs))
+	}
+	// The epic stays in Planning — the delivery moves it to Plan review.
+	if got := f.itemState("proj-1", "epic-1"); got != "st-planning" {
+		t.Errorf("epic state = %s, want st-planning", got)
+	}
+
+	// A re-delivered check while the re-plan is in flight queues nothing.
+	if _, err := store.Claim("plane-replan_epic-epic-1", "r1", "worker"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	first := job.Instructions
+	n, err = b.CheckItem(context.Background(), "proj-1", "epic-1")
+	if err != nil {
+		t.Fatalf("second CheckItem: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("second CheckItem queued %d jobs, want 0 (re-plan in flight)", n)
+	}
+	if len(fq.published()) != 1 {
+		t.Errorf("queue publishes = %d, want 1 (idempotent)", len(fq.published()))
+	}
+	again, err := store.Get("plane-replan_epic-epic-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Instructions != first {
+		t.Error("in-flight re-plan's instructions changed")
+	}
+}
+
+// TestReplanWithoutPlanMarkerNoop: an epic in Planning without a delivered
+// plan (its first plan is in flight) is not re-planned.
+func TestReplanWithoutPlanMarkerNoop(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	f.setItem("proj-1", "epic-1", "Toy epic", "st-planning", "", 1, "lbl-epic", "lbl-model")
+	f.addComment("proj-1", "epic-1", "<p>feedback</p>", fakeAdminMemberID)
+
+	n, err := b.CheckItem(context.Background(), "proj-1", "epic-1")
+	if err != nil {
+		t.Fatalf("CheckItem: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("CheckItem queued %d jobs, want 0 (no delivered plan)", n)
+	}
+	for _, id := range []string{"plane-replan_epic-epic-1", "plane-plan_epic-epic-1"} {
+		if _, err := store.Get(id); err == nil {
+			t.Errorf("job %s should not exist", id)
+		}
+	}
+}
+
+// TestReplanRepeatedAfterFinished covers the second round of feedback: a
+// finished re-plan is refreshed in place — new instructions (the new
+// comments), back to ready, published to the front again.
+func TestReplanRepeatedAfterFinished(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	fq := &FakePlanQueue{}
+	b.cfg.PlanQueue = fq
+
+	f.setItem("proj-1", "epic-1", "Toy epic", "st-review", "", 1, "lbl-epic", "lbl-model")
+	f.setDesc("proj-1", "epic-1", "<p>Build a toy.</p>\n<p>plan-page: http://plane/p/1</p>")
+	f.addComment("proj-1", "epic-1", "<p>Split task one in two.</p>", fakeAdminMemberID)
+	f.setState("proj-1", "epic-1", "st-planning")
+	if n, err := b.CheckItem(context.Background(), "proj-1", "epic-1"); err != nil || n != 1 {
+		t.Fatalf("first CheckItem: n=%d err=%v, want 1", n, err)
+	}
+
+	// The re-plan finishes; Nathan leaves a second round of feedback and
+	// the epic is still in Planning (the new plan has not delivered yet).
+	j, err := store.Get("plane-replan_epic-epic-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.State.Status = agentjob.Done
+	j.State.FinishedAt = "2026-11-02T00:00:00Z"
+	if err := store.SetStatus("plane-replan_epic-epic-1", j.State); err != nil {
+		t.Fatal(err)
+	}
+	f.addComment("proj-1", "epic-1", "<p>Still too coarse — one task per file.</p>", fakeAdminMemberID)
+
+	n, err := b.CheckItem(context.Background(), "proj-1", "epic-1")
+	if err != nil {
+		t.Fatalf("second CheckItem: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("second CheckItem queued %d jobs, want 1 (the refreshed re-plan)", n)
+	}
+	j, err = store.Get("plane-replan_epic-epic-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != agentjob.Ready {
+		t.Errorf("job status = %s, want ready", j.Status)
+	}
+	var inst map[string]any
+	if err := json.Unmarshal([]byte(j.Instructions), &inst); err != nil {
+		t.Fatalf("instructions not JSON: %v", err)
+	}
+	comments, _ := inst["comments"].([]any)
+	if len(comments) != 2 {
+		t.Fatalf("refreshed comments = %v, want both rounds of feedback", comments)
+	}
+	if comments[0] != "Split task one in two." || comments[1] != "Still too coarse — one task per file." {
+		t.Errorf("refreshed comments = %v, want both, oldest first", comments)
+	}
+	if len(fq.published()) != 2 {
+		t.Errorf("queue publishes = %d, want 2 (the refresh re-publishes)", len(fq.published()))
 	}
 }

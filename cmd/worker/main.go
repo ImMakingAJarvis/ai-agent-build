@@ -27,6 +27,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/notifier"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/notify"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/planworker"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
@@ -215,6 +216,22 @@ func run() error {
 		planHandler = nil
 	}
 
+	// Plan delivery (B4): a finished plan goes to the board — a page with
+	// the plan, the tasks as sub-items in Plan review, the epic moved
+	// there. It uses the same board client as the bridge (board
+	// credentials from the environment / agent.env); without them the
+	// worker still plans (plan.md is written to the store) but plan jobs
+	// fail on delivery.
+	var planDeliverer *planworker.Deliverer
+	if planHandler != nil {
+		pc, derr := plane.FromEnv()
+		if derr != nil {
+			log.Printf("worker: plan delivery unavailable (%v) — plan_epic jobs fail on delivery", derr)
+		} else {
+			planDeliverer = &planworker.Deliverer{Plane: pc, Registry: planHandler.Models}
+		}
+	}
+
 	// planMu serializes plan runs: a swap moves the one big model that
 	// fits in VRAM, so two concurrent plan jobs must not race the engine.
 	var planMu sync.Mutex
@@ -248,6 +265,31 @@ func run() error {
 		if err := jobStore.WriteFile(msg.ID, "plan.md", []byte(res.Plan)); err != nil {
 			log.Printf("worker: plan job %s: store plan: %v", msg.ID, err)
 		}
+
+		// Deliver the plan to the board (B4). The pipeline already wrote
+		// plan.md, so a delivery failure records the job as failed — the
+		// plan exists in the store, the board is not.
+		if planDeliverer == nil {
+			derr := fmt.Errorf("plan delivery unavailable (no board credentials)")
+			log.Printf("worker: plan job %s: %v", msg.ID, derr)
+			history.Fail(rec, derr)
+			ntf.OnFail(rec, derr)
+			jobMetrics.ObserveFailed(msg.Type, job.ModelID)
+			resolvePlanJobStore(jobStore, msg, job.ModelID, "", derr.Error())
+			return nil // recorded as failed; ack so it is not redelivered
+		}
+		delivery, derr := planDeliverer.Deliver(context.Background(), job, res)
+		if derr != nil {
+			log.Printf("worker: plan job %s: delivery failed: %v", msg.ID, derr)
+			history.Fail(rec, derr)
+			ntf.OnFail(rec, derr)
+			jobMetrics.ObserveFailed(msg.Type, job.ModelID)
+			resolvePlanJobStore(jobStore, msg, job.ModelID, "", derr.Error())
+			return nil // recorded as failed; ack so it is not redelivered
+		}
+		log.Printf("worker: plan job %s: plan delivered (page %s, %d sub-item(s))",
+			msg.ID, delivery.Page.ID, len(delivery.Items))
+
 		rec.Summary = agentjob.Summary(res.Plan)
 		history.Complete(rec)
 		jobMetrics.ObserveCompleted(msg.Type, job.ModelID, time.Since(jobStart).Seconds())
@@ -417,7 +459,8 @@ func run() error {
 // newPlanHandler builds the B2 plan dispatcher: the registry from
 // WORKER_MODELS_FILE (default config/models.yaml, repo root), one engine
 // client per registry endpoint, the cloud caller for the registry's cloud
-// engines, and the BasicPlanner pipeline until B3 replaces it.
+// engines, and the B3 planning pipeline (the Plan/Decompose/Review prompts
+// plus the task JSON schema, prompts/).
 //
 // When the worker runs beside the engine (docker compose), the registry's
 // host-local endpoints (localhost:11434) are not reachable from the
@@ -443,6 +486,16 @@ func newPlanHandler() (*planworker.Handler, error) {
 		// The iGPU helper, by the name its llama.cpp engine reports.
 		frontEnd = "jarvis-igpu.gguf"
 	}
+	promptsDir := os.Getenv("WORKER_PROMPTS_DIR")
+	if promptsDir == "" {
+		promptsDir = "prompts"
+	}
+	// WORKER_REPO_ROOT is the repo the plan step summarises for the model
+	// (the worker runs with the repo root as its CWD by default).
+	pipe, err := planworker.NewPipeline(promptsDir, os.Getenv("WORKER_REPO_ROOT"), reg)
+	if err != nil {
+		return nil, fmt.Errorf("planning pipeline: %w", err)
+	}
 	return &planworker.Handler{
 		Models: reg,
 		Engines: func(endpoint string) planworker.Engine {
@@ -460,7 +513,7 @@ func newPlanHandler() (*planworker.Handler, error) {
 			return e
 		},
 		Cloud:    planworker.NewAPI(),
-		Planner:  planworker.BasicPlanner{},
+		Planner:  pipe,
 		FrontEnd: frontEnd,
 	}, nil
 }
