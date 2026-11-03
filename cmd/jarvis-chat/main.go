@@ -122,7 +122,11 @@ func main() {
 		log.Fatal("jarvis-chat: no Discord bot configured (set DISCORD_BOT_TOKEN or BOT_1_TOKEN)")
 	}
 
-	ollamaClient := models.NewClient()
+	// While the worker is deep in a job the brain is saturated, so
+	// classify/chat calls route to the small fallback engine
+	// (FALLBACK_ENGINE_URL, the iGPU helper); NewFallbackClient is a
+	// pass-through when that is unset.
+	ollamaClient := NewFallbackClient(models.NewClient())
 	modelName := os.Getenv("LOCAL_MODEL")
 	if modelName == "" {
 		modelName = defaultModel

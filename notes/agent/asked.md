@@ -59,3 +59,5 @@
 - 2026-11-02T11:32Z B1 (plan_epic jumps the background queue): find and fix the root cause of the broker not honoring message priority. Resolved — it was the wrong queue-argument name (x-priority vs x-max-priority). B2 (worker model swap / cloud API) and B3 (Plan/Decompose/Review prompts + task schema) are next.
 - 2026-11-03T00:19Z Work-board Phase B is done through B5 (approval + re-plan); Nathan's plan has Phase C next: run_task execution on a toy epic, escalation/Blocked, and auto-PR
 - 2026-11-03T17:41Z Nathan noticed the Grafana token-per-second/decode panels weren't reporting correctly (job chat-1793680868-98b5) — wanted real engine throughput visible; decided fix = scrape the engine's own metrics endpoint instead of the worker's per-job counters.
+- 2026-11-03T18:17Z Nathan: when the worker is deep in work, use the igpu or cpu model for communication/voice
+- 2026-11-03T18:41Z Nathan uploaded the Reel plan (open-source Plex clone: Go media server on the 4090 box + web/Android/iPhone/Apple TV apps, Jellyfin as day-1 fallback) and wanted it queued as work items; open decisions for him at Gate 1 (scratch vs fork, MIT vs GPL, Apple dev account, users, name).

@@ -33,6 +33,12 @@ Environment:
                   jobs through it
   WHISPER_MODEL   default small   (tiny/base/small/medium/large)
   JARVIS_VOICE    persona profile: "jarvis" (default) or "glados"
+  FALLBACK_OLLAMA_URL  small-model engine used while the coding worker is
+                  deep in a job (default http://host.docker.internal:11435,
+                  the iGPU helper engine; point at a CPU engine to use one)
+  FALLBACK_MODEL  model id on that engine (default jarvis-igpu)
+  JOBS_DIR        job store scanned for the "worker busy" signal
+                  (default ~/.local/share/jarvis/jobs)
   VOICE_PROMPT    override: path to system prompt file
   TTS_VOICE       override: edge-tts voice (e.g. en-US-EmmaNeural)
   TTS_RATE        override: edge-tts rate (e.g. -10%)
@@ -79,6 +85,17 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 LOCAL_MODEL = os.getenv("LOCAL_MODEL", "jarvis-brain")
+# Worker-busy fallback: while the coding worker is deep in a job the 4090
+# brain is saturated and voice turns queue behind its long context. In that
+# case conversation LLM calls go to the small always-on helper model on the
+# iGPU (or a CPU engine, if pointed at one). See resolve_llm() below.
+FALLBACK_OLLAMA_URL = os.getenv(
+    "FALLBACK_OLLAMA_URL", "http://host.docker.internal:11435"
+)
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "jarvis-igpu")
+JOBS_DIR = os.getenv(
+    "JOBS_DIR", os.path.expanduser("~/.local/share/jarvis/jobs")
+)
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "small")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8100"))
 VOICE_USER = os.getenv("VOICE_USER", "")
@@ -510,6 +527,99 @@ SCHEDULE_CLAIM_RE = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Worker-busy fallback routing
+# ---------------------------------------------------------------------------
+# The job store is the "is the worker deep in work" signal: agent-run marks
+# a job's state.json status "running" for the whole round. Scanning a few
+# hundred tiny files is cheap, so results are cached briefly instead of
+# polled per request.
+_worker_busy_cache = {"at": 0.0, "val": False}
+WORKER_BUSY_TTL = 5.0
+_fallback_up_cache = {"at": 0.0, "val": False}
+FALLBACK_UP_TTL = 15.0
+_last_route = {"key": None}
+
+
+def _scan_worker_busy(jobs_dir: str) -> bool:
+    """True if any job in the store has state status == "running"."""
+    try:
+        entries = os.listdir(jobs_dir)
+    except OSError:
+        return False
+    for name in entries:
+        try:
+            with open(os.path.join(jobs_dir, name, "state.json")) as f:
+                if json.load(f).get("status") == "running":
+                    return True
+        except (OSError, json.JSONDecodeError):
+            continue
+    return False
+
+
+async def worker_busy() -> bool:
+    now = time.monotonic()
+    if now - _worker_busy_cache["at"] > WORKER_BUSY_TTL:
+        val = await asyncio.to_thread(_scan_worker_busy, JOBS_DIR)
+        _worker_busy_cache.update(at=now, val=val)
+    return _worker_busy_cache["val"]
+
+
+async def fallback_engine_up() -> bool:
+    """Probe the fallback engine's llama.cpp /health, cached (a dead engine
+    must not slow voice turns with a full timeout on every call)."""
+    now = time.monotonic()
+    if now - _fallback_up_cache["at"] <= FALLBACK_UP_TTL:
+        return _fallback_up_cache["val"]
+    val = False
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(f"{FALLBACK_OLLAMA_URL}/health")
+            val = resp.status_code == 200
+    except Exception:
+        val = False
+    _fallback_up_cache.update(at=now, val=val)
+    return val
+
+
+def _log_route(key: str, detail: str) -> None:
+    """Log a routing decision once, and again only when it changes."""
+    if _last_route["key"] != key:
+        logger.info("LLM route: %s", detail)
+        _last_route["key"] = key
+
+
+async def resolve_llm(model: str | None) -> tuple[str, str]:
+    """Pick (base_url, model_id) for a conversation LLM call.
+
+    An explicit `model` (the app's model picker) always wins: ids naming
+    the fallback model go to the fallback engine, everything else to the
+    brain. Otherwise, while the worker is deep in a job and the fallback
+    engine is up, the call goes to the small fallback model so voice stays
+    responsive; if the fallback is down the brain is used (voice must not
+    break because the helper model is down).
+    """
+    if model:
+        if FALLBACK_MODEL and FALLBACK_MODEL in model:
+            _log_route("picked-fallback", f"model picker -> {model}")
+            return FALLBACK_OLLAMA_URL, model
+        _log_route("picked-brain", f"model picker -> {model} @ {OLLAMA_URL}")
+        return OLLAMA_URL, model
+    if FALLBACK_OLLAMA_URL and FALLBACK_MODEL and await worker_busy():
+        if await fallback_engine_up():
+            _log_route(
+                "busy-fallback",
+                f"worker busy -> fallback {FALLBACK_MODEL} @ {FALLBACK_OLLAMA_URL}",
+            )
+            return FALLBACK_OLLAMA_URL, FALLBACK_MODEL
+        logger.warning(
+            "worker busy but fallback engine down at %s — using the brain",
+            FALLBACK_OLLAMA_URL,
+        )
+    _log_route("brain", f"brain {LOCAL_MODEL} @ {OLLAMA_URL}")
+    return OLLAMA_URL, LOCAL_MODEL
+
+
 async def run_tool_loop(client, messages, on_action=None, model=None,
                         max_tokens=300, actions=None):
     """One brain turn: LLM call, tool execution, repeat until a plain
@@ -523,9 +633,10 @@ async def run_tool_loop(client, messages, on_action=None, model=None,
     reply = "(no reply)"
     scheduled = False
     tools_supported = True
+    base_url, model_id = await resolve_llm(model)
     for rnd in range(MAX_TOOL_ROUNDS + 1):
         payload = {
-            "model": model or LOCAL_MODEL,
+            "model": model_id,
             "messages": messages,
             "stream": False,
             "temperature": 0.7,
@@ -540,7 +651,7 @@ async def run_tool_loop(client, messages, on_action=None, model=None,
             payload["tools"] = VOICE_TOOLS
         try:
             resp = await client.post(
-                f"{OLLAMA_URL}/v1/chat/completions", json=payload
+                f"{base_url}/v1/chat/completions", json=payload
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -833,6 +944,17 @@ async def health():
     except Exception:
         pass
 
+    # Fallback (small) engine + worker-busy state: diagnostics for the
+    # "voice is on the iGPU model right now" behavior.
+    fb = None
+    if FALLBACK_OLLAMA_URL and FALLBACK_MODEL:
+        fb = {
+            "url": FALLBACK_OLLAMA_URL,
+            "model": FALLBACK_MODEL,
+            "up": await fallback_engine_up(),
+            "worker_busy": await worker_busy(),
+        }
+
     status = "ok" if (whisper_ready and llm_ok) else "degraded"
     code = 200 if status == "ok" else 503
     return JSONResponse(
@@ -845,6 +967,7 @@ async def health():
             "model": LOCAL_MODEL,
             "memory": memory_ok,
             "memory_url": MEMORY_URL,
+            "fallback": fb,
             "voice": ACTIVE_PROFILE_KEY,
             "tts_voice": tts_settings()[0],
         },
@@ -859,6 +982,14 @@ async def models_endpoint():
     they appear here automatically. Falls back to the configured default if
     the engine is unreachable.
     """
+    def _short_name(mid: str) -> str:
+        # llama.cpp reports the GGUF path; Ollama reports e.g.
+        # "jarvis-brain:latest". Derive a short display name.
+        name = mid.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        if name.lower().endswith(".gguf"):
+            name = name[:-5]
+        return name
+
     models = []
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -868,18 +999,30 @@ async def models_endpoint():
                     mid = m.get("id") or m.get("name") or ""
                     if not mid:
                         continue
-                    # llama.cpp reports the GGUF path; Ollama reports e.g.
-                    # "jarvis-brain:latest". Derive a short display name.
-                    name = mid.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
-                    if name.lower().endswith(".gguf"):
-                        name = name[:-5]
                     models.append({
                         "id": mid,
-                        "name": name,
+                        "name": _short_name(mid),
                         "default": LOCAL_MODEL in mid,
                     })
     except Exception:
         pass
+    # Offer the fallback (small) model too, so the picker can force it even
+    # when the worker is idle. Its id is routed to the fallback engine by
+    # resolve_llm().
+    if FALLBACK_OLLAMA_URL and FALLBACK_MODEL:
+        have = {m["id"] for m in models}
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"{FALLBACK_OLLAMA_URL}/v1/models")
+                if resp.status_code == 200:
+                    for m in resp.json().get("models", []):
+                        mid = m.get("id") or m.get("name") or ""
+                        if not mid or mid in have:
+                            continue
+                        models.append({"id": mid, "name": _short_name(mid),
+                                       "default": False})
+        except Exception:
+            pass
     if not models:
         models.append({"id": LOCAL_MODEL, "name": LOCAL_MODEL, "default": True})
     return JSONResponse({"models": models, "default": LOCAL_MODEL})
