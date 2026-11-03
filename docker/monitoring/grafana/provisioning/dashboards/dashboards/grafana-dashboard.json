@@ -1186,26 +1186,26 @@
       },
       "targets": [
         {
-          "expr": "rate(model_prompt_tokens_total[5m])",
+          "expr": "rate(llamacpp:tokens_predicted_total[5m])",
           "refId": "A",
-          "legendFormat": "Prompt tokens/s"
+          "legendFormat": "Decode tokens/s"
         },
         {
-          "expr": "rate(model_generation_tokens_total[5m])",
+          "expr": "rate(llamacpp:prompt_tokens_total[5m])",
           "refId": "B",
-          "legendFormat": "Generation tokens/s"
+          "legendFormat": "Prefill tokens/s"
         },
         {
-          "expr": "rate(model_generation_eval_seconds_total[5m])",
+          "expr": "llamacpp:predicted_tokens_seconds",
           "refId": "C",
-          "legendFormat": "Generation eval time/s"
+          "legendFormat": "Decode tok/s (engine gauge)"
         }
       ],
-      "description": "Token throughput: prompt and generation rates over last 5 minutes"
+      "description": "Engine-wide token throughput over the last 5 minutes (all clients: chat, agent sessions, queue jobs). From the engine's /metrics endpoint (--metrics flag); the engine gauge is its own smoothed decode rate."
     },
     {
       "id": 46,
-      "title": "Eval Time (seconds)",
+      "title": "Eval Time (busy fraction)",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
@@ -1219,7 +1219,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "percentunit",
           "color": {
             "mode": "palette-classic"
           }
@@ -1228,26 +1228,21 @@
       },
       "targets": [
         {
-          "expr": "rate(model_prompt_eval_seconds_total[5m])",
+          "expr": "rate(llamacpp:tokens_predicted_seconds_total[5m])",
           "refId": "A",
-          "legendFormat": "Prompt eval rate"
+          "legendFormat": "Decode busy"
         },
         {
-          "expr": "rate(model_generation_eval_seconds_total[5m])",
+          "expr": "rate(llamacpp:prompt_seconds_total[5m])",
           "refId": "B",
-          "legendFormat": "Generation eval rate"
-        },
-        {
-          "expr": "rate(model_requests_total[5m])",
-          "refId": "C",
-          "legendFormat": "Requests/s"
+          "legendFormat": "Prefill busy"
         }
       ],
-      "description": "Evaluation time rates and request rate"
+      "description": "Share of wall-clock time the engine spends decoding vs prefilling (rate of its seconds counters, 0-100%). 100% = decoding non-stop."
     },
     {
       "id": 47,
-      "title": "Cumulative Tokens & Requests",
+      "title": "Cumulative Engine Tokens",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -1282,22 +1277,22 @@
       },
       "targets": [
         {
-          "expr": "model_prompt_tokens_total",
+          "expr": "llamacpp:prompt_tokens_total",
           "refId": "A",
           "legendFormat": "Prompt tokens"
         },
         {
-          "expr": "model_generation_tokens_total",
+          "expr": "llamacpp:tokens_predicted_total",
           "refId": "B",
-          "legendFormat": "Generation tokens"
+          "legendFormat": "Generated tokens"
         },
         {
-          "expr": "model_requests_total",
+          "expr": "llamacpp:prompt_tokens_cached_total",
           "refId": "C",
-          "legendFormat": "Requests"
+          "legendFormat": "Cached prompt tokens"
         }
       ],
-      "description": "Cumulative token counts and request total since worker start"
+      "description": "Cumulative token counts since engine start, all clients (prompt tokens exclude cached ones)."
     },
     {
       "id": 48,

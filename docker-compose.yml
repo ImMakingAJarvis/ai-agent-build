@@ -90,7 +90,13 @@ services:
         "--cache-type-k", "q4_0",
         "--cache-type-v", "q4_0",
         "--slot-save-path", "/var/lib/jarvis/slots",
+        "--metrics",
         "--log-disable" ]
+    # --metrics: expose the engine's Prometheus endpoint at /metrics
+    # (llamacpp:* counters — prompt/generation tokens, decode seconds,
+    # live tok/s gauges). Prometheus scrapes it in the "llama_engine"
+    # job; it counts ALL traffic to the engine (chat, agent, jobs),
+    # not just the worker's queue jobs.
 
   # ---------------- art (photo generation, port 8120) ---------------------
   # Z-Image-Turbo (6B, 8-step turbo) behind a small FastAPI+diffusers app.

@@ -30,3 +30,8 @@ scrape_configs:
   - job_name: "jarvis_worker"
     static_configs:
       - targets: ["jarvis-worker:9101"]
+
+  - job_name: "llama_engine"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["jarvis-engine:11434"]
