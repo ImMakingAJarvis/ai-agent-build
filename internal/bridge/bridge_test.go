@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/fit"
@@ -133,11 +134,15 @@ func (f *fakePlane) StateMoves() []fakeStateMove {
 
 func newFakePlane() *fakePlane {
 	return &fakePlane{
-		labels: map[string]string{"lbl-epic": "epic", "lbl-model": "plan:opus"},
+		labels: map[string]string{
+			"lbl-epic": "epic", "lbl-model": "plan:opus",
+			"lbl-exec":    "model:opus",
+			"lbl-run-cpu": "run:cpu", "lbl-run-igpu": "run:igpu",
+		},
 		states: map[string]string{
 			"st-backlog": "Backlog", "st-planning": "Planning", "st-ready": "Ready",
 			"st-review": "Plan review", "st-approved": "Plan approved",
-			"st-progress": "In progress", "st-done": "Done",
+			"st-progress": "In progress", "st-blocked": "Blocked", "st-done": "Done",
 		},
 		items:   map[string]map[string]map[string]any{},
 		members: []fakeMember{{id: fakeBotMemberID, email: fakeEmail}},
@@ -742,15 +747,153 @@ func TestPlanningJobQueuedPostsFitComment(t *testing.T) {
 	}
 }
 
-// TestRunTaskJobNoFitComment: the fit comment goes with planning jobs
-// only; a run_task job queues without one.
-func TestRunTaskJobNoFitComment(t *testing.T) {
+// fakeLocationQueue records the run_task messages the bridge routes to
+// the location queues (the bridge's LocationQueuePublisher in tests).
+type fakeLocationQueue struct {
+	mu        sync.Mutex
+	published []queue.Message
+	err       error
+}
+
+func (q *fakeLocationQueue) PublishLocation(ctx context.Context, loc string, m queue.Message) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.err != nil {
+		return q.err
+	}
+	q.published = append(q.published, m)
+	return nil
+}
+
+func (q *fakeLocationQueue) count() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.published)
+}
+
+func (q *fakeLocationQueue) at(i int) queue.Message {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.published[i]
+}
+
+// newRunBridge wires a bridge for run_task tests: a registry with the
+// test model (gpu home, cpu fallback) and a fake location queue.
+func newRunBridge(t *testing.T) (*Bridge, *fakePlane, *agentjob.Store, *fakeLocationQueue) {
+	t.Helper()
 	b, f, store, dir := newBridge(t, "jarvis-bot@x")
 	modelsFile := filepath.Join(dir, "models.yaml")
 	writeTestRegistry(t, modelsFile, "opus", 20, 80)
 	b.cfg.ModelsFile = modelsFile
 	b.cfg.FitSource = fixedReadings{fit.Readings{FreeVRAMGB: 10, FreeRAMGB: 100}}
+	lq := &fakeLocationQueue{}
+	b.cfg.LocationQueue = lq
+	return b, f, store, lq
+}
 
+// TestRunTaskJobPlacement: a Ready sub-item with a model: label is
+// placed (10 GiB free VRAM < 20 needed, so the cpu fallback wins),
+// published to the cpu location queue, and stored — with no fit comment
+// (those go with planning jobs only).
+func TestRunTaskJobPlacement(t *testing.T) {
+	b, f, store, lq := newRunBridge(t)
+	f.setItem("proj-1", "sub-1", "Sub task", "st-ready", "epic-1", 2, "lbl-exec")
+	body := eventBody("sub-1", "proj-1", "nathan@x", "state")
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("webhook: status %d, want 200", code)
+	}
+	b.Wait()
+
+	j, err := store.Get("plane-run_task-sub-1")
+	if err != nil {
+		t.Fatalf("run task job not queued: %v", err)
+	}
+	if j.Status != agentjob.Ready {
+		t.Errorf("job status %q, want %q", j.Status, agentjob.Ready)
+	}
+	if cs := f.Comments(); len(cs) != 0 {
+		t.Errorf("run task posted %d comments, want 0: %+v", len(cs), cs)
+	}
+	if lq.count() != 1 {
+		t.Fatalf("location queue published %d messages, want 1", lq.count())
+	}
+	m := lq.at(0)
+	if m.Type != queue.JobsCPUQueue {
+		t.Errorf("published to %q, want %q", m.Type, queue.JobsCPUQueue)
+	}
+	if m.ID != "plane-run_task-sub-1" || m.Kind != queue.KindAgent {
+		t.Errorf("message id/kind = %q/%q, want plane-run_task-sub-1/agent", m.ID, m.Kind)
+	}
+	if !strings.Contains(m.Instructions, `"trigger": "run_task"`) {
+		t.Errorf("instructions missing the run_task trigger: %s", m.Instructions)
+	}
+	if f.itemState("proj-1", "sub-1") != "st-ready" {
+		t.Errorf("card state %q, want unchanged Ready", f.itemState("proj-1", "sub-1"))
+	}
+
+	// a redelivered webhook is a no-op (the store entry exists)
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("replayed webhook: status %d, want 200", code)
+	}
+	b.Wait()
+	if lq.count() != 1 {
+		t.Errorf("replay published again (now %d), want 1", lq.count())
+	}
+}
+
+// TestRunTaskInvalidOverrideBlocks: a run:<loc> label the model's
+// placement does not allow blocks the card with a comment instead of
+// queueing anything (the runner would refuse it anyway).
+func TestRunTaskInvalidOverrideBlocks(t *testing.T) {
+	b, f, store, lq := newRunBridge(t)
+	f.setItem("proj-1", "sub-1", "Sub task", "st-ready", "epic-1", 2, "lbl-exec", "lbl-run-igpu")
+	body := eventBody("sub-1", "proj-1", "nathan@x", "state")
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("webhook: status %d, want 200", code)
+	}
+	b.Wait()
+
+	if f.itemState("proj-1", "sub-1") != "st-blocked" {
+		t.Fatalf("card state %q, want Blocked", f.itemState("proj-1", "sub-1"))
+	}
+	if lq.count() != 0 {
+		t.Errorf("location queue published %d messages, want 0", lq.count())
+	}
+	cs := f.Comments()
+	if len(cs) != 1 {
+		t.Fatalf("comments = %d, want 1: %+v", len(cs), cs)
+	}
+	if !strings.Contains(cs[0].html, "bridge: blocked —") ||
+		!strings.Contains(cs[0].html, "pinned to gpu, cpu") {
+		t.Errorf("block comment missing reason: %s", cs[0].html)
+	}
+	j, err := store.Get("plane-run_task-sub-1")
+	if err != nil {
+		t.Fatalf("blocked run job not stored: %v", err)
+	}
+	if j.Status != agentjob.Done || !strings.HasPrefix(j.Summary, "blocked: ") {
+		t.Errorf("job %s %q, want done with a blocked: summary", j.Status, j.Summary)
+	}
+
+	// Nathan moves the card back to Ready without fixing the labels:
+	// the catch-up re-blocks it, but the same-reason comment is not
+	// repeated.
+	f.setState("proj-1", "sub-1", "st-ready")
+	if _, err := b.CatchUp(context.Background()); err != nil {
+		t.Fatalf("catch-up: %v", err)
+	}
+	if f.itemState("proj-1", "sub-1") != "st-blocked" {
+		t.Errorf("card not re-blocked: %q", f.itemState("proj-1", "sub-1"))
+	}
+	if cs := f.Comments(); len(cs) != 1 {
+		t.Errorf("repeat block posted a second comment (now %d): %+v", len(cs), cs)
+	}
+}
+
+// TestRunTaskNoModelLabelBlocks: a Ready sub-item without a model: label
+// cannot be placed — it is blocked, not queued.
+func TestRunTaskNoModelLabelBlocks(t *testing.T) {
+	b, f, store, lq := newRunBridge(t)
 	f.setItem("proj-1", "sub-1", "Sub task", "st-ready", "epic-1", 2)
 	body := eventBody("sub-1", "proj-1", "nathan@x", "state")
 	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
@@ -758,11 +901,111 @@ func TestRunTaskJobNoFitComment(t *testing.T) {
 	}
 	b.Wait()
 
-	if _, err := store.Get("plane-run_task-sub-1"); err != nil {
-		t.Fatalf("run task job not queued: %v", err)
+	if f.itemState("proj-1", "sub-1") != "st-blocked" {
+		t.Fatalf("card state %q, want Blocked", f.itemState("proj-1", "sub-1"))
 	}
-	if cs := f.Comments(); len(cs) != 0 {
-		t.Errorf("run task posted %d comments, want 0: %+v", len(cs), cs)
+	if lq.count() != 0 {
+		t.Errorf("location queue published %d messages, want 0", lq.count())
+	}
+	j, err := store.Get("plane-run_task-sub-1")
+	if err != nil {
+		t.Fatalf("blocked run job not stored: %v", err)
+	}
+	if !strings.Contains(j.Summary, "no model: label") {
+		t.Errorf("summary %q, want the no-model reason", j.Summary)
+	}
+}
+
+// TestRunTaskRetriggersFinished: a finished store entry (a dep-waiting
+// run settles skipped) on a card that is still Ready is refreshed and
+// republished on the next catch-up; a second catch-up then sees an
+// in-flight (ready) entry and is a no-op.
+func TestRunTaskRetriggersFinished(t *testing.T) {
+	b, f, store, lq := newRunBridge(t)
+	f.setItem("proj-1", "sub-1", "Sub task", "st-ready", "epic-1", 2, "lbl-exec")
+
+	// a previous run settled skipped (it was waiting on a dep)
+	spec := agentjob.Spec{ID: "plane-run_task-sub-1", Title: "old run",
+		Instructions: `{"trigger":"run_task"}`, Source: "plane-bridge",
+		CreatedAt: time.Now().UTC()}
+	if _, err := store.Ingest(spec); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if err := store.SetStatus("plane-run_task-sub-1", agentjob.State{
+		Status: agentjob.Skipped, Summary: "waiting on deps",
+	}); err != nil {
+		t.Fatalf("set skipped: %v", err)
+	}
+
+	if _, err := b.CatchUp(context.Background()); err != nil {
+		t.Fatalf("catch-up: %v", err)
+	}
+	if lq.count() != 1 {
+		t.Fatalf("catch-up published %d messages, want 1 (re-trigger)", lq.count())
+	}
+	j, err := store.Get("plane-run_task-sub-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if j.Status != agentjob.Ready {
+		t.Errorf("status %q, want ready after re-trigger", j.Status)
+	}
+	if j.Title == "old run" {
+		t.Errorf("refresh did not replace the spec")
+	}
+
+	// ready reads as in flight: no second publish
+	if _, err := b.CatchUp(context.Background()); err != nil {
+		t.Fatalf("catch-up: %v", err)
+	}
+	if lq.count() != 1 {
+		t.Errorf("second catch-up published again (now %d), want 1", lq.count())
+	}
+}
+
+// TestRunTaskPublishFailureRetriggers: a queue publish failure settles
+// the entry failed (not ready — a ready entry would read as in flight
+// and never re-run); once the publisher is healthy, the catch-up
+// re-triggers it.
+func TestRunTaskPublishFailureRetriggers(t *testing.T) {
+	b, f, store, lq := newRunBridge(t)
+	f.setItem("proj-1", "sub-1", "Sub task", "st-ready", "epic-1", 2, "lbl-exec")
+	lq.mu.Lock()
+	lq.err = errors.New("broker down")
+	lq.mu.Unlock()
+
+	body := eventBody("sub-1", "proj-1", "nathan@x", "state")
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("webhook: status %d, want 200", code)
+	}
+	b.Wait()
+
+	j, err := store.Get("plane-run_task-sub-1")
+	if err != nil {
+		t.Fatalf("run job not stored: %v", err)
+	}
+	if j.Status != agentjob.Failed || !strings.Contains(j.Error, "queue publish failed") {
+		t.Errorf("job %s %q, want failed with a publish error", j.Status, j.Error)
+	}
+	if f.itemState("proj-1", "sub-1") != "st-ready" {
+		t.Errorf("card state %q, want still Ready (placement succeeded)", f.itemState("proj-1", "sub-1"))
+	}
+
+	lq.mu.Lock()
+	lq.err = nil
+	lq.mu.Unlock()
+	if _, err := b.CatchUp(context.Background()); err != nil {
+		t.Fatalf("catch-up: %v", err)
+	}
+	if lq.count() != 1 {
+		t.Fatalf("re-trigger published %d messages, want 1", lq.count())
+	}
+	j, err = store.Get("plane-run_task-sub-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if j.Status != agentjob.Ready {
+		t.Errorf("status %q, want ready after re-trigger", j.Status)
 	}
 }
 
@@ -1053,15 +1296,21 @@ func TestStripHTML(t *testing.T) {
 // review) to Ready and queues a run_task job for each. Cards Nathan has
 // moved on and children of other epics are left alone.
 func TestApprovalMovesSubItemsToReady(t *testing.T) {
-	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	b, f, store, dir := newBridge(t, "jarvis-bot@x")
+	modelsFile := filepath.Join(dir, "models.yaml")
+	writeTestRegistry(t, modelsFile, "opus", 20, 80)
+	b.cfg.ModelsFile = modelsFile
+	b.cfg.FitSource = fixedReadings{fit.Readings{FreeVRAMGB: 10, FreeRAMGB: 100}}
+	lq := &fakeLocationQueue{}
+	b.cfg.LocationQueue = lq
 
 	// A delivered plan: the epic and its sub-items sit in Plan review,
 	// the epic carries the plan-page: line, and one sub-item has already
 	// been moved on by hand.
 	f.setItem("proj-1", "epic-1", "Toy epic", "st-review", "", 1, "lbl-epic", "lbl-model")
 	f.setDesc("proj-1", "epic-1", "<p>Build a toy.</p>\n<p>plan-page: http://plane/p/1</p>")
-	f.setItem("proj-1", "sub-1", "Task one", "st-review", "epic-1", 2)
-	f.setItem("proj-1", "sub-2", "Task two", "st-review", "epic-1", 3)
+	f.setItem("proj-1", "sub-1", "Task one", "st-review", "epic-1", 2, "lbl-exec")
+	f.setItem("proj-1", "sub-2", "Task two", "st-review", "epic-1", 3, "lbl-exec")
 	f.setItem("proj-1", "sub-3", "Task in progress", "st-progress", "epic-1", 4)
 	f.setItem("proj-1", "sub-4", "Child of another epic", "st-review", "epic-2", 5)
 

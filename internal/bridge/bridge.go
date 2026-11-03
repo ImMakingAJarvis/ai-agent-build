@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/fit"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/placement"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
@@ -56,6 +58,7 @@ const (
 const (
 	planReviewState = "Plan review"
 	readyState      = "Ready"
+	blockedState    = "Blocked"
 )
 
 // Config configures a Bridge.
@@ -97,6 +100,22 @@ type Config struct {
 	// queue (B1). Nil keeps the store-only path: the job still lands in
 	// the store, which is the idempotency anchor either way.
 	PlanQueue PlanQueuePublisher
+	// LocationQueue routes run_task jobs to the location queue the
+	// placement decision picked (C1). Nil means no broker at bridge
+	// start: run entries settle to failed instead, so the next catch-up
+	// re-triggers them once a publisher is back.
+	LocationQueue LocationQueuePublisher
+	// Present is the box location snapshot (placement.Detect, A5) for
+	// the run_task placement decision; nil means every location is
+	// present.
+	Present map[placement.Location]bool
+}
+
+// LocationQueuePublisher routes a run_task job to the location queue its
+// placement decision picked. The implementation is
+// queue.LocationPublisher; tests use a fake.
+type LocationQueuePublisher interface {
+	PublishLocation(ctx context.Context, loc string, m queue.Message) error
 }
 
 // PlanQueuePublisher publishes a plan_epic job at the front of the
@@ -530,7 +549,7 @@ func (b *Bridge) evaluate(ctx context.Context, projectID string, item *plane.Wor
 		}
 	}
 	if item.Parent != "" && strings.EqualFold(stateName, "Ready") {
-		if b.enqueue(ctx, projectID, TriggerRun, item, "", names) {
+		if b.enqueueRun(ctx, projectID, item, names) {
 			queued++
 		}
 	}
@@ -631,6 +650,230 @@ func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *p
 	return added
 }
 
+// enqueueRun stores and publishes the run_task job for a Ready sub-item
+// (C1). It differs from the generic enqueue in three ways:
+//
+//   - placement: the card's model:<id> label is resolved in the registry
+//     and placement.Decide picks a box queue (a run:<loc> label pins
+//     one). A card that cannot be placed (missing, unknown or disabled
+//     model, no usable location, invalid override) is moved to Blocked
+//     with a comment instead of queued — the runner would refuse it
+//     anyway, and the Blocked state makes the problem visible on the
+//     board.
+//   - re-trigger: a finished store entry (done/failed/skipped) for a
+//     Ready card is Refreshed and republished. The two paths that settle
+//     an entry while the card is still Ready — a dep-waiting run (the
+//     runner settles it skipped) and a publish failure (settled failed)
+//     — emit no webhook for this card, so only the periodic catch-up
+//     re-runs evaluate for it.
+//   - the queue is the delivery mechanism: nothing else reads run_task
+//     entries out of the store, so a missing publisher or a failed
+//     publish settles the entry to failed — the next catch-up
+//     re-triggers it (terminal entry + Ready card), which self-heals
+//     once the broker or publisher is back.
+func (b *Bridge) enqueueRun(ctx context.Context, projectID string, item *plane.WorkItem, labelNames []string) bool {
+	id := "plane-" + TriggerRun + "-" + item.ID
+	spec := agentjob.Spec{
+		ID:           id,
+		Title:        b.title(projectID, TriggerRun, item, ""),
+		Class:        agentjob.ClassBackground,
+		Priority:     100,
+		Source:       "plane-bridge",
+		CreatedAt:    time.Now().UTC(),
+		Instructions: instructions(TriggerRun, b.cfg, projectID, item, "", "", labelNames, nil),
+	}
+
+	// An in-flight entry owns the card (the runner moves it to In
+	// progress); any repeated trigger is a no-op.
+	exists := false
+	if existing, err := b.cfg.Store.Get(id); err == nil {
+		exists = true
+		if existing.Status != agentjob.Done &&
+			existing.Status != agentjob.Failed && existing.Status != agentjob.Skipped {
+			return false
+		}
+	}
+
+	loc, reason := b.runPlacement(ctx, item, labelNames)
+	if reason != "" {
+		b.blockRunCard(ctx, projectID, item, reason)
+		if _, err := b.cfg.Store.Ingest(spec); err != nil {
+			b.cfg.Log.Error("settling blocked run job failed", "job", id, "err", err)
+			return false
+		}
+		if err := b.cfg.Store.SetStatus(id, agentjob.State{
+			Status:     agentjob.Done,
+			Summary:    "blocked: " + reason,
+			FinishedAt: time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			b.cfg.Log.Error("settling blocked run job failed", "job", id, "err", err)
+		}
+		b.cfg.Log.Info("run card blocked by placement", "job", id, "item", item.ID, "reason", reason)
+		return true
+	}
+
+	if exists {
+		// Finished entry on a Ready card: re-trigger. Refresh resets
+		// the status to ready (it enforces the terminal check itself)
+		// before the republish below.
+		if err := b.cfg.Store.Refresh(spec); err != nil {
+			b.cfg.Log.Error("re-triggering finished run job failed", "job", id, "err", err)
+			return false
+		}
+		b.cfg.Log.Info("re-triggered finished run job", "job", id, "item", item.ID)
+	}
+	if err := b.publishRunJob(ctx, item, spec, loc); err != nil {
+		// The entry must exist (SetStatus has no anchor otherwise) and
+		// must end terminal: a ready entry would read as in flight and
+		// never be re-triggered. A crash between a successful publish
+		// and the Ingest below self-heals through the runner, which
+		// ingests a missing entry when it consumes the message.
+		if _, ierr := b.cfg.Store.Ingest(spec); ierr != nil {
+			b.cfg.Log.Error("queuing run job failed", "job", id, "err", ierr)
+			return false
+		}
+		if serr := b.cfg.Store.SetStatus(id, agentjob.State{
+			Status:     agentjob.Failed,
+			Error:      "queue publish failed: " + err.Error(),
+			FinishedAt: time.Now().UTC().Format(time.RFC3339),
+		}); serr != nil {
+			b.cfg.Log.Error("settling failed run job", "job", id, "err", serr)
+		}
+		b.cfg.Log.Error("run job queue publish failed; catch-up will re-trigger it", "job", id, "err", err)
+		return false
+	}
+	if _, err := b.cfg.Store.Ingest(spec); err != nil {
+		b.cfg.Log.Error("queuing run job failed", "job", id, "err", err)
+		return false
+	}
+	b.cfg.Log.Info("queued run job", "job", id, "item", item.ID, "location", string(loc))
+	return true
+}
+
+// runPlacement resolves the card's executor model (model:<id> label) and
+// places it, returning the queue location and a block reason ("" =
+// placeable). GPUPaused is deliberately false: a game-watchdog pause
+// belongs to the queue lane — the streamwatcher pauses the consumer and
+// the job waits there — not to the board card.
+func (b *Bridge) runPlacement(ctx context.Context, item *plane.WorkItem, labelNames []string) (placement.Location, string) {
+	modelID := labelValue(labelNames, placement.ModelPrefix)
+	if modelID == "" {
+		return "", "no model: label on the card"
+	}
+	regFile, err := registry.Load(b.cfg.ModelsFile)
+	if err != nil {
+		return "", fmt.Sprintf("model registry: %v", err)
+	}
+	var m *registry.Model
+	for i := range regFile.Models {
+		if regFile.Models[i].ID == modelID {
+			m = &regFile.Models[i]
+		}
+	}
+	if m == nil {
+		return "", fmt.Sprintf("model %q is not in the registry", modelID)
+	}
+	if !m.Enabled {
+		return "", fmt.Sprintf("model %q is disabled", modelID)
+	}
+	src := b.cfg.FitSource
+	if src == nil {
+		src = fit.Live{}
+	}
+	readings, err := src.Readings(ctx)
+	if err != nil {
+		return "", fmt.Sprintf("live memory readings: %v", err)
+	}
+	res := placement.Decide(*m, labelValue(labelNames, placement.RunPrefix), placement.State{
+		FreeVRAMGB: readings.FreeVRAMGB,
+		FreeRAMGB:  readings.FreeRAMGB,
+		Present:    b.cfg.Present,
+	})
+	if res.Blocked {
+		return "", res.Reason
+	}
+	return res.Location, ""
+}
+
+// publishRunJob delivers the run job to the location queue the placement
+// decision picked. Cloud jobs have no cloud queue yet (C3): they are
+// published to jobs.igpu as a wake lane — the lane is never paused by the
+// game watchdog, and the runner re-decides placement at run time and
+// leaves the card in Ready with a comment until C3 lands.
+func (b *Bridge) publishRunJob(ctx context.Context, item *plane.WorkItem, spec agentjob.Spec, loc placement.Location) error {
+	if b.cfg.LocationQueue == nil {
+		return errors.New("no location queue publisher (broker down at bridge start)")
+	}
+	if loc == placement.Cloud {
+		loc = placement.IGPU
+	}
+	lane, ok := queue.LocationQueueFor(string(loc))
+	if !ok {
+		return fmt.Errorf("location %q has no box queue", loc)
+	}
+	return b.cfg.LocationQueue.PublishLocation(ctx, lane, queue.Message{
+		ID:           spec.ID,
+		Type:         lane,
+		Priority:     spec.Priority,
+		Kind:         queue.KindAgent,
+		Class:        spec.Class,
+		Title:        spec.Title,
+		Instructions: spec.Instructions,
+		Source:       "plane-bridge",
+		CreatedAt:    spec.CreatedAt,
+	})
+}
+
+// blockRunCard moves a card that placement cannot place to Blocked with a
+// comment (the bridge's own block path; the runner's says "taskrunner:").
+// A card whose reason was already commented (a blocked card Nathan moved
+// back to Ready without fixing it) gets no repeat comment on every
+// catch-up.
+func (b *Bridge) blockRunCard(ctx context.Context, projectID string, item *plane.WorkItem, reason string) {
+	// The stored comment holds the escaped reason (Plane renders
+	// comments as HTML), so the dedup needle must be escaped too.
+	needle := "bridge: blocked — " + html.EscapeString(reason)
+	dup := false
+	comments, err := b.cfg.Plane.ListComments(ctx, projectID, item.ID)
+	if err != nil {
+		b.cfg.Log.Warn("block: listing comments failed", "item", item.ID, "err", err)
+	} else {
+		for _, c := range comments {
+			if strings.Contains(c.CommentHTML, needle) {
+				dup = true
+				break
+			}
+		}
+	}
+	if !dup {
+		msg := "<p>" + needle +
+			" (fix the card's model:/run: labels or the model registry, then move it back to Ready)</p>"
+		if _, err := b.cfg.Plane.AddComment(ctx, projectID, item.ID, msg); err != nil {
+			b.cfg.Log.Warn("block comment failed", "item", item.ID, "err", err)
+		}
+	}
+	blocked, err := b.cfg.Plane.StateByName(ctx, projectID, blockedState)
+	if err != nil {
+		b.cfg.Log.Warn("block: state lookup failed", "project", projectID, "err", err)
+		return
+	}
+	if _, err := b.cfg.Plane.SetState(ctx, projectID, item.ID, blocked.ID); err != nil {
+		b.cfg.Log.Warn("block: move to Blocked failed", "item", item.ID, "err", err)
+	}
+	b.cfg.Log.Info("run card blocked", "item", item.ID, "reason", reason)
+}
+
+// labelValue returns the label that starts with prefix, minus the prefix
+// ("" if none).
+func labelValue(names []string, prefix string) string {
+	for _, n := range names {
+		if v, ok := strings.CutPrefix(n, prefix); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 // approveSubItems is the B5 approval: an epic moved to "Plan approved"
 // moves its sub-items that are still in Plan review to Ready, and
 // enqueues the run_task job for each of them (a Ready sub-item is a
@@ -671,7 +914,7 @@ func (b *Bridge) approveSubItems(ctx context.Context, projectID string, epic *pl
 			b.cfg.Log.Warn("approval: label lookup failed", "item", it.ID, "err", err)
 			continue
 		}
-		if b.enqueue(ctx, projectID, TriggerRun, it, "", names) {
+		if b.enqueueRun(ctx, projectID, it, names) {
 			queued++
 		}
 	}

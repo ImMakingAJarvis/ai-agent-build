@@ -25,6 +25,8 @@
 //	BRIDGE_EVENTS_FILE   JSONL event log (default ~/.local/share/jarvis/plane-bridge/events.jsonl)
 //	BRIDGE_MODELS_FILE   model registry to keep plan: labels in sync with
 //	                 (default /home/agent/ai-agent-build/config/models.yaml)
+//	BRIDGE_CATCHUP_INTERVAL  periodic catch-up period (default 5m; 0
+//	                 disables it — webhooks only)
 //	JARVIS_DATA_DIR      agent job store dir (default ~/.local/share/jarvis)
 package main
 
@@ -129,6 +131,7 @@ func run(log *slog.Logger) error {
 	// RabbitMQ outage must not stop the bridge — the store ingest is the
 	// idempotency anchor — so a failed connect degrades to store-only.
 	var planQueue bridge.PlanQueuePublisher
+	var locationQueue bridge.LocationQueuePublisher
 	qconn, err := queue.NewConn()
 	if err != nil {
 		log.Warn("rabbitmq unavailable; planning jobs are store-only", "err", err)
@@ -136,6 +139,10 @@ func run(log *slog.Logger) error {
 		defer qconn.Close()
 		planQueue = queue.NewPlanPublisher(qconn, queue.BackgroundQueue)
 		log.Info("plan queue publisher ready", "queue", queue.BackgroundQueue)
+		// C1: run_task jobs are placement-routed to the location queues
+		// (jobs.gpu/cpu/igpu), consumed by the host task-runner.
+		locationQueue = queue.NewLocationPublisher(qconn)
+		log.Info("location queue publisher ready")
 	}
 
 	webhookURL := envOr("BRIDGE_WEBHOOK_URL", "")
@@ -147,28 +154,36 @@ func run(log *slog.Logger) error {
 		webhookURL = fmt.Sprintf("http://%s:%s/webhook/plane", ip, portOf(listen))
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// C1: the run_task placement decision needs to know which locations
+	// this box has (A5); detect once and share with the board-label
+	// watcher below.
+	present := placement.Detect(ctx)
+	log.Info("box locations detected", "locations", placement.Names(present))
+
 	br, err := bridge.New(bridge.Config{
-		Plane:        client,
-		Store:        store,
-		Log:          log,
-		Projects:     projectIDs,
-		ProjectNames: projectNames,
-		WebhookURL:   webhookURL,
-		SecretFile:   secretFile,
-		BotEmail:     botEmail,
-		BoardURL:     planeURL,
-		Workspace:    workspace,
-		EventsFile:   eventsFile,
-		ModelsFile:   modelsFile,
-		PlanQueue:    planQueue,
+		Plane:         client,
+		Store:         store,
+		Log:           log,
+		Projects:      projectIDs,
+		ProjectNames:  projectNames,
+		WebhookURL:    webhookURL,
+		SecretFile:    secretFile,
+		BotEmail:      botEmail,
+		BoardURL:      planeURL,
+		Workspace:     workspace,
+		EventsFile:    eventsFile,
+		ModelsFile:    modelsFile,
+		PlanQueue:     planQueue,
+		LocationQueue: locationQueue,
+		Present:       present,
 	})
 	if err != nil {
 		return err
 	}
 	defer br.Close()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Webhook registration, retried until Plane is reachable.
 	go func() {
@@ -191,6 +206,12 @@ func run(log *slog.Logger) error {
 	catchUpDone := make(chan struct{})
 	go func() {
 		for {
+			// A restart reaps claimed/running entries whose owner PID is
+			// gone (crashed task-runner, reboot) so the catch-up below
+			// can re-trigger them.
+			if err := store.Recover(); err != nil {
+				log.Warn("store recover failed", "err", err)
+			}
 			n, err := br.CatchUp(ctx)
 			if err != nil {
 				log.Warn("catch-up sync failed, retrying", "err", err)
@@ -208,6 +229,45 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
+	// C1: periodic catch-up. A webhook re-runs evaluate only for the
+	// item that changed, so a card whose trigger state re-enters
+	// silently is only seen here: a dep-waiting run settles its entry
+	// skipped while the card stays Ready, and the dep finishing emits no
+	// event for it. Recover first — a crashed task-runner leaves its
+	// entry claimed with a dead PID, which reads as in flight.
+	go func() {
+		interval, perr := time.ParseDuration(envOr("BRIDGE_CATCHUP_INTERVAL", "5m"))
+		if perr != nil {
+			log.Error("bad BRIDGE_CATCHUP_INTERVAL; periodic catch-up disabled", "err", perr)
+			return
+		}
+		if interval == 0 {
+			return
+		}
+		log.Info("periodic catch-up enabled", "interval", interval.String())
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			if err := store.Recover(); err != nil {
+				log.Warn("store recover failed", "err", err)
+				continue
+			}
+			n, err := br.CatchUp(ctx)
+			if err != nil {
+				log.Warn("periodic catch-up failed", "err", err)
+				continue
+			}
+			if n > 0 {
+				log.Info("periodic catch-up queued jobs", "queued", n)
+			}
+		}
+	}()
+
 	// Keep the board labels in sync with the registry and the box:
 	// plan:<model> with the enabled planner models (A3), model:<id> with
 	// the enabled executor models and run:<loc> with the locations this
@@ -220,8 +280,6 @@ func run(log *slog.Logger) error {
 			return
 		case <-catchUpDone:
 		}
-		present := placement.Detect(ctx)
-		log.Info("box locations detected", "locations", placement.Names(present))
 		w := planlabels.NewWatcher(modelsFile, 15*time.Second, log,
 			func(ctx context.Context, f *registry.File) error {
 				if err := planlabels.Sync(ctx, client, projectIDs, f, log); err != nil {
