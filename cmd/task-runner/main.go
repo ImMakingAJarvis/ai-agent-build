@@ -22,9 +22,12 @@
 //	TASK_RUNNER_MODELS_FILE  model registry (default <repo>/config/models.yaml)
 //	JARVIS_DATA_DIR       agent job store dir (default ~/.local/share/jarvis —
 //	                      the same store plane-bridge writes into)
-//	SUNSHINE_ENDPOINT / STEAM_ENDPOINT  game watchdog (default: disabled) —
-//	                      while a stream is active the GPU location queue is
-//	                      paused, so GPU jobs wait in the lane
+//	SUNSHINE_ENDPOINT / STEAM_ENDPOINT  optional extras for the game
+//	                      watchdog (it always runs: Sunshine/Steam are
+//	                      detected via /proc, NVENC utilization as a
+//	                      fallback) — while a stream is active the GPU
+//	                      location queue is paused, so GPU jobs wait in
+//	                      the lane
 package main
 
 import (
@@ -197,8 +200,9 @@ func run(log *slog.Logger) error {
 
 	// Game watchdog for the queue lane (the worker container stops the
 	// engine to free VRAM; the task-runner pauses the GPU location queue,
-	// so GPU jobs wait in the lane while a game holds the GPU). Disabled
-	// when the endpoints are not set.
+	// so GPU jobs wait in the lane while a game holds the GPU). The
+	// watcher always runs — Sunshine/Steam are detected via /proc with
+	// NVENC utilization as a fallback; the endpoints are optional extras.
 	streamCh := make(chan streamwatcher.StateChange, 1)
 	streamWatcher := streamwatcher.New(streamwatcher.Config{
 		SunshineEndpoint: os.Getenv("SUNSHINE_ENDPOINT"),

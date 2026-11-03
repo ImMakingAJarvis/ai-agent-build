@@ -290,6 +290,38 @@ func TestRunPasses(t *testing.T) {
 	}
 }
 
+// TestRunLegacyStateNames: the projects migrated from AAB carry Plane's
+// default "In Progress" (capital P), not the plane-epic standard "In
+// progress". The runner matches state names case-insensitively (like the
+// bridge) or every migrated project fails with "no In progress state".
+func TestRunLegacyStateNames(t *testing.T) {
+	board := newFakeBoard()
+	board.states = []plane.State{
+		{ID: "s-ready", Name: "Ready"},
+		{ID: "s-progress", Name: "In Progress"},
+		{ID: "s-blocked", Name: "Blocked"},
+		{ID: "s-done", Name: "Done"},
+	}
+	board.add(plane.WorkItem{ID: "epic1", Name: "Add a /health endpoint", State: "s-ready", SequenceID: 2, Labels: []string{"epic"}})
+	board.add(plane.WorkItem{
+		ID: "card1", Name: "health endpoint", State: "s-ready", Parent: "epic1", SequenceID: 3,
+		DescriptionHTML: cardHTML("health", "add a /health endpoint", "health.py", "", "test -f health.py", "S", "local-27b"),
+	})
+	harness := &fakeHarness{passAfter: 1, good: "print('ok')", bad: "bad", file: "health.py"}
+	r := testRunner(t, board, harness, contentChecker{file: "health.py", want: "ok"})
+
+	res, err := runJob(t, r, "card1", "epic1", "model:local-27b")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Passed {
+		t.Fatalf("Result = %+v, want Passed", res)
+	}
+	if got := board.items["card1"].State; got != "s-done" {
+		t.Errorf("card state = %s, want s-done", got)
+	}
+}
+
 // TestRunRetriesThenPasses: attempt one fails the check, attempt two
 // builds on it and passes.
 func TestRunRetriesThenPasses(t *testing.T) {

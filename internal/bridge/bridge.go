@@ -807,11 +807,13 @@ func (b *Bridge) publishRunJob(ctx context.Context, item *plane.WorkItem, spec a
 	if loc == placement.Cloud {
 		loc = placement.IGPU
 	}
+	// PublishLocation takes the location ("cpu") and maps it to the queue
+	// itself; the lane name stays on the message — Type names the queue.
 	lane, ok := queue.LocationQueueFor(string(loc))
 	if !ok {
 		return fmt.Errorf("location %q has no box queue", loc)
 	}
-	return b.cfg.LocationQueue.PublishLocation(ctx, lane, queue.Message{
+	return b.cfg.LocationQueue.PublishLocation(ctx, string(loc), queue.Message{
 		ID:           spec.ID,
 		Type:         lane,
 		Priority:     spec.Priority,

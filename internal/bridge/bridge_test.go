@@ -756,6 +756,12 @@ type fakeLocationQueue struct {
 }
 
 func (q *fakeLocationQueue) PublishLocation(ctx context.Context, loc string, m queue.Message) error {
+	// Mirror the real publisher's contract: loc is a location ("cpu"),
+	// which it maps to a queue itself — a lane name ("jobs.cpu") is
+	// rejected. This is what caught the bridge double-converting.
+	if _, ok := queue.LocationQueueFor(loc); !ok {
+		return fmt.Errorf("location %q has no box queue", loc)
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.err != nil {

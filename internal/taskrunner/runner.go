@@ -115,14 +115,17 @@ func (r *Runner) Run(ctx context.Context, job *Job) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("list states: %w", err)
 	}
+	// State names are matched case-insensitively, like the bridge: the
+	// live projects migrated from AAB carry Plane's default "In
+	// Progress", while plane-epic scaffolds "In progress".
 	stateByID := map[string]string{}
 	doneID, inProgressID := "", ""
 	for _, s := range states {
 		stateByID[s.ID] = s.Name
-		switch s.Name {
-		case StateDone:
+		switch {
+		case strings.EqualFold(s.Name, StateDone):
 			doneID = s.ID
-		case StateInProgress:
+		case strings.EqualFold(s.Name, StateInProgress):
 			inProgressID = s.ID
 		}
 	}
@@ -580,7 +583,7 @@ func (r *Runner) blockCard(ctx context.Context, projectID, itemID, reason string
 		return
 	}
 	for _, s := range states {
-		if s.Name == StateBlocked {
+		if strings.EqualFold(s.Name, StateBlocked) {
 			if _, err := r.Board.SetState(ctx, projectID, itemID, s.ID); err != nil {
 				r.logf("move card to Blocked: %v", err)
 			}
