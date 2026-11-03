@@ -107,6 +107,22 @@ makes the kanban `nightly` tag the canonical source of the tag; until then
 the tag is set at add time or by re-triggering a finished job with the tag
 (`Refresh` parks it again).
 
+## The control surface (nobrakes-3)
+
+The owner flips `auto_mode` from Discord with the `!automode` command in the
+`jarvis-chat` daemon. It is owner-only by construction — the chat layer only
+fires the handler for the owner DM, the same guarantee as `!pause`/`!restart`:
+
+    !automode on     # auto_mode -> "on": nightly jobs will auto-enqueue
+    !automode off    # auto_mode -> "off": nightly jobs stay parked
+
+The command dials the flag store (`$JARVIS_REDIS`, default
+`redis://127.0.0.1:6379`), writes the value, reads it back, and confirms the
+stored result — turning it on warns that nightly jobs will now run
+autonomously. A bad or missing argument gets a usage line and leaves the flag
+untouched; Redis unreachable or disabled leaves the flag unchanged and says
+so. `cmd/jarvis-chat/automode.go` (unit-tested against miniredis).
+
 ## Health & operations
 
 ```bash
