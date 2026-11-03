@@ -1,0 +1,136 @@
+// Package nobrakes is the Redis-backed flag store for the NoBrakes feature:
+// autonomous nightly job execution gated by an operator-controlled auto_mode
+// flag. The feature is OFF by default and fully manual-overridable; see
+// docs/nobrakes/redis.md for the key structure and where Redis runs.
+package nobrakes
+
+import (
+	"context"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// Redis keys. The nobrakes: prefix namespaces all NoBrakes state.
+const (
+	// AutoModeKey holds the operator's auto_mode switch: "on" or "off".
+	// A missing key reads as "off" — the safe default.
+	AutoModeKey = "nobrakes:auto_mode"
+
+	// NightlyFlagKey marks the nightly window. Value semantics:
+	//
+	//   ""          nightly enqueue has never run
+	//   "YYYY-MM-DD" (UTC date) — the date of the last nightly window
+	//   whose jobs were already enqueued
+	//
+	// The nightly trigger (nobrakes-5) fires only when auto_mode is "on"
+	// AND the flag is not today's UTC date; after enqueuing it sets the
+	// flag to today's date. That makes the nightly batch idempotent:
+	// worker restarts or repeated triggers on the same day cannot double-
+	// enqueue. The key has no TTL — it is compared across days.
+	NightlyFlagKey = "nobrakes:nightly_flag"
+)
+
+// auto_mode values.
+const (
+	AutoModeOn  = "on"
+	AutoModeOff = "off"
+)
+
+// Store reads and writes the NoBrakes flag state in Redis.
+type Store struct {
+	client *redis.Client
+}
+
+// New dials the Redis at addr (a redis:// URL, as in $JARVIS_REDIS) and
+// verifies the connection. It returns an error when Redis is unreachable.
+func New(addr string) (*Store, error) {
+	opt, err := redis.ParseURL(addr)
+	if err != nil {
+		return nil, err
+	}
+	client := redis.NewClient(opt)
+	defer client.Close()
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		return nil, err
+	}
+	return &Store{client: client}, nil
+}
+
+// NewFromClient wraps an existing client (used by tests and callers that
+// already hold one).
+func NewFromClient(client *redis.Client) *Store {
+	return &Store{client: client}
+}
+
+// Close releases the connection pool.
+func (s *Store) Close() error { return s.client.Close() }
+
+// GetAutoMode returns the current auto_mode value. A missing key reads as
+// "off" so a fresh or wiped Redis is safe by default.
+func (s *Store) GetAutoMode(ctx context.Context) (string, error) {
+	v, err := s.client.Get(ctx, AutoModeKey).Result()
+	if err == redis.Nil {
+		return AutoModeOff, nil
+	}
+	if err != nil {
+		return AutoModeOff, err
+	}
+	if v != AutoModeOn && v != AutoModeOff {
+		// Corrupt value: treat as off rather than trusting it.
+		return AutoModeOff, nil
+	}
+	return v, nil
+}
+
+// AutoModeOn reports whether autonomous nightly execution is enabled.
+func (s *Store) AutoModeOn(ctx context.Context) (bool, error) {
+	v, err := s.GetAutoMode(ctx)
+	return v == AutoModeOn, err
+}
+
+// SetAutoMode sets the auto_mode switch to the given value. This is the
+// manual-override path (e.g. the Discord !automode command in nobrakes-3).
+func (s *Store) SetAutoMode(ctx context.Context, on bool) error {
+	if on {
+		return s.client.Set(ctx, AutoModeKey, AutoModeOn, 0).Err()
+	}
+	return s.client.Set(ctx, AutoModeKey, AutoModeOff, 0).Err()
+}
+
+// GetNightlyFlag returns the last processed nightly window (UTC date
+// "YYYY-MM-DD"), or "" when the nightly enqueue has never run.
+func (s *Store) GetNightlyFlag(ctx context.Context) (string, error) {
+	v, err := s.client.Get(ctx, NightlyFlagKey).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return v, err
+}
+
+// SetNightlyFlag records that the nightly window for date (UTC "YYYY-MM-DD")
+// has been processed. Callers pass time.Now().UTC().Format("2006-01-02").
+func (s *Store) SetNightlyFlag(ctx context.Context, date string) error {
+	return s.client.Set(ctx, NightlyFlagKey, date, 0).Err()
+}
+
+// NightlyDue reports whether the nightly window for now is still unprocessed:
+// the flag is not today's UTC date. Callers still gate on AutoModeOn — this
+// only answers the idempotency question.
+func (s *Store) NightlyDue(ctx context.Context, now time.Time) (bool, error) {
+	flag, err := s.GetNightlyFlag(ctx)
+	if err != nil {
+		return false, err
+	}
+	return flag != now.UTC().Format("2006-01-02"), nil
+}
+
+// EnsureDefaults creates both keys with their safe defaults if (and only
+// if) they are missing: auto_mode "off", nightly_flag "". Idempotent, so
+// callers may run it at startup without clobbering operator state.
+func (s *Store) EnsureDefaults(ctx context.Context) error {
+	if err := s.client.SetNX(ctx, AutoModeKey, AutoModeOff, 0).Err(); err != nil {
+		return err
+	}
+	return s.client.SetNX(ctx, NightlyFlagKey, "", 0).Err()
+}
