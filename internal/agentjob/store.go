@@ -24,6 +24,11 @@ const (
 	Done    = "done"
 	Failed  = "failed"
 	Skipped = "skipped"
+	// Parked: the job is defined but not in the active queue. Nightly-tagged
+	// jobs (TagNightly) are stored parked when they land in the store and
+	// stay parked until the NoBrakes nightly gate (internal/nobrakes.
+	// AutoEnqueue) moves them to ready. Next never returns parked jobs.
+	Parked = "parked"
 )
 
 // Job classes, highest priority first. A job's class decides where it sits
@@ -87,6 +92,27 @@ type Spec struct {
 	// scheduled this job. The worker reacts to that message on pickup.
 	DiscordChannelID string `json:"discord_channel_id,omitempty"`
 	DiscordMessageID string `json:"discord_message_id,omitempty"`
+
+	// Tags is an open set of job-level markers (job.json "tags"). The only
+	// tag with built-in semantics today is TagNightly.
+	Tags []string `json:"tags,omitempty"`
+}
+
+// TagNightly marks a job for NoBrakes autonomous nightly execution. A
+// nightly-tagged job is stored parked (out of the active queue) and is
+// auto-enqueued — moved to ready — by the nightly gate when the Redis
+// auto_mode flag is on. NoBrakes task 4 makes "nightly" the canonical
+// kanban tag; until then this job-level tag is the formalisation.
+const TagNightly = "nightly"
+
+// HasTag reports whether the spec carries tag.
+func (sp Spec) HasTag(tag string) bool {
+	for _, t := range sp.Tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // State is the mutable record (state.json).
@@ -158,9 +184,12 @@ func writeJSON(path string, v any) error {
 	return os.Rename(tmp, path)
 }
 
-// Ingest stores a new job as ready. It is idempotent: if the job already
-// exists (a redelivered message, or a second migration run) nothing changes
-// and added is false.
+// Ingest stores a new job. A job tagged nightly (TagNightly) is stored
+// parked — held out of the active queue until the NoBrakes nightly gate
+// (internal/nobrakes.AutoEnqueue) enqueues it; every other job is stored
+// ready, as before. It is idempotent: if the job already exists (a
+// redelivered message, or a second migration run) nothing changes and
+// added is false.
 func (s *Store) Ingest(sp Spec) (added bool, err error) {
 	if sp.ID == "" || filepath.Base(sp.ID) != sp.ID {
 		return false, fmt.Errorf("agentjob: bad job id %q", sp.ID)
@@ -174,7 +203,11 @@ func (s *Store) Ingest(sp Spec) (added bool, err error) {
 	if sp.CreatedAt.IsZero() {
 		sp.CreatedAt = time.Now().UTC()
 	}
-	if err := writeJSON(filepath.Join(s.JobDir(sp.ID), "state.json"), State{Status: Ready}); err != nil {
+	status := Ready
+	if sp.HasTag(TagNightly) {
+		status = Parked
+	}
+	if err := writeJSON(filepath.Join(s.JobDir(sp.ID), "state.json"), State{Status: status}); err != nil {
 		return false, err
 	}
 	// job.json is written last: a job without it is not yet visible.
@@ -204,7 +237,12 @@ func (s *Store) Refresh(sp Spec) error {
 	if err := writeJSON(filepath.Join(s.JobDir(sp.ID), "job.json"), sp); err != nil {
 		return err
 	}
+	// A re-triggered nightly job waits for the next nightly gate, not for
+	// the queue.
 	j.Status = Ready
+	if sp.HasTag(TagNightly) {
+		j.Status = Parked
+	}
 	return s.setState(sp.ID, j.State)
 }
 
