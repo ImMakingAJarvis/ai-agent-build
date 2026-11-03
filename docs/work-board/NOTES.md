@@ -657,3 +657,46 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   the viewer role (5), which gets a 403 on comment POST. The live test
   adds the admin to the scratch project as editor (role 20) first,
   mirroring `live_test.go`.
+
+## C1 — run_task execution loop + task-runner service (2026-11-03)
+
+- **Harness choice: Aider** (not OpenHands). Aider is a single Python CLI
+  pointed at any OpenAI-compatible endpoint (`--openai-api-base`) that
+  edits files on disk; OpenHands is a full agent server (runtime, browser,
+  event loop) — more moving parts for a loop where the runner already owns
+  git, the acceptance check, retries and board state. Aider runs from a
+  venv at `~/.local/share/task-runner/venv` (CPython 3.12 — aider does not
+  install on the system's Python 3.14) and the runner execs its `aider`
+  binary directly (`internal/taskrunner/harness.go`).
+- **Endpoint/model resolution:** the local engines serve the GGUF file
+  path, not the registry id, as the model name, so the harness asks the
+  endpoint's `/v1/models` and requires exactly one model — the runner must
+  know which model it is paying the box's VRAM for. The default endpoint is
+  `http://localhost:11434/v1` (the brain — the registry's only executor at
+  C1 time; a second local executor with a different endpoint needs the
+  `Aider.Endpoint` field set per model).
+- **Host service, not a container:** `cmd/task-runner`
+  (`systemd/task-runner.service`, `/usr/local/bin/task-runner`) is the
+  only consumer of the location queues (`jobs.gpu`/`jobs.cpu`/`jobs.igpu`).
+  The worker's placeholder silent-ack location workers were removed in the
+  same round — they would have been competing consumers that ack and drop
+  run_task jobs. The loop runs on the host because the worker container
+  mounts the repo read-only and carries no git, Go toolchain or Python.
+- **Store settling:** a run_task result settles its agent-job entry —
+  Running while in flight; Passed and Blocked → Done (Blocked is settled:
+  a human moves the card); Waiting → Skipped, the terminal "settled
+  without a verdict" state, so the bridge's next catch-up re-triggers the
+  job while the card is still Ready; infrastructure error → Failed (the
+  bridge re-triggers on a terminal entry + card state, self-healing). A
+  missing entry (the bridge ingest has not landed) is created from the
+  queue payload first, so the store stays whole.
+- **Game watchdog on the lane:** while a Sunshine/Steam stream is active
+  (endpoints set), the GPU lane is paused — GPU jobs wait in the queue
+  instead of fighting the game for the 4090.
+- **Branch shape:** the epic branch is `epics/<PREFIX-<epic seq>>` — the
+  task branch `epic-<PREFIX-<epic seq>>/task-<task seq>` must not sit under
+  a ref named `epic-<code>`, so the epic branch gets the `epics/` prefix.
+  Both live in `.worktrees/` worktrees (excluded from git status); the
+  task worktree is dropped after the merge, the epic worktree is kept so
+  later tasks of the same epic build on it and NOTES.md accumulates there.
+- **Live-verified:** pending the toy-epic run (below).

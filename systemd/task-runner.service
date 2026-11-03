@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis Task Runner (run_task execution loop — location queues)
+After=network-online.target rabbitmq-server.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+EnvironmentFile=/home/agent/.config/jarvis/agent.env
+ExecStart=/usr/local/bin/task-runner
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=task-runner
+
+[Install]
+WantedBy=multi-user.target
