@@ -57,3 +57,4 @@
 - 2026-11-01T10:20Z Work-board plan Phase A continues per PLAN.md task order (A2 merged as PR #131 content, A3 shipped in PR #131); A4 next (VRAM/RAM fit check).
 - 2026-11-02T05:49Z A6 (job plan-epic-planner-plan-with-m-1793259204-12): per-location queues jobs.gpu/cpu/igpu each with its own worker so CPU/iGPU jobs (e.g. audio transcription) run alongside the GPU job; game watchdog pauses only the GPU queue
 - 2026-11-02T11:32Z B1 (plan_epic jumps the background queue): find and fix the root cause of the broker not honoring message priority. Resolved — it was the wrong queue-argument name (x-priority vs x-max-priority). B2 (worker model swap / cloud API) and B3 (Plan/Decompose/Review prompts + task schema) are next.
+- 2026-11-03T00:19Z Work-board Phase B is done through B5 (approval + re-plan); Nathan's plan has Phase C next: run_task execution on a toy epic, escalation/Blocked, and auto-PR
