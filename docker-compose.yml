@@ -183,6 +183,14 @@ services:
       # Photo generation for the !photo Discord command.
       ART_URL: http://art:8120
       ART_GALLERY_URL: http://111.1.2.27:8120
+      # While the worker is deep in a job the brain is saturated, so
+      # classify/chat LLM calls route to the iGPU helper engine (host
+      # loopback 11435 via host-gateway). The worker-busy signal is the job
+      # store, already mounted below.
+      FALLBACK_ENGINE_URL: http://host.docker.internal:11435
+      FALLBACK_MODEL: jarvis-igpu
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
@@ -275,9 +283,20 @@ services:
       JARVIS_VOICE: glados
       OLLAMA_URL: http://engine:11434
       MEMORY_URL: http://memory:8101
+      # While the worker is deep in a job the 4090 brain is saturated, so
+      # conversation LLM calls route to the iGPU helper engine instead. It
+      # listens on the host loopback (11435), reachable from this container
+      # via host-gateway.
+      FALLBACK_OLLAMA_URL: http://host.docker.internal:11435
+      FALLBACK_MODEL: jarvis-igpu
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /opt/jarvis-voice:/opt/jarvis-voice
       - /home/agent/.cache/huggingface:/home/agent/.cache/huggingface:ro
+      # "Worker busy" signal: each job's state.json (status: running while
+      # the agent round is in progress).
+      - /home/agent/.local/share/jarvis/jobs:/home/agent/.local/share/jarvis/jobs:ro
       # self-signed TLS cert for the 8443 listener (voice_service.py's default
       # path ~/.config/jarvis/tls/voice.{crt,key}, HOME is /home/agent here);
       # regenerate with scripts/gen_voice_cert.sh after the IP changes

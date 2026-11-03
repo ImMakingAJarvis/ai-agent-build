@@ -27,7 +27,7 @@ Be brief: the direct answer, then the command(s) if any. Max ~10 lines.
 | chat | — | Discord bot answering owner DMs with the brain; bridges voice wake events to jobs |
 | dashboard | 8080 | web dashboard: jobs, queue, system state (PWA) |
 | ha | — | publishes Jarvis sensors to Home Assistant via MQTT |
-| voice | 8100 / 8443 | voice pipeline: wake word → STT → brain → TTS |
+| voice | 8100 / 8443 | voice pipeline: wake word → STT → brain → TTS (while the worker is deep in a job the LLM step routes to you — the iGPU helper model — so voice stays responsive) |
 | memory | 8101 (127.0.0.1) | vector search over work logs and jobs |
 | memory-reindex | — | re-scans memory sources every 15 min |
 | rabbitmq | 5672, 1883 (MQTT), 15672 (mgmt) | message broker |
