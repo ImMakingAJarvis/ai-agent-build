@@ -126,7 +126,7 @@ Run these in order, one per fresh context, with each ending in a commit and its 
 - [x] B2. Worker handler: swap in the chosen local model if needed (unload, load, restore afterward), or call the cloud API. Check: test with a stub model.
 - [x] B3. Implement the Plan, Decompose and Review prompts as files in `prompts/`, with the task JSON schema. Check: schema validation test on a sample output.
 - [x] B4. Deliver the plan: create a Plane page with the plan and link it from the epic, create the tasks as sub-items in Plan review with "blocked by" relations and a model: label on each (no run: label; placement comes from the registry), and move the epic to Plan review. Check: a toy epic ends up with a page and sub-items.
-- [ ] B5. Approval and re-plan: epic moved to Plan approved moves its sub-items to Ready; epic moved back to Planning re-runs planning with the epic's comments added to the prompt. Check: both paths on the toy epic.
+- [x] B5. Approval and re-plan: epic moved to Plan approved moves its sub-items to Ready; epic moved back to Planning re-runs planning with the epic's comments added to the prompt. Check: both paths on the toy epic.
 
 **Phase C: Execution**
 

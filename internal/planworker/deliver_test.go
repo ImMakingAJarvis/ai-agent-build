@@ -101,6 +101,7 @@ func newFakeBoard() *fakeBoard {
 		states: map[string]*fpState{
 			"st-backlog":     {ID: "st-backlog", Name: "Backlog", Group: "backlog", Sequence: 65536, Color: "#94A3B8"},
 			"st-plan-review": {ID: "st-plan-review", Name: "Plan review", Group: "unstarted", Sequence: 131072, Color: "#FBBF24"},
+			"st-ready":       {ID: "st-ready", Name: "Ready", Group: "unstarted", Sequence: 196608, Color: "#34D399"},
 		},
 		labels: map[string]*fpLabel{},
 		items: map[string]*fpItem{
@@ -210,6 +211,15 @@ func (f *fakeBoard) routeV1(w http.ResponseWriter, r *http.Request) {
 			it.DescriptionHTML = *in.DescriptionHTML
 		}
 		fpJSON(w, 200, it)
+	case len(parts) == 4 && parts[2] == "work-items" && r.Method == "DELETE":
+		it, ok := f.items[parts[3]]
+		if !ok {
+			http.Error(w, "no such item", http.StatusNotFound)
+			return
+		}
+		delete(f.items, it.ID)
+		delete(f.blocked, it.ID)
+		w.WriteHeader(http.StatusNoContent)
 	case len(parts) == 5 && parts[2] == "work-items" && parts[4] == "relations" && r.Method == "POST":
 		var in struct {
 			RelationType string   `json:"relation_type"`
@@ -252,10 +262,27 @@ func (f *fakeBoard) routePages(w http.ResponseWriter, r *http.Request) {
 	// A single page (the detail endpoint): the only place the body comes back.
 	if id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, root), "/"); id != "" {
 		for _, p := range f.pages {
-			if p.ID == id {
+			if p.ID != id {
+				continue
+			}
+			if r.Method == "PATCH" { // a re-plan replaces the page body
+				var in struct {
+					Name string `json:"name"`
+					HTML string `json:"description_html"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if in.Name != "" {
+					p.Name = in.Name
+				}
+				p.DescriptionHTML = in.HTML
 				fpJSON(w, 200, p)
 				return
 			}
+			fpJSON(w, 200, p)
+			return
 		}
 		http.Error(w, "no such page", http.StatusNotFound)
 		return
@@ -537,6 +564,108 @@ func TestDeliverConvergesAPartialDelivery(t *testing.T) {
 	}
 	if len(fb.pages) != 1 {
 		t.Errorf("pages = %d, want 1", len(fb.pages))
+	}
+}
+
+// TestDeliverReplan covers B5's delivery side: a re-plan delivers a new
+// plan over the old one — the page body is replaced, the cards the new
+// plan still has are refreshed in place, and the cards of dropped tasks
+// are deleted, but only while they are still in Plan review or Ready.
+// Cards Nathan moved on (Backlog, In progress, Done, ...) are kept.
+func TestDeliverReplan(t *testing.T) {
+	d, fb, _ := newDelivererTest(t)
+
+	// The first plan: four tasks.
+	first := toyResult()
+	first.Tasks.Tasks = append(first.Tasks.Tasks, Task{
+		ID: "t4", Title: "Old", Description: "Old work",
+		AcceptanceCheck: "go test ./...", Size: "S", ExecutorModel: "qwen3.8-27b",
+	})
+	if _, err := d.Deliver(context.Background(), toyJob(), first); err != nil {
+		t.Fatalf("first Deliver: %v", err)
+	}
+	subs := subItemsOf(fb, "epic-1")
+	if len(subs) != 4 {
+		t.Fatalf("sub-items = %d, want 4", len(subs))
+	}
+	t2ID, t3ID, t4ID := subs["t2"].ID, subs["t3"].ID, subs["t4"].ID
+
+	// Before the re-plan lands, Nathan has moved two of the old cards:
+	// t3 to Ready, t4 out to Backlog.
+	for _, mv := range []struct{ id, state string }{{t3ID, "st-ready"}, {t4ID, "st-backlog"}} {
+		if _, err := d.Plane.SetState(context.Background(), "proj-1", mv.id, mv.state); err != nil {
+			t.Fatalf("move %s: %v", mv.id, err)
+		}
+	}
+
+	// The re-plan: t1 kept with new content, t2/t3/t4 dropped, t5/t6 new.
+	rp := toyJob()
+	rp.Trigger = TriggerReplan
+	rp.Comments = []string{"Drop t2, t3 and t4; split the rest into t5 and t6."}
+	res := &Result{
+		Plan:  "# Re-plan\n\nRevised plan.",
+		Model: registry.Model{ID: "qwen3.8-27b"},
+		Tasks: TaskList{Epic: "epic-1", Tasks: []Task{
+			{ID: "t1", Title: "Base", Description: "Build the base (revised)", AcceptanceCheck: "go test ./...", Size: "S", ExecutorModel: "qwen3.8-27b"},
+			{ID: "t5", Title: "Part one", Description: "First half", Dependencies: []string{"t1"}, AcceptanceCheck: "go test ./...", Size: "S", ExecutorModel: "qwen3.8-27b"},
+			{ID: "t6", Title: "Part two", Description: "Second half", Dependencies: []string{"t1"}, AcceptanceCheck: "go test ./...", Size: "S", ExecutorModel: "qwen3.8-27b"},
+		}},
+	}
+	if _, err := d.Deliver(context.Background(), rp, res); err != nil {
+		t.Fatalf("re-plan Deliver: %v", err)
+	}
+
+	// One page, and its body is the new plan, not the old one.
+	if got := len(fb.pages); got != 1 {
+		t.Fatalf("pages = %d, want 1", got)
+	}
+	if !strings.Contains(fb.pages[0].DescriptionHTML, "Revised plan.") {
+		t.Errorf("page body %q not updated to the re-plan", fb.pages[0].DescriptionHTML)
+	}
+	if strings.Contains(fb.pages[0].DescriptionHTML, "Some plan.") {
+		t.Errorf("page body still carries the old plan: %q", fb.pages[0].DescriptionHTML)
+	}
+
+	// t1's card was reused in place and refreshed; t5/t6 are new cards in
+	// Plan review; t2 (Plan review) and t3 (Ready) are deleted; t4
+	// (Backlog) survives.
+	subs = subItemsOf(fb, "epic-1")
+	if len(subs) != 4 {
+		t.Fatalf("sub-items = %d, want 4 (t1, t4, t5, t6): %v", len(subs), subs)
+	}
+	t1 := subs["t1"]
+	if !strings.Contains(t1.DescriptionHTML, "Build the base (revised)") {
+		t.Errorf("t1 description %q not refreshed by the re-plan", t1.DescriptionHTML)
+	}
+	for _, tid := range []string{"t1", "t5", "t6"} {
+		if s := subs[tid]; s.State != "st-plan-review" {
+			t.Errorf("task %s state = %s, want Plan review", tid, s.State)
+		}
+	}
+	if _, ok := fb.items[t2ID]; ok {
+		t.Errorf("dropped card t2 (Plan review) not deleted")
+	}
+	if _, ok := fb.items[t3ID]; ok {
+		t.Errorf("dropped card t3 (Ready) not deleted")
+	}
+	if it, ok := fb.items[t4ID]; !ok {
+		t.Errorf("card t4 (Backlog) deleted by the re-plan — moved cards must be kept")
+	} else if it.State != "st-backlog" {
+		t.Errorf("card t4 state = %s, want Backlog (untouched)", it.State)
+	}
+
+	// The epic is back in Plan review, its description links the (reused)
+	// page exactly once, and the latest comment is the re-plan summary.
+	epic := fb.items["epic-1"]
+	if epic.State != "st-plan-review" {
+		t.Errorf("epic state = %s, want Plan review", epic.State)
+	}
+	if n := strings.Count(epic.DescriptionHTML, planPageMarker); n != 1 {
+		t.Errorf("epic description has %d plan-page lines, want 1: %q", n, epic.DescriptionHTML)
+	}
+	cs := fb.comments["epic-1"]
+	if len(cs) != 2 || !strings.Contains(cs[len(cs)-1], "Re-plan ready") {
+		t.Errorf("epic comments = %v, want the first-plan and the re-plan summaries", cs)
 	}
 }
 

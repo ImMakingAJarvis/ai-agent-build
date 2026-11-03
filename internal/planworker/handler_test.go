@@ -380,10 +380,28 @@ func TestParse(t *testing.T) {
 		t.Fatalf("parsed = %+v", j)
 	}
 
+	// B5: a re-plan job parses like a plan job and carries the epic's
+	// comments as feedback.
+	const replan = `{
+		"trigger": "replan_epic",
+		"item": {"id": "i1", "name": "Epic"},
+		"model_id": "planner-a",
+		"effort": "medium",
+		"comments": ["Split task one in two.", "Drop the cache task."]
+	}`
+	rp, err := Parse(replan)
+	if err != nil {
+		t.Fatalf("Parse re-plan: %v", err)
+	}
+	if rp.Trigger != TriggerReplan || len(rp.Comments) != 2 ||
+		rp.Comments[0] != "Split task one in two." {
+		t.Fatalf("re-plan parsed = %+v", rp)
+	}
+
 	for _, tc := range []struct {
 		name, in, want string
 	}{
-		{"other trigger", `{"trigger":"run_task","item":{"id":"i"},"model_id":"m"}`, "not a plan_epic job"},
+		{"other trigger", `{"trigger":"run_task","item":{"id":"i"},"model_id":"m"}`, "not a planning job"},
 		{"no model", `{"trigger":"plan_epic","item":{"id":"i"}}`, "no model_id"},
 		{"garbage", `not json`, "parse plan job"},
 	} {

@@ -290,11 +290,15 @@ type Relations struct {
 	FinishBefore []RelationRef `json:"finish_before"`
 }
 
-// Comment is a work-item comment.
+// Comment is a work-item comment. CreatedBy is the author's workspace
+// member id (the serializer also carries it as "actor"); compare it with
+// a workspace member id to tell bot comments from human ones — the
+// serializer does not carry the author's email.
 type Comment struct {
 	ID          string `json:"id"`
 	CommentHTML string `json:"comment_html"`
 	CreatedAt   string `json:"created_at"`
+	CreatedBy   string `json:"created_by"`
 }
 
 // Page is a project page (a Plane doc). The page body is description_html
@@ -313,6 +317,17 @@ type PageCreate struct {
 	Name            string `json:"name"`
 	DescriptionHTML string `json:"description_html,omitempty"`
 }
+
+// Marker lines in a description_html that mark items the planning
+// delivery (B4) wrote (the P5/P6 marker convention): a delivered task
+// sub-item starts with "plan-task: <task-id>", and the epic carries a
+// "plan-page: <url>" line pointing at its plan page. Both the bridge
+// (which recognises an epic as already planned) and the delivery (which
+// converges re-runs and cleans up a re-plan's cards, B5) match on them.
+const (
+	PlanTaskMarker = "plan-task: "
+	PlanPageMarker = "plan-page: "
+)
 
 // --- projects -----------------------------------------------------------------
 
@@ -735,6 +750,20 @@ func (c *Client) GetPage(ctx context.Context, projectID, pageID string) (*Page, 
 	var out Page
 	path := c.sessionPath("/workspaces/%s/projects/%s/pages/%s/", c.workspace, projectID, pageID)
 	if err := c.doSession(ctx, "GET", path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdatePage replaces a project page's body (session API, PATCH). The
+// payload is the same as CreatePage: the body field is description_html.
+func (c *Client) UpdatePage(ctx context.Context, projectID, pageID string, pg PageCreate) (*Page, error) {
+	if c.email == "" || c.password == "" {
+		return nil, errors.New("plane: pages need session credentials (Email/Password)")
+	}
+	var out Page
+	path := c.sessionPath("/workspaces/%s/projects/%s/pages/%s/", c.workspace, projectID, pageID)
+	if err := c.doSession(ctx, "PATCH", path, pg, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

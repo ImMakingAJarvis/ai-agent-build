@@ -13,6 +13,15 @@ Title: {{EPIC_TITLE}}
 Description:
 {{EPIC_DESCRIPTION}}
 
+## Epic comments
+
+Comments left on the epic by the person who reviews plans. On a re-plan
+this is feedback on the previous plan — address every point in the new
+plan; if a comment contradicts the epic description, the comment is the
+newer word. On a first plan this is "(no comments)".
+
+{{EPIC_COMMENTS}}
+
 ## Repository summary
 
 The repo is a Go project (plus config, docs and scripts). This is its file

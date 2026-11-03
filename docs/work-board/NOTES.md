@@ -603,3 +603,57 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
 - **B5 caveat:** page reuse is by name; a re-plan with different
   content needs an UpdatePage/DeletePage, which the client does not
   have yet.
+
+## B5 — approval and re-plan (2026-11-02)
+
+- Job plan-epic-planner-plan-with-m-1793259204-17. Two bridge
+  transitions, both on epics that already carry a delivered plan (the
+  `plan-page:` line in the description is the "has a plan" marker):
+  - **Plan approved → Ready.** `approveSubItems` moves every
+    Plan-review sub-item to **Ready** and queues a `run_task` job for
+    each. Idempotent on re-check (a second pass finds nothing left in
+    Plan review). run_task jobs go to the store only — the PlanQueue
+    is for planning, so approval publishes nothing to RabbitMQ.
+  - **Planning + has a plan → re-plan.** `enqueueReplan` collects the
+    epic's comments, queues a `replan_epic` job (deterministic id
+    `plane-replan_epic-<id>`) and publishes it to the PlanQueue at the
+    same front-of-queue priority as a first plan. A plain move back to
+    Planning *without* a delivered plan is a no-op — it is just
+    "start planning", which the original `plan_epic` label trigger
+    already covers.
+- **Comment filtering:** `replanComments` lists the epic's comments,
+  strips HTML, and drops the ones authored by the bot (matched by
+  member id, resolved from `cfg.BotEmail` via `ListWorkspaceMembers`
+  and cached in `b.botMember`). So the re-plan prompt carries only
+  human feedback — not the bot's own "Plan ready" / position notes.
+  The bot's id is resolved lazily on the first re-plan; if it cannot be
+  resolved the comments are kept unfiltered (a missing filter must not
+  block a re-plan).
+- **`Store.Refresh`** (new, `internal/agentjob`): re-queues a *finished*
+  job (Done/Failed/Skipped) in place with new instructions and puts it
+  back to Ready. An in-flight or missing job is refused ("not
+  finished") so a live re-plan never clobbers a running one. The
+  deterministic id means a re-trigger of the same epic lands on the
+  same job record.
+- **Planworker side:** `Parse` accepts `replan_epic` as well as
+  `plan_epic`; `Job.Comments` carries the human feedback and the
+  planning prompt gains a "Comments (feedback):" block (rendered as
+  "(no comments)" when empty) — see `prompts/plan.md`. The Deliverer's
+  re-plan path reuses the page (updates its body via `UpdatePage`) and
+  the kept cards (in place, via `SetDescriptionHTML`), and deletes the
+  cards the new plan dropped — but only when they are still in Plan
+  review or Ready; a card someone already moved to work is left alone.
+- **Live-verified this round:** the page body update (session PATCH)
+  and work-item deletion (v1 `DELETE`) — the two client methods B4
+  flagged as not yet exercised. The B5 acceptance
+  (`internal/bridge/b5_live_test.go`) runs the whole arc on a scratch
+  project: deliver a 2-task plan → approve (cards to Ready, run_task
+  jobs, no queue publish) → comment + move to Planning (re-plan job
+  carries the human comment, bot's filtered) → deliver the re-plan
+  (page updated, kept card refreshed, dropped card deleted, new card
+  created, single `plan-page:` line kept).
+- **Plane quirk (verified live):** commenting requires project
+  membership with at least the editor role — a plain member add grants
+  the viewer role (5), which gets a 403 on comment POST. The live test
+  adds the admin to the scratch project as editor (role 20) first,
+  mirroring `live_test.go`.

@@ -98,9 +98,9 @@ func (a *API) Chat(ctx context.Context, m *registry.Model, messages []models.Cha
 // anthropic calls the Anthropic Messages API (POST <endpoint>/messages).
 func (a *API) anthropic(ctx context.Context, m *registry.Model, messages []models.ChatMessage, maxTokens int) (string, error) {
 	body := map[string]any{
-		"model":       m.ID,
-		"max_tokens":  maxTokens,
-		"messages":    make([]map[string]string, 0, len(messages)),
+		"model":      m.ID,
+		"max_tokens": maxTokens,
+		"messages":   make([]map[string]string, 0, len(messages)),
 	}
 	if b := thinkingBudget(m.Thinking, "thinking.budget_tokens"); b > 0 {
 		body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": b}
@@ -160,9 +160,9 @@ func (a *API) anthropic(ctx context.Context, m *registry.Model, messages []model
 // (POST <endpoint>/chat/completions).
 func (a *API) openAICompatible(ctx context.Context, m *registry.Model, messages []models.ChatMessage, maxTokens int) (string, error) {
 	body := map[string]any{
-		"model":       m.ID,
-		"max_tokens":  maxTokens,
-		"messages":    make([]map[string]string, 0, len(messages)),
+		"model":      m.ID,
+		"max_tokens": maxTokens,
+		"messages":   make([]map[string]string, 0, len(messages)),
 	}
 	for _, msg := range messages {
 		body["messages"] = append(body["messages"].([]map[string]string), map[string]string{

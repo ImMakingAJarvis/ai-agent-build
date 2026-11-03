@@ -91,6 +91,7 @@ func (p *Pipeline) Plan(ctx context.Context, model Model, job *Job) (*PlanOutput
 	planPrompt := render(p.prompts["plan.md"], map[string]string{
 		"EPIC_TITLE":       job.Item.Name,
 		"EPIC_DESCRIPTION": epicDescription(job),
+		"EPIC_COMMENTS":    epicComments(job),
 		"REPO_SUMMARY":     repoSummary,
 		"EFFORT":           jobEffort(job),
 	})
@@ -355,4 +356,14 @@ func epicDescription(job *Job) string {
 		return "(no description)"
 	}
 	return job.Item.Description
+}
+
+// epicComments returns the re-plan feedback (B5) as one block, oldest
+// first, or a placeholder for a first plan (the bridge only carries
+// comments on replan_epic jobs).
+func epicComments(job *Job) string {
+	if len(job.Comments) == 0 {
+		return "(no comments)"
+	}
+	return strings.Join(job.Comments, "\n")
 }

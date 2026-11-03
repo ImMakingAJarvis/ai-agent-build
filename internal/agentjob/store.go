@@ -181,6 +181,33 @@ func (s *Store) Ingest(sp Spec) (added bool, err error) {
 	return true, writeJSON(filepath.Join(s.JobDir(sp.ID), "job.json"), sp)
 }
 
+// Refresh re-triggers a finished job with new instructions (B5's
+// repeated re-plan: the epic's comments changed, so the stored
+// instructions must be replaced, not just re-queued). It replaces
+// job.json with sp and puts the job back to ready. It refuses jobs
+// that are not finished (done/failed/skipped): re-writing the
+// instructions under an in-flight runner would be wrong, and the
+// caller is expected to have checked the status anyway.
+func (s *Store) Refresh(sp Spec) error {
+	j, err := s.Get(sp.ID)
+	if err != nil {
+		return err
+	}
+	switch j.Status {
+	case Done, Failed, Skipped:
+	default:
+		return fmt.Errorf("agentjob: job %s is %s, not finished", sp.ID, j.Status)
+	}
+	if sp.CreatedAt.IsZero() {
+		sp.CreatedAt = time.Now().UTC()
+	}
+	if err := writeJSON(filepath.Join(s.JobDir(sp.ID), "job.json"), sp); err != nil {
+		return err
+	}
+	j.Status = Ready
+	return s.setState(sp.ID, j.State)
+}
+
 // Get loads one job.
 func (s *Store) Get(id string) (Job, error) {
 	var j Job

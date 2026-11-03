@@ -28,7 +28,9 @@ func TestClientEngineOllama(t *testing.T) {
 			b, _ := json.Marshal(map[string]any{"models": ms})
 			w.Write(b)
 		case "/api/pull":
-			var req struct{ Name string `json:"name"` }
+			var req struct {
+				Name string `json:"name"`
+			}
 			json.NewDecoder(r.Body).Decode(&req)
 			pulls = append(pulls, req.Name)
 			loaded[req.Name] = true

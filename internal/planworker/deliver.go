@@ -13,18 +13,17 @@ import (
 
 // PlanReviewState is the state for planned-but-unapproved work
 // (docs/work-board/PLAN.md, "Approval in Plane"): tasks and their epic sit
-// in it until Nathan approves (B5) or re-plans (B6).
+// in it until Nathan approves (B5) or re-plans (B5).
 const PlanReviewState = "Plan review"
 
-// planTaskMarker and planPageMarker are plain-text markers in the
-// description_html of items this delivery wrote (the P5/P6 marker
-// convention): the first line of a sub-item is "plan-task: <task-id>" and
-// the epic carries a "plan-page: <url>" line. They make re-delivery
-// converge — a partial delivery is completed, never duplicated — and let a
-// later round (B5's re-plan) recognise the cards to clean up.
+// ReadyState is the state approved sub-items move to (B5).
+const ReadyState = "Ready"
+
+// The marker convention (P5/P6) lives in the plane package — the bridge
+// matches on the same strings when it recognises an epic as planned.
 const (
-	planTaskMarker = "plan-task: "
-	planPageMarker = "plan-page: "
+	planTaskMarker = plane.PlanTaskMarker
+	planPageMarker = plane.PlanPageMarker
 )
 
 // Deliverer delivers a finished plan to the Plane board (B4,
@@ -44,6 +43,11 @@ const (
 // and page it already created (found via their markers) and replaces the
 // link line rather than stacking another, so a partial failure followed by
 // a retry does not duplicate cards.
+//
+// A re-plan (replan_epic, B5) delivers a new plan over the old one: the
+// page body is replaced, the tasks the new plan still has are refreshed
+// in place, and the cards of tasks it dropped are deleted (only while
+// they are still in Plan review or Ready).
 type Deliverer struct {
 	// Plane is the board client (needs the bot session for pages).
 	Plane *plane.Client
@@ -94,7 +98,7 @@ func (d *Deliverer) Deliver(ctx context.Context, job *Job, res *Result) (*Delive
 	if err := d.linkPage(ctx, projectID, epicID, page, res); err != nil {
 		return nil, err
 	}
-	if err := d.summaryComment(ctx, projectID, epicID, res, page); err != nil {
+	if err := d.summaryComment(ctx, projectID, epicID, job, res, page); err != nil {
 		return nil, err
 	}
 	if _, err := d.Plane.SetState(ctx, projectID, epicID, state.ID); err != nil {
@@ -183,7 +187,13 @@ func (d *Deliverer) subItems(ctx context.Context, job *Job, res *Result, project
 	for _, t := range res.Tasks.Tasks {
 		if id, ok := have[t.ID]; ok {
 			// Converge the leftover card: back to Plan review, with its
-			// label (AddLabels merges, so the union is idempotent).
+			// label (AddLabels merges, so the union is idempotent). On a
+			// re-plan the card's content is the new plan's — refresh it.
+			if job.Trigger == TriggerReplan {
+				if _, err := d.Plane.SetDescriptionHTML(ctx, projectID, id, taskDescriptionHTML(t)); err != nil {
+					return nil, fmt.Errorf("task %q: refresh description: %w", t.ID, err)
+				}
+			}
 			if _, err := d.Plane.SetState(ctx, projectID, id, state.ID); err != nil {
 				return nil, fmt.Errorf("task %q: reset state: %w", t.ID, err)
 			}
@@ -206,6 +216,31 @@ func (d *Deliverer) subItems(ctx context.Context, job *Job, res *Result, project
 		out[t.ID] = wi.ID
 	}
 
+	// Re-plan (B5): cards of the previous plan that the new plan no longer
+	// has are deleted — but only cards the delivery still owns (Plan review
+	// or Ready). A card Nathan has moved elsewhere (In progress, Done, ...)
+	// is left where it is: a re-plan does not delete history or in-flight
+	// work.
+	if job.Trigger == TriggerReplan {
+		ready, err := d.Plane.StateByName(ctx, projectID, ReadyState)
+		if err != nil {
+			return nil, fmt.Errorf("state %q: %w", ReadyState, err)
+		}
+		for i := range items {
+			it := &items[i]
+			if it.Parent != epicID || (it.State != state.ID && it.State != ready.ID) {
+				continue
+			}
+			tid, ok := markerValue(it.DescriptionHTML, planTaskMarker)
+			if !ok || out[tid] != "" {
+				continue // no marker, or the new plan still has this task
+			}
+			if err := d.Plane.DeleteWorkItem(ctx, projectID, it.ID); err != nil {
+				return nil, fmt.Errorf("delete re-plan card %q: %w", tid, err)
+			}
+		}
+	}
+
 	// blocked-by: each dependency becomes a relation, added after all the
 	// cards exist.
 	for _, t := range res.Tasks.Tasks {
@@ -225,7 +260,9 @@ func (d *Deliverer) subItems(ctx context.Context, job *Job, res *Result, project
 
 // planPage creates the project page holding the plan document, reusing a
 // page with the same name when an earlier delivery of this epic's plan
-// already made one (a retry must not stack a second page).
+// already made one (a retry must not stack a second page). On a re-plan
+// the reused page's body is the old plan — it is replaced with the new
+// one (a first-plan retry leaves the body alone: same content, no churn).
 func (d *Deliverer) planPage(ctx context.Context, projectID string, job *Job, plan string) (*plane.Page, error) {
 	name := "Plan: " + job.Item.Name
 	pages, err := d.Plane.ListPages(ctx, projectID)
@@ -234,6 +271,16 @@ func (d *Deliverer) planPage(ctx context.Context, projectID string, job *Job, pl
 	}
 	for i := range pages {
 		if pages[i].Name == name {
+			if job.Trigger == TriggerReplan {
+				pg, err := d.Plane.UpdatePage(ctx, projectID, pages[i].ID, plane.PageCreate{
+					Name:            pages[i].Name,
+					DescriptionHTML: planPageHTML(plan),
+				})
+				if err != nil {
+					return nil, fmt.Errorf("update plan page: %w", err)
+				}
+				return pg, nil
+			}
 			return &pages[i], nil
 		}
 	}
@@ -279,14 +326,18 @@ func (d *Deliverer) linkPage(ctx context.Context, projectID, epicID string, pg *
 
 // summaryComment posts the model-prefixed summary on the epic (the P6
 // comment convention): what was planned and where to find it.
-func (d *Deliverer) summaryComment(ctx context.Context, projectID, epicID string, res *Result, pg *plane.Page) error {
+func (d *Deliverer) summaryComment(ctx context.Context, projectID, epicID string, job *Job, res *Result, pg *plane.Page) error {
 	url := d.Plane.PageLink(projectID, pg)
 	reviewed := ""
 	if res.Reviewed {
 		reviewed = " (reviewed)"
 	}
-	msg := fmt.Sprintf("%s: Plan ready — %d task(s) in %s for review%s. Plan: %s",
-		res.Model.ID, len(res.Tasks.Tasks), PlanReviewState, reviewed, url)
+	verb := "Plan"
+	if job.Trigger == TriggerReplan {
+		verb = "Re-plan"
+	}
+	msg := fmt.Sprintf("%s: %s ready — %d task(s) in %s for review%s. Plan: %s",
+		res.Model.ID, verb, len(res.Tasks.Tasks), PlanReviewState, reviewed, url)
 	if _, err := d.Plane.AddComment(ctx, projectID, epicID, "<p>"+htmlEscapeLine(msg)+"</p>"); err != nil {
 		return fmt.Errorf("summary comment: %w", err)
 	}

@@ -254,3 +254,31 @@ func TestRender(t *testing.T) {
 		t.Fatalf("render = %q", got)
 	}
 }
+
+// TestPipelineReplanComments: a re-plan's prompt carries the epic's
+// comments as feedback for the planning model; a first plan gets the
+// "(no comments)" placeholder.
+func TestPipelineReplanComments(t *testing.T) {
+	p := newTestPipeline(t, "")
+
+	re := &scriptModel{id: "planner-a", replies: []string{planDoc, validTasks}}
+	job := testJob("planner-a")
+	job.Trigger = TriggerReplan
+	job.Comments = []string{"Split task one in two.", "Drop the cache task."}
+	if _, err := p.Plan(context.Background(), re, job); err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	for _, want := range []string{"Split task one in two.", "Drop the cache task."} {
+		if !strings.Contains(re.prompts[0], want) {
+			t.Errorf("re-plan prompt missing comment %q:\n%s", want, re.prompts[0])
+		}
+	}
+
+	first := &scriptModel{id: "planner-a", replies: []string{planDoc, validTasks}}
+	if _, err := p.Plan(context.Background(), first, testJob("planner-a")); err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if !strings.Contains(first.prompts[0], "(no comments)") {
+		t.Errorf("first plan prompt missing (no comments):\n%s", first.prompts[0])
+	}
+}
