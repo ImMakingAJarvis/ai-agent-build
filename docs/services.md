@@ -36,7 +36,10 @@ Not containerized, on purpose:
   the stack, so it stays a host systemd unit (runs as `agent`,
   `Restart=on-failure`, inhibited by `touch /var/lib/jarvis/agent-run.disabled`).
 - **`jarvis-engine-igpu`** — the always-on helper model: Vulkan llama.cpp
-  on the Ryzen iGPU (Qwen2.5-3B Q4_K_M, port 11435, 127.0.0.1). The agent
+  on the Ryzen iGPU (Qwen2.5-3B Q4_K_M, port 11435). It binds 0.0.0.0 (not
+  loopback) so the voice/chat containers can reach it via
+  `host.docker.internal` as the worker-busy fallback — the model carries no
+  secrets, so LAN visibility is acceptable. The agent
   queries it via the `jarvis-helper` CLI for setup-change and self-restart
   questions; it costs no CPU cores (docs/igpu-model-handler.md). Model:
   `/opt/jarvis-igpu/models/jarvis-igpu.gguf`; deploy: `scripts/install_helper.sh`.
