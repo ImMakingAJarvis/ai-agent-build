@@ -1186,17 +1186,17 @@
       },
       "targets": [
         {
-          "expr": "rate(\"llamacpp:tokens_predicted_total\"[5m])",
+          "expr": "rate(llamacpp:tokens_predicted_total[5m])",
           "refId": "A",
           "legendFormat": "Decode tokens/s"
         },
         {
-          "expr": "rate(\"llamacpp:prompt_tokens_total\"[5m])",
+          "expr": "rate(llamacpp:prompt_tokens_total[5m])",
           "refId": "B",
           "legendFormat": "Prefill tokens/s"
         },
         {
-          "expr": "\"llamacpp:predicted_tokens_seconds\"",
+          "expr": "llamacpp:predicted_tokens_seconds",
           "refId": "C",
           "legendFormat": "Decode tok/s (engine gauge)"
         }
@@ -1228,12 +1228,12 @@
       },
       "targets": [
         {
-          "expr": "rate(\"llamacpp:tokens_predicted_seconds_total\"[5m])",
+          "expr": "rate(llamacpp:tokens_predicted_seconds_total[5m])",
           "refId": "A",
           "legendFormat": "Decode busy"
         },
         {
-          "expr": "rate(\"llamacpp:prompt_seconds_total\"[5m])",
+          "expr": "rate(llamacpp:prompt_seconds_total[5m])",
           "refId": "B",
           "legendFormat": "Prefill busy"
         }
@@ -1277,17 +1277,17 @@
       },
       "targets": [
         {
-          "expr": "\"llamacpp:prompt_tokens_total\"",
+          "expr": "llamacpp:prompt_tokens_total",
           "refId": "A",
           "legendFormat": "Prompt tokens"
         },
         {
-          "expr": "\"llamacpp:tokens_predicted_total\"",
+          "expr": "llamacpp:tokens_predicted_total",
           "refId": "B",
           "legendFormat": "Generated tokens"
         },
         {
-          "expr": "\"llamacpp:prompt_tokens_cached_total\"",
+          "expr": "llamacpp:prompt_tokens_cached_total",
           "refId": "C",
           "legendFormat": "Cached prompt tokens"
         }
