@@ -7,6 +7,11 @@
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
 //	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet] [-source S]
 //	                   [-class fix|build|background] [-priority N] [-depends a,b]
+//	                   [-tags a,b]
+//	jarvis-jobs nightly            NoBrakes: read the Redis auto_mode flag;
+//	                               if on and today's nightly window is
+//	                               unprocessed, enqueue parked nightly jobs
+//	jarvis-jobs enqueue <id>       move one parked job to ready (manual)
 //	jarvis-jobs order [a,b,c]    show or set the runtime band priority order
 //	                              (a permutation of fix, build, background)
 //	jarvis-jobs message [TEXT]   send the agent a message (stdin when TEXT
@@ -23,9 +28,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/nobrakes"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
@@ -37,7 +44,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message")
+		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|enqueue")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -70,8 +77,12 @@ func main() {
 		if err != nil {
 			die("%v", err)
 		}
-		fmt.Printf("%s — %s\nstatus: %s\nclass: %s\neffort: %s\n\n%s\n", j.ID, j.Title, j.Status,
-			agentjob.EffectiveClass(j.Class, j.Source), queue.CanonicalEffort(j.ReasoningEffort, "coding"), j.Instructions)
+		tags := ""
+		if len(j.Tags) > 0 {
+			tags = fmt.Sprintf("\ntags: %s", strings.Join(j.Tags, ", "))
+		}
+		fmt.Printf("%s — %s\nstatus: %s\nclass: %s\neffort: %s%s\n\n%s\n", j.ID, j.Title, j.Status,
+			agentjob.EffectiveClass(j.Class, j.Source), queue.CanonicalEffort(j.ReasoningEffort, "coding"), tags, j.Instructions)
 	case "pause":
 		if len(args) != 1 {
 			die("pause <id>")
@@ -124,6 +135,18 @@ func main() {
 		fmt.Sscan(args[1], &code)
 		j, _ := runner(store).Finish(args[0], code, "")
 		fmt.Printf("==> job %s %s %s\n", j.ID, j.Status, j.PRURL)
+	case "nightly":
+		if err := cmdNightly(store); err != nil {
+			die("%v", err)
+		}
+	case "enqueue":
+		if len(args) != 1 {
+			die("enqueue <id>")
+		}
+		if err := store.Enqueue(args[0]); err != nil {
+			die("%v", err)
+		}
+		fmt.Println(args[0])
 	case "order":
 		if err := cmdOrder(store, args); err != nil {
 			die("%v", err)
@@ -167,6 +190,41 @@ func cmdMessage(args []string, stdin io.Reader) error {
 		return err
 	}
 	fmt.Printf("queued %s (%d waiting)\n", name, inbox.Count())
+	return nil
+}
+
+// cmdNightly runs the NoBrakes nightly gate once (NoBrakes 2/6); the
+// agent-run loop calls it at the top of every iteration. When the Redis
+// auto_mode flag is "on" and today's UTC nightly window has not been
+// processed yet, it enqueues every parked nightly-tagged job (no manual
+// trigger) and stamps the window so the batch runs once per day.
+//
+// It never kills the loop: with Redis disabled ($JARVIS_REDIS=off) there
+// is nothing to read and it exits 0 quietly; with Redis unreachable (or
+// the gate failing mid-run) it logs a warning and exits 0 too — the
+// feature fails safe to off. Only a store it cannot open is a hard error.
+func cmdNightly(store *agentjob.Store) error {
+	addr := agentjob.StreamAddr()
+	if addr == "off" || addr == "none" {
+		return nil // no Redis configured: nothing to read, off
+	}
+	flags, err := nobrakes.New(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: redis %s unreachable (%v) — treating auto_mode as off\n", addr, err)
+		return nil
+	}
+	defer flags.Close()
+	enqueued, _, err := nobrakes.AutoEnqueue(context.Background(), flags, store, time.Now())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: %v — treating auto_mode as off\n", err)
+		return nil
+	}
+	if len(enqueued) > 0 {
+		fmt.Printf("jarvis-jobs: nobrakes nightly: auto-enqueued %d nightly job(s): %s\n",
+			len(enqueued), strings.Join(enqueued, " "))
+	}
+	// Steady state (off, or window already stamped) prints nothing: the
+	// loop log is for action and failure, not for every iteration.
 	return nil
 }
 
@@ -263,8 +321,8 @@ func cmdList(store *agentjob.Store, args []string, w io.Writer) error {
 		fmt.Fprintf(w, "%-10s %-40s %s %s\n", j.Status, j.ID, j.Title, j.PRURL)
 	}
 	var parts []string
-	for _, st := range []string{agentjob.Ready, agentjob.Claimed, agentjob.Running,
-		agentjob.Paused, agentjob.Done, agentjob.Failed, agentjob.Skipped} {
+	for _, st := range []string{agentjob.Ready, agentjob.Parked, agentjob.Claimed,
+		agentjob.Running, agentjob.Paused, agentjob.Done, agentjob.Failed, agentjob.Skipped} {
 		if n := counts[st]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, st))
 		}
@@ -284,6 +342,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	instructions := fs.String("instructions", "", "job body (default: stdin)")
 	effort := fs.String("effort", "", "reasoning effort: off, low, medium, high, xhigh, max (default medium)")
 	depends := fs.String("depends", "", "comma-separated job ids this job waits on (they must be done first)")
+	tags := fs.String("tags", "", "comma-separated tags (nightly: stored parked until the NoBrakes nightly gate enqueues it)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -294,6 +353,12 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	for _, d := range strings.Split(*depends, ",") {
 		if d = strings.TrimSpace(d); d != "" {
 			deps = append(deps, d)
+		}
+	}
+	var tagList []string
+	for _, tg := range strings.Split(*tags, ",") {
+		if tg = strings.TrimSpace(tg); tg != "" {
+			tagList = append(tagList, tg)
 		}
 	}
 	switch *class {
@@ -309,7 +374,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		}
 		body = string(b)
 	}
-	added, err := store.Ingest(agentjob.Spec{
+	sp := agentjob.Spec{
 		ID:              *id,
 		Title:           *title,
 		Instructions:    strings.TrimSpace(body),
@@ -319,7 +384,9 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		Class:           *class,
 		Priority:        *priority,
 		ReasoningEffort: queue.CanonicalEffort(*effort, "coding"),
-	})
+		Tags:            tagList,
+	}
+	added, err := store.Ingest(sp)
 	if err != nil {
 		return err
 	}
@@ -328,5 +395,8 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		return nil
 	}
 	fmt.Println(*id)
+	if sp.HasTag(agentjob.TagNightly) {
+		fmt.Println("parked: nightly-tagged jobs wait for the NoBrakes auto-enqueue (auto_mode on)")
+	}
 	return nil
 }

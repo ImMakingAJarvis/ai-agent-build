@@ -249,6 +249,14 @@ func main() {
 					return
 				}
 
+				// !automode on / off sets or clears the NoBrakes auto_mode
+				// flag in Redis (owner-only: this hook fires only for the
+				// owner DM, same as !pause / !restart).
+				if _, _, isAutoMode := cutAutoMode(content); isAutoMode {
+					handleAutoMode(d, agentjob.StreamAddr(), content)
+					return
+				}
+
 				// !photo / !photoassist / !photocheck generate a photo
 				// with the local art model (prompt expanded by the
 				// thinking mind) and send it back as an attachment.

@@ -132,6 +132,26 @@ func TestEnsureDefaultsIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestNewReturnsWorkingStore(t *testing.T) {
+	// Regression: New() must hand back a live client — the success path
+	// used to close it on the way out, so the first command failed with
+	// "client is closed".
+	mr := miniredis.RunT(t)
+	t.Cleanup(func() { mr.Close() })
+	s, err := New("redis://" + mr.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if err := s.SetAutoMode(ctx, true); err != nil {
+		t.Fatalf("store from New() is unusable: %v", err)
+	}
+	if v, err := s.GetAutoMode(ctx); err != nil || v != AutoModeOn {
+		t.Fatalf("auto_mode via New() = %q, %v; want on", v, err)
+	}
+}
+
 func TestNewRejectsBadAddr(t *testing.T) {
 	if _, err := New("not a url"); err == nil {
 		t.Fatal("New(bad addr) = nil error")

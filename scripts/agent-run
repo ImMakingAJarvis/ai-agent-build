@@ -229,6 +229,12 @@ start_watcher() {
 msg="${checkpoint:-$(summary "$(cat "$DRIVER" 2>/dev/null || echo agent)" "${status:-?}")}"
 round=0
 while :; do
+  # NoBrakes (2/6): read the Redis auto_mode flag on every iteration.
+  # When it is on and today's nightly window is unprocessed, parked
+  # nightly-tagged jobs are auto-enqueued (no manual trigger); when off,
+  # or when Redis is unreachable, nothing changes — the check logs a
+  # warning and exits 0, so it can never stall or kill the loop.
+  jarvis-jobs nightly || true
   job_id=""; job_title=""
   if next=$(jarvis-jobs next 2>/dev/null); then
     job_id="${next%%$'\t'*}"; job_title="${next#*$'\t'}"

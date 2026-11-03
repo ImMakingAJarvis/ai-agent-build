@@ -23,11 +23,12 @@ const (
 	//   "YYYY-MM-DD" (UTC date) — the date of the last nightly window
 	//   whose jobs were already enqueued
 	//
-	// The nightly trigger (nobrakes-5) fires only when auto_mode is "on"
-	// AND the flag is not today's UTC date; after enqueuing it sets the
-	// flag to today's date. That makes the nightly batch idempotent:
-	// worker restarts or repeated triggers on the same day cannot double-
-	// enqueue. The key has no TTL — it is compared across days.
+	// The nightly gate (AutoEnqueue, run by `jarvis-jobs nightly` at the
+	// top of every agent-run loop iteration) enqueues only when auto_mode
+	// is "on" AND the flag is not today's UTC date; after enqueuing it
+	// sets the flag to today's date. That makes the nightly batch
+	// idempotent: loop restarts or repeated checks on the same day cannot
+	// double-enqueue. The key has no TTL — it is compared across days.
 	NightlyFlagKey = "nobrakes:nightly_flag"
 )
 
@@ -49,9 +50,15 @@ func New(addr string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The caller (the nightly gate) runs this once per agent-run iteration
+	// and fails safe on error. No command retries (-1: 0 means the library
+	// default of 3): a dead Redis must fail the probe fast — one dial
+	// attempt, one pool log line — since the next loop iteration will try
+	// again anyway.
+	opt.MaxRetries = -1
 	client := redis.NewClient(opt)
-	defer client.Close()
 	if err := client.Ping(context.Background()).Err(); err != nil {
+		client.Close()
 		return nil, err
 	}
 	return &Store{client: client}, nil
