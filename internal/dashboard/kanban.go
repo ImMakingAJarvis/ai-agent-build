@@ -37,6 +37,7 @@ type createTaskReq struct {
 	Content  string `json:"content"`
 	Priority int    `json:"priority"`
 	Model    string `json:"model"`
+	Nightly  bool   `json:"nightly"` // NoBrakes 4/6: create already tagged for nightly auto-execution
 }
 
 type createSubTaskReq struct {
@@ -49,6 +50,9 @@ type updateTaskReq struct {
 	Priority *int   `json:"priority,omitempty"`
 	Model    string `json:"model,omitempty"`
 	Title    string `json:"title,omitempty"`
+	// Nightly is a pointer so a PATCH can distinguish "not sent" (leave
+	// unchanged) from an explicit false (clear the tag).
+	Nightly *bool `json:"nightly,omitempty"`
 }
 
 // modelOption represents a selectable model in the kanban board dropdowns.
@@ -145,23 +149,37 @@ func (ks *kanbanState) apiCreateTask(w http.ResponseWriter, r *http.Request) {
 		// Re-read to get the model field populated.
 		t, _ = ks.store.GetTask(t.ID)
 	}
+	if req.Nightly {
+		if err := ks.store.UpdateTaskNightly(t.ID, true); err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Re-read to get the nightly flag populated.
+		t, _ = ks.store.GetTask(t.ID)
+	}
 	respondJSON(w, t)
 }
 
 func (ks *kanbanState) apiListTasks(w http.ResponseWriter, r *http.Request) {
 	epicID := r.URL.Query().Get("epic_id")
+	// ?nightly=true restricts the list to the NoBrakes auto-eligible set.
+	nightly := r.URL.Query().Get("nightly") == "true"
 	tasks, err := ks.store.ListTasks()
 	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
-	if epicID != "" {
+	if epicID != "" || nightly {
 		// Non-nil so an empty result marshals as [] and never as null.
 		filtered := make([]kanban.Task, 0, len(tasks))
 		for _, t := range tasks {
-			if t.EpicID == epicID {
-				filtered = append(filtered, t)
+			if epicID != "" && t.EpicID != epicID {
+				continue
 			}
+			if nightly && !t.Nightly {
+				continue
+			}
+			filtered = append(filtered, t)
 		}
 		tasks = filtered
 	}
@@ -198,6 +216,12 @@ func (ks *kanbanState) apiUpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model != "" {
 		if err := ks.store.UpdateTaskModel(id, req.Model); err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+	}
+	if req.Nightly != nil {
+		if err := ks.store.UpdateTaskNightly(id, *req.Nightly); err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}

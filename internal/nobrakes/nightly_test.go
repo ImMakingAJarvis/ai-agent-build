@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/kanban"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
@@ -30,6 +31,15 @@ func addParkedNightly(t *testing.T, s *agentjob.Store, id, title string, priorit
 	}
 }
 
+func addParkedLinked(t *testing.T, s *agentjob.Store, id, title, kanbanTaskID string, tags []string, priority int) {
+	t.Helper()
+	sp := agentjob.Spec{ID: id, Title: title, KanbanTaskID: kanbanTaskID, Tags: tags,
+		Priority: priority, CreatedAt: time.Now().UTC()}
+	if added, err := s.Ingest(sp); err != nil || !added {
+		t.Fatalf("ingest %s: added=%v err=%v", id, added, err)
+	}
+}
+
 func jobStatus(t *testing.T, s *agentjob.Store, id string) string {
 	t.Helper()
 	j, err := s.Get(id)
@@ -47,7 +57,7 @@ func TestAutoEnqueueOffIsNoOp(t *testing.T) {
 	jobs := newTestJobs(t)
 	addParkedNightly(t, jobs, "n1", "nightly", 1)
 
-	enqueued, on, err := AutoEnqueue(ctx, flags, jobs, testNow)
+	enqueued, on, err := AutoEnqueue(ctx, flags, jobs, nil, testNow)
 	if err != nil || on || len(enqueued) != 0 {
 		t.Fatalf("AutoEnqueue off: enqueued=%v on=%v err=%v, want all empty", enqueued, on, err)
 	}
@@ -72,7 +82,7 @@ func TestAutoEnqueueOnAndDue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	enqueued, on, err := AutoEnqueue(ctx, flags, jobs, testNow)
+	enqueued, on, err := AutoEnqueue(ctx, flags, jobs, nil, testNow)
 	if err != nil || !on {
 		t.Fatalf("AutoEnqueue on+due: enqueued=%v on=%v err=%v", enqueued, on, err)
 	}
@@ -90,7 +100,7 @@ func TestAutoEnqueueOnAndDue(t *testing.T) {
 	}
 
 	// Same day, hours later: the window is stamped, nothing re-enqueues.
-	again, on, err := AutoEnqueue(ctx, flags, jobs, testNow.Add(2*time.Hour))
+	again, on, err := AutoEnqueue(ctx, flags, jobs, nil, testNow.Add(2*time.Hour))
 	if err != nil || !on || len(again) != 0 {
 		t.Fatalf("second check same day: enqueued=%v on=%v err=%v, want empty", again, on, err)
 	}
@@ -109,7 +119,7 @@ func TestAutoEnqueueOnNotDue(t *testing.T) {
 	if err := flags.SetNightlyFlag(ctx, "2026-11-03"); err != nil {
 		t.Fatal(err)
 	}
-	enqueued, on, err := AutoEnqueue(ctx, flags, jobs, testNow)
+	enqueued, on, err := AutoEnqueue(ctx, flags, jobs, nil, testNow)
 	if err != nil || !on || len(enqueued) != 0 {
 		t.Fatalf("AutoEnqueue not-due: enqueued=%v on=%v err=%v, want empty", enqueued, on, err)
 	}
@@ -117,7 +127,7 @@ func TestAutoEnqueueOnNotDue(t *testing.T) {
 		t.Fatalf("job status after not-due check: %s, want parked", st)
 	}
 	// Tomorrow the window is due again.
-	enqueued, _, err = AutoEnqueue(ctx, flags, jobs, testNow.Add(24*time.Hour))
+	enqueued, _, err = AutoEnqueue(ctx, flags, jobs, nil, testNow.Add(24*time.Hour))
 	if err != nil || len(enqueued) != 1 {
 		t.Fatalf("next day: enqueued=%v err=%v, want [n1]", enqueued, err)
 	}
@@ -135,7 +145,7 @@ func TestAutoEnqueueOnDueZeroParked(t *testing.T) {
 	if err := flags.SetAutoMode(ctx, true); err != nil {
 		t.Fatal(err)
 	}
-	enqueued, on, err := AutoEnqueue(ctx, flags, jobs, testNow)
+	enqueued, on, err := AutoEnqueue(ctx, flags, jobs, nil, testNow)
 	if err != nil || !on || len(enqueued) != 0 {
 		t.Fatalf("AutoEnqueue zero parked: enqueued=%v on=%v err=%v", enqueued, on, err)
 	}
@@ -157,7 +167,7 @@ func TestAutoEnqueueRedisDown(t *testing.T) {
 	}
 	mr.Close() // the server dies; the flag client is now pointing at nothing
 
-	enqueued, on, err := AutoEnqueue(context.Background(), flags, jobs, testNow)
+	enqueued, on, err := AutoEnqueue(context.Background(), flags, jobs, nil, testNow)
 	if err == nil {
 		t.Fatal("AutoEnqueue with redis down: want error")
 	}
@@ -166,5 +176,84 @@ func TestAutoEnqueueRedisDown(t *testing.T) {
 	}
 	if st := jobStatus(t, jobs, "n1"); st != agentjob.Parked {
 		t.Fatalf("job touched while redis was down: %s", st)
+	}
+}
+
+// TestNightlyEligibleKanbanTagIsCanonical is NoBrakes 4/6 acceptance
+// criterion 2: for parked jobs linked to kanban tasks, the task's nightly
+// tag on the board is the canonical auto-eligibility source. A linked job
+// with the legacy job tag but an untagged board task is NOT eligible (the
+// board wins); a linked job whose task is tagged is; jobs whose link is
+// unresolvable — and unlinked jobs — fall back to the job tag.
+func TestNightlyEligibleKanbanTagIsCanonical(t *testing.T) {
+	jobs := newTestJobs(t)
+	board, err := kanban.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := board.AddEpic("epic", "")
+	tagged := board.AddTask(ep.ID, "tagged", "", 5)
+	if err := board.UpdateTaskNightly(tagged.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	untagged := board.AddTask(ep.ID, "untagged", "", 5)
+	ghost := board.AddTask(ep.ID, "ghost", "", 5)
+	if err := board.DeleteTask(ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The CLI parks linked jobs of nightly tasks by carrying the job tag
+	// (jarvis-jobs add -kanban-task), so k1/k2 both have it.
+	addParkedLinked(t, jobs, "k1", "linked+tagged", tagged.ID, []string{agentjob.TagNightly}, 5)
+	addParkedLinked(t, jobs, "k2", "linked+untagged", untagged.ID, []string{agentjob.TagNightly}, 4)
+	addParkedLinked(t, jobs, "k3", "linked+deleted-task", ghost.ID, []string{agentjob.TagNightly}, 3)
+	addParkedNightly(t, jobs, "k4", "unlinked", 2)
+
+	got, err := NightlyEligible(jobs, board)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, j := range got {
+		ids = append(ids, j.ID)
+	}
+	if len(ids) != 3 || ids[0] != "k1" || ids[1] != "k3" || ids[2] != "k4" {
+		t.Fatalf("NightlyEligible = %v, want [k1 k3 k4] (k2 excluded: the board tag is canonical)", ids)
+	}
+}
+
+// TestAutoEnqueueKanbanBoard is NoBrakes 4/6 end-to-end against tagged test
+// tasks: with auto_mode on and the window due, the gate enqueues the job
+// linked to the nightly-tagged task and leaves the job linked to the
+// untagged task parked.
+func TestAutoEnqueueKanbanBoard(t *testing.T) {
+	ctx := context.Background()
+	flags := newTestStore(t)
+	jobs := newTestJobs(t)
+	board, err := kanban.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := board.AddEpic("epic", "")
+	yes := board.AddTask(ep.ID, "yes", "", 5)
+	if err := board.UpdateTaskNightly(yes.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	no := board.AddTask(ep.ID, "no", "", 5)
+	addParkedLinked(t, jobs, "b1", "linked to yes", yes.ID, []string{agentjob.TagNightly}, 5)
+	addParkedLinked(t, jobs, "b2", "linked to no", no.ID, []string{agentjob.TagNightly}, 4)
+	if err := flags.SetAutoMode(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+
+	enqueued, on, err := AutoEnqueue(ctx, flags, jobs, board, testNow)
+	if err != nil || !on {
+		t.Fatalf("AutoEnqueue with board: enqueued=%v on=%v err=%v", enqueued, on, err)
+	}
+	if len(enqueued) != 1 || enqueued[0] != "b1" {
+		t.Fatalf("enqueued = %v, want [b1] (b2's task is not nightly)", enqueued)
+	}
+	if st := jobStatus(t, jobs, "b2"); st != agentjob.Parked {
+		t.Fatalf("b2 = %s, want parked (board tag is canonical)", st)
 	}
 }

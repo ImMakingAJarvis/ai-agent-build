@@ -196,6 +196,10 @@
     color: var(--blue);
     border-color: rgba(88,166,255,0.3);
   }
+  .badge-nightly {
+    color: var(--purple);
+    border-color: rgba(188,140,255,0.3);
+  }
   .badge-priority {
     font-weight: 600;
   }
@@ -526,6 +530,13 @@
           <!-- Populated by JS from /api/kanban/models -->
         </select>
       </div>
+      <div class="detail-row">
+        <label>Nightly</label>
+        <label class="nightly-toggle" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="detail-nightly" onchange="updateTaskDetail()">
+          <span style="font-size:0.8rem;color:var(--muted)">eligible for NoBrakes auto-execution</span>
+        </label>
+      </div>
     </div>
 
     <div class="detail-section">
@@ -696,6 +707,10 @@ function renderTaskCard(t) {
     html += '<span class="badge badge-model">' + escapeHtml(t.model) + '</span>';
   }
 
+  if (t.nightly) {
+    html += '<span class="badge badge-nightly">NIGHTLY</span>';
+  }
+
   html += '<span class="badge badge-priority" style="color:' + priorityColor + ';border-color:' + priorityColor + '30">' +
     priorityLabel.toUpperCase() + '</span>';
 
@@ -792,6 +807,7 @@ async function openTaskDetail(taskId) {
   document.getElementById('detail-status').value = task.status;
   document.getElementById('detail-priority').value = task.priority || 5;
   document.getElementById('detail-model').value = task.model || '';
+  document.getElementById('detail-nightly').checked = !!task.nightly;
   document.getElementById('detail-content').textContent = task.content || '(no description)';
 
   // Load subtasks
@@ -824,11 +840,12 @@ async function updateTaskDetail() {
   const status = document.getElementById('detail-status').value;
   const priority = parseInt(document.getElementById('detail-priority').value);
   const model = document.getElementById('detail-model').value;
+  const nightly = document.getElementById('detail-nightly').checked;
 
   await fetch('/api/kanban/tasks/' + currentTaskId, {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({status, priority, model})
+    body: JSON.stringify({status, priority, model, nightly})
   });
 
   loadBoard();

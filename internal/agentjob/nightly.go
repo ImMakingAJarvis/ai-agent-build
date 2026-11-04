@@ -14,7 +14,9 @@ import "fmt"
 // does the same.
 
 // ParkedNightly returns every parked job tagged nightly (TagNightly), in
-// queue order. These are the jobs waiting for the NoBrakes nightly gate.
+// queue order — the job-tag view. The nightly gate itself uses
+// nobrakes.NightlyEligible, which resolves each linked job against the
+// kanban board; this remains the view for jobs without a board link.
 func (s *Store) ParkedNightly() ([]Job, error) {
 	jobs, err := s.List()
 	if err != nil {
@@ -23,6 +25,24 @@ func (s *Store) ParkedNightly() ([]Job, error) {
 	var out []Job
 	for _, j := range jobs {
 		if j.Status == Parked && j.HasTag(TagNightly) {
+			out = append(out, j)
+		}
+	}
+	return out, nil
+}
+
+// Parked returns every parked job, in queue order, regardless of tags.
+// The NoBrakes nightly gate (internal/nobrakes) filters this set by the
+// kanban task's nightly tag when the job carries a KanbanTaskID link.
+func (s *Store) Parked() ([]Job, error) {
+	jobs, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	// Non-nil so an empty result never reads as nil downstream.
+	out := make([]Job, 0, len(jobs))
+	for _, j := range jobs {
+		if j.Status == Parked {
 			out = append(out, j)
 		}
 	}

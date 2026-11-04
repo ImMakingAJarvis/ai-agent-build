@@ -149,3 +149,89 @@ func TestKanbanEpicTaskLifecycle(t *testing.T) {
 		t.Fatalf("epics after delete = %s, want []", got)
 	}
 }
+
+// TestKanbanNightlyTagAPISet covers NoBrakes 4/6 acceptance criterion 1:
+// a task can be tagged nightly via the API (on create and on update) and
+// the tag round-trips through GET; the ?nightly=true filter returns the
+// auto-eligible set.
+func TestKanbanNightlyTagAPISet(t *testing.T) {
+	s := newTestServer(t)
+
+	w := kanbanDo(t, s, "POST", "/api/kanban/epics", `{"title":"E1"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create epic: %d %s", w.Code, w.Body.String())
+	}
+	var ep kanban.Epic
+	if err := json.Unmarshal(w.Body.Bytes(), &ep); err != nil {
+		t.Fatal(err)
+	}
+
+	// One task tagged nightly at creation, one left plain.
+	w = kanbanDo(t, s, "POST", "/api/kanban/tasks",
+		`{"epic_id":"`+ep.ID+`","title":"tagged","priority":9,"nightly":true}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create tagged task: %d %s", w.Code, w.Body.String())
+	}
+	var tagged kanban.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &tagged); err != nil {
+		t.Fatal(err)
+	}
+	if !tagged.Nightly {
+		t.Fatalf("created task = %+v, want nightly=true", tagged)
+	}
+	w = kanbanDo(t, s, "POST", "/api/kanban/tasks",
+		`{"epic_id":"`+ep.ID+`","title":"plain","priority":5}`)
+	var plain kanban.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &plain); err != nil {
+		t.Fatal(err)
+	}
+	if plain.Nightly {
+		t.Fatalf("created task = %+v, want nightly unset", plain)
+	}
+
+	// The nightly filter returns exactly the tagged task.
+	if got := kanbanGet(t, s, "/api/kanban/tasks?nightly=true"); !strings.Contains(string(got), "tagged") || strings.Contains(string(got), "plain") {
+		t.Fatalf("nightly filter = %s, want only the tagged task", got)
+	}
+
+	// Tag the plain task via PATCH. Each step unmarshals into a fresh
+	// struct: nightly is omitempty, so reusing a struct would keep the
+	// stale value when the field is absent from the response.
+	w = kanbanDo(t, s, "PATCH", "/api/kanban/tasks/"+plain.ID, `{"nightly":true}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch nightly=true: %d %s", w.Code, w.Body.String())
+	}
+	var tagged2 kanban.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &tagged2); err != nil {
+		t.Fatal(err)
+	}
+	if !tagged2.Nightly {
+		t.Fatalf("patched task = %+v, want nightly=true", tagged2)
+	}
+
+	// Clear it again with an explicit false (not just absent).
+	w = kanbanDo(t, s, "PATCH", "/api/kanban/tasks/"+plain.ID, `{"nightly":false}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch nightly=false: %d %s", w.Code, w.Body.String())
+	}
+	var cleared kanban.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &cleared); err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Nightly {
+		t.Fatalf("cleared task = %+v, want nightly=false", cleared)
+	}
+
+	// An absent field leaves the tag untouched.
+	w = kanbanDo(t, s, "PATCH", "/api/kanban/tasks/"+tagged.ID, `{"status":"review"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch status: %d %s", w.Code, w.Body.String())
+	}
+	var stillTagged kanban.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &stillTagged); err != nil {
+		t.Fatal(err)
+	}
+	if !stillTagged.Nightly {
+		t.Fatalf("task lost nightly tag after an unrelated patch: %+v", stillTagged)
+	}
+}
