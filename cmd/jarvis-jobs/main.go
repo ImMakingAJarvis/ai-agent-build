@@ -3,6 +3,16 @@
 //	jarvis-jobs list [status]              all jobs, or only one status (e.g. failed)
 //	jarvis-jobs next                       print "<id>\t<title>"; exit 1 if none ready
 //	jarvis-jobs run <id> [-driver local|igpu|sonnet] [-round N] [-note TEXT]
+//	                   [-auto]             run under the NoBrakes guard:
+//	                                       take the auto-run marker (at most
+//	                                       one concurrent auto job) and exit 3
+//	                                       while another auto job holds it
+//	jarvis-jobs autopause <id>             an auto job failed: pause
+//	                                       autonomous execution (auto_mode +
+//	                                       full_auto off) and DM the owner the
+//	                                       job and the error
+//	jarvis-jobs running [clear]            show (or clear) the id of the auto
+//	                                       job that holds the running marker
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
 //	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet] [-source S]
@@ -29,6 +39,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -52,7 +63,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|enqueue")
+		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|autopause|running|enqueue")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -126,6 +137,8 @@ func main() {
 		note := fs.String("note", "", "typed instructions for this round")
 		effort := fs.String("effort", "",
 			"reasoning effort for this round: off, low, medium, high, xhigh, max (default: job spec, else medium)")
+		auto := fs.Bool("auto", false,
+			"NoBrakes: run under the auto-execution guard (take the running marker; exit 3 while another auto job holds it)")
 		if len(args) < 1 {
 			die("run <id> [flags]")
 		}
@@ -137,6 +150,16 @@ func main() {
 				j.ReasoningEffort = queue.CanonicalEffort(*effort, "coding")
 				store.Ingest(j.Spec)
 			}
+		}
+		if *auto {
+			if err := runAuto(store, args[0], *driver, *round, *note); err != nil {
+				if errors.Is(err, errAutoHeld) {
+					fmt.Fprintf(os.Stderr, "jarvis-jobs: run -auto %s: %v\n", args[0], err)
+					os.Exit(3)
+				}
+				die("%v", err)
+			}
+			return
 		}
 		r := runner(store)
 		r.Tee = os.Stdout
@@ -159,6 +182,14 @@ func main() {
 		}
 	case "fullauto":
 		if err := cmdFullAuto(os.Stdout, args); err != nil {
+			die("%v", err)
+		}
+	case "autopause":
+		if err := cmdAutoPause(store, args, discordNotify); err != nil {
+			die("%v", err)
+		}
+	case "running":
+		if err := cmdRunning(os.Stdout, args); err != nil {
 			die("%v", err)
 		}
 	case "audit":
@@ -334,6 +365,146 @@ func cmdFullAuto(w io.Writer, args []string) error {
 		return nil
 	}
 	fmt.Fprintln(w, v)
+	return nil
+}
+
+// errAutoHeld marks the "another auto job is running" outcome of
+// run -auto. The caller maps it to exit 3 — distinct from die()'s 2 and
+// from a failed job's exit 1 — so the agent-run loop can tell a busy
+// marker (idle-poll and retry) apart from a run failure.
+var errAutoHeld = errors.New("another auto job is running")
+
+// runAuto runs a job under the NoBrakes auto-execution guard (6/6): it
+// takes the nobrakes:running marker — at most one auto job at a time —
+// and releases it when the round ends, whatever the outcome. A marker
+// held by a job that is no longer running is stale and is taken over
+// (crash, reboot, a round that never released); a marker held by a live
+// job is not. The round itself runs exactly like a manual `run`.
+//
+// Without a reachable Redis there is no marker to take, so -auto
+// refuses to run: an unguarded auto run is exactly what the guard
+// exists to prevent.
+func runAuto(store *agentjob.Store, id, driver, round, note string) error {
+	addr := agentjob.StreamAddr()
+	if addr == "off" || addr == "none" {
+		return fmt.Errorf("NoBrakes is disabled here (JARVIS_REDIS is off), so there is no auto-run marker — run the job manually")
+	}
+	flags, err := nobrakes.New(addr)
+	if err != nil {
+		return fmt.Errorf("nobrakes: redis %s unreachable: %w", addr, err)
+	}
+	defer flags.Close()
+	ctx := context.Background()
+	// A holder whose job is gone from the store or no longer "running"
+	// left a stale marker: take it over rather than idle-polling forever.
+	alive := func(holder string) bool {
+		j, err := store.Get(holder)
+		return err == nil && j.Status == agentjob.Running
+	}
+	holder, ok, err := flags.AcquireRunning(ctx, id, alive)
+	if err != nil {
+		return fmt.Errorf("acquire %s: %w", nobrakes.RunningKey, err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: %s", errAutoHeld, holder)
+	}
+	defer func() {
+		if err := flags.ReleaseRunning(ctx, id); err != nil {
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: release %s: %v (a stale marker is taken over by the next auto round)\n", nobrakes.RunningKey, err)
+		}
+	}()
+	r := runner(store)
+	r.Tee = os.Stdout
+	j, err := r.Run(ctx, id, round, driver, note)
+	fmt.Printf("\n==> job %s %s %s\n", j.ID, j.Status, j.PRURL)
+	return err
+}
+
+// cmdAutoPause is the NoBrakes error path (6/6): an auto-executed job
+// failed, so autonomous execution is paused — auto_mode and full_auto
+// are both set off — and the owner is told on Discord which job failed
+// and why. The pause write is best-effort: a missing or corrupt flag
+// already reads as off in the loop, so even with a dead Redis the system
+// ends up safe, and the notification goes out either way — the owner
+// must hear about the failure. Re-enabling is a deliberate operator act
+// (!automode on / !fullauto on); the feature never re-enables itself.
+func cmdAutoPause(store *agentjob.Store, args []string, notify func(string) error) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: jarvis-jobs autopause <id>")
+	}
+	j, err := store.Get(args[0])
+	if err != nil {
+		return err
+	}
+	reason := strings.TrimSpace(j.Error)
+	if reason == "" {
+		reason = "the round exited non-zero"
+	}
+	if addr := agentjob.StreamAddr(); addr == "off" || addr == "none" {
+		fmt.Fprintln(os.Stderr, "jarvis-jobs: autopause: NoBrakes disabled (JARVIS_REDIS off) — nothing to pause")
+	} else if flags, err := nobrakes.New(addr); err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-jobs: autopause: redis %s unreachable (%v) — flags left as-is (they read off anyway)\n", addr, err)
+	} else {
+		defer flags.Close()
+		if err := flags.Pause(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: autopause: pause: %v — flags left as-is (they read off anyway)\n", err)
+		}
+	}
+	msg := fmt.Sprintf("NoBrakes: auto job %q (%s) failed: %s. Autonomous execution is paused — auto_mode and full_auto are now off; re-enable with !automode on / !fullauto on.",
+		j.Title, j.ID, reason)
+	if err := notify(msg); err != nil {
+		return fmt.Errorf("discord notify: %w", err)
+	}
+	fmt.Printf("auto mode paused: %s (%s): %s\n", j.ID, j.Title, reason)
+	return nil
+}
+
+// discordNotify DMs the owner through the jarvis-discord helper — the
+// same transport the agent-run loop's notify() uses.
+func discordNotify(msg string) error {
+	cmd := exec.Command("jarvis-discord", "notify", msg)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// cmdRunning shows or clears the NoBrakes auto-run marker (6/6).
+// `jarvis-jobs running` prints the id of the auto job that holds
+// nobrakes:running, or "(none)". `jarvis-jobs running clear` removes it —
+// the operator's manual override for a marker left behind by a crash
+// (a stale marker is also taken over automatically once the holder's
+// job is no longer running).
+func cmdRunning(w io.Writer, args []string) error {
+	if len(args) > 1 || (len(args) == 1 && args[0] != "clear") {
+		return fmt.Errorf("usage: jarvis-jobs running [clear]")
+	}
+	addr := agentjob.StreamAddr()
+	if addr == "off" || addr == "none" {
+		fmt.Fprintln(w, "(none) — NoBrakes disabled (JARVIS_REDIS off)")
+		return nil
+	}
+	flags, err := nobrakes.New(addr)
+	if err != nil {
+		return fmt.Errorf("nobrakes: redis %s unreachable: %w", addr, err)
+	}
+	defer flags.Close()
+	ctx := context.Background()
+	if len(args) == 1 {
+		if err := flags.ClearRunning(ctx); err != nil {
+			return err
+		}
+		fmt.Fprintln(w, "cleared")
+		return nil
+	}
+	holder, err := flags.RunningHolder(ctx)
+	if err != nil {
+		return err
+	}
+	if holder == "" {
+		fmt.Fprintln(w, "(none)")
+		return nil
+	}
+	fmt.Fprintln(w, holder)
 	return nil
 }
 

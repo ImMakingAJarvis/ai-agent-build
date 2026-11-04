@@ -174,6 +174,19 @@ func (s *Store) NightlyDue(ctx context.Context, now time.Time) (bool, error) {
 	return flag != now.UTC().Format("2006-01-02"), nil
 }
 
+// Pause turns every NoBrakes switch off — auto_mode and full_auto. It is
+// the error path for auto-execution (nobrakes-6): an auto job that failed
+// stops ALL autonomous execution until the operator re-enables a switch
+// manually (!automode on / !fullauto on). The feature never re-enables
+// itself. A missing key already reads as off, so a caller that cannot
+// reach Redis still ends up safe; this just makes the state explicit.
+func (s *Store) Pause(ctx context.Context) error {
+	if err := s.SetAutoMode(ctx, false); err != nil {
+		return err
+	}
+	return s.SetFullAuto(ctx, false)
+}
+
 // EnsureDefaults creates all flag keys with their safe defaults if (and
 // only if) they are missing: auto_mode "off", nightly_flag "",
 // full_auto "off". Idempotent, so callers may run it at startup without

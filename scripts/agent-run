@@ -15,7 +15,11 @@
 #     the owner choosing what happens next. NoBrakes full-auto mode
 #     (the nobrakes:full_auto Redis flag, flipped with !fullauto) skips
 #     the question and runs the next ready job immediately, at any time
-#     of day, for as long as the queue has work.
+#     of day, for as long as the queue has work. Safety guardrails
+#     (NoBrakes 6/6): at most one concurrent auto job (the
+#     nobrakes:running marker), an auto job that failed pauses the
+#     feature and notifies the owner, and manual rounds are never
+#     blocked by the feature.
 #
 #   agent-run                         first run, or carry on after "Stop"
 #   agent-run --resume REASON [GPU]   after a reboot (called by agent-resume)
@@ -180,8 +184,15 @@ if (( resume )); then
   exit_if_rebooting
   # The round that rebooted was a queued job: record how it ended.
   if [[ -f "$CONF/current-job" ]]; then
-    jarvis-jobs finish "$(cat "$CONF/current-job")" "$status" || true
+    jid="$(cat "$CONF/current-job")"
+    jarvis-jobs finish "$jid" "$status" || true
     rm -f "$CONF/current-job"
+    # NoBrakes 6/6: if that was a full-auto round that failed, pause
+    # autonomous execution and notify — same as the main loop path.
+    if [[ "$(jarvis-jobs fullauto 2>/dev/null || echo off)" == "on" ]]; then
+      job_status=$(jarvis-jobs list 2>/dev/null | awk -v id="$jid" '$2 == id {print $1}')
+      [[ "$job_status" == "failed" ]] && jarvis-jobs autopause "$jid" || true
+    fi
   fi
 fi
 
@@ -252,6 +263,7 @@ while :; do
   # `jarvis-jobs fullauto off`) takes effect on the next iteration, and
   # !pause / !restart still work mid-run.
   fullauto=$(jarvis-jobs fullauto 2>/dev/null || echo off)
+  auto_run=0   # NoBrakes 6/6: 1 when this round runs under the auto guard
   if [[ "$fullauto" == "on" ]]; then
     if [[ -z "$job_id" ]]; then
       echo "==> full auto: queue empty, idle-polling (stop with !fullauto off)"
@@ -270,6 +282,7 @@ while :; do
       d=local
     fi
     note=""
+    auto_run=1
     notify "Full auto: running ${job_title} (${job_id}) on ${d}."
   else
     if [[ -n "$job_id" ]]; then
@@ -319,12 +332,39 @@ $q"); then
 
   # Start Discord watcher so the user can interrupt this job at any time.
   start_watcher
-  jarvis-jobs run "$job_id" -driver "$d" -round "$(date +%s)-$round" -note "$note"; status=$?
+  # NoBrakes 6/6: a full-auto round runs under the auto-execution guard
+  # (-auto: take the nobrakes:running marker — at most one concurrent
+  # auto job — released when the round ends). A supervised round never
+  # touches the marker: manual runs are the operator's override.
+  if (( auto_run )); then
+    jarvis-jobs run "$job_id" -driver "$d" -round "$(date +%s)-$round" -note "$note" -auto; status=$?
+    # Exit 3 = another auto job holds the marker. Never run a second
+    # one: idle-poll and retry next iteration (the holder's round
+    # releases the marker when it ends; a stale one is taken over
+    # automatically).
+    if (( status == 3 )); then
+      echo "==> another auto job is running; idle-polling"
+      rm -f "$CONF/current-job"   # no round started — resume must not claim one
+      stop_watcher
+      sleep 60
+      continue
+    fi
+  else
+    jarvis-jobs run "$job_id" -driver "$d" -round "$(date +%s)-$round" -note "$note"; status=$?
+  fi
   stop_watcher
   exit_if_rebooting   # keep current-job: agent-resume records it after the reboot
 
   # Check if the job was paused (user messaged during the run).
   job_status=$(jarvis-jobs list 2>/dev/null | awk -v id="$job_id" '$2 == id {print $1}')
+  # NoBrakes 6/6: an auto round that failed pauses autonomous execution —
+  # auto_mode and full_auto are set off and the owner is notified on
+  # Discord (jarvis-jobs autopause). A supervised round never pauses the
+  # feature: manual runs are the override, and a !pause / !restart is a
+  # deliberate operator act, not a failure.
+  if (( auto_run )) && [[ "$job_status" == "failed" ]]; then
+    jarvis-jobs autopause "$job_id" || true
+  fi
   if [[ "$job_status" == "paused" ]]; then
     rm -f "$CONF/current-job"
     # Read the user's message from the signal file.
