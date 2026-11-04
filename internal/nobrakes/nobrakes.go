@@ -1,6 +1,7 @@
 // Package nobrakes is the Redis-backed flag store for the NoBrakes feature:
-// autonomous nightly job execution gated by an operator-controlled auto_mode
-// flag. The feature is OFF by default and fully manual-overridable; see
+// autonomous job execution gated by operator-controlled flags — the nightly
+// auto_mode batch and full auto mode (the loop runs any ready job at any
+// time). Every flag is OFF by default and fully manual-overridable; see
 // docs/nobrakes/redis.md for the key structure and where Redis runs.
 package nobrakes
 
@@ -30,9 +31,19 @@ const (
 	// idempotent: loop restarts or repeated checks on the same day cannot
 	// double-enqueue. The key has no TTL — it is compared across days.
 	NightlyFlagKey = "nobrakes:nightly_flag"
+
+	// FullAutoKey holds the full-auto switch: "on" or "off". When "on",
+	// the agent-run loop runs the next ready job immediately — at any
+	// time of day, not just the nightly window — for as long as the queue
+	// has work; with an empty queue it idle-polls instead of asking. It
+	// is independent of auto_mode (the nightly batch) and can be
+	// combined with it. Read by the agent-run loop on every iteration;
+	// written by the operator (CLI `jarvis-jobs fullauto on|off`,
+	// Discord !fullauto). A missing key reads as "off" — the safe default.
+	FullAutoKey = "nobrakes:full_auto"
 )
 
-// auto_mode values.
+// Flag values, shared by every NoBrakes switch.
 const (
 	AutoModeOn  = "on"
 	AutoModeOff = "off"
@@ -73,10 +84,11 @@ func NewFromClient(client *redis.Client) *Store {
 // Close releases the connection pool.
 func (s *Store) Close() error { return s.client.Close() }
 
-// GetAutoMode returns the current auto_mode value. A missing key reads as
-// "off" so a fresh or wiped Redis is safe by default.
-func (s *Store) GetAutoMode(ctx context.Context) (string, error) {
-	v, err := s.client.Get(ctx, AutoModeKey).Result()
+// getFlag reads one of the on/off flag keys. A missing key reads as "off"
+// so a fresh or wiped Redis is safe by default; a corrupt value is
+// treated the same rather than trusted.
+func (s *Store) getFlag(ctx context.Context, key string) (string, error) {
+	v, err := s.client.Get(ctx, key).Result()
 	if err == redis.Nil {
 		return AutoModeOff, nil
 	}
@@ -88,6 +100,18 @@ func (s *Store) GetAutoMode(ctx context.Context) (string, error) {
 		return AutoModeOff, nil
 	}
 	return v, nil
+}
+
+// GetAutoMode returns the current auto_mode value. A missing key reads as
+// "off" so a fresh or wiped Redis is safe by default.
+func (s *Store) GetAutoMode(ctx context.Context) (string, error) {
+	return s.getFlag(ctx, AutoModeKey)
+}
+
+// GetFullAuto returns the current full-auto value. A missing key reads as
+// "off" so a fresh or wiped Redis is safe by default.
+func (s *Store) GetFullAuto(ctx context.Context) (string, error) {
+	return s.getFlag(ctx, FullAutoKey)
 }
 
 // AutoModeOn reports whether autonomous nightly execution is enabled.
@@ -103,6 +127,24 @@ func (s *Store) SetAutoMode(ctx context.Context, on bool) error {
 		return s.client.Set(ctx, AutoModeKey, AutoModeOn, 0).Err()
 	}
 	return s.client.Set(ctx, AutoModeKey, AutoModeOff, 0).Err()
+}
+
+// FullAutoOn reports whether full auto mode is enabled: the agent-run loop
+// runs every ready job immediately, at any time of day, as long as the
+// queue has work.
+func (s *Store) FullAutoOn(ctx context.Context) (bool, error) {
+	v, err := s.GetFullAuto(ctx)
+	return v == AutoModeOn, err
+}
+
+// SetFullAuto sets the full-auto switch to the given value. This is the
+// manual-override path (the CLI `jarvis-jobs fullauto on|off` and the
+// Discord !fullauto command).
+func (s *Store) SetFullAuto(ctx context.Context, on bool) error {
+	if on {
+		return s.client.Set(ctx, FullAutoKey, AutoModeOn, 0).Err()
+	}
+	return s.client.Set(ctx, FullAutoKey, AutoModeOff, 0).Err()
 }
 
 // GetNightlyFlag returns the last processed nightly window (UTC date
@@ -132,12 +174,16 @@ func (s *Store) NightlyDue(ctx context.Context, now time.Time) (bool, error) {
 	return flag != now.UTC().Format("2006-01-02"), nil
 }
 
-// EnsureDefaults creates both keys with their safe defaults if (and only
-// if) they are missing: auto_mode "off", nightly_flag "". Idempotent, so
-// callers may run it at startup without clobbering operator state.
+// EnsureDefaults creates all flag keys with their safe defaults if (and
+// only if) they are missing: auto_mode "off", nightly_flag "",
+// full_auto "off". Idempotent, so callers may run it at startup without
+// clobbering operator state.
 func (s *Store) EnsureDefaults(ctx context.Context) error {
 	if err := s.client.SetNX(ctx, AutoModeKey, AutoModeOff, 0).Err(); err != nil {
 		return err
 	}
-	return s.client.SetNX(ctx, NightlyFlagKey, "", 0).Err()
+	if err := s.client.SetNX(ctx, NightlyFlagKey, "", 0).Err(); err != nil {
+		return err
+	}
+	return s.client.SetNX(ctx, FullAutoKey, AutoModeOff, 0).Err()
 }

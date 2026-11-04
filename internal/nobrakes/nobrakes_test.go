@@ -70,6 +70,69 @@ func TestGetAutoModeCorruptValueIsOff(t *testing.T) {
 	}
 }
 
+func TestGetFullAutoMissingKeyIsOff(t *testing.T) {
+	s := newTestStore(t)
+	v, err := s.GetFullAuto(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != AutoModeOff {
+		t.Fatalf("missing key = %q, want %q", v, AutoModeOff)
+	}
+	on, err := s.FullAutoOn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on {
+		t.Error("FullAutoOn with missing key = true, want false")
+	}
+}
+
+func TestSetFullAutoRoundtrip(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.SetFullAuto(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.GetFullAuto(ctx); v != AutoModeOn {
+		t.Fatalf("after on: %q", v)
+	}
+	if on, _ := s.FullAutoOn(ctx); !on {
+		t.Error("FullAutoOn = false after SetFullAuto(true)")
+	}
+	if err := s.SetFullAuto(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.GetFullAuto(ctx); v != AutoModeOff {
+		t.Fatalf("after off: %q", v)
+	}
+	// The two switches are independent: full_auto must not read auto_mode.
+	if err := s.SetAutoMode(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := s.FullAutoOn(ctx); on {
+		t.Error("FullAutoOn = true with only auto_mode on — flags must be independent")
+	}
+	if on, _ := s.AutoModeOn(ctx); !on {
+		t.Error("AutoModeOn = false with SetAutoMode(true)")
+	}
+}
+
+func TestGetFullAutoCorruptValueIsOff(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.client.Set(ctx, FullAutoKey, "banana", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.GetFullAuto(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != AutoModeOff {
+		t.Fatalf("corrupt value = %q, want %q", v, AutoModeOff)
+	}
+}
+
 func TestNightlyFlag(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -119,6 +182,9 @@ func TestEnsureDefaultsIsIdempotent(t *testing.T) {
 	}
 	if v, err := s.client.Get(ctx, NightlyFlagKey).Result(); err != nil || v != "" {
 		t.Fatalf("nightly_flag = %q, %v", v, err)
+	}
+	if v, err := s.client.Get(ctx, FullAutoKey).Result(); err != nil || v != AutoModeOff {
+		t.Fatalf("full_auto = %q, %v; want %q", v, err, AutoModeOff)
 	}
 	// Operator state must survive a second call.
 	if err := s.SetAutoMode(ctx, true); err != nil {
