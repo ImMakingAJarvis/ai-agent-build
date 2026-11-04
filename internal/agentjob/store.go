@@ -93,6 +93,11 @@ type Spec struct {
 	DiscordChannelID string `json:"discord_channel_id,omitempty"`
 	DiscordMessageID string `json:"discord_message_id,omitempty"`
 
+	// KanbanTaskID links the job to the kanban task it was created from
+	// (NoBrakes 4/6). When set, the nightly gate reads the task's nightly
+	// tag on the board as the canonical auto-eligibility source.
+	KanbanTaskID string `json:"kanban_task_id,omitempty"`
+
 	// Tags is an open set of job-level markers (job.json "tags"). The only
 	// tag with built-in semantics today is TagNightly.
 	Tags []string `json:"tags,omitempty"`
@@ -101,8 +106,9 @@ type Spec struct {
 // TagNightly marks a job for NoBrakes autonomous nightly execution. A
 // nightly-tagged job is stored parked (out of the active queue) and is
 // auto-enqueued — moved to ready — by the nightly gate when the Redis
-// auto_mode flag is on. NoBrakes task 4 makes "nightly" the canonical
-// kanban tag; until then this job-level tag is the formalisation.
+// auto_mode flag is on. NoBrakes 4/6 makes the kanban task's nightly tag
+// the canonical source; this job-level tag remains the fallback for
+// parked jobs with no kanban link.
 const TagNightly = "nightly"
 
 // HasTag reports whether the spec carries tag.
