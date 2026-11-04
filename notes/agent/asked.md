@@ -70,3 +70,4 @@
 - 2026-11-04T20:01Z Nathan: stop the Steam Big Picture process and delete all of the Steam library for now (job chat-1793821235-c342)
 - 2026-11-04T20:13Z Nathan wanted disk space of all drives visible in Grafana
 - 2026-11-04T20:23Z Nathan: chatbot or flag listener cannot change nobrakes flags — fix it and enable fullauto (done same round; the loop now runs ready jobs unattended)
+- 2026-11-04T20:34Z Nathan proposed adding 'save benchmark results to Jarviss' as a standing default for future jobs (job chat-1793820896-38de); confirmed yes — NAS is the durable store, the 1TB local is working space.
