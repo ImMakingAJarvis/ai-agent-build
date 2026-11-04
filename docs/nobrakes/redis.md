@@ -133,6 +133,36 @@ So the loop is: tag a kanban task nightly on the board → jobs created
 from it (`-kanban-task`) park → with `!automode on`, the first
 `jarvis-jobs nightly` pass of each UTC day enqueues exactly those jobs.
 
+## The audit log (nobrakes-5)
+
+Every job the gate auto-enqueues is recorded in a durable log, so
+autonomous execution is reviewable after the fact: what ran, when, and
+that it was automatic.
+
+- **Location & format** — `<data dir>/nobrakes/audit.jsonl` (default
+  `~/.local/share/jarvis/nobrakes/audit.jsonl`), one JSON object per line:
+  `{"timestamp":"…","window":"YYYY-MM-DD","job_id":"…","title":"…",
+  "trigger":"auto_mode"}`. `timestamp` is the pass time (UTC, RFC 3339);
+  `window` is the nightly window the pass processed, so entries group per
+  batch. `trigger` is always `auto_mode` today; the field exists so a
+  future trigger (scheduled run, operator command) is distinguishable in
+  the same log.
+- **Written** — by `AutoEnqueue`, appended immediately after each
+  `Enqueue` succeeds, carrying that pass's `now` (deterministic for tests).
+  A failed audit write never blocks the batch: the job runs either way and
+  the shortfall is reported. If the log file itself cannot be opened, the
+  pass runs unaudited (the enqueue line is still in the loop log).
+- **Read** — `jarvis-jobs audit [n]` (last `n` entries, default all;
+  `-json` for the raw lines) and the dashboard's
+  `GET /api/nobrakes/audit` (every entry, oldest first, plus the log path).
+  A missing file reads as an empty list, not an error.
+- **Robustness** — each entry is a single O_APPEND write, so a crash cannot
+  corrupt earlier lines; a torn final line (crash mid-append) is skipped on
+  read, so one bad line cannot hide the rest.
+
+Manual enqueues (`jarvis-jobs enqueue`) are not auto-executions and are not
+audited; the log records the gate's own actions only.
+
 ## The control surface (nobrakes-3)
 
 The owner flips `auto_mode` from Discord with the `!automode` command in the
