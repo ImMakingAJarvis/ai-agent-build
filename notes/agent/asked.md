@@ -66,3 +66,5 @@
 - 2026-11-04T17:46Z Nathan: when the worker is done with a task it should update the PLANE task — tool + CLAUDE.md instruction (job chat-1793781308-8f20)
 - 2026-11-04T17:57Z Nathan: enable the fullauto loop (17:35Z '!fullauto on'; the stale chat container queued it as a job — now fixed, the flag is on and the loop runs ready jobs at any time)
 - 2026-11-04T19:48Z Nathan: fix PR #147 (was CONFLICTING after main moved); the round's 'Jarvissfolder is what I meant' was a NAS clarification (share name `Jarviss`, job chat-1793820896-38de) attached to this round, not a PR change
+- 2026-11-04T18:54Z Nathan (Reel P0 round): NAS creds live in bootstrap.env — save in tools, use NAS for storing benchmark/results; clear the Steam library; mount 2TB Windows drive for NAS backup; format+use the empty 1TB SSD.
+- 2026-11-04T20:01Z Nathan: stop the Steam Big Picture process and delete all of the Steam library for now (job chat-1793821235-c342)
