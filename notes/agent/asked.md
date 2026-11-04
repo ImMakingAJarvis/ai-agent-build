@@ -68,3 +68,4 @@
 - 2026-11-04T19:48Z Nathan: fix PR #147 (was CONFLICTING after main moved); the round's 'Jarvissfolder is what I meant' was a NAS clarification (share name `Jarviss`, job chat-1793820896-38de) attached to this round, not a PR change
 - 2026-11-04T18:54Z Nathan (Reel P0 round): NAS creds live in bootstrap.env — save in tools, use NAS for storing benchmark/results; clear the Steam library; mount 2TB Windows drive for NAS backup; format+use the empty 1TB SSD.
 - 2026-11-04T20:01Z Nathan: stop the Steam Big Picture process and delete all of the Steam library for now (job chat-1793821235-c342)
+- 2026-11-04T20:13Z Nathan wanted disk space of all drives visible in Grafana

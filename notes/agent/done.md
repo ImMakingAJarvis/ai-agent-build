@@ -94,3 +94,4 @@
 - 2026-11-04T19:48Z [chat-1793815219-b8c6] PR #147 merge conflict fixed: merged origin/main into superagent-new-agent, conflicts only in 4 notes files, kept both sides chronological, build/vet/test green, MERGEABLE (PR #147)
 - 2026-11-04T18:54Z [plan-jarvis-build-plan-open-s-1793478730-1] Reel P0: stock Jellyfin 12.4 baseline live — compose service (port 8096, NVENC verified), movie+TV libraries, direct-play/resume verified, boot-safe, docs/reel/jellyfin-baseline.md (PR #151)
 - 2026-11-04T20:01Z [chat-1793821235-c342] Steam stopped (Big Picture, 16 procs as nathan) + 288G steamapps library deleted — /home 99%→66% (302G free); client/login kept so games re-download (PR #152)
+- 2026-11-04T20:13Z [chat-1793822232-d332] Grafana: System — Disk row — per-drive usage %, free space, used-over-time for /, /boot/efi, /mnt/ssd1t, /mnt/windows (PR #153)
