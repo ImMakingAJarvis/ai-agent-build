@@ -167,6 +167,29 @@ services:
       # (same mount as the ha service).
       - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
 
+  # ---------------- reel: jellyfin (media server, port 8096) --------------
+  # Stock Jellyfin — the Reel plan's day-1 baseline (docs/reel/jellyfin-baseline.md).
+  # Runs on this box, not the Synology, so transcoding can use the 4090's NVENC.
+  # Media is bind-mounted read-only: the demo library in /var/lib/jarvis/jellyfin/demo
+  # until the NAS share (jarvissdrive) is mounted at /mnt/jarvis — then swap the
+  # second mount to /mnt/jarvis/<media> and restart the container (docs, below).
+  # Config: /var/lib/jarvis/jellyfin/config on the host; admin credentials live in
+  # /home/agent/.config/jarvis/jellyfin.env (chmod 600, never in the repo).
+  jellyfin:
+    image: jellyfin/jellyfin:12.4
+    container_name: jarvis-jellyfin
+    restart: unless-stopped
+    # nvidia runtime: /dev/nvidia* + driver libs for NVENC (jellyfin-ffmpeg7);
+    # hardware transcoding is toggled in .../jellyfin/config/jellyfin.xml.
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+    ports:
+      - "8096:8096"
+    volumes:
+      - /var/lib/jarvis/jellyfin/config:/config
+      - /var/lib/jarvis/jellyfin/demo:/media:ro
+
   # ---------------- chat / dashboard / ha ----------------
   chat:
     build:
