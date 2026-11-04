@@ -65,3 +65,4 @@
 - 2026-11-04T10:05Z Nathan: 'create a new agent based on the features of Deepseek's super agent' and integrate it into the existing system; round instruction !automode on (auto_mode set on)
 - 2026-11-04T17:46Z Nathan: when the worker is done with a task it should update the PLANE task — tool + CLAUDE.md instruction (job chat-1793781308-8f20)
 - 2026-11-04T17:57Z Nathan: enable the fullauto loop (17:35Z '!fullauto on'; the stale chat container queued it as a job — now fixed, the flag is on and the loop runs ready jobs at any time)
+- 2026-11-04T19:48Z Nathan: fix PR #147 (was CONFLICTING after main moved); the round's 'Jarvissfolder is what I meant' was a NAS clarification (share name `Jarviss`, job chat-1793820896-38de) attached to this round, not a PR change
