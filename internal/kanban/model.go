@@ -42,6 +42,11 @@ type Task struct {
 	Priority  int       `json:"priority"`         // 1-10, higher = more urgent; 0 treated as 5
 	Branch    string    `json:"branch,omitempty"` // git branch created for this task
 	Model     string    `json:"model,omitempty"`  // model the task was assigned to
+	// Nightly marks the task as eligible for NoBrakes autonomous nightly
+	// execution (NoBrakes 4/6): when the auto_mode flag is on, the worker's
+	// nightly gate auto-enqueues the jobs linked to nightly-tagged tasks.
+	// This is the canonical source of the "nightly" designation.
+	Nightly   bool      `json:"nightly,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

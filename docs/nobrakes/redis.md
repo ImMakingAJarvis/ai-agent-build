@@ -114,12 +114,68 @@ Behaviour, in order:
    line and exit 0; the feature fails safe to off and never stalls or kills
    the loop.
 
-"Nightly" today is a job-level tag: `jarvis-jobs add ... -tags nightly`
-stores the job **parked** — present in the store but out of the active
-queue (`next` and the dashboard queue view never see it). NoBrakes task 4
-makes the kanban `nightly` tag the canonical source of the tag; until then
-the tag is set at add time or by re-triggering a finished job with the tag
-(`Refresh` parks it again).
+A nightly job is stored **parked** — present in the store but out of the
+active queue (`next` and the dashboard queue view never see it). The
+designation itself lives on the kanban board (nobrakes-4, below); the
+job-level tag that parks it at ingest is the storage mechanism.
+
+## The nightly tag (nobrakes-4)
+
+The kanban task's `nightly` flag is the canonical source of the NoBrakes
+designation: a task is "nightly" when `Task.Nightly` is set, and the set of
+auto-eligible jobs is derived from it.
+
+- **Board** — the flag is stored on the task JSON
+  (`internal/kanban`: `Task.Nightly`, `UpdateTaskNightly`,
+  `ListNightlyTasks`) and is set/cleared from the board UI (the task
+  detail's Nightly checkbox) or the API (`PATCH /api/kanban/tasks/{id}`
+  with `{"nightly": true|false}`; `GET /api/kanban/tasks?nightly=true`
+  lists the nightly set; create accepts `"nightly": true`).
+- **Link** — a job points at its task with
+  `jarvis-jobs add ... -kanban-task <task-id>` (`Spec.KanbanTaskID`).
+  When the linked task is nightly, add also applies the job-level
+  `nightly` tag, so `Ingest` stores the job parked.
+- **Gate** — `nobrakes.NightlyEligible` walks the parked jobs: a job
+  whose `KanbanTaskID` resolves on the board is eligible exactly when the
+  task is `Nightly` (the board wins, even over a stale job tag); a job
+  whose link is missing or unresolvable falls back to the job-level tag,
+  so jobs queued before nobrakes-4 keep working. `AutoEnqueue` uses this
+  set; `jarvis-jobs nightly` opens the board and passes it in, falling
+  back to job tags with a warning if the board cannot be read.
+
+So the loop is: tag a kanban task nightly on the board → jobs created
+from it (`-kanban-task`) park → with `!automode on`, the first
+`jarvis-jobs nightly` pass of each UTC day enqueues exactly those jobs.
+
+## The audit log (nobrakes-5)
+
+Every job the gate auto-enqueues is recorded in a durable log, so
+autonomous execution is reviewable after the fact: what ran, when, and
+that it was automatic.
+
+- **Location & format** — `<data dir>/nobrakes/audit.jsonl` (default
+  `~/.local/share/jarvis/nobrakes/audit.jsonl`), one JSON object per line:
+  `{"timestamp":"…","window":"YYYY-MM-DD","job_id":"…","title":"…",
+  "trigger":"auto_mode"}`. `timestamp` is the pass time (UTC, RFC 3339);
+  `window` is the nightly window the pass processed, so entries group per
+  batch. `trigger` is always `auto_mode` today; the field exists so a
+  future trigger (scheduled run, operator command) is distinguishable in
+  the same log.
+- **Written** — by `AutoEnqueue`, appended immediately after each
+  `Enqueue` succeeds, carrying that pass's `now` (deterministic for tests).
+  A failed audit write never blocks the batch: the job runs either way and
+  the shortfall is reported. If the log file itself cannot be opened, the
+  pass runs unaudited (the enqueue line is still in the loop log).
+- **Read** — `jarvis-jobs audit [n]` (last `n` entries, default all;
+  `-json` for the raw lines) and the dashboard's
+  `GET /api/nobrakes/audit` (every entry, oldest first, plus the log path).
+  A missing file reads as an empty list, not an error.
+- **Robustness** — each entry is a single O_APPEND write, so a crash cannot
+  corrupt earlier lines; a torn final line (crash mid-append) is skipped on
+  read, so one bad line cannot hide the rest.
+
+Manual enqueues (`jarvis-jobs enqueue`) are not auto-executions and are not
+audited; the log records the gate's own actions only.
 
 ## Full auto mode
 

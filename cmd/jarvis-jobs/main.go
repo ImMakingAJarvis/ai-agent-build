@@ -7,13 +7,16 @@
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
 //	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet] [-source S]
 //	                   [-class fix|build|background] [-priority N] [-depends a,b]
-//	                   [-tags a,b]
+//	                   [-tags a,b] [-kanban-task TASKID]
 //	jarvis-jobs nightly            NoBrakes: read the Redis auto_mode flag;
 //	                               if on and today's nightly window is
 //	                               unprocessed, enqueue parked nightly jobs
 //	jarvis-jobs fullauto [on|off]  NoBrakes: read (prints "on"/"off") or
 //	                               set the full-auto flag — on = the loop
 //	                               runs every ready job without asking
+//	jarvis-jobs audit [n]          NoBrakes: show the last n entries of the
+//	                               auto-execution audit log (default: all);
+//	                               -json prints the raw JSON lines
 //	jarvis-jobs enqueue <id>       move one parked job to ready (manual)
 //	jarvis-jobs order [a,b,c]    show or set the runtime band priority order
 //	                              (a permutation of fix, build, background)
@@ -25,6 +28,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -35,6 +39,7 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/kanban"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/nobrakes"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
@@ -47,7 +52,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|fullauto|enqueue")
+		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|enqueue")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -156,6 +161,10 @@ func main() {
 		if err := cmdFullAuto(os.Stdout, args); err != nil {
 			die("%v", err)
 		}
+	case "audit":
+		if err := cmdAudit(args); err != nil {
+			die("%v", err)
+		}
 	case "enqueue":
 		if len(args) != 1 {
 			die("enqueue <id>")
@@ -231,9 +240,34 @@ func cmdNightly(store *agentjob.Store) error {
 		return nil
 	}
 	defer flags.Close()
-	enqueued, _, err := nobrakes.AutoEnqueue(context.Background(), flags, store, time.Now())
+	// NoBrakes 4/6: the kanban board is the canonical source of the nightly
+	// designation for jobs linked to a task. If the board cannot be read we
+	// pass nil and the gate falls back to the job-level nightly tag.
+	board, err := kanban.Open(agentjob.DataDir())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: %v — treating auto_mode as off\n", err)
+		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: kanban store: %v — falling back to job tags\n", err)
+		board = nil
+	}
+	// NoBrakes 5/6: every auto-enqueued job lands in the durable audit log.
+	// The log is a record, not the gate: if it cannot be opened the pass
+	// runs without it (the enqueue line below is still in the loop log).
+	var audit nobrakes.AuditRecorder
+	auditLog, err := nobrakes.NewAuditLog(nobrakes.DefaultAuditPath(agentjob.DataDir()))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: audit log: %v — pass runs unaudited\n", err)
+	} else {
+		audit = auditLog
+		defer auditLog.Close()
+	}
+	enqueued, _, err := nobrakes.AutoEnqueue(context.Background(), flags, store, board, time.Now(), audit)
+	if err != nil {
+		if len(enqueued) > 0 {
+			// The gate acted (jobs enqueued, window stamped): the error is
+			// about the record, not the switch.
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: %v — treating auto_mode as off\n", err)
+		}
 		return nil
 	}
 	if len(enqueued) > 0 {
@@ -300,6 +334,40 @@ func cmdFullAuto(w io.Writer, args []string) error {
 		return nil
 	}
 	fmt.Fprintln(w, v)
+	return nil
+}
+
+// cmdAudit shows the NoBrakes audit log (5/6): every job the nightly gate
+// auto-enqueued — timestamp, nightly window, job id/title, trigger — most
+// recent last. `audit [n]` shows the last n entries (default: all);
+// -json prints the raw JSON lines for scripting.
+func cmdAudit(args []string) error {
+	fs := flag.NewFlagSet("audit", flag.ExitOnError)
+	jsonOut := fs.Bool("json", false, "print the raw JSON lines")
+	fs.Parse(args)
+	args = fs.Args()
+	n := 0
+	if len(args) == 1 {
+		if _, err := fmt.Sscanf(args[0], "%d", &n); err != nil {
+			die("audit [n]")
+		}
+	}
+	entries, err := nobrakes.RecentAudit(nobrakes.DefaultAuditPath(agentjob.DataDir()), n)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		for _, e := range entries {
+			if err := enc.Encode(e); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, e := range entries {
+		fmt.Printf("%s  %s  %s  (window %s, %s)\n", e.Timestamp, e.JobID, e.Title, e.Window, e.Trigger)
+	}
 	return nil
 }
 
@@ -418,6 +486,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	effort := fs.String("effort", "", "reasoning effort: off, low, medium, high, xhigh, max (default medium)")
 	depends := fs.String("depends", "", "comma-separated job ids this job waits on (they must be done first)")
 	tags := fs.String("tags", "", "comma-separated tags (nightly: stored parked until the NoBrakes nightly gate enqueues it)")
+	kanbanTask := fs.String("kanban-task", "", "kanban task id this job was created from (NoBrakes: the task's nightly tag then decides auto-eligibility)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -449,6 +518,18 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		}
 		body = string(b)
 	}
+	// NoBrakes 4/6: a job linked to a kanban task whose nightly tag is set is
+	// a nightly job — tag it so Ingest stores it parked (the nightly gate
+	// then re-resolves eligibility from the board, which stays canonical).
+	if *kanbanTask != "" && !hasTag(tagList, agentjob.TagNightly) {
+		if board, err := kanban.Open(agentjob.DataDir()); err == nil {
+			if t, err := board.GetTask(*kanbanTask); err == nil && t.Nightly {
+				tagList = append(tagList, agentjob.TagNightly)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: add: kanban store: %v — link set, board tag not checked\n", err)
+		}
+	}
 	sp := agentjob.Spec{
 		ID:              *id,
 		Title:           *title,
@@ -459,6 +540,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		Class:           *class,
 		Priority:        *priority,
 		ReasoningEffort: queue.CanonicalEffort(*effort, "coding"),
+		KanbanTaskID:    *kanbanTask,
 		Tags:            tagList,
 	}
 	added, err := store.Ingest(sp)
@@ -474,4 +556,14 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		fmt.Println("parked: nightly-tagged jobs wait for the NoBrakes auto-enqueue (auto_mode on)")
 	}
 	return nil
+}
+
+// hasTag reports whether the tag list carries tag.
+func hasTag(tags []string, tag string) bool {
+	for _, t := range tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
 }
