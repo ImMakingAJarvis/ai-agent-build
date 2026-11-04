@@ -61,3 +61,4 @@
 - 2026-11-03T17:41Z Nathan noticed the Grafana token-per-second/decode panels weren't reporting correctly (job chat-1793680868-98b5) — wanted real engine throughput visible; decided fix = scrape the engine's own metrics endpoint instead of the worker's per-job counters.
 - 2026-11-03T18:17Z Nathan: when the worker is deep in work, use the igpu or cpu model for communication/voice
 - 2026-11-03T18:41Z Nathan uploaded the Reel plan (open-source Plex clone: Go media server on the 4090 box + web/Android/iPhone/Apple TV apps, Jellyfin as day-1 fallback) and wanted it queued as work items; open decisions for him at Gate 1 (scratch vs fork, MIT vs GPL, Apple dev account, users, name).
+- 2026-11-04T00:46Z Nathan wants full auto mode: a flag that lets the agent run queued jobs at any point (any time of day), as long as there is work in the queue — not just the nightly window (job chat-1793749887-62af, PR #143)

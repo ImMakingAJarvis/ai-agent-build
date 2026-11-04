@@ -1,6 +1,7 @@
 # NoBrakes — Redis flag store
 
-NoBrakes (autonomous nightly job execution) keeps all of its shared state in
+NoBrakes (autonomous job execution — the nightly batch and full auto mode)
+keeps all of its shared state in
 the stack's existing Redis service. Nothing new runs: the `redis` service in
 `docker-compose.yml` is the one used for live job streams, and NoBrakes
 namespaces its keys under `nobrakes:`.
@@ -35,6 +36,7 @@ secrets. To change memory/eviction, edit that line and
 |---|---|---|---|
 | `nobrakes:auto_mode` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
 | `nobrakes:nightly_flag` | string | `""` or a UTC date `"YYYY-MM-DD"` | `""` |
+| `nobrakes:full_auto` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
 
 - **`nobrakes:auto_mode`** — the operator's master switch for autonomous
   nightly execution. Written by the manual-override path (the Discord
@@ -50,8 +52,17 @@ secrets. To change memory/eviction, edit that line and
   Worker restarts or repeated triggers on the same day therefore cannot
   double-enqueue the nightly batch, and the window re-arms automatically the
   next UTC day. No TTL — it is compared across days.
+- **`nobrakes:full_auto`** — the full-auto switch. When `"on"`,
+  the agent-run loop runs the next ready job **immediately, at any time of
+  day**, for as long as the queue has work, without asking the owner who
+  runs it; with an empty queue it idle-polls instead of asking. It is
+  independent of `auto_mode` (the nightly batch) — the two can be combined.
+  Written by the operator (`jarvis-jobs fullauto on|off`, Discord
+  `!fullauto`), read by the agent-run loop at the top of every stage-3
+  iteration. Missing or corrupt values read as `"off"` — the supervised
+  ask path is the default.
 
-Both keys are pre-created at install time (`EnsureDefaults` in
+All three keys are pre-created at install time (`EnsureDefaults` in
 `internal/nobrakes` does the same idempotently at runtime — it only fills
 missing keys and never clobbers operator state).
 
@@ -65,11 +76,14 @@ on, _ := st.AutoModeOn(ctx)          // false when key missing/corrupt
 _ = st.SetAutoMode(ctx, true)        // manual override
 due, _ := st.NightlyDue(ctx, time.Now())  // idempotency check
 _ = st.SetNightlyFlag(ctx, time.Now().UTC().Format("2006-01-02"))
+fa, _ := st.FullAutoOn(ctx)          // false when key missing/corrupt
+_ = st.SetFullAuto(ctx, true)        // manual override (full auto mode)
 ```
 
 Constants: `nobrakes.AutoModeKey`, `nobrakes.NightlyFlagKey`,
-`nobrakes.AutoModeOn/Off`. Unit-tested against miniredis in
-`internal/nobrakes/nobrakes_test.go`; later NoBrakes tasks reuse this store.
+`nobrakes.FullAutoKey`, `nobrakes.AutoModeOn/Off`. Unit-tested against
+miniredis in `internal/nobrakes/nobrakes_test.go`; later NoBrakes tasks
+reuse this store.
 
 ## The nightly gate (nobrakes-2)
 
@@ -163,28 +177,56 @@ that it was automatic.
 Manual enqueues (`jarvis-jobs enqueue`) are not auto-executions and are not
 audited; the log records the gate's own actions only.
 
+## Full auto mode
+
+When `full_auto` is `"on"`, the agent-run stage-3 loop runs the next ready
+job **immediately, at any time of day** — not just the nightly window — for
+as long as the queue has work. Each iteration:
+
+1. **flag read**: `jarvis-jobs fullauto` reads `nobrakes:full_auto` fresh
+   (the read fails safe to `"off"` — Redis disabled or unreachable, corrupt
+   value, or a read error — so the loop can never stall or run blind).
+2. **on + a ready job** → the job runs right away, without a Discord
+   question. The driver is the job's own spec driver (`jarvis-jobs show`
+   reports it as `driver:` — e.g. a sonnet-gated job runs on Sonnet),
+   falling back to the driver of the last round, then `local`. A short
+   Discord notify announces what is running.
+3. **on + empty queue** → the loop idle-polls (60 s) instead of asking;
+   newly queued jobs start on the next pass.
+4. **off** → the supervised path is unchanged: the loop asks on Discord
+   which driver runs the job (or to skip/stop).
+
+The two switches are independent: `auto_mode` still controls the nightly
+auto-enqueue (section above), `full_auto` controls per-job execution. The
+owner overrides at any time — `!fullauto off` takes effect on the next loop
+iteration, and `!pause` / `!restart` still interrupt a running job.
+
 ## The control surface (nobrakes-3)
 
 The owner flips `auto_mode` from Discord with the `!automode` command in the
-`jarvis-chat` daemon. It is owner-only by construction — the chat layer only
-fires the handler for the owner DM, the same guarantee as `!pause`/`!restart`:
+`jarvis-chat` daemon, and `full_auto` with `!fullauto`. Both
+are owner-only by construction — the chat layer only fires the handler for
+the owner DM, the same guarantee as `!pause`/`!restart`:
 
     !automode on     # auto_mode -> "on": nightly jobs will auto-enqueue
     !automode off    # auto_mode -> "off": nightly jobs stay parked
+    !fullauto on     # full_auto -> "on": ready jobs run immediately, any time
+    !fullauto off    # full_auto -> "off": back to the supervised ask
 
 The command dials the flag store (`$JARVIS_REDIS`, default
 `redis://127.0.0.1:6379`), writes the value, reads it back, and confirms the
-stored result — turning it on warns that nightly jobs will now run
-autonomously. A bad or missing argument gets a usage line and leaves the flag
-untouched; Redis unreachable or disabled leaves the flag unchanged and says
-so. `cmd/jarvis-chat/automode.go` (unit-tested against miniredis).
+stored result — turning it on warns that jobs will now run autonomously. A
+bad or missing argument gets a usage line and leaves the flag untouched;
+Redis unreachable or disabled leaves the flag unchanged and says so.
+`cmd/jarvis-chat/automode.go` and `cmd/jarvis-chat/fullauto.go`
+(unit-tested against miniredis).
 
 ## Health & operations
 
 ```bash
 docker exec jarvis-redis redis-cli ping                     # PONG
 docker exec jarvis-redis redis-cli GET nobrakes:auto_mode   # off
-docker exec jarvis-redis redis-cli EXISTS nobrakes:auto_mode nobrakes:nightly_flag  # 2
+docker exec jarvis-redis redis-cli EXISTS nobrakes:auto_mode nobrakes:nightly_flag nobrakes:full_auto  # 3
 
 # restart (container comes back with state intact — AOF)
 docker compose restart redis
@@ -198,4 +240,7 @@ sudo systemctl stop jarvis-stack
 
 If the feature must be killed instantly while Redis keeps serving job
 streams: `docker exec jarvis-redis redis-cli SET nobrakes:auto_mode off` —
-the nightly gate reads this on every run.
+the nightly gate reads this on every run. For full auto mode:
+`docker exec jarvis-redis redis-cli SET nobrakes:full_auto off` — the loop
+re-reads it at the top of every iteration and returns to the supervised
+ask.

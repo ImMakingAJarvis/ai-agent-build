@@ -12,7 +12,10 @@
 #     run by whichever driver the owner picks on Discord: the local model
 #     (default; it pulls the coding model and builds the queue system) or
 #     the strong model when the local one is stuck. Every round ends with
-#     the owner choosing what happens next.
+#     the owner choosing what happens next. NoBrakes full-auto mode
+#     (the nobrakes:full_auto Redis flag, flipped with !fullauto) skips
+#     the question and runs the next ready job immediately, at any time
+#     of day, for as long as the queue has work.
 #
 #   agent-run                         first run, or carry on after "Stop"
 #   agent-run --resume REASON [GPU]   after a reboot (called by agent-resume)
@@ -238,35 +241,68 @@ while :; do
   job_id=""; job_title=""
   if next=$(jarvis-jobs next 2>/dev/null); then
     job_id="${next%%$'\t'*}"; job_title="${next#*$'\t'}"
-    q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
-    choices="Local model,iGPU model,Sonnet,Skip,Stop"
-  else
-    q="No ready jobs in the queue. Type instructions, or Stop."
-    choices="Stop"
   fi
-  if ! answer=$(jarvis-discord ask -choices "$choices" "$msg
+  # NoBrakes full auto mode: when the full_auto flag is on, run
+  # the next ready job immediately — at any time of day, not just the
+  # nightly window — without asking who runs it, for as long as the
+  # queue has work; with an empty queue it idle-polls instead of
+  # asking. The flag is read fresh every iteration and fails safe to
+  # off (Redis disabled or unreachable), so the supervised ask below is
+  # the default. The owner overrides at any time: !fullauto off (or
+  # `jarvis-jobs fullauto off`) takes effect on the next iteration, and
+  # !pause / !restart still work mid-run.
+  fullauto=$(jarvis-jobs fullauto 2>/dev/null || echo off)
+  if [[ "$fullauto" == "on" ]]; then
+    if [[ -z "$job_id" ]]; then
+      echo "==> full auto: queue empty, idle-polling (stop with !fullauto off)"
+      sleep 60
+      continue
+    fi
+    # Honor the job's own spec driver (e.g. the sonnet-gated jobs);
+    # fall back to the driver of the last round (the $DRIVER file), then
+    # local. Anything else — an empty file, "agent", a stale value —
+    # normalizes to local.
+    d=$(jarvis-jobs show "$job_id" 2>/dev/null | sed -n 's/^driver: //p')
+    if ! [[ "$d" =~ ^(local|igpu|sonnet)$ ]]; then
+      d=$(cat "$DRIVER" 2>/dev/null | tr -d '[:space:]')
+    fi
+    if ! [[ "$d" =~ ^(local|igpu|sonnet)$ ]]; then
+      d=local
+    fi
+    note=""
+    notify "Full auto: running ${job_title} (${job_id}) on ${d}."
+  else
+    if [[ -n "$job_id" ]]; then
+      q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
+      choices="Local model,iGPU model,Sonnet,Skip,Stop"
+    else
+      q="No ready jobs in the queue. Type instructions, or Stop."
+      choices="Stop"
+    fi
+    if ! answer=$(jarvis-discord ask -choices "$choices" "$msg
 
 $q"); then
-    echo "==> couldn't reach Discord; retrying in 5 minutes"
-    sleep 300
-    continue
-  fi
+      echo "==> couldn't reach Discord; retrying in 5 minutes"
+      sleep 300
+      continue
+    fi
 
-  shopt -s nocasematch
-  case "$answer" in
-    stop)    shopt -u nocasematch
-             notify "Stopped. Run agent-run as $(whoami) on $(hostname) to pick it up again."
-             exit 0 ;;
-    skip)    shopt -u nocasematch
-             [[ -n "$job_id" ]] && jarvis-jobs skip "$job_id"
-             msg="Skipped ${job_id:-nothing}."
-             continue ;;
-    sonnet)  d=sonnet; note="" ;;
-    "igpu model"|igpu) d=igpu; note="" ;;
-    "local model"|local) d=local; note="" ;;
-    *)       d=local; note="$answer" ;;
-  esac
-  shopt -u nocasematch
+    shopt -s nocasematch
+    case "$answer" in
+      stop)    shopt -u nocasematch
+               notify "Stopped. Run agent-run as $(whoami) on $(hostname) to pick it up again."
+               exit 0 ;;
+      skip)    shopt -u nocasematch
+               [[ -n "$job_id" ]] && jarvis-jobs skip "$job_id"
+               msg="Skipped ${job_id:-nothing}."
+               continue ;;
+      sonnet)  d=sonnet; note="" ;;
+      "igpu model"|igpu) d=igpu; note="" ;;
+      "local model"|local) d=local; note="" ;;
+      *)       d=local; note="$answer" ;;
+    esac
+    shopt -u nocasematch
+  fi
 
   if [[ -z "$job_id" ]]; then
     msg="No job to run, and typed instructions need a queued job. Add one with jarvis-enqueue or the migration script."

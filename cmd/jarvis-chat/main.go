@@ -257,6 +257,15 @@ func main() {
 					return
 				}
 
+				// !fullauto on / off sets or clears the NoBrakes full-auto
+				// flag in Redis: when on, the agent-run loop runs the next
+				// ready job immediately at any time of day (owner-only, same
+				// as !automode).
+				if _, _, isFullAuto := cutFullAuto(content); isFullAuto {
+					handleFullAuto(d, agentjob.StreamAddr(), content)
+					return
+				}
+
 				// !photo / !photoassist / !photocheck generate a photo
 				// with the local art model (prompt expanded by the
 				// thinking mind) and send it back as an attachment.
