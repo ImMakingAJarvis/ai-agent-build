@@ -32,9 +32,11 @@ services:
 
   # Live job stream: the agent runner XADDs the agent's stream-json output
   # as it happens (internal/agentjob/stream.go); the dashboard tails it for
-  # GET /jobs/{id} live views (internal/dashboard/live.go). Host-side
-  # runners reach it at 127.0.0.1:6379 (JARVIS_REDIS left unset); the
-  # dashboard container reaches it at redis:6379 (set below).
+  # GET /jobs/{id} live views (internal/dashboard/live.go). It is also the
+  # NoBrakes flag store behind !automode / !fullauto in jarvis-chat.
+  # Host-side runners reach it at 127.0.0.1:6379 (JARVIS_REDIS left
+  # unset); the dashboard and chat containers reach it at redis:6379
+  # (JARVIS_REDIS set below in each service).
   redis:
     image: redis:7
     container_name: jarvis-redis
@@ -207,6 +209,11 @@ services:
       ENGINE_URL: http://engine:11434
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       DASHBOARD_ADDR: dashboard:8080
+      # NoBrakes flag store (!automode / !fullauto) + job live streams.
+      # Must be the compose service name: the StreamAddr() default
+      # (127.0.0.1:6379) is the container's own loopback, where there is
+      # no Redis, so the flag commands could never reach the store.
+      JARVIS_REDIS: redis://redis:6379
       # Vector DB over work logs / job history / queue (RAG + search action).
       MEMORY_URL: http://memory:8101
       # Photo generation for the !photo Discord command.
