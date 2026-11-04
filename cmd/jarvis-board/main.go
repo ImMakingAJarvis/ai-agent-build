@@ -5,6 +5,9 @@
 //	jarvis-board link <item>                print the browser URL for an item
 //	jarvis-board item <item>                one line: AAB-4 [state] title link
 //	jarvis-board comment <item> [msg...]    post "<model>: <msg>" (stdin if no msg)
+//	jarvis-board state <item> <state> [msg] move the item to <state> (by name,
+//	                                        case-insensitive); with a msg, also
+//	                                        post "<model>: <msg>"
 //
 // <item> is a work-item reference: a UUID, a display id like "AAB-43",
 // or a bare sequence "43". A prefixed display id selects its project by
@@ -38,6 +41,12 @@ const usage = `usage (flags go before the positional args):
   jarvis-board link <item>
   jarvis-board item <item>
   jarvis-board comment <item> [message...]
+  jarvis-board state <item> <state> [message...]
+  jarvis-board done <item> [message...]
+
+  "state" moves the item to <state> (matched by name, case-insensitive);
+  "done" is a shortcut for state <item> Done. With a trailing message the
+  command also posts it as a model-prefixed comment.
 
 flags:
   --project <ref>   project ref (default $PLANE_PROJECT or "AAB")
@@ -120,9 +129,38 @@ func main() {
 		}
 		fmt.Printf("%s commented: %s\n", cm.ID, link)
 
+	case "state":
+		if len(args) < 2 {
+			fail(usage)
+		}
+		moveState(ctx, c, p, wi, ref, link, args[1], o.model, args[2:])
+
+	case "done":
+		// The common completion case, spelled out for the worker.
+		moveState(ctx, c, p, wi, ref, link, "Done", o.model, args[1:])
+
 	default:
 		fail(usage)
 	}
+}
+
+// moveState moves the item to the named state (case-insensitive) and, when
+// a message is given, posts it as a model-prefixed comment — one command
+// covers "the worker is done with this task, update the Plane item".
+func moveState(ctx context.Context, c *plane.Client, p *plane.Project, wi *plane.WorkItem, ref, link, stateName, model string, msgArgs []string) {
+	st, err := c.StateByName(ctx, p.ID, stateName)
+	if err != nil {
+		fail(err.Error())
+	}
+	if _, err := c.SetState(ctx, p.ID, wi.ID, st.ID); err != nil {
+		fail(err.Error())
+	}
+	if msg := message(msgArgs); msg != "" {
+		if _, err := c.AddComment(ctx, p.ID, wi.ID, commentHTML(model, msg)); err != nil {
+			fail(err.Error())
+		}
+	}
+	fmt.Printf("%s -> %s %s\n", ref, st.Name, link)
 }
 
 // commentHTML wraps a model-prefixed message in the comment_html
