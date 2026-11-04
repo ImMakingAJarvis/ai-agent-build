@@ -100,12 +100,38 @@ Behaviour, in order:
    line and exit 0; the feature fails safe to off and never stalls or kills
    the loop.
 
-"Nightly" today is a job-level tag: `jarvis-jobs add ... -tags nightly`
-stores the job **parked** — present in the store but out of the active
-queue (`next` and the dashboard queue view never see it). NoBrakes task 4
-makes the kanban `nightly` tag the canonical source of the tag; until then
-the tag is set at add time or by re-triggering a finished job with the tag
-(`Refresh` parks it again).
+A nightly job is stored **parked** — present in the store but out of the
+active queue (`next` and the dashboard queue view never see it). The
+designation itself lives on the kanban board (nobrakes-4, below); the
+job-level tag that parks it at ingest is the storage mechanism.
+
+## The nightly tag (nobrakes-4)
+
+The kanban task's `nightly` flag is the canonical source of the NoBrakes
+designation: a task is "nightly" when `Task.Nightly` is set, and the set of
+auto-eligible jobs is derived from it.
+
+- **Board** — the flag is stored on the task JSON
+  (`internal/kanban`: `Task.Nightly`, `UpdateTaskNightly`,
+  `ListNightlyTasks`) and is set/cleared from the board UI (the task
+  detail's Nightly checkbox) or the API (`PATCH /api/kanban/tasks/{id}`
+  with `{"nightly": true|false}`; `GET /api/kanban/tasks?nightly=true`
+  lists the nightly set; create accepts `"nightly": true`).
+- **Link** — a job points at its task with
+  `jarvis-jobs add ... -kanban-task <task-id>` (`Spec.KanbanTaskID`).
+  When the linked task is nightly, add also applies the job-level
+  `nightly` tag, so `Ingest` stores the job parked.
+- **Gate** — `nobrakes.NightlyEligible` walks the parked jobs: a job
+  whose `KanbanTaskID` resolves on the board is eligible exactly when the
+  task is `Nightly` (the board wins, even over a stale job tag); a job
+  whose link is missing or unresolvable falls back to the job-level tag,
+  so jobs queued before nobrakes-4 keep working. `AutoEnqueue` uses this
+  set; `jarvis-jobs nightly` opens the board and passes it in, falling
+  back to job tags with a warning if the board cannot be read.
+
+So the loop is: tag a kanban task nightly on the board → jobs created
+from it (`-kanban-task`) park → with `!automode on`, the first
+`jarvis-jobs nightly` pass of each UTC day enqueues exactly those jobs.
 
 ## The control surface (nobrakes-3)
 
