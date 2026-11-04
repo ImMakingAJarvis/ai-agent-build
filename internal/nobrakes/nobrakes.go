@@ -200,3 +200,33 @@ func (s *Store) EnsureDefaults(ctx context.Context) error {
 	}
 	return s.client.SetNX(ctx, FullAutoKey, AutoModeOff, 0).Err()
 }
+
+// Owner-facing confirmations for the switches. Shared by every control
+// surface (the Discord !automode / !fullauto commands in cmd/jarvis-chat,
+// the brain's set_automode / set_fullauto actions, and the CLI) so the
+// owner hears the same words no matter how they flipped the switch.
+
+// AutoModeReply builds the confirmation for the auto_mode state. Turning
+// the switch on warns that nightly jobs will now run autonomously.
+func AutoModeReply(on bool) string {
+	if on {
+		return "Auto mode is ON — nightly jobs (tagged \"nightly\") will auto-enqueue " +
+			"at the top of the next agent-run loop iteration and run once per UTC day. " +
+			"Say !automode off to stop this."
+	}
+	return "Auto mode is OFF — nightly jobs will not auto-enqueue."
+}
+
+// FullAutoReply builds the confirmation for the full-auto state. Turning
+// the switch on warns that queued jobs will now run autonomously at any
+// time, and how to stop it.
+func FullAutoReply(on bool) string {
+	if on {
+		return "Full auto is ON — the agent-run loop will run each ready job " +
+			"immediately (driver from the job's spec), at any time of day, for " +
+			"as long as the queue has work; it idle-polls when the queue is " +
+			"empty. Say !fullauto off to stop; !pause and !restart still work " +
+			"mid-run."
+	}
+	return "Full auto is OFF — the loop asks on Discord before running each job."
+}
