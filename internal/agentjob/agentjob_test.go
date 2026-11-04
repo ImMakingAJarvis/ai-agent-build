@@ -267,6 +267,37 @@ func TestDefaultCommandIgpuDriver(t *testing.T) {
 	}
 }
 
+// TestDefaultCommandSuperagentDriver is the acceptance test for the
+// superagent driver: the round runs the superagent CLI (its own
+// plan→act→verify loop, not the Claude Code harness) with the round's
+// prompt as its goal, and the env carries the model that drives it.
+func TestDefaultCommandSuperagentDriver(t *testing.T) {
+	t.Setenv("JARVIS_MODEL", "stale-model")
+	t.Setenv("LOCAL_MODEL", "")
+	cmd := defaultCommand("superagent", "do it", "off")
+	if cmd.Args[0] != "superagent" || len(cmd.Args) != 2 || cmd.Args[1] != "do it" {
+		t.Fatalf("superagent driver args = %v", cmd.Args)
+	}
+	if got := ModelFor("superagent"); got != "jarvis-brain" {
+		t.Errorf("ModelFor(superagent) = %q, want jarvis-brain", got)
+	}
+	if !strings.Contains(strings.Join(cmd.Env, "\n"), "JARVIS_MODEL=jarvis-brain") {
+		t.Error("superagent driver env lacks JARVIS_MODEL=jarvis-brain")
+	}
+	// No Claude Code harness flags may leak into the superagent command.
+	joined := strings.Join(cmd.Args, " ")
+	for _, no := range []string{"--dangerously-skip-permissions", "--output-format", "-p"} {
+		if strings.Contains(joined, no) {
+			t.Errorf("superagent args must not carry %q: %s", no, joined)
+		}
+	}
+	// SUPERAGENT_MODEL pins the engine model.
+	t.Setenv("SUPERAGENT_MODEL", "qwen-coder")
+	if got := ModelFor("superagent"); got != "qwen-coder" {
+		t.Errorf("ModelFor(superagent) with SUPERAGENT_MODEL = %q", got)
+	}
+}
+
 func TestPromptHasRulesJobAndNote(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir()) // don't drain the real inbox
 	r := &Runner{Brief: func(string) string { return "RULES" }}

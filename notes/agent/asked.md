@@ -62,5 +62,7 @@
 - 2026-11-03T18:17Z Nathan: when the worker is deep in work, use the igpu or cpu model for communication/voice
 - 2026-11-03T18:41Z Nathan uploaded the Reel plan (open-source Plex clone: Go media server on the 4090 box + web/Android/iPhone/Apple TV apps, Jellyfin as day-1 fallback) and wanted it queued as work items; open decisions for him at Gate 1 (scratch vs fork, MIT vs GPL, Apple dev account, users, name).
 - 2026-11-04T00:46Z Nathan wants full auto mode: a flag that lets the agent run queued jobs at any point (any time of day), as long as there is work in the queue — not just the nightly window (job chat-1793749887-62af, PR #143)
+- 2026-11-04T10:05Z Nathan: 'create a new agent based on the features of Deepseek's super agent' and integrate it into the existing system; round instruction !automode on (auto_mode set on)
 - 2026-11-04T17:46Z Nathan: when the worker is done with a task it should update the PLANE task — tool + CLAUDE.md instruction (job chat-1793781308-8f20)
 - 2026-11-04T17:57Z Nathan: enable the fullauto loop (17:35Z '!fullauto on'; the stale chat container queued it as a job — now fixed, the flag is on and the loop runs ready jobs at any time)
+- 2026-11-04T19:48Z Nathan: fix PR #147 (was CONFLICTING after main moved); the round's 'Jarvissfolder is what I meant' was a NAS clarification (share name `Jarviss`, job chat-1793820896-38de) attached to this round, not a PR change

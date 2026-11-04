@@ -2,7 +2,7 @@
 //
 //	jarvis-jobs list [status]              all jobs, or only one status (e.g. failed)
 //	jarvis-jobs next                       print "<id>\t<title>"; exit 1 if none ready
-//	jarvis-jobs run <id> [-driver local|igpu|sonnet] [-round N] [-note TEXT]
+//	jarvis-jobs run <id> [-driver local|igpu|sonnet|superagent] [-round N] [-note TEXT]
 //	                   [-auto]             run under the NoBrakes guard:
 //	                                       take the auto-run marker (at most
 //	                                       one concurrent auto job) and exit 3
@@ -15,7 +15,7 @@
 //	                                       job that holds the running marker
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
-//	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet] [-source S]
+//	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet|superagent] [-source S]
 //	                   [-class fix|build|background] [-priority N] [-depends a,b]
 //	                   [-tags a,b] [-kanban-task TASKID]
 //	jarvis-jobs nightly            NoBrakes: read the Redis auto_mode flag;
@@ -106,7 +106,7 @@ func main() {
 		// this line (see `fullauto` above).
 		driver := j.Driver
 		switch driver {
-		case "local", "igpu", "sonnet":
+		case "local", "igpu", "sonnet", "superagent":
 		default:
 			driver = "local"
 		}
@@ -132,7 +132,7 @@ func main() {
 		}
 	case "run":
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
-		driver := fs.String("driver", "local", "local, igpu or sonnet")
+		driver := fs.String("driver", "local", "local, igpu, sonnet or superagent")
 		round := fs.String("round", "", "round label")
 		note := fs.String("note", "", "typed instructions for this round")
 		effort := fs.String("effort", "",
@@ -649,7 +649,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	id := fs.String("id", "", "job id")
 	title := fs.String("title", "", "job title")
-	driver := fs.String("driver", "local", "local, igpu or sonnet")
+	driver := fs.String("driver", "local", "local, igpu, sonnet or superagent")
 	source := fs.String("source", "", "origin (discord, migrate, …)")
 	class := fs.String("class", agentjob.ClassBuild, "fix, build or background (fix runs before build, build before background)")
 	priority := fs.Int("priority", 0, "higher runs first within the class")

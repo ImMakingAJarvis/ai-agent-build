@@ -172,6 +172,18 @@ fi
 # A reboot mid-round resumes that round's conversation on the same driver.
 if (( resume )); then
   d=$(cat "$DRIVER" 2>/dev/null || echo local)
+  if [[ "$d" == superagent ]]; then
+    # A superagent round is one self-contained command (cmd/superagent),
+    # not a Claude conversation — there is no conversation to resume. Put
+    # the job back in the queue for a fresh run.
+    if [[ -f "$CONF/current-job" ]]; then
+      jid="$(cat "$CONF/current-job")"
+      jarvis-jobs requeue "$jid" || true
+      rm -f "$CONF/current-job"
+    fi
+    summary "superagent" 0
+    exit 0
+  fi
   if [[ "$d" == local || "$d" == igpu ]]; then m="$d"; else m="$M2"; fi
   # Tag the session with the job id (as jarvis-jobs run does) so the
   # owner-message hook injects queue-site messages into this round too.
@@ -275,10 +287,10 @@ while :; do
     # local. Anything else — an empty file, "agent", a stale value —
     # normalizes to local.
     d=$(jarvis-jobs show "$job_id" 2>/dev/null | sed -n 's/^driver: //p')
-    if ! [[ "$d" =~ ^(local|igpu|sonnet)$ ]]; then
+    if ! [[ "$d" =~ ^(local|igpu|sonnet|superagent)$ ]]; then
       d=$(cat "$DRIVER" 2>/dev/null | tr -d '[:space:]')
     fi
-    if ! [[ "$d" =~ ^(local|igpu|sonnet)$ ]]; then
+    if ! [[ "$d" =~ ^(local|igpu|sonnet|superagent)$ ]]; then
       d=local
     fi
     note=""
@@ -287,7 +299,7 @@ while :; do
   else
     if [[ -n "$job_id" ]]; then
       q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
-      choices="Local model,iGPU model,Sonnet,Skip,Stop"
+      choices="Local model,iGPU model,Sonnet,Super agent,Skip,Stop"
     else
       q="No ready jobs in the queue. Type instructions, or Stop."
       choices="Stop"
@@ -312,6 +324,7 @@ $q"); then
       sonnet)  d=sonnet; note="" ;;
       "igpu model"|igpu) d=igpu; note="" ;;
       "local model"|local) d=local; note="" ;;
+      "super agent"|superagent) d=superagent; note="" ;;
       *)       d=local; note="$answer" ;;
     esac
     shopt -u nocasematch
