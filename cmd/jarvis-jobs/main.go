@@ -11,6 +11,9 @@
 //	jarvis-jobs nightly            NoBrakes: read the Redis auto_mode flag;
 //	                               if on and today's nightly window is
 //	                               unprocessed, enqueue parked nightly jobs
+//	jarvis-jobs audit [n]          NoBrakes: show the last n entries of the
+//	                               auto-execution audit log (default: all);
+//	                               -json prints the raw JSON lines
 //	jarvis-jobs enqueue <id>       move one parked job to ready (manual)
 //	jarvis-jobs order [a,b,c]    show or set the runtime band priority order
 //	                              (a permutation of fix, build, background)
@@ -22,6 +25,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -45,7 +49,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|enqueue")
+		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|audit|enqueue")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -140,6 +144,10 @@ func main() {
 		if err := cmdNightly(store); err != nil {
 			die("%v", err)
 		}
+	case "audit":
+		if err := cmdAudit(args); err != nil {
+			die("%v", err)
+		}
 	case "enqueue":
 		if len(args) != 1 {
 			die("enqueue <id>")
@@ -223,9 +231,26 @@ func cmdNightly(store *agentjob.Store) error {
 		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: kanban store: %v — falling back to job tags\n", err)
 		board = nil
 	}
-	enqueued, _, err := nobrakes.AutoEnqueue(context.Background(), flags, store, board, time.Now())
+	// NoBrakes 5/6: every auto-enqueued job lands in the durable audit log.
+	// The log is a record, not the gate: if it cannot be opened the pass
+	// runs without it (the enqueue line below is still in the loop log).
+	var audit nobrakes.AuditRecorder
+	auditLog, err := nobrakes.NewAuditLog(nobrakes.DefaultAuditPath(agentjob.DataDir()))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: %v — treating auto_mode as off\n", err)
+		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: audit log: %v — pass runs unaudited\n", err)
+	} else {
+		audit = auditLog
+		defer auditLog.Close()
+	}
+	enqueued, _, err := nobrakes.AutoEnqueue(context.Background(), flags, store, board, time.Now(), audit)
+	if err != nil {
+		if len(enqueued) > 0 {
+			// The gate acted (jobs enqueued, window stamped): the error is
+			// about the record, not the switch.
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes nightly: %v — treating auto_mode as off\n", err)
+		}
 		return nil
 	}
 	if len(enqueued) > 0 {
@@ -234,6 +259,40 @@ func cmdNightly(store *agentjob.Store) error {
 	}
 	// Steady state (off, or window already stamped) prints nothing: the
 	// loop log is for action and failure, not for every iteration.
+	return nil
+}
+
+// cmdAudit shows the NoBrakes audit log (5/6): every job the nightly gate
+// auto-enqueued — timestamp, nightly window, job id/title, trigger — most
+// recent last. `audit [n]` shows the last n entries (default: all);
+// -json prints the raw JSON lines for scripting.
+func cmdAudit(args []string) error {
+	fs := flag.NewFlagSet("audit", flag.ExitOnError)
+	jsonOut := fs.Bool("json", false, "print the raw JSON lines")
+	fs.Parse(args)
+	args = fs.Args()
+	n := 0
+	if len(args) == 1 {
+		if _, err := fmt.Sscanf(args[0], "%d", &n); err != nil {
+			die("audit [n]")
+		}
+	}
+	entries, err := nobrakes.RecentAudit(nobrakes.DefaultAuditPath(agentjob.DataDir()), n)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		for _, e := range entries {
+			if err := enc.Encode(e); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, e := range entries {
+		fmt.Printf("%s  %s  %s  (window %s, %s)\n", e.Timestamp, e.JobID, e.Title, e.Window, e.Trigger)
+	}
 	return nil
 }
 
