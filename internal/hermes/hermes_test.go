@@ -309,18 +309,30 @@ func TestParseResult_UnknownType(t *testing.T) {
 
 func TestDefaultActions(t *testing.T) {
 	actions := DefaultActions()
-	if len(actions) != 7 {
-		t.Errorf("expected 7 default actions, got %d", len(actions))
+	if len(actions) != 9 {
+		t.Errorf("expected 9 default actions, got %d", len(actions))
 	}
 
 	keys := make(map[string]bool)
 	for _, a := range actions {
 		keys[a.Key] = true
 	}
-	expected := []string{"enqueue_job", "check_status", "list_jobs", "start_engine", "stop_engine", "web_search", "delegate"}
+	expected := []string{"enqueue_job", "check_status", "list_jobs", "start_engine",
+		"stop_engine", "web_search", "delegate", "set_automode", "set_fullauto"}
 	for _, k := range expected {
 		if !keys[k] {
 			t.Errorf("missing expected action %q", k)
+		}
+	}
+
+	// The mode actions flip flags directly — they must require full access
+	// (they enable autonomous execution) and must be the ones the classifier
+	// is told to use instead of enqueue_job.
+	for _, a := range actions {
+		if a.Key == "set_automode" || a.Key == "set_fullauto" {
+			if !a.RequiresFullAccess {
+				t.Errorf("action %q must require full access", a.Key)
+			}
 		}
 	}
 }

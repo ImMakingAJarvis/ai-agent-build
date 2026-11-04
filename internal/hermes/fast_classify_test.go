@@ -2,6 +2,17 @@ package hermes
 
 import "testing"
 
+// classify3 is fastClassify with the params return unwrapped, for table
+// tests that only care about result and action key.
+func classify3(t *testing.T, input string) (fastClassifyResult, string, map[string]string) {
+	t.Helper()
+	res, key, params := fastClassify(input)
+	if key == "" && params != nil {
+		t.Fatalf("fastClassify(%q): params without action key", input)
+	}
+	return res, key, params
+}
+
 func TestFastClassifyGreetings(t *testing.T) {
 	cases := []struct {
 		input   string
@@ -21,7 +32,7 @@ func TestFastClassifyGreetings(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		got, key := fastClassify(tc.input)
+		got, key, _ := classify3(t, tc.input)
 		if got != tc.wantRes {
 			t.Errorf("fastClassify(%q) = %v, want %v", tc.input, got, tc.wantRes)
 		}
@@ -41,10 +52,14 @@ func TestFastClassifyQuestions(t *testing.T) {
 		{"Can you explain Go generics?", fastChat},
 		{"What are you working on?", fastAction}, // check_status pattern
 		{"What's going on?", fastAction},         // check_status pattern
+		// A state question names the switch but asks — it must not flip a
+		// flag; it goes to the LLM, which classifies questions as chat.
+		{"Is full auto on?", fastUnknown},
+		{"Is auto mode on or off?", fastUnknown},
 	}
 
 	for _, tc := range cases {
-		got, _ := fastClassify(tc.input)
+		got, _, _ := classify3(t, tc.input)
 		if got != tc.wantRes {
 			t.Errorf("fastClassify(%q) = %v, want %v", tc.input, got, tc.wantRes)
 		}
@@ -73,15 +88,74 @@ func TestFastClassifyActions(t *testing.T) {
 		// Stop engine
 		{"stop the engine", fastAction, "stop_engine"},
 		{"pause building", fastAction, "stop_engine"},
+		// Mode words must not claim the engine patterns and vice versa
+		{"turn on the engine", fastAction, "start_engine"},
 	}
 
 	for _, tc := range cases {
-		got, key := fastClassify(tc.input)
+		got, key, _ := classify3(t, tc.input)
 		if got != tc.wantRes {
 			t.Errorf("fastClassify(%q) = %v, want %v", tc.input, got, tc.wantRes)
 		}
 		if key != tc.wantKey {
 			t.Errorf("fastClassify(%q) key = %q, want %q", tc.input, key, tc.wantKey)
+		}
+	}
+}
+
+func TestFastClassifyModeSwitches(t *testing.T) {
+	cases := []struct {
+		input   string
+		wantRes fastClassifyResult
+		wantKey string
+		wantMode string
+	}{
+		// Full auto
+		{"turn on full auto", fastAction, "set_fullauto", "on"},
+		{"turn full auto on", fastAction, "set_fullauto", "on"},
+		{"Turn ON Full Auto", fastAction, "set_fullauto", "on"}, // case-insensitive
+		{"turn off full auto", fastAction, "set_fullauto", "off"},
+		{"turn full auto off", fastAction, "set_fullauto", "off"},
+		{"enable full auto", fastAction, "set_fullauto", "on"},
+		{"disable full auto", fastAction, "set_fullauto", "off"},
+		{"set full auto to off", fastAction, "set_fullauto", "off"},
+		{"put it on full auto", fastAction, "set_fullauto", "on"},
+		{"switch to full auto, on", fastAction, "set_fullauto", "on"},
+		// Auto mode (the nightly batch)
+		{"turn on auto mode", fastAction, "set_automode", "on"},
+		{"turn off auto mode", fastAction, "set_automode", "off"},
+		{"enable auto mode", fastAction, "set_automode", "on"},
+		{"disable auto mode", fastAction, "set_automode", "off"},
+		{"turn on automode", fastAction, "set_automode", "on"},
+		// Requests in question form carry the state and the verb → action
+		{"can you turn on full auto?", fastAction, "set_fullauto", "on"},
+		{"could you turn off auto mode?", fastAction, "set_automode", "off"},
+		// Greeting + request → action
+		{"hey, turn on full auto", fastAction, "set_fullauto", "on"},
+		// Ambiguous: mode named but the state is not explicit → LLM
+		{"go full auto", fastUnknown, "", ""},
+		{"switch to full auto", fastUnknown, "", ""},
+		{"full auto is on", fastUnknown, "", ""}, // statement, no verb
+		{"don't turn on full auto", fastUnknown, "", ""}, // negated
+		// "automation" / other auto-words must not claim the switch
+		{"what is automation", fastChat, "", ""},
+	}
+
+	for _, tc := range cases {
+		got, key, params := classify3(t, tc.input)
+		if got != tc.wantRes {
+			t.Errorf("fastClassify(%q) = %v, want %v", tc.input, got, tc.wantRes)
+			continue
+		}
+		if key != tc.wantKey {
+			t.Errorf("fastClassify(%q) key = %q, want %q", tc.input, key, tc.wantKey)
+		}
+		if got == fastAction {
+			if params["mode"] != tc.wantMode {
+				t.Errorf("fastClassify(%q) mode = %q, want %q", tc.input, params["mode"], tc.wantMode)
+			}
+		} else if params != nil {
+			t.Errorf("fastClassify(%q) unexpected params %v", tc.input, params)
 		}
 	}
 }
@@ -102,7 +176,7 @@ func TestFastClassifyStatements(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		got, _ := fastClassify(tc.input)
+		got, _, _ := classify3(t, tc.input)
 		if got != tc.wantRes {
 			t.Errorf("fastClassify(%q) = %v, want %v", tc.input, got, tc.wantRes)
 		}
@@ -112,7 +186,7 @@ func TestFastClassifyStatements(t *testing.T) {
 func TestFastClassifyEmpty(t *testing.T) {
 	cases := []string{"", "   ", "\t\n"}
 	for _, input := range cases {
-		got, _ := fastClassify(input)
+		got, _, _ := classify3(t, input)
 		if got != fastUnknown {
 			t.Errorf("fastClassify(%q) = %v, want %v (fastUnknown)", input, got, fastUnknown)
 		}
@@ -130,10 +204,11 @@ func TestFastClassifyCaseInsensitive(t *testing.T) {
 		{"Hey!", fastChat},
 		{"HEY!", fastChat},
 		{"WHAT IS 2+2?", fastChat},
+		{"TURN OFF FULL AUTO", fastAction},
 	}
 
 	for _, tc := range cases {
-		got, _ := fastClassify(tc.input)
+		got, _, _ := classify3(t, tc.input)
 		if got != tc.wantRes {
 			t.Errorf("fastClassify(%q) = %v, want %v", tc.input, got, tc.wantRes)
 		}

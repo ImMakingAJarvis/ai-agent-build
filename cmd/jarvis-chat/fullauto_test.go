@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -41,8 +43,19 @@ func TestCutFullAuto(t *testing.T) {
 	}
 }
 
+// pinLoopActive keeps handleFullAuto's wake path hermetic: the loop is
+// treated as already up, so WakeLoop does nothing and never touches
+// systemd or the installed helper.
+func pinLoopActive(t *testing.T) {
+	t.Helper()
+	old := nobrakes.UnitActive
+	t.Cleanup(func() { nobrakes.UnitActive = old })
+	nobrakes.UnitActive = func(string) bool { return true }
+}
+
 func TestHandleFullAutoOn(t *testing.T) {
 	addr, mr := miniredisURL(t)
+	pinLoopActive(t)
 	d := &testDiscord{}
 	handleFullAuto(d, addr, "!fullauto on")
 
@@ -55,6 +68,38 @@ func TestHandleFullAutoOn(t *testing.T) {
 	}
 	if !strings.Contains(msg, "!fullauto off") {
 		t.Errorf("confirmation %q should warn how to turn it off", msg)
+	}
+}
+
+func TestHandleFullAutoOnWakesStoppedLoop(t *testing.T) {
+	addr, mr := miniredisURL(t)
+	// The loop is down and the restart helper (stubbed) says it started it.
+	oldUnit := nobrakes.UnitActive
+	oldHelper := nobrakes.LoopRestartHelper
+	t.Cleanup(func() {
+		nobrakes.UnitActive = oldUnit
+		nobrakes.LoopRestartHelper = oldHelper
+	})
+	nobrakes.UnitActive = func(string) bool { return false }
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "fake-restart")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s\\n' 'agent-run started'\n"), 0o755); err != nil {
+		t.Fatalf("write stub helper: %v", err)
+	}
+	nobrakes.LoopRestartHelper = helper
+
+	d := &testDiscord{}
+	handleFullAuto(d, addr, "!fullauto on")
+
+	if got, err := mr.Get(nobrakes.FullAutoKey); err != nil || got != nobrakes.AutoModeOn {
+		t.Fatalf("redis %s = %q, err=%v; want %q", nobrakes.FullAutoKey, got, err, nobrakes.AutoModeOn)
+	}
+	msg := d.lastNotify()
+	if !strings.Contains(msg, "Full auto is ON") {
+		t.Errorf("confirmation %q should say ON", msg)
+	}
+	if !strings.Contains(msg, "I started it") {
+		t.Errorf("confirmation %q should report the loop was started", msg)
 	}
 }
 
@@ -74,6 +119,7 @@ func TestHandleFullAutoOff(t *testing.T) {
 
 func TestHandleFullAutoIndependentOfAutoMode(t *testing.T) {
 	addr, mr := miniredisURL(t)
+	pinLoopActive(t)
 	mr.Set(nobrakes.AutoModeKey, nobrakes.AutoModeOn) // nightly on already
 	d := &testDiscord{}
 	handleFullAuto(d, addr, "!fullauto on")

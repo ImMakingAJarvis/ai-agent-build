@@ -14,9 +14,12 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
-// DefaultActions returns the standard set of actions for Jarvis.
+// DefaultActions returns the standard set of actions for Jarvis. The NoBrakes
+// mode-switch actions (automode.go) are appended at the end: they are the
+// way the owner's "turn on full auto" requests are handled without
+// scheduling a job.
 func DefaultActions() []Action {
-	return []Action{
+	actions := []Action{
 		{
 			Key:              "enqueue_job",
 			Description:      "Enqueue a new build job into the worker queue",
@@ -69,6 +72,7 @@ func DefaultActions() []Action {
 			},
 		},
 	}
+	return append(actions, modeActions()...)
 }
 
 func runEnqueueJob(_ context.Context, params map[string]string) (string, error) {

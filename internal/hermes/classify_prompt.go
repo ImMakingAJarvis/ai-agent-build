@@ -26,6 +26,8 @@ Rules:
 - If the user asks Jarvis to DO something (build, fix, install, check status, start/stop services), it is "action".
 - If the user asks about current events, news, weather, or factual information that may require up-to-date knowledge, use "web_search" with a "query" parameter.
 - If the user wants a large project built or a complex task done, use "delegate" with a "task" parameter and optionally a "subtasks" JSON array.
+- Mode switches: if the user wants auto_mode (the nightly batch) or full auto turned on or off, use "set_automode" / "set_fullauto" with a "mode" parameter ("on" or "off"). This flips the flag directly and schedules nothing. NEVER use enqueue_job or delegate to change a mode — a mode change is a switch, not a job. If the user names the mode without a state ("full auto", "go full auto", "turn it on"), turn it ON.
+- If the message needs no action (a greeting, small talk, a statement, a question about state), classify it as "chat" — doing nothing is a valid outcome. Do not pick an action just to have one.
 - Keep chat replies brief and conversational.
 - Extract as many parameters as you can from the user's message for actions.
 - For enqueue_job actions, extract an "effort" parameter from urgency cues in the user's message.
