@@ -46,6 +46,7 @@ func miniredisURL(t *testing.T) (string, *miniredis.Miniredis) {
 
 func TestHandleAutoModeOn(t *testing.T) {
 	addr, mr := miniredisURL(t)
+	pinLoopActive(t)
 	d := &testDiscord{}
 	handleAutoMode(d, addr, "!automode on")
 
@@ -58,6 +59,29 @@ func TestHandleAutoModeOn(t *testing.T) {
 	}
 	if !strings.Contains(msg, "!automode off") {
 		t.Errorf("confirmation %q should warn how to turn it off", msg)
+	}
+	if strings.Contains(msg, "loop is stopped") {
+		t.Errorf("confirmation %q should not mention the loop (it is up)", msg)
+	}
+}
+
+func TestHandleAutoModeOnLoopStopped(t *testing.T) {
+	addr, mr := miniredisURL(t)
+	oldUnit := nobrakes.UnitActive
+	t.Cleanup(func() { nobrakes.UnitActive = oldUnit })
+	nobrakes.UnitActive = func(string) bool { return false }
+	d := &testDiscord{}
+	handleAutoMode(d, addr, "!automode on")
+
+	if got, err := mr.Get(nobrakes.AutoModeKey); err != nil || got != nobrakes.AutoModeOn {
+		t.Fatalf("redis %s = %q, err=%v; want %q", nobrakes.AutoModeKey, got, err, nobrakes.AutoModeOn)
+	}
+	msg := d.lastNotify()
+	if !strings.Contains(msg, "Auto mode is ON") {
+		t.Errorf("confirmation %q should say ON", msg)
+	}
+	if !strings.Contains(msg, "loop is stopped") {
+		t.Errorf("confirmation %q should say the loop is stopped", msg)
 	}
 }
 

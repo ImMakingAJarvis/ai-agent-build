@@ -54,24 +54,14 @@ func cutFullAuto(content string) (on, valid, isCommand bool) {
 	}
 }
 
-// fullAutoReply builds the owner-facing confirmation for the new state.
-// Turning the switch on warns that queued jobs will now run autonomously
-// at any time, and how to stop it.
-func fullAutoReply(on bool) string {
-	if on {
-		return "Full auto is ON — the agent-run loop will run each ready job " +
-			"immediately (driver from the job's spec), at any time of day, for " +
-			"as long as the queue has work; it idle-polls when the queue is " +
-			"empty. Say !fullauto off to stop; !pause and !restart still work " +
-			"mid-run."
-	}
-	return "Full auto is OFF — the loop asks on Discord before running each job."
-}
-
 // handleFullAuto executes the !fullauto command: it dials the NoBrakes flag
 // store, writes the requested state, reads the value back, and confirms the
-// stored result to the owner. Redis failures never leave the owner guessing —
-// each replies with a short explanation and leaves the flag unchanged.
+// stored result to the owner. Turning the switch ON also wakes the agent-run
+// loop if it is stopped (nobrakes.WakeLoop), so full auto takes effect
+// immediately instead of waiting for the loop to be started by hand — that
+// is the point of a no-scheduling trigger. Redis failures never leave the
+// owner guessing — each replies with a short explanation and leaves the flag
+// unchanged.
 func handleFullAuto(d sender, addr, content string) {
 	on, valid, isCommand := cutFullAuto(content)
 	if !isCommand {
@@ -111,5 +101,16 @@ func handleFullAuto(d sender, addr, content string) {
 	} else {
 		log.Printf("jarvis-chat: !fullauto: read-back: %v", err)
 	}
-	_ = d.Notify(ctx, fullAutoReply(onStored))
+
+	reply := nobrakes.FullAutoReply(onStored)
+	if onStored {
+		// Full auto is on and only means something while the agent-run
+		// loop runs: if the loop is stopped, start it so the switch
+		// takes effect now. The wake note (empty when the loop was
+		// already up) is appended to the confirmation.
+		if note := nobrakes.WakeLoop(ctx, nobrakes.LoopUnit); note != "" {
+			reply += " " + note
+		}
+	}
+	_ = d.Notify(ctx, reply)
 }
