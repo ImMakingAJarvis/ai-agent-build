@@ -90,6 +90,14 @@ func ModelFor(driver string) string {
 		}
 		return "jarvis-igpu"
 	}
+	if driver == "superagent" {
+		// The Super Agent's loop runs on the local brain by default;
+		// SUPERAGENT_MODEL pins a different engine model.
+		if m := os.Getenv("SUPERAGENT_MODEL"); m != "" {
+			return m
+		}
+		return ModelFor("local")
+	}
 	if m := os.Getenv("LOCAL_MODEL"); m != "" {
 		return m
 	}
@@ -115,6 +123,18 @@ func igpuContextTokens() string {
 }
 
 func defaultCommand(driver, prompt, effort string) *exec.Cmd {
+	// The Super Agent runs its own plan→act→verify loop (cmd/superagent)
+	// instead of the Claude Code harness. The round prompt is its goal, it
+	// works in the inherited CWD (the repo), and it streams plain progress
+	// to stdout (the Runner tees that to the transcript). Exit 0 = goal met.
+	if driver == "superagent" {
+		env := append([]string{}, os.Environ()...)
+		env = stripEnv(env, "JARVIS_MODEL")
+		env = append(env, "JARVIS_MODEL="+ModelFor(driver))
+		cmd := exec.Command("superagent", prompt)
+		cmd.Env = env
+		return cmd
+	}
 	bin := "agent-local"
 	args := []string{"--dangerously-skip-permissions"}
 	if driver == "sonnet" {
