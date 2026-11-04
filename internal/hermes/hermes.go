@@ -102,13 +102,15 @@ func (a *Agent) Register(action Action) {
 // It first attempts fast keyword-based classification, which handles ~80%
 // of messages instantly. Ambiguous messages fall through to the LLM.
 func (a *Agent) Classify(ctx context.Context, userMessage string) (*Result, error) {
-	// Fast path: keyword-based classification avoids an LLM call.
-	if res, actionKey := fastClassify(userMessage); res != fastUnknown {
+	// Fast path: keyword-based classification avoids an LLM call. The mode
+	// switch actions (set_automode / set_fullauto) carry their requested
+	// state in Parameters, extracted by the fast path.
+	if res, actionKey, params := fastClassify(userMessage); res != fastUnknown {
 		switch res {
 		case fastChat:
 			return &Result{Type: TypeChat}, nil
 		case fastAction:
-			return &Result{Type: TypeAction, ActionName: actionKey}, nil
+			return &Result{Type: TypeAction, ActionName: actionKey, Parameters: params}, nil
 		}
 	}
 
