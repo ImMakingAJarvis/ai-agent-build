@@ -37,6 +37,7 @@ secrets. To change memory/eviction, edit that line and
 | `nobrakes:auto_mode` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
 | `nobrakes:nightly_flag` | string | `""` or a UTC date `"YYYY-MM-DD"` | `""` |
 | `nobrakes:full_auto` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
+| `nobrakes:running` | string | the id of the one auto job currently executing | absent (no auto job running) |
 
 - **`nobrakes:auto_mode`** — the operator's master switch for autonomous
   nightly execution. Written by the manual-override path (the Discord
@@ -61,10 +62,21 @@ secrets. To change memory/eviction, edit that line and
   `!fullauto`), read by the agent-run loop at the top of every stage-3
   iteration. Missing or corrupt values read as `"off"` — the supervised
   ask path is the default.
-
-All three keys are pre-created at install time (`EnsureDefaults` in
-`internal/nobrakes` does the same idempotently at runtime — it only fills
-missing keys and never clobbers operator state).
+- **`nobrakes:running`** — the safety guardrail (nobrakes-6): marks the
+  single auto job that is executing right now. Value: the job id. It is
+  created by `jarvis-jobs run -auto` (the full-auto path of the agent-run
+  loop) and released when the round ends, whatever the outcome; it has no
+  TTL, because the guarantee it protects (at most one concurrent auto
+  job) must not depend on a clock. A marker left behind by a crash is
+  *stale* and is taken over automatically: the next `run -auto` checks
+  the holder's job status in the job store and overwrites the marker when
+  the holder is no longer `running`. An operator can inspect it with
+  `jarvis-jobs running` and clear a stuck one with
+  `jarvis-jobs running clear`. The three flag keys are pre-created at
+  install time (`EnsureDefaults` in `internal/nobrakes` does the same
+  idempotently at runtime — it only fills missing keys and never clobbers
+  operator state); `nobrakes:running` is transient and only exists while
+  an auto job runs.
 
 ## Go helper
 
@@ -227,6 +239,7 @@ Redis unreachable or disabled leaves the flag unchanged and says so.
 docker exec jarvis-redis redis-cli ping                     # PONG
 docker exec jarvis-redis redis-cli GET nobrakes:auto_mode   # off
 docker exec jarvis-redis redis-cli EXISTS nobrakes:auto_mode nobrakes:nightly_flag nobrakes:full_auto  # 3
+docker exec jarvis-redis redis-cli GET nobrakes:running     # (nil) while no auto job runs
 
 # restart (container comes back with state intact — AOF)
 docker compose restart redis
@@ -243,4 +256,9 @@ streams: `docker exec jarvis-redis redis-cli SET nobrakes:auto_mode off` —
 the nightly gate reads this on every run. For full auto mode:
 `docker exec jarvis-redis redis-cli SET nobrakes:full_auto off` — the loop
 re-reads it at the top of every iteration and returns to the supervised
-ask.
+ask. A round that is *running* can be interrupted the usual way
+(`!pause` / `!restart`); if the `nobrakes:running` marker is ever left
+behind and the auto path stops picking up jobs, check `jarvis-jobs
+running` and clear it with `jarvis-jobs running clear` (a stale marker is
+also taken over automatically once the holder's job is no longer running).
+The full safety model is in [safety.md](safety.md).
