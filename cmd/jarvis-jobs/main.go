@@ -11,6 +11,9 @@
 //	jarvis-jobs nightly            NoBrakes: read the Redis auto_mode flag;
 //	                               if on and today's nightly window is
 //	                               unprocessed, enqueue parked nightly jobs
+//	jarvis-jobs fullauto [on|off]  NoBrakes: read (prints "on"/"off") or
+//	                               set the full-auto flag — on = the loop
+//	                               runs every ready job without asking
 //	jarvis-jobs enqueue <id>       move one parked job to ready (manual)
 //	jarvis-jobs order [a,b,c]    show or set the runtime band priority order
 //	                              (a permutation of fix, build, background)
@@ -44,7 +47,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|enqueue")
+		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|fullauto|enqueue")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -81,8 +84,18 @@ func main() {
 		if len(j.Tags) > 0 {
 			tags = fmt.Sprintf("\ntags: %s", strings.Join(j.Tags, ", "))
 		}
-		fmt.Printf("%s — %s\nstatus: %s\nclass: %s\neffort: %s%s\n\n%s\n", j.ID, j.Title, j.Status,
-			agentjob.EffectiveClass(j.Class, j.Source), queue.CanonicalEffort(j.ReasoningEffort, "coding"), tags, j.Instructions)
+		// The driver the loop should run this job on: the job's own spec
+		// driver when it names a valid one (e.g. a sonnet-gated job), the
+		// default "local" otherwise. The agent-run full-auto branch reads
+		// this line (see `fullauto` above).
+		driver := j.Driver
+		switch driver {
+		case "local", "igpu", "sonnet":
+		default:
+			driver = "local"
+		}
+		fmt.Printf("%s — %s\nstatus: %s\nclass: %s\ndriver: %s\neffort: %s%s\n\n%s\n", j.ID, j.Title, j.Status,
+			agentjob.EffectiveClass(j.Class, j.Source), driver, queue.CanonicalEffort(j.ReasoningEffort, "coding"), tags, j.Instructions)
 	case "pause":
 		if len(args) != 1 {
 			die("pause <id>")
@@ -137,6 +150,10 @@ func main() {
 		fmt.Printf("==> job %s %s %s\n", j.ID, j.Status, j.PRURL)
 	case "nightly":
 		if err := cmdNightly(store); err != nil {
+			die("%v", err)
+		}
+	case "fullauto":
+		if err := cmdFullAuto(os.Stdout, args); err != nil {
 			die("%v", err)
 		}
 	case "enqueue":
@@ -225,6 +242,64 @@ func cmdNightly(store *agentjob.Store) error {
 	}
 	// Steady state (off, or window already stamped) prints nothing: the
 	// loop log is for action and failure, not for every iteration.
+	return nil
+}
+
+// cmdFullAuto reads or sets the NoBrakes full-auto flag
+// (nobrakes:full_auto). `jarvis-jobs fullauto` prints "on" or "off";
+// `jarvis-jobs fullauto on|off` sets it and prints the new state.
+//
+// A get never fails the caller: with Redis disabled ($JARVIS_REDIS=off),
+// unreachable, or holding a corrupt value it prints "off" (and a warning
+// on stderr) and returns nil — the agent-run loop relies on that to fail
+// safe on every iteration. A set that cannot reach Redis returns an error
+// instead: an operator must never believe a switch they flipped is on.
+func cmdFullAuto(w io.Writer, args []string) error {
+	set := false
+	switch len(args) {
+	case 0:
+		// get
+	case 1:
+		switch strings.ToLower(args[0]) {
+		case "on", "off":
+			set = true
+		default:
+			return fmt.Errorf("usage: jarvis-jobs fullauto [on|off]")
+		}
+	default:
+		return fmt.Errorf("usage: jarvis-jobs fullauto [on|off]")
+	}
+	addr := agentjob.StreamAddr()
+	if addr == "off" || addr == "none" {
+		if !set {
+			fmt.Fprintln(w, "off")
+			return nil
+		}
+		return fmt.Errorf("NoBrakes is disabled here (JARVIS_REDIS is off), so there is no full-auto flag to set")
+	}
+	flags, err := nobrakes.New(addr)
+	if err != nil {
+		if !set {
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes fullauto: redis %s unreachable (%v) — treating full auto as off\n", addr, err)
+			fmt.Fprintln(w, "off")
+			return nil
+		}
+		return fmt.Errorf("nobrakes fullauto: redis %s unreachable: %w", addr, err)
+	}
+	defer flags.Close()
+	ctx := context.Background()
+	if set {
+		if err := flags.SetFullAuto(ctx, strings.ToLower(args[0]) == "on"); err != nil {
+			return fmt.Errorf("set full_auto: %w", err)
+		}
+	}
+	v, err := flags.GetFullAuto(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes fullauto: read: %v — treating full auto as off\n", err)
+		fmt.Fprintln(w, "off")
+		return nil
+	}
+	fmt.Fprintln(w, v)
 	return nil
 }
 
