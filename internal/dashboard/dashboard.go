@@ -406,6 +406,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/kanban/subtasks/{id}", s.kanban.apiToggleSubTask)
 	mux.HandleFunc("GET /api/kanban/subtasks", s.kanban.apiListSubTasks)
 	mux.HandleFunc("GET /api/kanban/models", s.kanban.apiListModels)
+	mux.HandleFunc("GET /api/nobrakes/audit", s.handleNobrakesAudit)
 	return mux
 }
 
