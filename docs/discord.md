@@ -46,6 +46,15 @@ involved):
   the service is down. See docs/agent-run.md.
 - `!photo <prompt>` — generate a photo with the local art model.
 - `!build <title…>` / `!fix <title…>` — queue a build/fix job.
+- `!automode on` / `!automode off` — NoBrakes nightly switch (auto-enqueue
+  of nightly jobs). If the loop is stopped when you turn it on, the reply
+  says so. See docs/nobrakes/redis.md.
+- `!fullauto on` / `!fullauto off` — NoBrakes full-auto switch (run every
+  ready job immediately). Turning it on also starts the agent-run loop if
+  it is stopped, so it takes effect right away. See docs/nobrakes/redis.md.
+
+  The same switches work in plain language through the brain ("turn on
+  full auto") — `set_automode` / `set_fullauto`, never via a queued job.
 
 Instead of exporting variables, you can put the same `KEY=value` lines in
 `~/.config/jarvis/discord.env` (bootstrap.sh writes this file for you).

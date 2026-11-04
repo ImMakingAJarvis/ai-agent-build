@@ -213,7 +213,7 @@ auto-enqueue (section above), `full_auto` controls per-job execution. The
 owner overrides at any time — `!fullauto off` takes effect on the next loop
 iteration, and `!pause` / `!restart` still interrupt a running job.
 
-## The control surface (nobrakes-3)
+## The control surface (nobrakes-3, extended in nobrakes-7)
 
 The owner flips `auto_mode` from Discord with the `!automode` command in the
 `jarvis-chat` daemon, and `full_auto` with `!fullauto`. Both
@@ -232,6 +232,34 @@ bad or missing argument gets a usage line and leaves the flag untouched;
 Redis unreachable or disabled leaves the flag unchanged and says so.
 `cmd/jarvis-chat/automode.go` and `cmd/jarvis-chat/fullauto.go`
 (unit-tested against miniredis).
+
+The brain can flip the same switches in natural language ("turn on full
+auto"). Hermes registers `set_automode` / `set_fullauto` actions
+(`internal/hermes/automode.go`), owner-only by full access; they dial the
+same flag store, set the same keys, and confirm with the same shared
+reply text (`nobrakes.AutoModeReply` / `FullAutoReply`). The classifier is
+told to use these instead of `enqueue_job` — a mode change is a switch,
+never a job — and to classify messages that need no action as chat, so
+doing nothing is a first-class outcome.
+
+### Waking the loop (nobrakes-7)
+
+A flag only means something while the agent-run loop runs, so the switch
+commands also look at the loop:
+
+- **`!fullauto on` / `set_fullauto on`** — after the flag is stored,
+  `nobrakes.WakeLoop` (`internal/nobrakes/wake.go`) checks whether the
+  `agent-run` unit is active; when it is stopped it runs the
+  `agent-run-restart` helper, which starts the service (and is a no-op
+  while the loop is inhibited by `agent-run.disabled` or `resume-pending`).
+  The confirmation gains a note: "…I started it", or what is standing in
+  the way when it could not. A wake failure never blocks or rolls back the
+  flag write — the note just says the switch takes effect once the loop is
+  up.
+- **`!automode on` / `set_automode on`** — when the loop is stopped, the
+  confirmation says so ("…nothing will run until it is started") but does
+  **not** start it: a started-but-supervised loop would ask on Discord who
+  runs the next job, which the owner did not ask for.
 
 ## Health & operations
 

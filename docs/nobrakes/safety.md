@@ -77,9 +77,12 @@ Nothing in this layer can stop a human:
   act, not an auto failure).
 - **`jarvis-jobs run <id>` without `-auto`** runs any job directly,
   marker untouched, regardless of any flag.
-- **`!automode` / `!fullauto`** (Discord) write the flags straight into
-  Redis from the chat daemon — they never pass through a job or a
-  marker, so they always work, even mid-round.
+- **`!automode` / `!fullauto`** (Discord) and the brain's
+  **`set_automode` / `set_fullauto`** actions (natural language: "turn on
+  full auto") write the flags straight into Redis from the chat daemon —
+  they never pass through a job or a marker, so they always work, even
+  mid-round. A mode change is never routed to `enqueue_job`: the
+  classifier is told the switches are the only way to change a mode.
 - **`!pause` / `!restart`** still interrupt a running auto round.
 
 ### 4. Fail-safe defaults
@@ -112,6 +115,22 @@ go test ./internal/nobrakes/ ./cmd/jarvis-jobs/
 - `internal/nobrakes/running_test.go` — marker acquire (free / held /
   reentrant / stale takeover), release by holder vs. non-holder,
   holder/clear, `Pause` turning both switches off.
+- `internal/nobrakes/wake_test.go` — `WakeLoop`: no-op when the loop is
+  active, starts a stopped loop via the (stubbed) `agent-run-restart`
+  helper, and the owner-facing notes for the inhibited / resume-pending /
+  helper-failure cases.
+- `internal/hermes/automode_test.go` — the `set_automode` /
+  `set_fullauto` actions flip the right flag (and only that flag), confirm
+  with the shared text, append the wake note when the loop was stopped,
+  and answer owner-facing no-change messages when Redis is disabled or
+  unreachable.
+- `internal/hermes/fast_classify_test.go` — "turn on full auto" style
+  requests classify to the mode actions with the state extracted; state
+  questions ("is full auto on?"), statements, and negated requests never
+  flip a flag on the fast path.
+- `cmd/jarvis-chat/{automode,fullauto}_test.go` — the `!` commands
+  (miniredis), including the loop-wake note on `!fullauto on` and the
+  loop-stopped note on `!automode on`.
 - `cmd/jarvis-jobs/guard_test.go` — `autopause` (pause + notify,
   notify-out when Redis is disabled/unreachable, notify failure is an
   error), `running` show/clear, `run -auto` refusing without Redis and
