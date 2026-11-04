@@ -50,17 +50,6 @@ func cutAutoMode(content string) (on, valid, isCommand bool) {
 	}
 }
 
-// autoModeReply builds the owner-facing confirmation for the new state.
-// Turning the switch on warns that nightly jobs will now run autonomously.
-func autoModeReply(on bool) string {
-	if on {
-		return "Auto mode is ON — nightly jobs (tagged \"nightly\") will auto-enqueue " +
-			"at the top of the next agent-run loop iteration and run once per UTC day. " +
-			"Say !automode off to stop this."
-	}
-	return "Auto mode is OFF — nightly jobs will not auto-enqueue."
-}
-
 // handleAutoMode executes the !automode command: it dials the NoBrakes flag
 // store, writes the requested state, reads the value back, and confirms the
 // stored result to the owner. Redis failures never leave the owner guessing —
@@ -104,5 +93,15 @@ func handleAutoMode(d sender, addr, content string) {
 	} else {
 		log.Printf("jarvis-chat: !automode: read-back: %v", err)
 	}
-	_ = d.Notify(ctx, autoModeReply(onStored))
+
+	reply := nobrakes.AutoModeReply(onStored)
+	if onStored && !nobrakes.UnitActive(nobrakes.LoopUnit) {
+		// The nightly gate runs at the top of every agent-run loop
+		// iteration: with the loop stopped the switch changes nothing
+		// until the loop is up. Say so — but do NOT start the loop, that
+		// would put it in supervised mode and it would ask on Discord who
+		// runs the next job, which the owner did not ask for.
+		reply += " Note: the agent-run loop is stopped, so nothing will run until it is started."
+	}
+	_ = d.Notify(ctx, reply)
 }
