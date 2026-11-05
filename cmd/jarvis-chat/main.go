@@ -266,6 +266,15 @@ func main() {
 					return
 				}
 
+				// !keepgoing on / off sets or clears the NoBrakes keep-going
+				// flag in Redis: when on, a failed auto job notifies the
+				// owner without pausing autonomous execution (owner-only,
+				// same as !automode / !fullauto).
+				if _, _, isKeepGoing := cutKeepGoing(content); isKeepGoing {
+					handleKeepGoing(d, agentjob.StreamAddr(), content)
+					return
+				}
+
 				// !photo / !photoassist / !photocheck generate a photo
 				// with the local art model (prompt expanded by the
 				// thinking mind) and send it back as an attachment.

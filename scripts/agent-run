@@ -18,8 +18,10 @@
 #     of day, for as long as the queue has work. Safety guardrails
 #     (NoBrakes 6/6): at most one concurrent auto job (the
 #     nobrakes:running marker), an auto job that failed pauses the
-#     feature and notifies the owner, and manual rounds are never
-#     blocked by the feature.
+#     feature and notifies the owner — unless keep-going is on
+#     (nobrakes:keep_going, flipped with !keepgoing or the "Keep going"
+#     checkpoint button), when the failure only notifies — and manual
+#     rounds are never blocked by the feature.
 #
 #   agent-run                         first run, or carry on after "Stop"
 #   agent-run --resume REASON [GPU]   after a reboot (called by agent-resume)
@@ -200,10 +202,17 @@ if (( resume )); then
     jarvis-jobs finish "$jid" "$status" || true
     rm -f "$CONF/current-job"
     # NoBrakes 6/6: if that was a full-auto round that failed, pause
-    # autonomous execution and notify — same as the main loop path.
+    # autonomous execution and notify — same as the main loop path
+    # (keep-going: notify without pausing when keep_going is on).
     if [[ "$(jarvis-jobs fullauto 2>/dev/null || echo off)" == "on" ]]; then
       job_status=$(jarvis-jobs list 2>/dev/null | awk -v id="$jid" '$2 == id {print $1}')
-      [[ "$job_status" == "failed" ]] && jarvis-jobs autopause "$jid" || true
+      if [[ "$job_status" == "failed" ]]; then
+        if [[ "$(jarvis-jobs keepgoing 2>/dev/null || echo off)" == "on" ]]; then
+          jarvis-jobs failnote "$jid" || true
+        else
+          jarvis-jobs autopause "$jid" || true
+        fi
+      fi
     fi
   fi
 fi
@@ -299,10 +308,10 @@ while :; do
   else
     if [[ -n "$job_id" ]]; then
       q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
-      choices="Local model,iGPU model,Sonnet,Super agent,Skip,Stop"
+      choices="Local model,iGPU model,Sonnet,Super agent,Skip,Stop,Full auto,Auto mode,Keep going"
     else
       q="No ready jobs in the queue. Type instructions, or Stop."
-      choices="Stop"
+      choices="Stop,Full auto,Auto mode,Keep going"
     fi
     if ! answer=$(jarvis-discord ask -choices "$choices" "$msg
 
@@ -325,6 +334,35 @@ $q"); then
       "igpu model"|igpu) d=igpu; note="" ;;
       "local model"|local) d=local; note="" ;;
       "super agent"|superagent) d=superagent; note="" ;;
+      "full auto")  shopt -u nocasematch
+               # NoBrakes button: turn the switch on and go back to the top
+               # of the loop — the next iteration re-reads the flag and
+               # runs the next ready job without asking. A set that cannot
+               # reach Redis is reported, never swallowed: the owner must
+               # not believe a flipped switch is on.
+               if jarvis-jobs fullauto on >/dev/null; then
+                 msg="Full auto is on — each ready job runs immediately, at any time of day (stop: !fullauto off)."
+               else
+                 msg="Couldn't turn on full auto — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
+               fi
+               notify "$msg"
+               continue ;;
+      "auto mode")  shopt -u nocasematch
+               if jarvis-jobs automode on >/dev/null; then
+                 msg="Auto mode is on — nightly-tagged jobs auto-enqueue at the top of each loop iteration, once per UTC day (stop: !automode off)."
+               else
+                 msg="Couldn't turn on auto mode — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
+               fi
+               notify "$msg"
+               continue ;;
+      "keep going") shopt -u nocasematch
+               if jarvis-jobs keepgoing on >/dev/null; then
+                 msg="Keep going is on — if an auto job fails, I'll tell you but keep working through the next ready job instead of pausing (stop: !keepgoing off)."
+               else
+                 msg="Couldn't turn on keep going — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
+               fi
+               notify "$msg"
+               continue ;;
       *)       d=local; note="$answer" ;;
     esac
     shopt -u nocasematch
@@ -375,8 +413,17 @@ $q"); then
   # Discord (jarvis-jobs autopause). A supervised round never pauses the
   # feature: manual runs are the override, and a !pause / !restart is a
   # deliberate operator act, not a failure.
+  #
+  # Keep-going mode: when the keep_going flag is on, the failure path
+  # notifies the owner but does NOT pause — the loop moves on to the next
+  # ready job (jarvis-jobs failnote: no flag writes). The flag is read
+  # fresh and fails safe to off, so Redis trouble still pauses.
   if (( auto_run )) && [[ "$job_status" == "failed" ]]; then
-    jarvis-jobs autopause "$job_id" || true
+    if [[ "$(jarvis-jobs keepgoing 2>/dev/null || echo off)" == "on" ]]; then
+      jarvis-jobs failnote "$job_id" || true
+    else
+      jarvis-jobs autopause "$job_id" || true
+    fi
   fi
   if [[ "$job_status" == "paused" ]]; then
     rm -f "$CONF/current-job"
