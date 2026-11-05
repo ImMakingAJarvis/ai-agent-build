@@ -439,6 +439,17 @@ Keep your context small, it is 64K tokens: read files in parts (offset
 and limit), grep instead of cat for big files, pipe long command output
 through head or tail, and never print a whole log.
 
+You ARE the local brain (llama.cpp on port 11434). Never stop or kill
+it — no `docker compose stop engine`, `docker compose restart engine`,
+`systemctl stop jarvis-engine` or `pkill llama-server`. Your next API
+call would die with "Connection refused" and the engine stays down for
+every later round; that is exactly what happened 2026-11-04 (see
+docs/worker-moe-incident-2026-11-04.md). If a job needs the 4090 free
+(a VRAM sweep and friends), it belongs on another driver — the job
+spec's `driver:` field says which (sonnet or igpu): requeue it
+(`jarvis-jobs requeue <id>`), leave a Discord note that it must be
+dispatched on its spec driver, and end the round.
+
 How to work:
 - Plan first, then build in small steps. If a "coder" subagent is
   available, hand it each well-specified coding task (files, goal, how to
