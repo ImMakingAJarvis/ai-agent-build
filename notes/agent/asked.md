@@ -75,3 +75,5 @@
 - 2026-11-05T04:37Z Nathan: auto_mode + fullauto buttons on the Discord next-steps question, plus a keep-working-even-if-something-failed mode (job chat-1793831245-3eb6)
 - 2026-11-05T06:07Z Nathan wants GLM 5.3 flash benchmarked alongside the MoE sweep: its own project, cache-amount tests, and a spot in the potential-models registry
 - 2026-11-05T14:57Z Nathan: 'the photo generation seems to be broken' (job chat-1793859813-fc82) — shipped the VRAM-wait fix (PR #164); open decision for him: how to partition the 4090 between the agent brain's KV and the art model (work-slot ctx size / duplicate Docker engine)
+- 2026-11-05T16:33Z [chat-1793847447-ba6c] Nathan asked to 'relist' the bunch of jobs that failed in the last few hours — turned out to be a single connection-refused burst when the brain engine was briefly down (Nov 4 ~22:25 → Nov 5 ~00:01)
+- 2026-11-05T17:15Z Nathan wants to steer a running worker from the job log UI: inject messages into its thought loop (Talk box) and stop its work (Stop work button, park + skip to next in auto/full-auto) — delivered in PR #161, verified live 2026-11-05
