@@ -38,18 +38,40 @@ models:
     fallback_location: cpu
 
   # ~100 GB IQ4_XS MoE, mostly RAM-resident (docs/freetoken-runner.md); the
-  # engine (ft serve, llama.cpp-compatible) runs on 11435 while it is armed.
+  # engine (ft serve, llama.cpp-compatible) runs on 11436 while it is armed
+  # (11435 is the iGPU helper — see docs/igpu-model-handler.md).
   # Primary local planner once pulled — until then it is hidden, not deleted.
   - id: qwen3.8-flash-next
     display_name: Qwen 3.8 Flash Next (MoE)
     location: local
     engine: llama.cpp
-    endpoint: http://localhost:11435/v1
+    endpoint: http://localhost:11436/v1
     roles: [planner]
     context_tokens: 131072
     vram_gb: 20
     ram_gb: 80
     thinking: "thinking_budget:8192"
+    cost_per_mtok: 0
+    enabled: false
+    home_location: gpu
+    fallback_location: cpu
+
+  # Zhipu GLM 5.3 flash MoE — second local MoE candidate
+  # (docs/benchmarks/moe-models-to-benchmark.md). Served the same way as
+  # qwen3.8-flash-next (FreeToken ft serve, hybrid strategy, port 11436).
+  # Not pulled yet — hidden until the VRAM-cache sweep (Plane project GLM)
+  # picks a quant and the model lands. vram/ram are placeholders mirroring
+  # the sibling MoE; correct them at pull time.
+  - id: glm5.3-flash
+    display_name: GLM 5.3 Flash (MoE)
+    location: local
+    engine: llama.cpp
+    endpoint: http://localhost:11436/v1
+    roles: [planner]
+    context_tokens: 131072
+    vram_gb: 20
+    ram_gb: 80
+    thinking: ""   # TBD at pull time — confirm GLM's thinking param
     cost_per_mtok: 0
     enabled: false
     home_location: gpu
