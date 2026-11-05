@@ -73,3 +73,4 @@
 - 2026-11-04T20:34Z Nathan proposed adding 'save benchmark results to Jarviss' as a standing default for future jobs (job chat-1793820896-38de); confirmed yes — NAS is the durable store, the 1TB local is working space.
 - 2026-11-05T03:43Z requeue all previously failed jobs within the day — scope = failures finished today (local), older failures left alone
 - 2026-11-05T04:37Z Nathan: auto_mode + fullauto buttons on the Discord next-steps question, plus a keep-working-even-if-something-failed mode (job chat-1793831245-3eb6)
+- 2026-11-05T06:07Z Nathan wants GLM 5.3 flash benchmarked alongside the MoE sweep: its own project, cache-amount tests, and a spot in the potential-models registry
