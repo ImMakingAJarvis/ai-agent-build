@@ -71,3 +71,4 @@
 - 2026-11-04T20:13Z Nathan wanted disk space of all drives visible in Grafana
 - 2026-11-04T20:23Z Nathan: chatbot or flag listener cannot change nobrakes flags — fix it and enable fullauto (done same round; the loop now runs ready jobs unattended)
 - 2026-11-04T20:34Z Nathan proposed adding 'save benchmark results to Jarviss' as a standing default for future jobs (job chat-1793820896-38de); confirmed yes — NAS is the durable store, the 1TB local is working space.
+- 2026-11-05T03:43Z requeue all previously failed jobs within the day — scope = failures finished today (local), older failures left alone

@@ -1,7 +1,8 @@
 // Package nobrakes is the Redis-backed flag store for the NoBrakes feature:
 // autonomous job execution gated by operator-controlled flags — the nightly
-// auto_mode batch and full auto mode (the loop runs any ready job at any
-// time). Every flag is OFF by default and fully manual-overridable; see
+// auto_mode batch, full auto mode (the loop runs any ready job at any
+// time), and keep going (a failed auto job notifies but does not pause).
+// Every flag is OFF by default and fully manual-overridable; see
 // docs/nobrakes/redis.md for the key structure and where Redis runs.
 package nobrakes
 
@@ -41,6 +42,19 @@ const (
 	// written by the operator (CLI `jarvis-jobs fullauto on|off`,
 	// Discord !fullauto). A missing key reads as "off" — the safe default.
 	FullAutoKey = "nobrakes:full_auto"
+
+	// KeepGoingKey holds the keep-going switch: "on" or "off". When "on",
+	// a failed auto-executed job does NOT pause autonomous execution:
+	// the owner is still notified, auto_mode/full_auto stay as they are,
+	// and the loop moves on to the next ready job (the failed job stays
+	// "failed" in the store and is not re-picked). When "off" (default),
+	// an auto failure trips autopause as usual. It is a modifier on the
+	// failure path, not an execution switch — it starts nothing by
+	// itself. Read by the agent-run loop on the auto-failure path;
+	// written by the operator (CLI `jarvis-jobs keepgoing on|off`,
+	// Discord !keepgoing, the checkpoint's "keep going" button). A
+	// missing key reads as "off" — the safe default.
+	KeepGoingKey = "nobrakes:keep_going"
 )
 
 // Flag values, shared by every NoBrakes switch.
@@ -147,6 +161,29 @@ func (s *Store) SetFullAuto(ctx context.Context, on bool) error {
 	return s.client.Set(ctx, FullAutoKey, AutoModeOff, 0).Err()
 }
 
+// GetKeepGoing returns the current keep-going value. A missing key reads
+// as "off" — the safe default (an auto failure pauses the feature).
+func (s *Store) GetKeepGoing(ctx context.Context) (string, error) {
+	return s.getFlag(ctx, KeepGoingKey)
+}
+
+// KeepGoingOn reports whether keep-going is enabled: a failed auto job
+// notifies the owner but does not pause autonomous execution.
+func (s *Store) KeepGoingOn(ctx context.Context) (bool, error) {
+	v, err := s.GetKeepGoing(ctx)
+	return v == AutoModeOn, err
+}
+
+// SetKeepGoing sets the keep-going switch to the given value. Like the
+// other switches it is the operator's manual override: a direct Redis
+// write that works at any time, including mid-round.
+func (s *Store) SetKeepGoing(ctx context.Context, on bool) error {
+	if on {
+		return s.client.Set(ctx, KeepGoingKey, AutoModeOn, 0).Err()
+	}
+	return s.client.Set(ctx, KeepGoingKey, AutoModeOff, 0).Err()
+}
+
 // GetNightlyFlag returns the last processed nightly window (UTC date
 // "YYYY-MM-DD"), or "" when the nightly enqueue has never run.
 func (s *Store) GetNightlyFlag(ctx context.Context) (string, error) {
@@ -180,6 +217,10 @@ func (s *Store) NightlyDue(ctx context.Context, now time.Time) (bool, error) {
 // manually (!automode on / !fullauto on). The feature never re-enables
 // itself. A missing key already reads as off, so a caller that cannot
 // reach Redis still ends up safe; this just makes the state explicit.
+//
+// keep_going is deliberately NOT touched: it is a modifier on the failure
+// path, not an execution switch — with both switches off no auto job can
+// run, so there is no failure left for keep_going to change.
 func (s *Store) Pause(ctx context.Context) error {
 	if err := s.SetAutoMode(ctx, false); err != nil {
 		return err
@@ -189,8 +230,8 @@ func (s *Store) Pause(ctx context.Context) error {
 
 // EnsureDefaults creates all flag keys with their safe defaults if (and
 // only if) they are missing: auto_mode "off", nightly_flag "",
-// full_auto "off". Idempotent, so callers may run it at startup without
-// clobbering operator state.
+// full_auto "off", keep_going "off". Idempotent, so callers may run it
+// at startup without clobbering operator state.
 func (s *Store) EnsureDefaults(ctx context.Context) error {
 	if err := s.client.SetNX(ctx, AutoModeKey, AutoModeOff, 0).Err(); err != nil {
 		return err
@@ -198,7 +239,10 @@ func (s *Store) EnsureDefaults(ctx context.Context) error {
 	if err := s.client.SetNX(ctx, NightlyFlagKey, "", 0).Err(); err != nil {
 		return err
 	}
-	return s.client.SetNX(ctx, FullAutoKey, AutoModeOff, 0).Err()
+	if err := s.client.SetNX(ctx, FullAutoKey, AutoModeOff, 0).Err(); err != nil {
+		return err
+	}
+	return s.client.SetNX(ctx, KeepGoingKey, AutoModeOff, 0).Err()
 }
 
 // Owner-facing confirmations for the switches. Shared by every control
@@ -229,4 +273,19 @@ func FullAutoReply(on bool) string {
 			"mid-run."
 	}
 	return "Full auto is OFF — the loop asks on Discord before running each job."
+}
+
+// KeepGoingReply builds the confirmation for the keep-going state. Turning
+// the switch on warns that a failed auto job will not stop the loop, and
+// that it only changes what happens on failure — it starts nothing by
+// itself.
+func KeepGoingReply(on bool) string {
+	if on {
+		return "Keep going is ON — when an auto-executed job fails, you will be " +
+			"notified but the loop keeps working through the next ready job " +
+			"instead of pausing. It only matters while auto_mode or full auto " +
+			"is running. Say !keepgoing off to pause on failure again."
+	}
+	return "Keep going is OFF — a failed auto job pauses autonomous execution " +
+		"and notifies you, as usual."
 }

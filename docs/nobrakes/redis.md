@@ -37,6 +37,7 @@ secrets. To change memory/eviction, edit that line and
 | `nobrakes:auto_mode` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
 | `nobrakes:nightly_flag` | string | `""` or a UTC date `"YYYY-MM-DD"` | `""` |
 | `nobrakes:full_auto` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
+| `nobrakes:keep_going` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
 | `nobrakes:running` | string | the id of the one auto job currently executing | absent (no auto job running) |
 
 - **`nobrakes:auto_mode`** — the operator's master switch for autonomous
@@ -62,6 +63,18 @@ secrets. To change memory/eviction, edit that line and
   `!fullauto`), read by the agent-run loop at the top of every stage-3
   iteration. Missing or corrupt values read as `"off"` — the supervised
   ask path is the default.
+- **`nobrakes:keep_going`** — the keep-going switch. When `"on"`, a
+  failed auto-executed job does **not** pause autonomous execution: the
+  owner is still notified (`jarvis-jobs failnote`), `auto_mode` and
+  `full_auto` stay as they are, and the loop moves on to the next ready
+  job — the failed job stays `failed` in the store and is not re-picked.
+  When `"off"` (default), an auto failure trips autopause as usual. It is
+  a *modifier on the failure path*, not an execution switch: it starts
+  nothing by itself, and `Pause` (the autopause path) deliberately leaves
+  it untouched. Written by the operator (`jarvis-jobs keepgoing on|off`,
+  Discord `!keepgoing`, the checkpoint's "Keep going" button), read by
+  the agent-run loop on the auto-failure path. Missing or corrupt values
+  read as `"off"` — a failure still pauses.
 - **`nobrakes:running`** — the safety guardrail (nobrakes-6): marks the
   single auto job that is executing right now. Value: the job id. It is
   created by `jarvis-jobs run -auto` (the full-auto path of the agent-run
@@ -72,7 +85,7 @@ secrets. To change memory/eviction, edit that line and
   the holder's job status in the job store and overwrites the marker when
   the holder is no longer `running`. An operator can inspect it with
   `jarvis-jobs running` and clear a stuck one with
-  `jarvis-jobs running clear`. The three flag keys are pre-created at
+  `jarvis-jobs running clear`. The four flag keys are pre-created at
   install time (`EnsureDefaults` in `internal/nobrakes` does the same
   idempotently at runtime — it only fills missing keys and never clobbers
   operator state); `nobrakes:running` is transient and only exists while
@@ -90,10 +103,13 @@ due, _ := st.NightlyDue(ctx, time.Now())  // idempotency check
 _ = st.SetNightlyFlag(ctx, time.Now().UTC().Format("2006-01-02"))
 fa, _ := st.FullAutoOn(ctx)          // false when key missing/corrupt
 _ = st.SetFullAuto(ctx, true)        // manual override (full auto mode)
+kg, _ := st.KeepGoingOn(ctx)         // false when key missing/corrupt
+_ = st.SetKeepGoing(ctx, true)       // manual override (keep-going mode)
 ```
 
 Constants: `nobrakes.AutoModeKey`, `nobrakes.NightlyFlagKey`,
-`nobrakes.FullAutoKey`, `nobrakes.AutoModeOn/Off`. Unit-tested against
+`nobrakes.FullAutoKey`, `nobrakes.KeepGoingKey`,
+`nobrakes.AutoModeOn/Off`. Unit-tested against
 miniredis in `internal/nobrakes/nobrakes_test.go`; later NoBrakes tasks
 reuse this store.
 
@@ -216,22 +232,30 @@ iteration, and `!pause` / `!restart` still interrupt a running job.
 ## The control surface (nobrakes-3, extended in nobrakes-7)
 
 The owner flips `auto_mode` from Discord with the `!automode` command in the
-`jarvis-chat` daemon, and `full_auto` with `!fullauto`. Both
-are owner-only by construction — the chat layer only fires the handler for
-the owner DM, the same guarantee as `!pause`/`!restart`:
+`jarvis-chat` daemon, `full_auto` with `!fullauto`, and the keep-going
+modifier with `!keepgoing`. All are owner-only by construction — the chat
+layer only fires the handler for the owner DM, the same guarantee as
+`!pause`/`!restart`:
 
     !automode on     # auto_mode -> "on": nightly jobs will auto-enqueue
     !automode off    # auto_mode -> "off": nightly jobs stay parked
     !fullauto on     # full_auto -> "on": ready jobs run immediately, any time
     !fullauto off    # full_auto -> "off": back to the supervised ask
+    !keepgoing on    # keep_going -> "on": an auto failure notifies, does not pause
+    !keepgoing off   # keep_going -> "off": an auto failure pauses, as usual
 
 The command dials the flag store (`$JARVIS_REDIS`, default
 `redis://127.0.0.1:6379`), writes the value, reads it back, and confirms the
 stored result — turning it on warns that jobs will now run autonomously. A
 bad or missing argument gets a usage line and leaves the flag untouched;
 Redis unreachable or disabled leaves the flag unchanged and says so.
-`cmd/jarvis-chat/automode.go` and `cmd/jarvis-chat/fullauto.go`
-(unit-tested against miniredis).
+`cmd/jarvis-chat/automode.go`, `cmd/jarvis-chat/fullauto.go` and
+`cmd/jarvis-chat/keepgoing.go` (unit-tested against miniredis).
+
+The supervised checkpoint has the same switches as buttons: when the loop
+asks "Next: … who runs it?", the **Full auto**, **Auto mode** and
+**Keep going** buttons flip the corresponding flag on and return to the top
+of the loop (a set that cannot reach Redis is reported, never swallowed).
 
 The brain can flip the same switches in natural language ("turn on full
 auto"). Hermes registers `set_automode` / `set_fullauto` actions
@@ -266,7 +290,7 @@ commands also look at the loop:
 ```bash
 docker exec jarvis-redis redis-cli ping                     # PONG
 docker exec jarvis-redis redis-cli GET nobrakes:auto_mode   # off
-docker exec jarvis-redis redis-cli EXISTS nobrakes:auto_mode nobrakes:nightly_flag nobrakes:full_auto  # 3
+docker exec jarvis-redis redis-cli EXISTS nobrakes:auto_mode nobrakes:nightly_flag nobrakes:full_auto nobrakes:keep_going  # 4
 docker exec jarvis-redis redis-cli GET nobrakes:running     # (nil) while no auto job runs
 
 # restart (container comes back with state intact — AOF)
