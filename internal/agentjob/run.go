@@ -50,6 +50,13 @@ type Runner struct {
 	// consumed, and a stale file from a previous round is cleared by
 	// agent-run before it starts the next one.
 	RestartSignalFile string
+	// StopSignalFile, if non-empty, is polled during job execution. When it
+	// appears (written by the dashboard's Stop button or `jarvis-jobs stop`),
+	// the running command is killed and the job is parked: out of the active
+	// queue, so the agent-run loop skips to the next work. The file is
+	// consumed, and a stale file from a previous round is cleared by
+	// agent-run before it starts the next one.
+	StopSignalFile string
 	// ReplySignalFile, if non-empty, is written by signalWatcher when a
 	// Discord message arrives but the engine slot is free — the round is NOT
 	// paused. After the job completes, agent-run checks for this file and
@@ -319,6 +326,13 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	if driver == "" {
 		driver = "local"
 	}
+	// A stop signal left over from a previous round (one that landed after
+	// that round's watcher was gone) must not park this round's job: clear
+	// it before the claim. A stop pressed during this round lands after the
+	// command has started, and the watcher picks it up from there.
+	if r.StopSignalFile != "" {
+		_ = os.Remove(r.StopSignalFile)
+	}
 	j, err := r.Store.Claim(id, round, driver)
 	if err != nil {
 		return j, err
@@ -388,7 +402,7 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	if err := cmd.Start(); err != nil {
 		return j, err
 	}
-	if r.SignalFile != "" || r.RestartSignalFile != "" {
+	if r.SignalFile != "" || r.RestartSignalFile != "" || r.StopSignalFile != "" {
 		go r.signalWatcher(j.ID, cmd)
 	}
 	runErr := cmd.Wait()
@@ -402,12 +416,15 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	return r.finish(j, rec, buf.String(), runErr, wh)
 }
 
-// signalWatcher polls SignalFile and RestartSignalFile every second. A
-// restart signal (a "!restart" DM) kills the running command and re-queues
-// the job for a fresh run. A pause signal (an incoming user message) checks
-// whether the engine's chat slot is free. If free, it writes ReplySignalFile
-// and lets the round finish (agent-run sends a light reply after completion).
-// If the slot is busy, it kills the running command and pauses the job.
+// signalWatcher polls SignalFile, RestartSignalFile and StopSignalFile
+// every second. A restart signal (a "!restart" DM) kills the running command
+// and re-queues the job for a fresh run. A stop signal (the dashboard's Stop
+// button or `jarvis-jobs stop`) kills the command and parks the job, so the
+// agent-run loop skips to the next work. A pause signal (an incoming user
+// message) checks whether the engine's chat slot is free. If free, it writes
+// ReplySignalFile and lets the round finish (agent-run sends a light reply
+// after completion). If the slot is busy, it kills the running command and
+// pauses the job.
 func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 	for {
 		if r.RestartSignalFile != "" {
@@ -420,6 +437,20 @@ func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 				}
 				_ = r.Store.Restart(id)
 				_ = os.Remove(r.RestartSignalFile) // consume; don't kill the next round
+				return
+			}
+		}
+		if r.StopSignalFile != "" {
+			if _, err := os.Stat(r.StopSignalFile); err == nil {
+				// Owner stopped the work: park before kill, like pause —
+				// finish() reads the status after Wait returns, so a job
+				// that is already Parked keeps it instead of showing up
+				// as failed. The file is consumed so a stale stop never
+				// hits the next round.
+				if err := r.Store.Stop(id); err == nil && cmd.Process != nil {
+					cmd.Process.Kill()
+				}
+				_ = os.Remove(r.StopSignalFile)
 				return
 			}
 		}
@@ -502,6 +533,9 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 	switch {
 	case cur.Status == Paused:
 		j.Status = Paused
+	case cur.Status == Parked:
+		// Stop: the watcher already took the job out of the queue.
+		j.Status = Parked
 	case cur.Status == Ready:
 		// !restart: the watcher already put the job back in the queue.
 		j.Status = Ready
@@ -524,8 +558,11 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 		rec.Kwh, rec.PowerCost = j.Kwh, j.PowerCost
 		if runErr != nil {
 			failErr := runErr
-			if restarted {
+			switch {
+			case restarted:
 				failErr = errors.New("restarted by owner")
+			case cur.Status == Parked:
+				failErr = errors.New("stopped by owner")
 			}
 			r.History.Fail(rec, failErr)
 		} else {

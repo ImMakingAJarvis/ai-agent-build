@@ -814,6 +814,107 @@ func TestStoreRestartIgnoresFinishedJob(t *testing.T) {
 	}
 }
 
+func TestStoreStop(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Instructions: "do a"})
+
+	// A stop that lands when nothing is running is refused…
+	if err := s.Stop("a"); err == nil {
+		t.Fatal("want an error stopping a ready job")
+	}
+	// …a running job parks…
+	if err := s.SetStatus("a", State{Status: Running}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Stop("a"); err != nil {
+		t.Fatal(err)
+	}
+	// …and a late one is a no-op on a parked job.
+	if err := s.Stop("a"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get("a")
+	if got.Status != Parked {
+		t.Fatalf("want parked, got %s", got.Status)
+	}
+	// A late stop can never park a finished job.
+	if err := s.SetStatus("a", State{Status: Done}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Stop("a"); err == nil {
+		t.Fatal("want an error stopping a done job")
+	}
+}
+
+func TestNextSkipsParked(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Priority: 10})
+	ingest(t, s, Spec{ID: "b", Priority: 1})
+	if err := s.SetStatus("a", State{Status: Parked}); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "b" {
+		t.Fatalf("parked jobs are out of the queue; want b, got %v", j)
+	}
+}
+
+func TestSignalWatcherStopParksJob(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Instructions: "do a"})
+
+	stopFile := filepath.Join(t.TempDir(), "stop-signal")
+	r := runner(t, s, `while sleep 0.1; do :; done`)
+	r.StopSignalFile = stopFile
+
+	type result struct {
+		j   Job
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		j, err := r.Run(context.Background(), "a", "r1", "local", "")
+		done <- result{j, err}
+	}()
+
+	// Wait until the round is actually running, so the signal is acted on.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, _ := s.Get("a")
+		if got.Status == Running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job never reached running: %s", got.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	_ = os.WriteFile(stopFile, nil, 0o644)
+
+	out := <-done
+	if out.err == nil {
+		t.Fatal("want an error from the killed round, got nil")
+	}
+	if out.j.Status != Parked {
+		t.Fatalf("returned job: want parked after stop, got %s", out.j.Status)
+	}
+	got, _ := s.Get("a")
+	if got.Status != Parked {
+		t.Fatalf("stored status: want parked after stop, got %s", got.Status)
+	}
+	// The signal must be consumed, so it cannot park the next round.
+	if _, err := os.Stat(stopFile); !os.IsNotExist(err) {
+		t.Fatal("stop-signal should be consumed")
+	}
+}
+
 func TestReadDocSection(t *testing.T) {
 	// Read J0.9 section from the actual doc file
 	instr, doc := readDocSection("../..", "docs/jobs/j0-queue-work-source.md", "j0.9")
