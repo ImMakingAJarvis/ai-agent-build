@@ -460,6 +460,27 @@ func (s *Store) Pause(id string) error {
 	return s.setState(id, j.State)
 }
 
+// Stop parks a running job: the round is killed and the job is taken out
+// of the active queue, so the agent-run loop skips to the next work. It is
+// the counterpart of Pause, but the job is not left in the queue; re-queue
+// it later with SetStatus(Ready). Like Pause, it is a no-op when the job
+// is already parked, and it refuses a job that is not running: a signal
+// that lands after a clean finish must not park a done or skipped job.
+func (s *Store) Stop(id string) error {
+	j, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if j.Status == Parked {
+		return nil
+	}
+	if j.Status != Running {
+		return fmt.Errorf("job %s is %s, not running", id, j.Status)
+	}
+	j.Status = Parked
+	return s.setState(id, j.State)
+}
+
 // Restart puts a running job back to ready for a fresh run (the "!restart"
 // chat command kills the round and re-queues it). It is the counterpart of
 // Pause, but a no-op when the job is not running: a signal that lands after

@@ -14,6 +14,9 @@
 //	jarvis-jobs running [clear]            show (or clear) the id of the auto
 //	                                       job that holds the running marker
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
+//	jarvis-jobs stop <id>            stop a running job: kill the round
+//	                               and park the job out of the queue — the
+//	                               loop skips to the next work
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
 //	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet|superagent] [-source S]
 //	                   [-class fix|build|background] [-priority N] [-depends a,b]
@@ -53,6 +56,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -71,7 +75,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue")
+		die("usage: jarvis-jobs list [status]|next|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -125,6 +129,13 @@ func main() {
 			die("pause <id>")
 		}
 		if err := store.Pause(args[0]); err != nil {
+			die("%v", err)
+		}
+	case "stop":
+		if len(args) != 1 {
+			die("stop <id>")
+		}
+		if err := stopJob(store, args[0]); err != nil {
 			die("%v", err)
 		}
 	case "skip", "requeue":
@@ -677,11 +688,15 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 		die("history: %v", err)
 	}
 	r := &agentjob.Runner{Store: store, History: h}
-	if conf := os.Getenv("JARVIS_CONF"); conf != "" {
+	if conf := confDir(); conf != "" {
 		r.SignalFile = conf + "/pause-signal"
 		// !restart DM (jarvis-chat) writes this; the signal watcher kills
 		// the round and re-queues the job for a fresh run.
 		r.RestartSignalFile = conf + "/restart-signal"
+		// Stop button (dashboard) or `jarvis-jobs stop` writes this; the
+		// signal watcher kills the round and parks the job so the loop
+		// skips to the next work.
+		r.StopSignalFile = conf + "/stop-signal"
 	}
 	// Sample GPU power for the whole round; the total lands in the job
 	// state and history as kWh + $ at the configured JARVIS_POWER_RATE.
@@ -691,6 +706,67 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 		return s.Stop
 	}
 	return r
+}
+
+// confDir returns JARVIS_CONF, defaulting to ~/.config/jarvis — the same
+// directory jarvis-chat and the dashboard use for signal files. The runner
+// only polled signal files when JARVIS_CONF was set, which it is not in
+// production, so !pause / !restart / stop were silently dead before.
+func confDir() string {
+	if d := os.Getenv("JARVIS_CONF"); d != "" {
+		return d
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "jarvis")
+}
+
+// stopJob stops a running job: it writes the stop-signal file the runner's
+// signal watcher polls, then waits for the job to be parked. If the watcher
+// never acts (an old runner binary, or the round already ending), it parks
+// the job directly so the loop skips it either way.
+func stopJob(store *agentjob.Store, id string) error {
+	j, err := store.Get(id)
+	if err != nil {
+		return err
+	}
+	switch j.Status {
+	case agentjob.Parked:
+		fmt.Printf("already parked: %s (re-queue with: jarvis-jobs requeue %s)\n", j.ID, j.ID)
+		return nil
+	case agentjob.Running, agentjob.Claimed:
+		// fall through — write the signal
+	default:
+		return fmt.Errorf("job %s is %s, not running", j.ID, j.Status)
+	}
+	conf := confDir()
+	if conf == "" {
+		return errors.New("cannot determine the JARVIS_CONF directory")
+	}
+	if err := os.WriteFile(conf+"/stop-signal", nil, 0o644); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if j, err := store.Get(id); err == nil && j.Status == agentjob.Parked {
+			fmt.Printf("stopped: %s — parked (re-queue with: jarvis-jobs requeue %s)\n", j.ID, j.ID)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	// The watcher did not act: park the store entry directly. If the job
+	// has finished meanwhile, Stop refuses and the stale signal is cleared.
+	if err := store.Stop(id); err != nil {
+		os.Remove(conf + "/stop-signal")
+		return err
+	}
+	fmt.Printf("stopped: %s — parked (re-queue with: jarvis-jobs requeue %s)\n", j.ID, j.ID)
+	return nil
 }
 
 // cmdList prints all jobs in queue order, optionally filtered to one status
