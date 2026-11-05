@@ -27,9 +27,18 @@ for rollback.
 | `grafana` | Dashboards (provisioned from `docker/monitoring/grafana/provisioning/`) | 3000 | `jarvis-grafana` | named volume `grafana_data` |
 | `node-exporter` | Host CPU/RAM/disk metrics (host rootfs bind-mounted RO) | 9100 | `jarvis-node-exporter` | — |
 | `nvidia-exporter` | GPU metrics (nvidia-smi wrapper, nvidia runtime) | 3001 | `jarvis-nvidia-exporter` | — |
+| `jellyfin` | Reel media server (Jellyfin 12.4, 4090 NVENC transcoding); demo library now, NAS share at `/mnt/jarvis` later. docs/reel/jellyfin-baseline.md | 8096 (LAN) | `jarvis-jellyfin` | config: `/var/lib/jarvis/jellyfin/config`; media ro: `/var/lib/jarvis/jellyfin/demo`; admin creds in `~/.config/jarvis/jellyfin.env` (never committed) |
+
+The full map of every service and its connections — including the host
+units (agent-run, plane-bridge, jarvis-watchdog, the engines) and the
+external boxes (HA, Plane, Discord) — is in docs/system-frame.md.
 
 Not containerized, on purpose:
 
+- **`jarvis-engine` (host unit)** — since 2026-11-05 the *canonical* brain
+  runs as the host unit on 127.0.0.1:11434, while the compose `engine`
+  container sits as a network-less zombie (the watchdog escalates it, never
+  auto-heals it). See docs/system-frame.md §2 and §8.
 - **`agent-run` / `agent-resume`** — the loop that runs the agent itself
   (Claude Code rounds from the job queue). It needs the host user account,
   sudo, the repo working tree and the CLI toolchain; it is also what manages
@@ -76,7 +85,7 @@ the driver lib is injected by the nvidia runtime.
 ## Verifying the stack
 
 ```bash
-docker compose ps                 # 14 services (15 with --profile optional)
+docker compose ps                 # 17 services (18 with --profile optional)
 curl -s 127.0.0.1:11434/v1/models | head -c 100                    # engine: serving jarvis-brain
 curl -s 127.0.0.1:11435/health | head -c 60                        # igpu helper: {"status":"ok"}
 curl -s 127.0.0.1:8120/health | head -c 200                        # art: model loaded + GPU
