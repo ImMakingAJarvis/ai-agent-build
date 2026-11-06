@@ -450,6 +450,55 @@ func TestApplyOrderReordersAndReclassifies(t *testing.T) {
 	}
 }
 
+func TestSetDriverRewritesSpec(t *testing.T) {
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "p1", Class: ClassBuild})
+	if err := s.SetDriver("p1", "igpu"); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.Get("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Driver != "igpu" {
+		t.Fatalf("driver %q, want igpu", j.Driver)
+	}
+	// The driver rewrite must not touch the state.
+	if j.Status != Ready {
+		t.Fatalf("status %q, want ready", j.Status)
+	}
+	if err := s.SetDriver("p1", "nope"); err == nil {
+		t.Fatal("SetDriver accepted an unknown driver")
+	}
+}
+
+func TestNextExcluding(t *testing.T) {
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a"})
+	ingest(t, s, Spec{ID: "b"})
+	j, err := s.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "a" {
+		t.Fatalf("Next got %v, want a", j)
+	}
+	j, err = s.NextExcluding(map[string]bool{"a": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "b" {
+		t.Fatalf("NextExcluding(a) got %v, want b", j)
+	}
+	j, err = s.NextExcluding(map[string]bool{"a": true, "b": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j != nil {
+		t.Fatalf("NextExcluding(a,b) got %v, want nil", j)
+	}
+}
+
 func TestClaimedJobReadyAfterRestartAndNotRunTwice(t *testing.T) {
 	s := newStore(t)
 	ingest(t, s, Spec{ID: "a"})
