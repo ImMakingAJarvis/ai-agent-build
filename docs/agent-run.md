@@ -26,6 +26,43 @@ command line; the driver of the last round is recorded in
 `~/.config/jarvis/driver` (a reboot mid-round resumes on the same
 driver).
 
+## Photo window (jobs tagged `photo`)
+
+Photo jobs need the 4090 **without** the brain on it: the art/bench
+services wait for ~12 GB of free VRAM before generating
+(docs/brain-swap.md). The loop brackets the whole ready batch with a
+swap window instead of the old manual bracket (two extra igpu jobs):
+
+- **Before the first photo job runs** the loop calls
+  `jarvis-swap out --jobs <batch> --force`: watchdog maintenance window
+  first (the brain re-arms at the deadline), brain unit stopped,
+  art+bench up, and every ready photo job flipped to the iGPU helper at
+  priority 1000. The pulled job then runs on the **igpu** driver
+  regardless of its spec driver.
+- **`jarvis-jobs photo-ready`** lists the batch (ready + tagged, in run
+  order; empty output = drained). The tag is set by image-queue
+  ingestion or `jarvis-jobs add -tags photo`.
+- **Re-flip:** `out` is idempotent — while the window is open, each
+  photo pull re-flips the batch, so photo jobs that arrive mid-window
+  get the iGPU driver and the maintenance window extends as long as
+  there is work.
+- **When the batch drains** (no ready photo jobs) the loop calls
+  `jarvis-swap in` at the top of the next iteration: window closed,
+  art+bench stopped, brain reloaded and API-checked.
+- **Only windows the loop opened get closed by the loop:** a successful
+  `out` writes the marker `~/.config/jarvis/photo-window`, and the
+  drain check requires it. A manual window (docs/brain-swap.md) for
+  non-photo work — e.g. a VRAM sweep with no photo jobs — never gets a
+  marker and is left to the owner. A manual window *with* a photo batch
+  is adopted: the first photo pull re-flips it and writes the marker.
+- **Failure handling:** if `out` cannot open the window (e.g. brain down
+  without a maintenance window — the 2026-11-04 mode the watchdog owns),
+  the loop backs off 60 s and retries, notifying once per failure
+  stretch, not per retry. A failed `in` is retried the same way; the
+  watchdog deadline re-arms the brain either way. `jarvis-swap`
+  notifies Discord on both a successful out and in; swap.log is
+  `~/.local/state/jarvis/swap.log`.
+
 ## Restart from chat (`!restart`)
 
 DM `!restart` to the bot while a round is running: `jarvis-chat` writes
