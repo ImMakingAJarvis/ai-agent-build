@@ -27,6 +27,34 @@ restart the unit, re-test. If the setup changes substantially, update
 `scripts/jarvis-helper-context.md` and re-run `scripts/install_helper.sh`.
 Investigation + benchmarks: docs/igpu-model-handler.md.
 
+## Brain swap — photo window (mechanical, do not re-plan)
+
+Photo generation (art :8120 / bench :8121) needs 12 GB free of the 4090's
+VRAM; the brain holds ~17.6 GB, so photos run in a swap window: the brain
+stops, photo jobs run on the iGPU helper, the brain comes back. Runbook:
+`docs/brain-swap.md`. State: `jarvis-swap status`.
+
+When photo work needs the GPU, in your own round:
+1. `jarvis-swap handoff`, fill "In flight" + "First thing on return"
+   (2-3 lines each — resume, don't re-plan).
+2. Enqueue **swap-out**: fix, `-priority 100 -driver igpu`, instructions:
+   "Brain swap OUT. Run exactly `jarvis-swap out --jobs <photo ids>
+   --maintain 4h --job <this job's id>`. Exit 0 → finish (exit 0).
+   Otherwise `jarvis-discord notify 'swap OUT failed: <last line of
+   ~/.local/state/jarvis/swap.log>'` and finish failed. Do nothing else."
+3. Enqueue **swap-in**: fix, `-priority 100 -driver igpu`,
+   `-depends <all photo ids>`, same instructions but `jarvis-swap in`.
+   End the round.
+4. Next brain round after the window: read `notes/brain-handoff.md`, do
+   "First thing on return", verify the photos, `mkdir -p notes/archive &&
+   mv notes/brain-handoff.md notes/archive/`, jarvis-notes done.
+
+Hard rules: never run `jarvis-swap out`/`in` from a local (brain) round —
+only from an igpu round; never stop the brain mid-round. The watchdog
+maintain window re-arms the brain at the deadline no matter what;
+`jarvis-jobs next` skips jobs whose engine is down, so local jobs wait
+through the window.
+
 ## The vector graph — more data than the repo
 
 The **Jarvis Memory Service** (`jarvis-memory` systemd unit,
