@@ -201,6 +201,11 @@ services:
     image: jarvis/jarvis-chat:local
     container_name: jarvis-chat
     restart: always
+    # agentRunUp() (cmd/jarvis-chat/schedule.go) checks the host agent-run
+    # loop with pgrep; without the host PID namespace it can never see host
+    # processes and reports agent-run "not running" even when it is up. The
+    # image side of the check is procps in docker/jarvis-go/Dockerfile.
+    pid: host
     env_file:
       - /home/agent/.config/jarvis/agent.env
     environment:
