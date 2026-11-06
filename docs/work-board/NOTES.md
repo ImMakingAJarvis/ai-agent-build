@@ -725,3 +725,36 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   automatically.
 - Binary reinstalled to `/usr/local/bin/jarvis-board` (root-owned;
   `sudo install` after `go build`).
+
+## Broker-restart survival: bridge publishers + location workers reconnect (2026-11-06)
+
+- **Found (job chat-1793835565-142a):** the RabbitMQ container restarted
+  ~12:20 Nov 5 while both consumers of the queues were up.
+  - `plane-bridge` had wired its publishers once at start and `IsClosed`
+    only reports a Close *we* initiated, so after the broker came back it
+    still held no connection: the TST-3 run job re-triggered and failed
+    every 5-minute catch-up with "no location queue publisher (broker
+    down at bridge start)" until a bridge restart.
+  - `task-runner`'s `LocationWorker.consumeLoop` returned when the
+    deliveries channel closed (the dead broker connection), so the
+    workers went silent forever; the republished TST-3 message sat in
+    `jobs.cpu` unwatched.
+- **Bridge fix (46f6ac6):** the publishers now sit behind a `queueRelay`
+  (mutex-guarded holder of the `bridge` publisher interfaces). A failed
+  start runs a 30 s connect retry; a live one starts a `watchConn`
+  watchdog that calls `Conn.Reconnect` while the new `Conn.Dead` reports
+  the underlying AMQP connection is gone. A publish racing the swap
+  errors once; store-settle + catch-up re-trigger retries it. Unit test:
+  `cmd/plane-bridge/main_test.go` (nil relay fails with the store-settle
+  error; swap changes what publishes see next; interface conformance).
+- **Runner fix:** `LocationWorker.consumeLoop` now re-subscribes when the
+  deliveries channel closes and the worker is still running —
+  `Conn.Reconnect`, then re-declare/bind/QoS/Consume on a fresh channel,
+  5 s backoff while the broker is down. The pause flag is untouched, so a
+  game-watchdog GPU pause survives a broker restart. A `Stop` still wins:
+  the running check happens before the resubscribe.
+- **Live-verified:** both binaries deployed and the services restarted.
+  02:57 — restarted bridge republished TST-3 to `jobs.cpu` on the startup
+  catch-up; 03:03 — the new task-runner picked it up, the TST-3 card
+  moved to In Progress, and the run started (the C1 loop end-to-end, the
+  first Plane task executed by the loop).
