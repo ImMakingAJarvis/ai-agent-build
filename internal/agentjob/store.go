@@ -98,8 +98,9 @@ type Spec struct {
 	// tag on the board as the canonical auto-eligibility source.
 	KanbanTaskID string `json:"kanban_task_id,omitempty"`
 
-	// Tags is an open set of job-level markers (job.json "tags"). The only
-	// tag with built-in semantics today is TagNightly.
+	// Tags is an open set of job-level markers (job.json "tags"). Tags with
+	// built-in semantics: TagNightly (NoBrakes nightly gate), TagPhoto
+	// (brain-swap photo window).
 	Tags []string `json:"tags,omitempty"`
 }
 
@@ -110,6 +111,14 @@ type Spec struct {
 // the canonical source; this job-level tag remains the fallback for
 // parked jobs with no kanban link.
 const TagNightly = "nightly"
+
+// TagPhoto marks a job as photo work: it needs the 4090 without the brain
+// (the art/bench services wait for 12 GB free before generating, see
+// docs/brain-swap.md). The queue watcher (scripts/agent-run) opens a
+// brain-swap window for the batch of ready photo-tagged jobs before the
+// first one runs and swaps the brain back in when the batch drains. Set
+// with `jarvis-jobs add -tags photo`, and by image-queue ingestion.
+const TagPhoto = "photo"
 
 // HasTag reports whether the spec carries tag.
 func (sp Spec) HasTag(tag string) bool {
@@ -308,6 +317,28 @@ func (s *Store) List() ([]Job, error) {
 		return x.ID < y.ID
 	})
 	return jobs, nil
+}
+
+// PhotoReady returns the ids of every ready job tagged photo (TagPhoto),
+// in queue run order (the order Next would hand them out). The queue
+// watcher uses this as the brain-swap photo batch (docs/brain-swap.md):
+// it opens the swap window for the whole list before the first run and
+// closes it once the list is empty.
+func (s *Store) PhotoReady() ([]string, error) {
+	if err := s.Recover(); err != nil {
+		return nil, err
+	}
+	jobs, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, j := range jobs {
+		if j.Status == Ready && j.HasTag(TagPhoto) {
+			ids = append(ids, j.ID)
+		}
+	}
+	return ids, nil
 }
 
 // SetOrder updates a job's class and within-class priority (higher priority
