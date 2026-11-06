@@ -76,3 +76,4 @@
 - 2026-11-05T06:07Z Nathan wants GLM 5.3 flash benchmarked alongside the MoE sweep: its own project, cache-amount tests, and a spot in the potential-models registry
 - 2026-11-06T00:07Z Nathan questioned the bot's 'agent-run is not running' status claim — bot status messages must be truthful
 - 2026-11-06T04:48Z Nathan: audit 8 days of work logs, find where the model repeats the same questions or re-investigates machine state it should already know, and update tools/prompt/references to eliminate the repeated thinking.
+- 2026-11-06T11:14Z Nathan asked how to get Plane board work to the agent: tags? set to ready? what's the holdup — answered in docs/plane-to-queue.md (Ready IS the trigger; no per-task tags; holdup was C1 unmerged + broker-restart gap, both fixed). Also asked (Discord buttons, 3am): start planning the ~35 Backlog epic tasks now / a few / later.
