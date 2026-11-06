@@ -13,7 +13,9 @@ the machine: docker containers, loaded llama.cpp engines (model, quant,
 context, VRAM, health), host RAM/load/uptime/disk, systemd services
 (agent-run, jarvis-watchdog, plane-bridge, task-runner), agent-job queue
 counts, and the swap-window state. Exit 1 means something is down (the
-report still prints).
+report still prints). If your round prompt has no snapshot (the running
+jarvis-jobs binary predates the injection), run it yourself at the
+start of the round.
 
     jarvis-stack-status            # human readable
     jarvis-stack-status --json     # machine readable
