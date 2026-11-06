@@ -9,8 +9,9 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app "./${BIN}"
 
 FROM debian:trixie-slim
+# procps: jarvis-chat's agentRunUp() liveness check shells out to pgrep.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates procps \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/app /usr/local/bin/app
 # uid/gid of the 'agent' user on the host: mounted host dirs are agent-owned.
