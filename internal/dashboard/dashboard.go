@@ -383,6 +383,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/queue", s.handleQueue)
 	mux.HandleFunc("POST /api/queue/reorder", s.handleQueueReorder)
 	mux.HandleFunc("POST /api/queue/band-order", s.handleQueueBandOrder)
+	mux.HandleFunc("POST /api/queue/edit", s.handleQueueEdit)
 	mux.HandleFunc("POST /api/plans", func(w http.ResponseWriter, r *http.Request) { s.plans.handlePlanUpload(s, w, r) })
 	mux.HandleFunc("GET /api/plans", func(w http.ResponseWriter, r *http.Request) { s.plans.handlePlanList(s, w, r) })
 	mux.HandleFunc("GET /html/plans-section", func(w http.ResponseWriter, r *http.Request) { s.plans.handlePlanListHTML(s, w, r) })
