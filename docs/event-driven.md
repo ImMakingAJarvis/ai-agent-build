@@ -1,0 +1,77 @@
+# Event-driven work: flow queues
+
+The worker queues (voice/fix/coding/background, jobs.gpu/cpu/igpu) move
+*jobs* from the scheduler to a model. **Flow queues** (`flow.<name>`) are the
+event-driven channel between models *across rounds*: one round publishes a
+job to a flow queue, finishes; another model does the work and publishes the
+result back; the first model's next round consumes it and continues.
+
+## The pattern
+
+1. **Publish** the job to `flow.<name>` — the message carries the
+   instructions for the target model *and* a `context` block left for the
+   publisher's next round.
+2. **Wake the target**: a flow queue has no worker of its own, so the
+   publisher also adds a small agent job (or publishes `kind=agent` to a
+   standard queue) telling the target model to consume `flow.<name>` and do
+   what it says.
+3. The target model **does the work**, then **publishes the result back to
+   the same flow queue** and adds a small agent job that wakes the
+   publisher's brain (that is what `flow.e2e-wake` messages are for).
+4. The publisher's **next round consumes** the flow queue
+   (`jarvis-mq consume flow.<name>`), reads the result plus the context it
+   left itself, and continues.
+5. **Tidy up**: `jarvis-mq delete flow.<name>` once the flow is finished
+   (a durable empty queue is harmless, but deleting keeps the broker clean).
+
+## Semantics
+
+- Queues are **created on demand** (`PublishFlow` declares + binds before
+  every publish; re-declaring with identical args is a no-op). They are not
+  in `rabbitmq/definitions.json` because every round can spawn its own.
+- Messages are **persistent**: a message published before any consumer
+  exists sits on the broker until consumed.
+- Flow queues are **not priority queues** — ordering is guaranteed by the
+  single consumer (the next round), so no AMQP priority is sent.
+- **Peek, then consume**: `peek` inspects without removing (fetch-unacked,
+  then nack-requeue in reverse order to restore front-of-queue order); if
+  the process dies between fetch and put-back the broker requeues the
+  unacked messages, so nothing is lost. `consume` pops and acks.
+- **Message IDs must be unique per publish** (the worker uses the id as the
+  agent-job id when it ingests `kind=agent`). `jarvis-mq` defaults to
+  `mq-<unix>-<6 random hex>`; the superagent tool uses `sa-<unix>-<suffix>`.
+  Never reuse a fixed id.
+
+## CLI
+
+    jarvis-mq publish flow.avatar --kind agent --title "make avatar" \
+        --instructions "generate the image, save it, publish the result to \
+        flow.avatar, then add a local agent job that consumes flow.avatar" \
+        --context "discord avatar for the identity DM, 512x512" \
+        --payload size=512
+    jarvis-mq peek flow.avatar            # inspect without removing
+    jarvis-mq consume flow.avatar         # pop up to 1 message (or -n N, --json)
+    jarvis-mq depth flow.avatar
+    jarvis-mq queues                      # all queues with depths
+    jarvis-mq purge flow.avatar           # drop the messages, keep the queue
+    jarvis-mq delete flow.avatar          # drop the queue too
+
+Guards: publishing to a queue that is neither `flow.*` nor a known queue is
+refused (the topic exchange would silently drop it), as is `delete` of a
+worker-owned queue (voice, fix, coding, background, jobs.*, image).
+`--driver/--class/--effort` map onto the agent-job fields so a published
+`kind=agent` message carries its routing.
+
+## In-process (superagent)
+
+The superagent executor has a `rabbitmq` tool — the same operations as the
+CLI (`publish|consume|peek|depth` with the same message fields) — so a
+running agent can hand work to another model mid-run without shelling out.
+
+## Code
+
+- `internal/queue/flow.go` — `FlowQueueName`, `IsFlowQueue`,
+  `EnsureFlowQueue`, `PublishFlow` (confirm-mode, waits for the broker ack),
+  `PopFlow`, `PeekFlow`, `PurgeFlow`, `DeleteFlow`.
+- `cmd/jarvis-mq/main.go` — the CLI above.
+- `internal/superagent/tools.go` — `runMQ`, the in-process tool.

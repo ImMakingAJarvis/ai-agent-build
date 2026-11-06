@@ -41,8 +41,9 @@ func runner(t *testing.T, s *Store, script string) *Runner {
 	return &Runner{
 		Store: s, History: h,
 		Command:  func(driver, prompt, effort string) *exec.Cmd { return exec.Command("sh", "-c", script) },
-		PRLookup: func(string) string { return "" },
-		Brief:    func(string) string { return "RULES" },
+		PRLookup:   func(string) string { return "" },
+		Brief:      func(string) string { return "RULES" },
+		StackStatus: func() string { return "" },
 	}
 }
 
@@ -300,7 +301,7 @@ func TestDefaultCommandSuperagentDriver(t *testing.T) {
 
 func TestPromptHasRulesJobAndNote(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir()) // don't drain the real inbox
-	r := &Runner{Brief: func(string) string { return "RULES" }}
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT", Branch: "br"}}, "local", "NOTE")
 	for _, w := range []string{"RULES", "d0", "TEXT", "br", "NOTE"} {
 		if !strings.Contains(p, w) {
@@ -309,12 +310,41 @@ func TestPromptHasRulesJobAndNote(t *testing.T) {
 	}
 }
 
+func TestPromptIncludesMachineSnapshot(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	snap := "STACK 2026-11-05\nOK: 3 engine(s) serving"
+	r := &Runner{
+		Brief:       func(string) string { return "RULES" },
+		StackStatus: func() string { return snap },
+	}
+	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
+	for _, w := range []string{"MACHINE SNAPSHOT at round start", snap} {
+		if !strings.Contains(p, w) {
+			t.Fatalf("prompt lacks %q:\n%s", w, p)
+		}
+	}
+	// Order: brief, then snapshot, then the job line.
+	bi, si, ji := strings.Index(p, "RULES"), strings.Index(p, "MACHINE SNAPSHOT"), strings.Index(p, "=== YOUR JOB THIS ROUND")
+	if !(bi < si && si < ji) {
+		t.Fatalf("bad ordering: brief=%d snapshot=%d job=%d", bi, si, ji)
+	}
+}
+
+func TestPromptOmitsEmptySnapshot(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
+	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
+	if strings.Contains(p, "MACHINE SNAPSHOT") {
+		t.Fatal("empty snapshot must not add a section")
+	}
+}
+
 func TestPromptIncludesIdleOwnerMessages(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
 	if _, err := inbox.Send("hello from the owner"); err != nil {
 		t.Fatal(err)
 	}
-	r := &Runner{Brief: func(string) string { return "RULES" }}
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
 	if !strings.Contains(p, "hello from the owner") ||
 		!strings.Contains(p, "while the agent was idle") {
