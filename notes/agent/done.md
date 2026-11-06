@@ -102,3 +102,5 @@
 - 2026-11-05T06:07Z [chat-1793833477-49fb] GLM 5.3 flash joined the MoE benchmark lineup: Plane project GLM (epic GLM-1 + 6 cache points GLM-2..7), list doc + sweep plan, registry entry glm5.3-flash (PR #160)
 - 2026-11-06T00:07Z [chat-1793859839-b30e] jarvis-chat: agent-run liveness check fixed — pgrep in-container needed procps + pid:host; anchored pattern; PR #167
 - 2026-11-06T04:48Z [chat-1793860533-bc43] Reduced repeated machine-state thinking (PR #170): jarvis-stack-status extended (host/services/queue/swap) and its output injected as MACHINE SNAPSHOT into every round prompt (Runner.StackStatus); new gh-pr-wait polls PR mergeability; Machine-state section in stage3 briefs + global CLAUDE.md; bootstrap.sh drift fixed (brain-guard paragraph backfilled)
+- 2026-11-06T08:46Z [feat-event-driven-mq] flow queues + jarvis-mq CLI + superagent rabbitmq tool for event-driven handoff between models (PR #171)
+- 2026-11-06T08:51Z [e2e-flow-wake-1793953900] Event-driven E2E round-trip verified end-to-end: consumed flow.e2e-wake (result=ok + image + context), deleted queue, closed the loop (consume side of PR #171)
