@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# gh-pr-wait — wait until GitHub reports a definite mergeable state for a PR.
+#
+# After a push, `gh pr view --json mergeable` says UNKNOWN while GitHub
+# computes. The old pattern (sleep, re-check, repeat — by hand, in the
+# model's context) burned a round's tokens on waiting. This does the
+# waiting outside the model: it polls every 15 s and returns when there
+# is a definite answer.
+#
+# Usage: gh-pr-wait <PR> [timeout-seconds]
+#   <PR>               PR number (current repo) or repo#N / full URL
+#   timeout-seconds    default 300; 0 = wait indefinitely
+#
+# Exit codes (the model branches on these, no re-checking needed):
+#   0  open and MERGEABLE
+#   1  CONFLICTING — merge origin/main into the branch, resolve, push,
+#      and re-run this command
+#   2  merged or closed — nothing left to do on the PR
+#   3  timed out while GitHub was still computing (UNKNOWN)
+#
+# Prints one verdict line on stdout; quiet while waiting.
+set -u
+
+pr="${1:?usage: gh-pr-wait <PR> [timeout-seconds]}"
+timeout="${2:-300}"
+export GH_TOKEN="${GH_TOKEN:-$(ghapp-token)}"
+deadline=$(( $(date +%s) + timeout ))
+
+while :; do
+  out=$(gh pr view "$pr" --json state,mergeable 2>/dev/null)
+  if [[ -n "$out" ]]; then
+    state=$(printf '%s' "$out" | sed -n 's/.*"state":"\([A-Z]*\)".*/\1/p')
+    mergeable=$(printf '%s' "$out" | sed -n 's/.*"mergeable":"\([A-Z_]*\)".*/\1/p')
+    case "$state" in
+      MERGED|CLOSED)
+        echo "PR $pr is $state — nothing left to do on it."
+        exit 2
+        ;;
+    esac
+    case "$mergeable" in
+      MERGEABLE)
+        echo "PR $pr is open and MERGEABLE."
+        exit 0
+        ;;
+      CONFLICTING)
+        echo "PR $pr is CONFLICTING — merge origin/main into the branch, resolve, push, re-run."
+        exit 1
+        ;;
+      *)
+        : # UNKNOWN — keep waiting
+        ;;
+    esac
+  fi
+  if (( timeout > 0 )) && (( $(date +%s) >= deadline )); then
+    echo "timed out after ${timeout}s — PR $pr still UNKNOWN (GitHub still computing)."
+    exit 3
+  fi
+  sleep 15
+done
