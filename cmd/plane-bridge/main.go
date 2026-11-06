@@ -40,6 +40,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -130,19 +131,41 @@ func run(log *slog.Logger) error {
 	// B1: plan_epic jobs jump to the front of the background queue. A
 	// RabbitMQ outage must not stop the bridge — the store ingest is the
 	// idempotency anchor — so a failed connect degrades to store-only.
-	var planQueue bridge.PlanQueuePublisher
-	var locationQueue bridge.LocationQueuePublisher
-	qconn, err := queue.NewConn()
-	if err != nil {
-		log.Warn("rabbitmq unavailable; planning jobs are store-only", "err", err)
+	// The relay makes that degradation temporary: a connect retry until
+	// the broker is back, then a watchdog that reconnects a dead
+	// connection (broker restart, network drop), so the C1 catch-up
+	// re-trigger of run jobs can publish them without a bridge restart.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	relay := &queueRelay{}
+	if qconn, err := queue.NewConn(); err != nil {
+		log.Warn("rabbitmq unavailable; jobs are store-only until the broker is back", "err", err)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(queueRetry):
+				}
+				qc, err := queue.NewConn()
+				if err != nil {
+					log.Warn("rabbitmq still unavailable, retrying", "err", err)
+					continue
+				}
+				relay.set(queue.NewPlanPublisher(qc, queue.BackgroundQueue), queue.NewLocationPublisher(qc))
+				log.Info("queue publishers ready (broker back)")
+				go watchConn(ctx, log, qc)
+				return
+			}
+		}()
 	} else {
 		defer qconn.Close()
-		planQueue = queue.NewPlanPublisher(qconn, queue.BackgroundQueue)
+		relay.set(queue.NewPlanPublisher(qconn, queue.BackgroundQueue), queue.NewLocationPublisher(qconn))
 		log.Info("plan queue publisher ready", "queue", queue.BackgroundQueue)
 		// C1: run_task jobs are placement-routed to the location queues
 		// (jobs.gpu/cpu/igpu), consumed by the host task-runner.
-		locationQueue = queue.NewLocationPublisher(qconn)
 		log.Info("location queue publisher ready")
+		go watchConn(ctx, log, qconn)
 	}
 
 	webhookURL := envOr("BRIDGE_WEBHOOK_URL", "")
@@ -153,9 +176,6 @@ func run(log *slog.Logger) error {
 		}
 		webhookURL = fmt.Sprintf("http://%s:%s/webhook/plane", ip, portOf(listen))
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// C1: the run_task placement decision needs to know which locations
 	// this box has (A5); detect once and share with the board-label
@@ -176,8 +196,8 @@ func run(log *slog.Logger) error {
 		Workspace:     workspace,
 		EventsFile:    eventsFile,
 		ModelsFile:    modelsFile,
-		PlanQueue:     planQueue,
-		LocationQueue: locationQueue,
+		PlanQueue:     relay,
+		LocationQueue: relay,
 		Present:       present,
 	})
 	if err != nil {
@@ -398,4 +418,68 @@ func defaultSecretFile() string {
 
 func defaultEventsFile() string {
 	return agentjob.DataDir() + "/plane-bridge/events.jsonl"
+}
+
+// queueRetry is the period for the broker connect retry and the dead-
+// connection watchdog.
+const queueRetry = 30 * time.Second
+
+// queueRelay holds the queue publishers behind a mutex so a (re)connect
+// can swap them in without touching a publish in flight. While no
+// publisher is set (broker down at start, before the retry lands) the
+// methods fail with the error the bridge expects: the job settles failed
+// and the catch-up re-triggers it once the publisher is back.
+type queueRelay struct {
+	mu       sync.Mutex
+	plan     bridge.PlanQueuePublisher
+	location bridge.LocationQueuePublisher
+}
+
+func (r *queueRelay) set(plan bridge.PlanQueuePublisher, location bridge.LocationQueuePublisher) {
+	r.mu.Lock()
+	r.plan = plan
+	r.location = location
+	r.mu.Unlock()
+}
+
+func (r *queueRelay) PublishPlan(ctx context.Context, m queue.Message) (int, error) {
+	r.mu.Lock()
+	p := r.plan
+	r.mu.Unlock()
+	if p == nil {
+		return 0, errors.New("no plan queue publisher (broker down at bridge start)")
+	}
+	return p.PublishPlan(ctx, m)
+}
+
+func (r *queueRelay) PublishLocation(ctx context.Context, loc string, m queue.Message) error {
+	r.mu.Lock()
+	p := r.location
+	r.mu.Unlock()
+	if p == nil {
+		return errors.New("no location queue publisher (broker down at bridge start)")
+	}
+	return p.PublishLocation(ctx, loc, m)
+}
+
+// watchConn reconnects qconn while its underlying AMQP connection is dead
+// (broker restart, network drop). Reconnect is safe under concurrent
+// publish: a publish racing the swap errors once and the bridge's
+// store-settle plus catch-up re-trigger retries it.
+func watchConn(ctx context.Context, log *slog.Logger, qconn *queue.Conn) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(queueRetry):
+		}
+		if !qconn.Dead() {
+			continue
+		}
+		if err := qconn.Reconnect(); err != nil {
+			log.Warn("rabbitmq reconnect failed, retrying", "err", err)
+			continue
+		}
+		log.Info("rabbitmq reconnected; publishers live again")
+	}
 }
