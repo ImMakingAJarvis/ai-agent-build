@@ -355,6 +355,34 @@ func alive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
+// Edit updates a ready job's title and/or instructions — the text of the
+// work. A non-empty field is replaced; an empty field leaves the stored
+// text unchanged. It refuses jobs that are not ready: the queue UI edits
+// queued work only, and re-writing the text under an in-flight or finished
+// job would be wrong (finished jobs are re-triggered with Refresh instead).
+func (s *Store) Edit(id, title, instructions string) error {
+	if !ValidID(id) {
+		return fmt.Errorf("agentjob: bad job id %q", id)
+	}
+	if title == "" && instructions == "" {
+		return fmt.Errorf("agentjob: nothing to edit for job %s", id)
+	}
+	j, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if j.Status != Ready {
+		return fmt.Errorf("agentjob: job %s is %s, not ready", id, j.Status)
+	}
+	if title != "" {
+		j.Title = title
+	}
+	if instructions != "" {
+		j.Instructions = instructions
+	}
+	return writeJSON(filepath.Join(s.JobDir(id), "job.json"), j.Spec)
+}
+
 // Recover puts claimed/running jobs whose owner process is gone (crash or
 // reboot) back to ready. A job whose owner is alive is left alone, so it is
 // never run twice at once.

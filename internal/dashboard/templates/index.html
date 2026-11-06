@@ -441,9 +441,11 @@
     border-bottom: 1px solid var(--border);
     border-left: 3px solid var(--muted);
   }
+  .qband-photo .qband-head { border-left-color: var(--purple); }
   .qband-fix .qband-head { border-left-color: var(--red); }
   .qband-build .qband-head { border-left-color: var(--yellow); }
   .qband-background .qband-head { border-left-color: var(--blue); }
+  .qjob-photo { border-color: var(--purple); }
   .qband-count { color: var(--muted); font-weight: 400; font-size: 0.72rem; }
   .qband-body { padding: 6px; min-height: 44px; }
   .qband-empty {
@@ -480,6 +482,41 @@
   .qjob-title { color: var(--fg); font-size: 0.83rem; font-weight: 500; }
   .qjob-meta { color: var(--muted); font-size: 0.7rem; margin-top: 3px; }
   .qjob-blocked { color: var(--yellow); font-weight: 600; }
+  /* Edit: the button sits at the card's right edge; the form (title input +
+     text area) replaces the card's content while it is open. */
+  .qjob-edit {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    margin-top: 2px;
+    font-size: 0.7rem;
+    padding: 2px 10px;
+  }
+  .qedit-title {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    font-size: 0.8rem;
+    padding: 4px 6px;
+    background: var(--card);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .qedit-text {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    font-size: 0.78rem;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    padding: 4px 6px;
+    background: var(--card);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    resize: vertical;
+  }
+  .qedit-title:focus, .qedit-text:focus { outline: none; border-color: var(--blue); }
+  .qedit-actions { display: flex; gap: 6px; margin-top: 6px; }
   @media (max-width: 640px) {
     body { padding: 12px; }
     .cost-row, .queue-row, .slots-row { grid-template-columns: 1fr 1fr; }
