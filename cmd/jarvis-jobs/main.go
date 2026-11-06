@@ -7,6 +7,10 @@
 //	                                       is skipped (left ready), so the
 //	                                       worker idles through a brain-swap
 //	                                       window (docs/brain-swap.md)
+//	jarvis-jobs photo-ready              comma-separated ids of the ready
+//	                                       photo-tagged jobs, in run order
+//	                                       (empty line = none, so the
+//	                                       brain-swap photo batch has drained)
 //	jarvis-jobs run <id> [-driver local|igpu|sonnet|superagent] [-round N] [-note TEXT]
 //	                   [-auto]             run under the NoBrakes guard:
 //	                                       take the auto-run marker (at most
@@ -82,7 +86,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue")
+		die("usage: jarvis-jobs list [status]|next|photo-ready|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -107,6 +111,16 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("%s\t%s\n", j.ID, j.Title)
+	case "photo-ready":
+		ids, err := store.PhotoReady()
+		if err != nil {
+			die("%v", err)
+		}
+		// Comma-separated ids in run order; an empty line (not an error)
+		// means no ready photo jobs — the photo batch has drained. The
+		// queue watcher reads this to open and close brain-swap photo
+		// windows (scripts/agent-run, docs/agent-run.md).
+		fmt.Println(strings.Join(ids, ","))
 	case "show":
 		if len(args) != 1 {
 			die("show <id>")
