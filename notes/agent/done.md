@@ -100,3 +100,4 @@
 - 2026-11-05T03:43Z [chat-1793849788-18bc] requeued 13 of today's failed jobs (all from the afternoon connection-refused outage) back to ready (job chat-1793849788-18bc)
 - 2026-11-05T04:37Z [chat-1793831245-3eb6] NoBrakes checkpoint buttons (Full auto / Auto mode / Keep going) on the supervised ask + keep-going mode: !keepgoing, jarvis-jobs keepgoing on|off, jarvis-jobs failnote; a failed auto job notifies without pausing while keep_going is on, off by default, fails safe (PR #159)
 - 2026-11-05T06:07Z [chat-1793833477-49fb] GLM 5.3 flash joined the MoE benchmark lineup: Plane project GLM (epic GLM-1 + 6 cache points GLM-2..7), list doc + sweep plan, registry entry glm5.3-flash (PR #160)
+- 2026-11-06T02:19Z [chat-1793860390-eb5b] Brain swap protocol: scripts/jarvis-swap (status/out/in/handoff) + driver-aware jarvis-jobs next + requeue -driver/-class/-priority + docs/brain-swap.md runbook + CLAUDE.md section (PR #168)
