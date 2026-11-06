@@ -597,6 +597,13 @@ func photoSpecDefaults(spec *agentjob.Spec, prompt string) {
 	if spec.Driver == "" {
 		spec.Driver = "igpu"
 	}
+	// The "photo" tag (agentjob.TagPhoto once it lands on main) is what
+	// the queue watcher keys on to bracket the batch with a brain-swap
+	// window (scripts/agent-run) — photo work never runs with the brain
+	// on the 4090.
+	if !spec.HasTag("photo") {
+		spec.Tags = append(spec.Tags, "photo")
+	}
 }
 
 // getQueueDepths queries RabbitMQ for the pending message count on each
