@@ -8,8 +8,12 @@ Type=simple
 User=agent
 SupplementaryGroups=video render
 PIDFile=/run/jarvis-engine-igpu.pid
+# --host 0.0.0.0 so the stack's containers (voice, chat) can reach the
+# helper model via host.docker.internal while the worker is deep in a job;
+# the model carries no secrets, so LAN visibility is acceptable.
 ExecStart=/opt/jarvis-igpu/bin/llama-server \
     -m /opt/jarvis-igpu/models/jarvis-igpu.gguf \
+    --host 0.0.0.0 \
     --port 11435 \
     -dev Vulkan1 \
     -ngl 99 \

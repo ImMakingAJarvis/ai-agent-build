@@ -2,6 +2,9 @@ package kanban
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -164,5 +167,99 @@ func TestDeleteMissing(t *testing.T) {
 	}
 	if err := s.DeleteTask("nope"); err == nil {
 		t.Error("DeleteTask of missing task should error")
+	}
+}
+
+// TestUpdateTaskNightlyRoundTrip covers NoBrakes 4/6: a task can be tagged
+// nightly and the tag is persisted to its JSON, and the tag can be cleared.
+func TestUpdateTaskNightlyRoundTrip(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := s.AddEpic("epic", "")
+	tk := s.AddTask(ep.ID, "task", "", 5)
+
+	// A fresh task is not nightly, and the field is omitted from its JSON.
+	raw, err := json.Marshal(tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(raw); strings.Contains(got, "nightly") {
+		t.Errorf("fresh task JSON carries nightly: %s", got)
+	}
+
+	if err := s.UpdateTaskNightly(tk.ID, true); err != nil {
+		t.Fatalf("UpdateTaskNightly(true): %v", err)
+	}
+	got, err := s.GetTask(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Nightly {
+		t.Errorf("task.Nightly = false after set, want true")
+	}
+	// The tag survives a reload from disk (it is stored on the task JSON).
+	if raw, _ := os.ReadFile(filepath.Join(s.root, "tasks", tk.ID+".json")); !strings.Contains(string(raw), `"nightly": true`) {
+		t.Errorf("task JSON does not persist nightly: %s", raw)
+	}
+
+	// Clearing the tag works too.
+	if err := s.UpdateTaskNightly(tk.ID, false); err != nil {
+		t.Fatalf("UpdateTaskNightly(false): %v", err)
+	}
+	if got, _ := s.GetTask(tk.ID); got.Nightly {
+		t.Errorf("task.Nightly = true after clear, want false")
+	}
+}
+
+// TestListNightlyTasks is the queryable nightly set (NoBrakes 4/6): only
+// tagged tasks are returned, in ListTasks order; an empty set marshals as [].
+func TestListNightlyTasks(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := s.AddEpic("epic", "")
+	a := s.AddTask(ep.ID, "a", "", 1)
+	b := s.AddTask(ep.ID, "b", "", 9)
+	s.AddTask(ep.ID, "c", "", 5) // left untagged; must not appear
+	// Tag the lowest and the highest priority task, not the middle one.
+	if err := s.UpdateTaskNightly(a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateTaskNightly(b.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListNightlyTasks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, t := range got {
+		ids = append(ids, t.ID)
+	}
+	// ListTasks order is priority desc, so b (9) precedes a (1); c is absent.
+	if len(ids) != 2 || ids[0] != b.ID || ids[1] != a.ID {
+		t.Fatalf("ListNightlyTasks = %v, want [b a]", ids)
+	}
+
+	// With nothing tagged the set is empty but non-nil (marshals as []).
+	s2, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep2 := s2.AddEpic("epic2", "")
+	s2.AddTask(ep2.ID, "plain", "", 5)
+	empty, err := s2.ListNightlyTasks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty == nil {
+		t.Fatal("ListNightlyTasks on an empty board = nil, want non-nil empty")
+	}
+	if b, _ := json.Marshal(empty); string(b) != "[]" {
+		t.Errorf("empty nightly set marshals as %s, want []", b)
 	}
 }

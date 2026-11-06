@@ -32,9 +32,11 @@ services:
 
   # Live job stream: the agent runner XADDs the agent's stream-json output
   # as it happens (internal/agentjob/stream.go); the dashboard tails it for
-  # GET /jobs/{id} live views (internal/dashboard/live.go). Host-side
-  # runners reach it at 127.0.0.1:6379 (JARVIS_REDIS left unset); the
-  # dashboard container reaches it at redis:6379 (set below).
+  # GET /jobs/{id} live views (internal/dashboard/live.go). It is also the
+  # NoBrakes flag store behind !automode / !fullauto in jarvis-chat.
+  # Host-side runners reach it at 127.0.0.1:6379 (JARVIS_REDIS left
+  # unset); the dashboard and chat containers reach it at redis:6379
+  # (JARVIS_REDIS set below in each service).
   redis:
     image: redis:7
     container_name: jarvis-redis
@@ -90,7 +92,13 @@ services:
         "--cache-type-k", "q4_0",
         "--cache-type-v", "q4_0",
         "--slot-save-path", "/var/lib/jarvis/slots",
+        "--metrics",
         "--log-disable" ]
+    # --metrics: expose the engine's Prometheus endpoint at /metrics
+    # (llamacpp:* counters — prompt/generation tokens, decode seconds,
+    # live tok/s gauges). Prometheus scrapes it in the "llama_engine"
+    # job; it counts ALL traffic to the engine (chat, agent, jobs),
+    # not just the worker's queue jobs.
 
   # ---------------- art (photo generation, port 8120) ---------------------
   # Z-Image-Turbo (6B, 8-step turbo) behind a small FastAPI+diffusers app.
@@ -161,6 +169,29 @@ services:
       # (same mount as the ha service).
       - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
 
+  # ---------------- reel: jellyfin (media server, port 8096) --------------
+  # Stock Jellyfin — the Reel plan's day-1 baseline (docs/reel/jellyfin-baseline.md).
+  # Runs on this box, not the Synology, so transcoding can use the 4090's NVENC.
+  # Media is bind-mounted read-only: the demo library in /var/lib/jarvis/jellyfin/demo
+  # until the NAS share (jarvissdrive) is mounted at /mnt/jarvis — then swap the
+  # second mount to /mnt/jarvis/<media> and restart the container (docs, below).
+  # Config: /var/lib/jarvis/jellyfin/config on the host; admin credentials live in
+  # /home/agent/.config/jarvis/jellyfin.env (chmod 600, never in the repo).
+  jellyfin:
+    image: jellyfin/jellyfin:12.4
+    container_name: jarvis-jellyfin
+    restart: unless-stopped
+    # nvidia runtime: /dev/nvidia* + driver libs for NVENC (jellyfin-ffmpeg7);
+    # hardware transcoding is toggled in .../jellyfin/config/jellyfin.xml.
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+    ports:
+      - "8096:8096"
+    volumes:
+      - /var/lib/jarvis/jellyfin/config:/config
+      - /var/lib/jarvis/jellyfin/demo:/media:ro
+
   # ---------------- chat / dashboard / ha ----------------
   chat:
     build:
@@ -170,6 +201,11 @@ services:
     image: jarvis/jarvis-chat:local
     container_name: jarvis-chat
     restart: always
+    # agentRunUp() (cmd/jarvis-chat/schedule.go) checks the host agent-run
+    # loop with pgrep; without the host PID namespace it can never see host
+    # processes and reports agent-run "not running" even when it is up. The
+    # image side of the check is procps in docker/jarvis-go/Dockerfile.
+    pid: host
     env_file:
       - /home/agent/.config/jarvis/agent.env
     environment:
@@ -178,11 +214,24 @@ services:
       ENGINE_URL: http://engine:11434
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       DASHBOARD_ADDR: dashboard:8080
+      # NoBrakes flag store (!automode / !fullauto) + job live streams.
+      # Must be the compose service name: the StreamAddr() default
+      # (127.0.0.1:6379) is the container's own loopback, where there is
+      # no Redis, so the flag commands could never reach the store.
+      JARVIS_REDIS: redis://redis:6379
       # Vector DB over work logs / job history / queue (RAG + search action).
       MEMORY_URL: http://memory:8101
       # Photo generation for the !photo Discord command.
       ART_URL: http://art:8120
       ART_GALLERY_URL: http://111.1.2.27:8120
+      # While the worker is deep in a job the brain is saturated, so
+      # classify/chat LLM calls route to the iGPU helper engine (host
+      # loopback 11435 via host-gateway). The worker-busy signal is the job
+      # store, already mounted below.
+      FALLBACK_ENGINE_URL: http://host.docker.internal:11435
+      FALLBACK_MODEL: jarvis-igpu
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
@@ -275,9 +324,20 @@ services:
       JARVIS_VOICE: glados
       OLLAMA_URL: http://engine:11434
       MEMORY_URL: http://memory:8101
+      # While the worker is deep in a job the 4090 brain is saturated, so
+      # conversation LLM calls route to the iGPU helper engine instead. It
+      # listens on the host loopback (11435), reachable from this container
+      # via host-gateway.
+      FALLBACK_OLLAMA_URL: http://host.docker.internal:11435
+      FALLBACK_MODEL: jarvis-igpu
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /opt/jarvis-voice:/opt/jarvis-voice
       - /home/agent/.cache/huggingface:/home/agent/.cache/huggingface:ro
+      # "Worker busy" signal: each job's state.json (status: running while
+      # the agent round is in progress).
+      - /home/agent/.local/share/jarvis/jobs:/home/agent/.local/share/jarvis/jobs:ro
       # self-signed TLS cert for the 8443 listener (voice_service.py's default
       # path ~/.config/jarvis/tls/voice.{crt,key}, HOME is /home/agent here);
       # regenerate with scripts/gen_voice_cert.sh after the IP changes

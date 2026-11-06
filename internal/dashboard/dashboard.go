@@ -379,6 +379,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/approvals", s.handleApprovals)
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
 	mux.HandleFunc("POST /api/owner-message", s.handleOwnerMessage)
+	mux.HandleFunc("POST /api/jobs/{id}/stop", s.handleJobStop)
 	mux.HandleFunc("GET /api/queue", s.handleQueue)
 	mux.HandleFunc("POST /api/queue/reorder", s.handleQueueReorder)
 	mux.HandleFunc("POST /api/queue/band-order", s.handleQueueBandOrder)
@@ -406,6 +407,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/kanban/subtasks/{id}", s.kanban.apiToggleSubTask)
 	mux.HandleFunc("GET /api/kanban/subtasks", s.kanban.apiListSubTasks)
 	mux.HandleFunc("GET /api/kanban/models", s.kanban.apiListModels)
+	mux.HandleFunc("GET /api/nobrakes/audit", s.handleNobrakesAudit)
 	return mux
 }
 
@@ -937,6 +939,77 @@ func (s *Server) handleOwnerMessage(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "Queued — no job is running; the next round starts with it. ")
 	}
 	fmt.Fprintf(w, "<span class=\"muted\">%d waiting</span>", inbox.Count())
+}
+
+// handleJobStop stops a running job (the Stop button on the job page). It
+// writes the stop-signal file the runner's signal watcher polls; the
+// watcher kills the round and parks the job, so the agent-run loop skips to
+// the next work. If the watcher does not act in time (an old runner binary
+// or the round already ending) the job is parked directly. Responds with an
+// HTML fragment for the page's fetch handler.
+func (s *Server) handleJobStop(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !agentjob.ValidID(id) {
+		http.Error(w, "bad job id", http.StatusBadRequest)
+		return
+	}
+	st, err := agentjob.Open(filepath.Dir(s.historyPath))
+	if err != nil {
+		http.Error(w, "could not open the job store", http.StatusInternalServerError)
+		return
+	}
+	j, err := st.Get(id)
+	if err != nil {
+		http.Error(w, "no such job", http.StatusNotFound)
+		return
+	}
+	switch j.Status {
+	case agentjob.Parked:
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, "Already parked — re-queue it to run it again.")
+		return
+	case agentjob.Running, agentjob.Claimed:
+		// fall through — request the stop
+	default:
+		http.Error(w, "job is not running", http.StatusConflict)
+		return
+	}
+	conf := os.Getenv("JARVIS_CONF")
+	if conf == "" {
+		home, _ := os.UserHomeDir()
+		conf = filepath.Join(home, ".config", "jarvis")
+	}
+	if err := os.WriteFile(conf+"/stop-signal", nil, 0o644); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The watcher polls every second, so a live runner parks the job well
+	// inside this window; it is only the fallback wait.
+	parked := false
+	for i := 0; i < 10 && !parked; i++ {
+		if j, err := st.Get(id); err == nil && j.Status == agentjob.Parked {
+			parked = true
+		} else {
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	if !parked {
+		// The watcher did not act: park the store entry directly. If the
+		// job finished meanwhile this is a no-op or a refusal — either way
+		// the status below reports the truth.
+		st.Stop(id)
+		if j, err := st.Get(id); err == nil {
+			parked = j.Status == agentjob.Parked
+		}
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if parked {
+		fmt.Fprintf(w, "Stopped — <code>%s</code> is parked out of the queue; the loop skips to the next work. Re-queue it any time to run it again.",
+			template.HTMLEscapeString(id))
+	} else {
+		fmt.Fprintf(w, "Stop requested — <code>%s</code> should park within a second.",
+			template.HTMLEscapeString(id))
+	}
 }
 
 // currentAgentJobID returns the id of the agent job that is running (or

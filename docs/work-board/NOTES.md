@@ -700,3 +700,28 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   task worktree is dropped after the merge, the epic worktree is kept so
   later tasks of the same epic build on it and NOTES.md accumulates there.
 - **Live-verified:** pending the toy-epic run (below).
+## P6+ — `jarvis-board state`/`done`: worker updates the Plane item on task completion (2026-11-04)
+
+- Job chat-1793781308-8f20 (Nathan): when the worker is done with a task
+  it should update the Plane task; add that to tools and/or CLAUDE.md.
+- **Tool:** `jarvis-board state <item> <state> [msg...]` moves the item
+  to `<state>` (matched by name, case-insensitive, via
+  `plane.StateByName` + `plane.SetState` — both already existed in P3)
+  and, when a trailing message is given, posts it as a model-prefixed
+  comment under the usual convention. `jarvis-board done <item> [msg...]`
+  is the completion shortcut (state `Done`). Prints
+  `<ref> -> <State> <link>`.
+- **Test:** `TestLiveStateCommand` (`cmd/jarvis-board/state_test.go`)
+  runs the built binary against a scratch project: state move
+  (lowercase name), the `done` shortcut with comment (comment verified
+  via `ListComments`), and an unknown state failing without moving the
+  item. Board left as found (project deleted in defer).
+- **CLAUDE.md:** the old rule "do not move item states from ad-hoc
+  rounds — state writeback is owned by C1" is replaced by a standing
+  instruction: after the PR is open and Discord is notified, the worker
+  moves the item to `Done` with a comment carrying the outcome and PR
+  link; a failed/stuck job goes to `Blocked` with the reason. The
+  worker owns these transitions until C1 writes states back
+  automatically.
+- Binary reinstalled to `/usr/local/bin/jarvis-board` (root-owned;
+  `sudo install` after `go build`).

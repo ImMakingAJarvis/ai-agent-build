@@ -41,8 +41,9 @@ func runner(t *testing.T, s *Store, script string) *Runner {
 	return &Runner{
 		Store: s, History: h,
 		Command:  func(driver, prompt, effort string) *exec.Cmd { return exec.Command("sh", "-c", script) },
-		PRLookup: func(string) string { return "" },
-		Brief:    func(string) string { return "RULES" },
+		PRLookup:   func(string) string { return "" },
+		Brief:      func(string) string { return "RULES" },
+		StackStatus: func() string { return "" },
 	}
 }
 
@@ -267,9 +268,40 @@ func TestDefaultCommandIgpuDriver(t *testing.T) {
 	}
 }
 
+// TestDefaultCommandSuperagentDriver is the acceptance test for the
+// superagent driver: the round runs the superagent CLI (its own
+// plan→act→verify loop, not the Claude Code harness) with the round's
+// prompt as its goal, and the env carries the model that drives it.
+func TestDefaultCommandSuperagentDriver(t *testing.T) {
+	t.Setenv("JARVIS_MODEL", "stale-model")
+	t.Setenv("LOCAL_MODEL", "")
+	cmd := defaultCommand("superagent", "do it", "off")
+	if cmd.Args[0] != "superagent" || len(cmd.Args) != 2 || cmd.Args[1] != "do it" {
+		t.Fatalf("superagent driver args = %v", cmd.Args)
+	}
+	if got := ModelFor("superagent"); got != "jarvis-brain" {
+		t.Errorf("ModelFor(superagent) = %q, want jarvis-brain", got)
+	}
+	if !strings.Contains(strings.Join(cmd.Env, "\n"), "JARVIS_MODEL=jarvis-brain") {
+		t.Error("superagent driver env lacks JARVIS_MODEL=jarvis-brain")
+	}
+	// No Claude Code harness flags may leak into the superagent command.
+	joined := strings.Join(cmd.Args, " ")
+	for _, no := range []string{"--dangerously-skip-permissions", "--output-format", "-p"} {
+		if strings.Contains(joined, no) {
+			t.Errorf("superagent args must not carry %q: %s", no, joined)
+		}
+	}
+	// SUPERAGENT_MODEL pins the engine model.
+	t.Setenv("SUPERAGENT_MODEL", "qwen-coder")
+	if got := ModelFor("superagent"); got != "qwen-coder" {
+		t.Errorf("ModelFor(superagent) with SUPERAGENT_MODEL = %q", got)
+	}
+}
+
 func TestPromptHasRulesJobAndNote(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir()) // don't drain the real inbox
-	r := &Runner{Brief: func(string) string { return "RULES" }}
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT", Branch: "br"}}, "local", "NOTE")
 	for _, w := range []string{"RULES", "d0", "TEXT", "br", "NOTE"} {
 		if !strings.Contains(p, w) {
@@ -278,12 +310,41 @@ func TestPromptHasRulesJobAndNote(t *testing.T) {
 	}
 }
 
+func TestPromptIncludesMachineSnapshot(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	snap := "STACK 2026-11-05\nOK: 3 engine(s) serving"
+	r := &Runner{
+		Brief:       func(string) string { return "RULES" },
+		StackStatus: func() string { return snap },
+	}
+	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
+	for _, w := range []string{"MACHINE SNAPSHOT at round start", snap} {
+		if !strings.Contains(p, w) {
+			t.Fatalf("prompt lacks %q:\n%s", w, p)
+		}
+	}
+	// Order: brief, then snapshot, then the job line.
+	bi, si, ji := strings.Index(p, "RULES"), strings.Index(p, "MACHINE SNAPSHOT"), strings.Index(p, "=== YOUR JOB THIS ROUND")
+	if !(bi < si && si < ji) {
+		t.Fatalf("bad ordering: brief=%d snapshot=%d job=%d", bi, si, ji)
+	}
+}
+
+func TestPromptOmitsEmptySnapshot(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
+	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
+	if strings.Contains(p, "MACHINE SNAPSHOT") {
+		t.Fatal("empty snapshot must not add a section")
+	}
+}
+
 func TestPromptIncludesIdleOwnerMessages(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
 	if _, err := inbox.Send("hello from the owner"); err != nil {
 		t.Fatal(err)
 	}
-	r := &Runner{Brief: func(string) string { return "RULES" }}
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
 	if !strings.Contains(p, "hello from the owner") ||
 		!strings.Contains(p, "while the agent was idle") {
@@ -780,6 +841,107 @@ func TestStoreRestartIgnoresFinishedJob(t *testing.T) {
 	got, _ := s.Get("a")
 	if got.Status != Done {
 		t.Fatalf("done job must stay done, got %s", got.Status)
+	}
+}
+
+func TestStoreStop(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Instructions: "do a"})
+
+	// A stop that lands when nothing is running is refused…
+	if err := s.Stop("a"); err == nil {
+		t.Fatal("want an error stopping a ready job")
+	}
+	// …a running job parks…
+	if err := s.SetStatus("a", State{Status: Running}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Stop("a"); err != nil {
+		t.Fatal(err)
+	}
+	// …and a late one is a no-op on a parked job.
+	if err := s.Stop("a"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get("a")
+	if got.Status != Parked {
+		t.Fatalf("want parked, got %s", got.Status)
+	}
+	// A late stop can never park a finished job.
+	if err := s.SetStatus("a", State{Status: Done}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Stop("a"); err == nil {
+		t.Fatal("want an error stopping a done job")
+	}
+}
+
+func TestNextSkipsParked(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Priority: 10})
+	ingest(t, s, Spec{ID: "b", Priority: 1})
+	if err := s.SetStatus("a", State{Status: Parked}); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "b" {
+		t.Fatalf("parked jobs are out of the queue; want b, got %v", j)
+	}
+}
+
+func TestSignalWatcherStopParksJob(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Instructions: "do a"})
+
+	stopFile := filepath.Join(t.TempDir(), "stop-signal")
+	r := runner(t, s, `while sleep 0.1; do :; done`)
+	r.StopSignalFile = stopFile
+
+	type result struct {
+		j   Job
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		j, err := r.Run(context.Background(), "a", "r1", "local", "")
+		done <- result{j, err}
+	}()
+
+	// Wait until the round is actually running, so the signal is acted on.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, _ := s.Get("a")
+		if got.Status == Running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job never reached running: %s", got.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	_ = os.WriteFile(stopFile, nil, 0o644)
+
+	out := <-done
+	if out.err == nil {
+		t.Fatal("want an error from the killed round, got nil")
+	}
+	if out.j.Status != Parked {
+		t.Fatalf("returned job: want parked after stop, got %s", out.j.Status)
+	}
+	got, _ := s.Get("a")
+	if got.Status != Parked {
+		t.Fatalf("stored status: want parked after stop, got %s", got.Status)
+	}
+	// The signal must be consumed, so it cannot park the next round.
+	if _, err := os.Stat(stopFile); !os.IsNotExist(err) {
+		t.Fatal("stop-signal should be consumed")
 	}
 }
 

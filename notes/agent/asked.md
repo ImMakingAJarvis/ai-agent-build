@@ -58,3 +58,21 @@
 - 2026-11-02T05:49Z A6 (job plan-epic-planner-plan-with-m-1793259204-12): per-location queues jobs.gpu/cpu/igpu each with its own worker so CPU/iGPU jobs (e.g. audio transcription) run alongside the GPU job; game watchdog pauses only the GPU queue
 - 2026-11-02T11:32Z B1 (plan_epic jumps the background queue): find and fix the root cause of the broker not honoring message priority. Resolved — it was the wrong queue-argument name (x-priority vs x-max-priority). B2 (worker model swap / cloud API) and B3 (Plan/Decompose/Review prompts + task schema) are next.
 - 2026-11-03T00:19Z Work-board Phase B is done through B5 (approval + re-plan); Nathan's plan has Phase C next: run_task execution on a toy epic, escalation/Blocked, and auto-PR
+- 2026-11-03T17:41Z Nathan noticed the Grafana token-per-second/decode panels weren't reporting correctly (job chat-1793680868-98b5) — wanted real engine throughput visible; decided fix = scrape the engine's own metrics endpoint instead of the worker's per-job counters.
+- 2026-11-03T18:17Z Nathan: when the worker is deep in work, use the igpu or cpu model for communication/voice
+- 2026-11-03T18:41Z Nathan uploaded the Reel plan (open-source Plex clone: Go media server on the 4090 box + web/Android/iPhone/Apple TV apps, Jellyfin as day-1 fallback) and wanted it queued as work items; open decisions for him at Gate 1 (scratch vs fork, MIT vs GPL, Apple dev account, users, name).
+- 2026-11-04T00:46Z Nathan wants full auto mode: a flag that lets the agent run queued jobs at any point (any time of day), as long as there is work in the queue — not just the nightly window (job chat-1793749887-62af, PR #143)
+- 2026-11-04T10:05Z Nathan: 'create a new agent based on the features of Deepseek's super agent' and integrate it into the existing system; round instruction !automode on (auto_mode set on)
+- 2026-11-04T17:46Z Nathan: when the worker is done with a task it should update the PLANE task — tool + CLAUDE.md instruction (job chat-1793781308-8f20)
+- 2026-11-04T17:57Z Nathan: enable the fullauto loop (17:35Z '!fullauto on'; the stale chat container queued it as a job — now fixed, the flag is on and the loop runs ready jobs at any time)
+- 2026-11-04T19:48Z Nathan: fix PR #147 (was CONFLICTING after main moved); the round's 'Jarvissfolder is what I meant' was a NAS clarification (share name `Jarviss`, job chat-1793820896-38de) attached to this round, not a PR change
+- 2026-11-04T18:54Z Nathan (Reel P0 round): NAS creds live in bootstrap.env — save in tools, use NAS for storing benchmark/results; clear the Steam library; mount 2TB Windows drive for NAS backup; format+use the empty 1TB SSD.
+- 2026-11-04T20:01Z Nathan: stop the Steam Big Picture process and delete all of the Steam library for now (job chat-1793821235-c342)
+- 2026-11-04T20:13Z Nathan wanted disk space of all drives visible in Grafana
+- 2026-11-04T20:23Z Nathan: chatbot or flag listener cannot change nobrakes flags — fix it and enable fullauto (done same round; the loop now runs ready jobs unattended)
+- 2026-11-04T20:34Z Nathan proposed adding 'save benchmark results to Jarviss' as a standing default for future jobs (job chat-1793820896-38de); confirmed yes — NAS is the durable store, the 1TB local is working space.
+- 2026-11-05T03:43Z requeue all previously failed jobs within the day — scope = failures finished today (local), older failures left alone
+- 2026-11-05T04:37Z Nathan: auto_mode + fullauto buttons on the Discord next-steps question, plus a keep-working-even-if-something-failed mode (job chat-1793831245-3eb6)
+- 2026-11-05T06:07Z Nathan wants GLM 5.3 flash benchmarked alongside the MoE sweep: its own project, cache-amount tests, and a spot in the potential-models registry
+- 2026-11-06T00:07Z Nathan questioned the bot's 'agent-run is not running' status claim — bot status messages must be truthful
+- 2026-11-06T04:48Z Nathan: audit 8 days of work logs, find where the model repeats the same questions or re-investigates machine state it should already know, and update tools/prompt/references to eliminate the repeated thinking.

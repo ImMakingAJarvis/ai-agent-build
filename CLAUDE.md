@@ -95,10 +95,21 @@ there.
 
       jarvis-discord notify --item T2I-3 "<status>"
 - Other subcommands: `jarvis-board item <ref>` (one-line summary with
-  state), `jarvis-board link <ref>` (URL only). Flags go BEFORE the
-  positional args.
+  state), `jarvis-board link <ref>` (URL only), `jarvis-board state <ref>
+  <State> [msg...]` and `jarvis-board done <ref> [msg...]` (move the item;
+  the message, when given, is also posted as a model-prefixed comment).
+  Flags go BEFORE the positional args.
 - Link format: `<PLANE_URL>/jarvis/browse/<PREFIX-<n>>` (browse works
   for any project in the workspace).
 - `plane-bridge` watches every project in `PLANE_PROJECTS` (workspace
-  webhooks, gated per project). Do not move item states from ad-hoc
-  rounds — state writeback is owned by the C1 phase of the plan.
+  webhooks, gated per project).
+- **When the worker is done with a task, it updates the Plane item.**
+  Until C1 writes states back automatically, the worker owns the
+  transition: after the PR is open and Discord is notified, move the
+  item and leave the outcome as a model-prefixed comment:
+
+      jarvis-board done T2I-3 "done: <what shipped> (PR #n)"
+
+  A failed or stuck job goes to `Blocked` with the reason
+  (`jarvis-board state T2I-3 Blocked "..."`) instead of being left
+  where it is.

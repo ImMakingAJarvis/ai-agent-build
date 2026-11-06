@@ -46,6 +46,23 @@ re-queued job.
 `!restart` restarts the *conversation*, not the service. To restart the
 agent-run **service** itself use the restart helper below.
 
+## Stopping a running job (park)
+
+The job log page's **Stop work** button (or `jarvis-jobs stop <id>`) writes
+`~/.config/jarvis/stop-signal`; the running job's signal watcher kills the
+round and parks the job. A parked job is out of the active queue — `Next()`
+never returns it — so the loop skips to the next work: in full auto the
+next ready job starts immediately, in supervised mode the next checkpoint
+asks about it. Re-queue a parked job with `jarvis-jobs requeue <id>`.
+
+- Like `!restart`, the signal file is consumed by the watcher and a stale
+  one is cleared before each round, so a stop sent between rounds cannot
+  park the next job. A late stop is a no-op: `Store.Stop` only acts on
+  `running` jobs.
+- The runner polls the signal files under `$JARVIS_CONF` (default
+  `~/.config/jarvis` when the variable is unset — the same directory
+  `jarvis-chat` and `jarvis-discord` use to write theirs).
+
 ## Restart the service (`agent-run-restart`)
 
 `/usr/local/bin/agent-run-restart` (repo: `scripts/agent-run-restart`,

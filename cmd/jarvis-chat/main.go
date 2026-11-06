@@ -122,7 +122,11 @@ func main() {
 		log.Fatal("jarvis-chat: no Discord bot configured (set DISCORD_BOT_TOKEN or BOT_1_TOKEN)")
 	}
 
-	ollamaClient := models.NewClient()
+	// While the worker is deep in a job the brain is saturated, so
+	// classify/chat calls route to the small fallback engine
+	// (FALLBACK_ENGINE_URL, the iGPU helper); NewFallbackClient is a
+	// pass-through when that is unset.
+	ollamaClient := NewFallbackClient(models.NewClient())
 	modelName := os.Getenv("LOCAL_MODEL")
 	if modelName == "" {
 		modelName = defaultModel
@@ -242,6 +246,32 @@ func main() {
 					nctx, ncancel := context.WithTimeout(context.Background(), 15*time.Second)
 					_ = d.Notify(nctx, msg)
 					ncancel()
+					return
+				}
+
+				// !automode on / off sets or clears the NoBrakes auto_mode
+				// flag in Redis (owner-only: this hook fires only for the
+				// owner DM, same as !pause / !restart).
+				if _, _, isAutoMode := cutAutoMode(content); isAutoMode {
+					handleAutoMode(d, agentjob.StreamAddr(), content)
+					return
+				}
+
+				// !fullauto on / off sets or clears the NoBrakes full-auto
+				// flag in Redis: when on, the agent-run loop runs the next
+				// ready job immediately at any time of day (owner-only, same
+				// as !automode).
+				if _, _, isFullAuto := cutFullAuto(content); isFullAuto {
+					handleFullAuto(d, agentjob.StreamAddr(), content)
+					return
+				}
+
+				// !keepgoing on / off sets or clears the NoBrakes keep-going
+				// flag in Redis: when on, a failed auto job notifies the
+				// owner without pausing autonomous execution (owner-only,
+				// same as !automode / !fullauto).
+				if _, _, isKeepGoing := cutKeepGoing(content); isKeepGoing {
+					handleKeepGoing(d, agentjob.StreamAddr(), content)
 					return
 				}
 

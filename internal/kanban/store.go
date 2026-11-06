@@ -337,6 +337,43 @@ func (s *Store) UpdateTaskModel(id, model string) error {
 	return writeJSON(path, t)
 }
 
+// UpdateTaskNightly sets or clears the nightly tag on a task (NoBrakes 4/6).
+// The nightly tag is the canonical source for the worker's auto-eligible set.
+func (s *Store) UpdateTaskNightly(id string, nightly bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, "tasks", id+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var t Task
+	if err := json.Unmarshal(b, &t); err != nil {
+		return err
+	}
+	t.Nightly = nightly
+	t.UpdatedAt = time.Now().UTC()
+	return writeJSON(path, t)
+}
+
+// ListNightlyTasks returns every nightly-tagged task, in the same
+// priority/creation order as ListTasks. This is the queryable "nightly set"
+// the NoBrakes nightly gate auto-enqueues from.
+func (s *Store) ListNightlyTasks() ([]Task, error) {
+	all, err := s.ListTasks()
+	if err != nil {
+		return nil, err
+	}
+	// Non-nil so an empty board marshals as [] and never as null.
+	out := make([]Task, 0, len(all))
+	for _, t := range all {
+		if t.Nightly {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 // DeleteTask removes a task file, its subtasks, and unlinks it from its epic.
 func (s *Store) DeleteTask(id string) error {
 	s.mu.Lock()

@@ -56,7 +56,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 1
+        "y": 18
       },
       "id": 1,
       "title": "GPU Utilization",
@@ -117,7 +117,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 1
+        "y": 18
       },
       "id": 2,
       "title": "GPU Temperature",
@@ -178,7 +178,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 1
+        "y": 18
       },
       "id": 3,
       "title": "GPU Power Draw",
@@ -239,7 +239,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 1
+        "y": 18
       },
       "id": 4,
       "title": "GPU Fan Speed",
@@ -329,7 +329,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 5
+        "y": 22
       },
       "id": 5,
       "title": "GPU Utilization & Memory Utilization",
@@ -391,7 +391,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 5
+        "y": 22
       },
       "id": 6,
       "title": "GPU Memory Usage",
@@ -433,6 +433,192 @@
       "type": "row"
     },
     {
+      "id": 500,
+      "title": "System \u2014 Disk",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "panels": []
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "id": 501,
+      "title": "Disk Usage by Mountpoint",
+      "type": "bargauge",
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "min": 0,
+        "max": 100
+      },
+      "targets": [
+        {
+          "expr": "(1 - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/etc/.*\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/etc/.*\"}) * 100",
+          "legendFormat": "{{mountpoint}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "color": "dark-blue"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "id": 502,
+      "title": "Free Space by Drive",
+      "type": "bargauge",
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": false
+      },
+      "targets": [
+        {
+          "expr": "node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/etc/.*\"}",
+          "legendFormat": "{{mountpoint}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "pointSize": 5,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "id": 503,
+      "title": "Disk Used Over Time",
+      "type": "timeseries",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/etc/.*\"} - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/etc/.*\"}",
+          "legendFormat": "{{mountpoint}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -467,7 +653,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 14
+        "y": 31
       },
       "id": 10,
       "title": "CPU Usage (avg)",
@@ -528,7 +714,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 14
+        "y": 31
       },
       "id": 11,
       "title": "RAM Usage",
@@ -590,7 +776,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 14
+        "y": 31
       },
       "id": 12,
       "title": "RAM Available",
@@ -651,7 +837,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 14
+        "y": 31
       },
       "id": 13,
       "title": "Swap Usage",
@@ -710,7 +896,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 35
       },
       "id": 14,
       "title": "CPU Usage by Mode",
@@ -801,7 +987,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 35
       },
       "id": 15,
       "title": "Memory Usage",
@@ -840,7 +1026,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 43
       },
       "id": 300,
       "title": "GPU Power & Clocks",
@@ -880,7 +1066,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 27
+        "y": 44
       },
       "id": 20,
       "title": "GPU Power Draw Over Time",
@@ -937,7 +1123,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 27
+        "y": 44
       },
       "id": 21,
       "title": "GPU Clocks",
@@ -969,7 +1155,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 300
+        "y": 317
       },
       "panels": [],
       "repeat": null,
@@ -984,7 +1170,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 301
+        "y": 318
       },
       "datasource": {
         "type": "prometheus",
@@ -1027,7 +1213,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 301
+        "y": 318
       },
       "datasource": {
         "type": "prometheus",
@@ -1075,7 +1261,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 301
+        "y": 318
       },
       "datasource": {
         "type": "prometheus",
@@ -1120,7 +1306,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 301
+        "y": 318
       },
       "datasource": {
         "type": "prometheus",
@@ -1169,7 +1355,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 305
+        "y": 322
       },
       "datasource": {
         "type": "prometheus",
@@ -1186,32 +1372,32 @@
       },
       "targets": [
         {
-          "expr": "rate(model_prompt_tokens_total[5m])",
+          "expr": "rate(llamacpp:tokens_predicted_total[5m])",
           "refId": "A",
-          "legendFormat": "Prompt tokens/s"
+          "legendFormat": "Decode tokens/s"
         },
         {
-          "expr": "rate(model_generation_tokens_total[5m])",
+          "expr": "rate(llamacpp:prompt_tokens_total[5m])",
           "refId": "B",
-          "legendFormat": "Generation tokens/s"
+          "legendFormat": "Prefill tokens/s"
         },
         {
-          "expr": "rate(model_generation_eval_seconds_total[5m])",
+          "expr": "llamacpp:predicted_tokens_seconds",
           "refId": "C",
-          "legendFormat": "Generation eval time/s"
+          "legendFormat": "Decode tok/s (engine gauge)"
         }
       ],
-      "description": "Token throughput: prompt and generation rates over last 5 minutes"
+      "description": "Engine-wide token throughput over the last 5 minutes (all clients: chat, agent sessions, queue jobs). From the engine's /metrics endpoint (--metrics flag); the engine gauge is its own smoothed decode rate."
     },
     {
       "id": 46,
-      "title": "Eval Time (seconds)",
+      "title": "Eval Time (busy fraction)",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 305
+        "y": 322
       },
       "datasource": {
         "type": "prometheus",
@@ -1219,7 +1405,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "percentunit",
           "color": {
             "mode": "palette-classic"
           }
@@ -1228,32 +1414,27 @@
       },
       "targets": [
         {
-          "expr": "rate(model_prompt_eval_seconds_total[5m])",
+          "expr": "rate(llamacpp:tokens_predicted_seconds_total[5m])",
           "refId": "A",
-          "legendFormat": "Prompt eval rate"
+          "legendFormat": "Decode busy"
         },
         {
-          "expr": "rate(model_generation_eval_seconds_total[5m])",
+          "expr": "rate(llamacpp:prompt_seconds_total[5m])",
           "refId": "B",
-          "legendFormat": "Generation eval rate"
-        },
-        {
-          "expr": "rate(model_requests_total[5m])",
-          "refId": "C",
-          "legendFormat": "Requests/s"
+          "legendFormat": "Prefill busy"
         }
       ],
-      "description": "Evaluation time rates and request rate"
+      "description": "Share of wall-clock time the engine spends decoding vs prefilling (rate of its seconds counters, 0-100%). 100% = decoding non-stop."
     },
     {
       "id": 47,
-      "title": "Cumulative Tokens & Requests",
+      "title": "Cumulative Engine Tokens",
       "type": "stat",
       "gridPos": {
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 313
+        "y": 330
       },
       "datasource": {
         "type": "prometheus",
@@ -1282,22 +1463,22 @@
       },
       "targets": [
         {
-          "expr": "model_prompt_tokens_total",
+          "expr": "llamacpp:prompt_tokens_total",
           "refId": "A",
           "legendFormat": "Prompt tokens"
         },
         {
-          "expr": "model_generation_tokens_total",
+          "expr": "llamacpp:tokens_predicted_total",
           "refId": "B",
-          "legendFormat": "Generation tokens"
+          "legendFormat": "Generated tokens"
         },
         {
-          "expr": "model_requests_total",
+          "expr": "llamacpp:prompt_tokens_cached_total",
           "refId": "C",
-          "legendFormat": "Requests"
+          "legendFormat": "Cached prompt tokens"
         }
       ],
-      "description": "Cumulative token counts and request total since worker start"
+      "description": "Cumulative token counts since engine start, all clients (prompt tokens exclude cached ones)."
     },
     {
       "id": 48,
@@ -1307,7 +1488,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 313
+        "y": 330
       },
       "datasource": {
         "type": "prometheus",
@@ -1356,7 +1537,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 313
+        "y": 330
       },
       "datasource": {
         "type": "prometheus",
