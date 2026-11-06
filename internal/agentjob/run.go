@@ -36,6 +36,9 @@ type Runner struct {
 	// Brief returns the stage-3 rules for a driver. The default reads
 	// $JARVIS_CONF/stage3-<driver>.txt.
 	Brief func(driver string) string
+	// StackStatus returns the machine snapshot included in the round
+	// prompt (default: runs jarvis-stack-status). Return "" to omit it.
+	StackStatus func() string
 	// Tee, if set, also receives the agent's output live (agent.log).
 	Tee io.Writer
 	// SignalFile, if non-empty, is polled during job execution. When it
@@ -213,11 +216,45 @@ func (r *Runner) brief(driver string) string {
 	return string(b)
 }
 
-// Prompt is the stage-3 rules plus the job text (and any typed note).
+// defaultStackStatus runs jarvis-stack-status and returns its report for
+// the round prompt. The report is kept even on a non-zero exit (the tool
+// prints the full report and exits 1 when something is down — a down
+// engine is exactly the state a round needs to see). It returns "" only
+// when the tool is missing, times out, or prints no report.
+func defaultStackStatus() string {
+	bin := "/usr/local/bin/jarvis-stack-status"
+	if _, err := os.Stat(bin); err != nil {
+		bin = "jarvis-stack-status"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin).CombinedOutput()
+	s := strings.TrimSpace(string(out))
+	if ctx.Err() == context.DeadlineExceeded {
+		return "" // never block the round on a wedged snapshot
+	}
+	if err != nil && !strings.Contains(s, "STACK") {
+		return "" // missing tool or no report
+	}
+	return s
+}
+
+func (r *Runner) stackStatus() string {
+	if r.StackStatus != nil {
+		return r.StackStatus()
+	}
+	return defaultStackStatus()
+}
+
+// Prompt is the stage-3 rules, the machine snapshot, and the job text
+// (plus any typed note).
 func (r *Runner) Prompt(j Job, driver, note string) string {
 	var b strings.Builder
 	b.WriteString(r.brief(driver))
-	fmt.Fprintf(&b, "\n\n=== YOUR JOB THIS ROUND: %s — %s ===\n", j.ID, j.Title)
+	if snap := r.stackStatus(); snap != "" {
+		fmt.Fprintf(&b, "\nMACHINE SNAPSHOT at round start (jarvis-stack-status):\n%s\nTreat this as the current state of the machine: containers, loaded engines + VRAM, services, job queue, swap window. Do not re-discover the layout (systemctl list-units, ss -tlnp, docker ps, curl to engine ports). Probe deeper only when the job's evidence contradicts this snapshot, or while debugging a specific failure.\n", snap)
+	}
+	fmt.Fprintf(&b, "\n=== YOUR JOB THIS ROUND: %s — %s ===\n", j.ID, j.Title)
 	if j.Branch != "" {
 		fmt.Fprintf(&b, "Branch: %s\n", j.Branch)
 	}
