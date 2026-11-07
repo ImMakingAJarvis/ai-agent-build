@@ -79,3 +79,5 @@
 - 2026-11-06T23:09Z Nathan: photos need their own priority (below fix, above build/background); !photo should queue + batch rather than fail when VRAM is tight; !photonow / !photoassistnow go on a queue above fix and pause everything (swap out -> generate -> swap back -> brain resumes); sending images to Discord is welcome, not annoying
 - 2026-11-06T23:47Z Nathan wanted the photo queue visible in the dashboard queue UI (it was buried in the build band) and a way to edit the text of queued work (PR #180)
 - 2026-11-07T01:00Z Nathan: !photonow/!photo images were not being posted to Discord (root causes: un-restarted watcher + failed rounds marked done); also asked for a link on the queue dashboard to the page with all generated images.
+- 2026-11-07T03:02Z Nathan: fix all open PRs to make them mergable (job chat-1794017962-5065)
+- 2026-11-07T04:00Z Nathan: image generator tasks must show as in progress on the queue page with access to logs (queue page = JARVIS UI at :8080)
