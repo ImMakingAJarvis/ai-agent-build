@@ -13,6 +13,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
 
@@ -228,5 +229,82 @@ func TestPauseStillWritesSignal(t *testing.T) {
 	}
 	if _, err := os.Stat(pauseSignalPath()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEnqueuePhotoJob(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JARVIS_DATA_DIR", dir)
+
+	in := chat.Incoming{ChannelID: "chan1", MessageID: "msg1"}
+	expanded := "A photo of a red panda in fresh snow, soft light."
+	id, err := enqueuePhotoJob(in, "a red panda", expanded, false)
+	if err != nil {
+		t.Fatalf("enqueuePhotoJob: %v", err)
+	}
+	if id == "" {
+		t.Fatal("empty id")
+	}
+
+	// The prompt file must be written for the iGPU round to read back.
+	if got, err := photo.ReadPrompt(dir, id); err != nil || got != expanded {
+		t.Fatalf("prompt file = %q (err %v), want %q", got, err, expanded)
+	}
+
+	store, _ := agentjob.Open(dir)
+	j, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if j.Class != agentjob.ClassBuild {
+		t.Errorf("class = %q, want %q", j.Class, agentjob.ClassBuild)
+	}
+	if j.Priority != photoJobPriority {
+		t.Errorf("priority = %d, want %d", j.Priority, photoJobPriority)
+	}
+	if j.Driver != "igpu" {
+		t.Errorf("driver = %q, want igpu", j.Driver)
+	}
+	if !j.HasTag(photo.Tag) {
+		t.Errorf("missing %q tag", photo.Tag)
+	}
+	if j.DiscordChannelID != "chan1" || j.DiscordMessageID != "msg1" {
+		t.Errorf("discord fields = %q %q", j.DiscordChannelID, j.DiscordMessageID)
+	}
+	if j.Title != "photo: a red panda" {
+		t.Errorf("title = %q", j.Title)
+	}
+}
+
+func TestEnqueuePhotoJobNow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JARVIS_DATA_DIR", dir)
+
+	in := chat.Incoming{ChannelID: "chan1", MessageID: "msg1"}
+	id, err := enqueuePhotoJob(in, "sunset", "a sunset", true)
+	if err != nil {
+		t.Fatalf("enqueuePhotoJob: %v", err)
+	}
+	store, _ := agentjob.Open(dir)
+	j, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if j.Class != agentjob.ClassFix {
+		t.Errorf("class = %q, want %q", j.Class, agentjob.ClassFix)
+	}
+	if j.Priority != photoNowJobPriority {
+		t.Errorf("priority = %d, want %d", j.Priority, photoNowJobPriority)
+	}
+	if !j.HasTag(photo.Tag) {
+		t.Errorf("missing %q tag", photo.Tag)
+	}
+}
+
+func TestEnqueuePhotoJobRejectsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JARVIS_DATA_DIR", dir)
+	if _, err := enqueuePhotoJob(chat.Incoming{}, "sunset", "   ", false); err == nil {
+		t.Fatal("expected error for empty prompt")
 	}
 }

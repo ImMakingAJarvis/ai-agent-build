@@ -114,6 +114,84 @@ func TestCmdAutoPauseMissingJobIsError(t *testing.T) {
 	}
 }
 
+// TestCmdFailNoteNotifiesWithoutPausing pins the keep-going failure path:
+// the owner hears about the failure, but no flag is written — auto_mode
+// and full_auto are left exactly as they were.
+func TestCmdFailNoteNotifiesWithoutPausing(t *testing.T) {
+	newFullAutoRedis(t)
+	flags := testFlags(t)
+	ctx := context.Background()
+	if err := flags.SetAutoMode(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := flags.SetFullAuto(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	store := newGuardJobsStore(t)
+	var got string
+	if err := cmdFailNote(store, []string{"job-x"}, func(m string) error { got = m; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// The failure is named, and the keep-going tail explains what happens
+	// next.
+	for _, want := range []string{"auto job that just died", "job-x", "agent exited with status 1", "Keep going is on"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("notification %q missing %q", got, want)
+		}
+	}
+	// No flag writes: both execution switches are still on.
+	if v, _ := flags.GetAutoMode(ctx); v != nobrakes.AutoModeOn {
+		t.Fatalf("failnote touched auto_mode = %q", v)
+	}
+	if v, _ := flags.GetFullAuto(ctx); v != nobrakes.AutoModeOn {
+		t.Fatalf("failnote touched full_auto = %q", v)
+	}
+}
+
+func TestCmdFailNoteRedisDisabledStillNotifies(t *testing.T) {
+	t.Setenv("JARVIS_REDIS", "off")
+	store := newGuardJobsStore(t)
+	var got string
+	if err := cmdFailNote(store, []string{"job-x"}, func(m string) error { got = m; return nil }); err != nil {
+		t.Fatalf("disabled redis must not fail the notification: %v", err)
+	}
+	if !strings.Contains(got, "agent exited with status 1") {
+		t.Fatalf("notification not sent: %q", got)
+	}
+}
+
+func TestCmdFailNoteUnreachableRedisStillNotifies(t *testing.T) {
+	t.Setenv("JARVIS_REDIS", "redis://127.0.0.1:1")
+	store := newGuardJobsStore(t)
+	var got string
+	if err := cmdFailNote(store, []string{"job-x"}, func(m string) error { got = m; return nil }); err != nil {
+		t.Fatalf("unreachable redis must not fail the notification: %v", err)
+	}
+	if !strings.Contains(got, "job-x") {
+		t.Fatalf("notification not sent: %q", got)
+	}
+}
+
+func TestCmdFailNoteNotifyFailureIsError(t *testing.T) {
+	newFullAutoRedis(t)
+	store := newGuardJobsStore(t)
+	err := cmdFailNote(store, []string{"job-x"}, func(string) error { return errors.New("discord down") })
+	if err == nil {
+		t.Fatal("notify failure must be an error")
+	}
+	if !strings.Contains(err.Error(), "discord down") {
+		t.Fatalf("error = %v, want the notify failure", err)
+	}
+}
+
+func TestCmdFailNoteMissingJobIsError(t *testing.T) {
+	newFullAutoRedis(t)
+	store := newGuardJobsStore(t)
+	if err := cmdFailNote(store, []string{"nope"}, func(string) error { return nil }); err == nil {
+		t.Fatal("unknown job id must be an error")
+	}
+}
+
 func TestCmdRunningNoneWhenFree(t *testing.T) {
 	newFullAutoRedis(t)
 	var out strings.Builder

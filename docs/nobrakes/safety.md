@@ -2,9 +2,9 @@
 
 NoBrakes lets the machine run its own job queue without asking. This is
 the safety layer that makes that acceptable to leave on: **at most one
-auto job at a time, an auto failure stops the feature and tells the
-owner, and a human can always drive the queue by hand.** It is the last
-gate before the feature can be left on overnight.
+auto job at a time, an auto failure tells the owner and — unless keep-going
+is on — stops the feature, and a human can always drive the queue by
+hand.** It is the last gate before the feature can be left on overnight.
 
 The three switches and the running marker are documented in
 [redis.md](redis.md); this page covers the guarantees they give and how
@@ -66,6 +66,21 @@ When an auto round ends with the job `failed`, the loop calls
 Re-enabling is a deliberate operator act (`!automode on` / `!fullauto
 on`). The feature never re-enables itself.
 
+**Keep-going mode** (`nobrakes:keep_going` `on`): the failure path
+changes, the guarantees don't. When an auto round ends `failed` with
+keep-going on, the loop calls `jarvis-jobs failnote <id>` instead of
+`autopause`: the owner still gets the same Discord DM (job title, id,
+error), but **no flag is written** — `auto_mode` and `full_auto` stay as
+they are and the loop moves on to the next ready job. The failed job
+stays `failed` in the store and is not re-picked. Keep-going is a
+modifier on the failure path, not an execution switch: it starts nothing
+by itself, `Pause` (the autopause path) deliberately leaves it untouched,
+and its read fails safe to `off` — so Redis trouble still pauses.
+Flipping it back off (`!keepgoing off`) restores pause-on-failure for
+the next failure. The one thing it never relaxes: the owner is told about
+every auto failure, and the at-most-one-auto-job marker is untouched
+either way.
+
 ### 3. Manual override always works
 
 Nothing in this layer can stop a human:
@@ -97,12 +112,14 @@ always requires an explicit operator write that succeeds.
 |---|---|---|
 | `nobrakes:auto_mode` | the nightly gate auto-enqueues parked nightly jobs once per UTC day | nightly jobs stay parked until enqueued manually (`jarvis-jobs enqueue`) |
 | `nobrakes:full_auto` | the loop runs the next ready job immediately, at any time, guarded by the running marker | the loop asks the owner on Discord who runs the next job |
+| `nobrakes:keep_going` | a failed auto job notifies the owner and the loop keeps working | a failed auto job pauses the feature (autopause) and notifies the owner |
 | `nobrakes:running` | set by `run -auto` for the duration of one auto round | (absent) no auto job is running |
 
-The two switches are independent and can be combined (nightly batch +
-full auto). Either being `on` means "autonomous execution may happen";
-an auto failure turns **both** off. The marker is not a switch — it is
-the concurrency guard on the execution itself.
+The two execution switches are independent and can be combined (nightly
+batch + full auto). Either being `on` means "autonomous execution may
+happen"; an auto failure turns **both** off — unless keep-going is `on`,
+when it only changes the notification, never the execution. The marker
+is not a switch — it is the concurrency guard on the execution itself.
 
 ## How to test
 
@@ -112,6 +129,10 @@ the concurrency guard on the execution itself.
 go test ./internal/nobrakes/ ./cmd/jarvis-jobs/
 ```
 
+- `internal/nobrakes/nobrakes_test.go` — the flag store: missing/corrupt
+  keys read off, set/get roundtrips, flag independence, the nightly
+  window idempotency, `EnsureDefaults`, and `Pause` leaving
+  `keep_going` untouched.
 - `internal/nobrakes/running_test.go` — marker acquire (free / held /
   reentrant / stale takeover), release by holder vs. non-holder,
   holder/clear, `Pause` turning both switches off.
@@ -128,9 +149,10 @@ go test ./internal/nobrakes/ ./cmd/jarvis-jobs/
   requests classify to the mode actions with the state extracted; state
   questions ("is full auto on?"), statements, and negated requests never
   flip a flag on the fast path.
-- `cmd/jarvis-chat/{automode,fullauto}_test.go` — the `!` commands
-  (miniredis), including the loop-wake note on `!fullauto on` and the
-  loop-stopped note on `!automode on`.
+- `cmd/jarvis-chat/{automode,fullauto,keepgoing}_test.go` — the `!`
+  commands (miniredis), including the loop-wake note on `!fullauto on`,
+  the loop-stopped note on `!automode on`, and that `!keepgoing` touches
+  only its own flag.
 - `cmd/jarvis-jobs/guard_test.go` — `autopause` (pause + notify,
   notify-out when Redis is disabled/unreachable, notify failure is an
   error), `running` show/clear, `run -auto` refusing without Redis and
@@ -173,4 +195,6 @@ jarvis-jobs running                                   # (none) — marker releas
 the tests don't cover, the system degrades to "no auto work happens"
 (idle-polling, refused `run -auto`, flags reading off) — it cannot
 degrade to "two auto jobs at once" or "silently keeps running after a
-failure".
+failure". (Keep-going is the deliberate exception to *stopping*: the
+owner is still told about every failure, and the flag's read fails safe
+to off, so a broken guard still pauses.)

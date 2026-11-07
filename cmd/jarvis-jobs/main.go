@@ -2,6 +2,10 @@
 //
 //	jarvis-jobs list [status]              all jobs, or only one status (e.g. failed)
 //	jarvis-jobs next                       print "<id>\t<title>"; exit 1 if none ready
+//	jarvis-jobs photo-ready                comma-separated ids of the ready
+//	                                       photo-tagged batch — the set the
+//	                                       agent-run watcher brackets with one
+//	                                       brain-swap window (empty when none)
 //	jarvis-jobs run <id> [-driver local|igpu|sonnet|superagent] [-round N] [-note TEXT]
 //	                   [-auto]             run under the NoBrakes guard:
 //	                                       take the auto-run marker (at most
@@ -14,6 +18,9 @@
 //	jarvis-jobs running [clear]            show (or clear) the id of the auto
 //	                                       job that holds the running marker
 //	jarvis-jobs finish <id> <exit-code>    record a round that ran elsewhere (after a reboot)
+//	jarvis-jobs stop <id>            stop a running job: kill the round
+//	                               and park the job out of the queue — the
+//	                               loop skips to the next work
 //	jarvis-jobs skip <id> | requeue <id> | show <id>
 //	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet|superagent] [-source S]
 //	                   [-class fix|build|background] [-priority N] [-depends a,b]
@@ -24,6 +31,14 @@
 //	jarvis-jobs fullauto [on|off]  NoBrakes: read (prints "on"/"off") or
 //	                               set the full-auto flag — on = the loop
 //	                               runs every ready job without asking
+//	jarvis-jobs automode [on|off]  NoBrakes: read or set the auto_mode flag
+//	                               (the nightly-batch switch)
+//	jarvis-jobs keepgoing [on|off] NoBrakes: read or set the keep-going
+//	                               flag — on = a failed auto job notifies
+//	                               but does not pause the loop
+//	jarvis-jobs failnote <id>      NoBrakes: an auto job failed under
+//	                               keep-going: DM the owner the job and the
+//	                               error WITHOUT pausing (no flag writes)
 //	jarvis-jobs audit [n]          NoBrakes: show the last n entries of the
 //	                               auto-execution audit log (default: all);
 //	                               -json prints the raw JSON lines
@@ -45,6 +60,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,7 +79,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|restart|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|autopause|running|enqueue")
+		die("usage: jarvis-jobs list [status]|next|photo-ready|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -88,6 +104,18 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("%s\t%s\n", j.ID, j.Title)
+	case "photo-ready":
+		jobs, err := store.PhotoReady()
+		if err != nil {
+			die("%v", err)
+		}
+		ids := make([]string, 0, len(jobs))
+		for _, j := range jobs {
+			ids = append(ids, j.ID)
+		}
+		// The agent-run watcher reads this: one line, comma-separated ids,
+		// empty line when the photo batch is empty.
+		fmt.Println(strings.Join(ids, ","))
 	case "show":
 		if len(args) != 1 {
 			die("show <id>")
@@ -117,6 +145,13 @@ func main() {
 			die("pause <id>")
 		}
 		if err := store.Pause(args[0]); err != nil {
+			die("%v", err)
+		}
+	case "stop":
+		if len(args) != 1 {
+			die("stop <id>")
+		}
+		if err := stopJob(store, args[0]); err != nil {
 			die("%v", err)
 		}
 	case "skip", "requeue":
@@ -184,8 +219,20 @@ func main() {
 		if err := cmdFullAuto(os.Stdout, args); err != nil {
 			die("%v", err)
 		}
+	case "automode":
+		if err := cmdAutoMode(os.Stdout, args); err != nil {
+			die("%v", err)
+		}
+	case "keepgoing":
+		if err := cmdKeepGoing(os.Stdout, args); err != nil {
+			die("%v", err)
+		}
 	case "autopause":
 		if err := cmdAutoPause(store, args, discordNotify); err != nil {
+			die("%v", err)
+		}
+	case "failnote":
+		if err := cmdFailNote(store, args, discordNotify); err != nil {
 			die("%v", err)
 		}
 	case "running":
@@ -310,62 +357,91 @@ func cmdNightly(store *agentjob.Store) error {
 	return nil
 }
 
-// cmdFullAuto reads or sets the NoBrakes full-auto flag
-// (nobrakes:full_auto). `jarvis-jobs fullauto` prints "on" or "off";
-// `jarvis-jobs fullauto on|off` sets it and prints the new state.
+// cmdFlag is the shared get/set handler for the NoBrakes flag switches
+// (fullauto, automode, keepgoing): `jarvis-jobs <switch>` prints "on" or
+// "off"; `jarvis-jobs <switch> on|off` sets the flag and prints the stored
+// state. name is the human name of the switch for the messages.
 //
 // A get never fails the caller: with Redis disabled ($JARVIS_REDIS=off),
 // unreachable, or holding a corrupt value it prints "off" (and a warning
 // on stderr) and returns nil — the agent-run loop relies on that to fail
 // safe on every iteration. A set that cannot reach Redis returns an error
 // instead: an operator must never believe a switch they flipped is on.
-func cmdFullAuto(w io.Writer, args []string) error {
-	set := false
+func cmdFlag(w io.Writer, args []string, name string,
+	get func(ctx context.Context, st *nobrakes.Store) (string, error),
+	set func(ctx context.Context, st *nobrakes.Store, on bool) error) error {
+	setFlag := false
 	switch len(args) {
 	case 0:
 		// get
 	case 1:
 		switch strings.ToLower(args[0]) {
 		case "on", "off":
-			set = true
+			setFlag = true
 		default:
-			return fmt.Errorf("usage: jarvis-jobs fullauto [on|off]")
+			return fmt.Errorf("bad value %q (want on or off)", args[0])
 		}
 	default:
-		return fmt.Errorf("usage: jarvis-jobs fullauto [on|off]")
+		return fmt.Errorf("usage: jarvis-jobs %s [on|off]", name)
 	}
 	addr := agentjob.StreamAddr()
 	if addr == "off" || addr == "none" {
-		if !set {
+		if !setFlag {
 			fmt.Fprintln(w, "off")
 			return nil
 		}
-		return fmt.Errorf("NoBrakes is disabled here (JARVIS_REDIS is off), so there is no full-auto flag to set")
+		return fmt.Errorf("NoBrakes is disabled here (JARVIS_REDIS is off), so there is no %s flag to set", name)
 	}
-	flags, err := nobrakes.New(addr)
+	st, err := nobrakes.New(addr)
 	if err != nil {
-		if !set {
-			fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes fullauto: redis %s unreachable (%v) — treating full auto as off\n", addr, err)
+		if !setFlag {
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes %s: redis %s unreachable (%v) — treating %s as off\n", name, addr, err, name)
 			fmt.Fprintln(w, "off")
 			return nil
 		}
-		return fmt.Errorf("nobrakes fullauto: redis %s unreachable: %w", addr, err)
+		return fmt.Errorf("nobrakes %s: redis %s unreachable: %w", name, addr, err)
 	}
-	defer flags.Close()
+	defer st.Close()
 	ctx := context.Background()
-	if set {
-		if err := flags.SetFullAuto(ctx, strings.ToLower(args[0]) == "on"); err != nil {
-			return fmt.Errorf("set full_auto: %w", err)
+	if setFlag {
+		if err := set(ctx, st, strings.ToLower(args[0]) == "on"); err != nil {
+			return fmt.Errorf("set %s: %w", name, err)
 		}
 	}
-	v, err := flags.GetFullAuto(ctx)
+	v, err := get(ctx, st)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes fullauto: read: %v — treating full auto as off\n", err)
+		fmt.Fprintf(os.Stderr, "jarvis-jobs: nobrakes %s: read: %v — treating %s as off\n", name, err, name)
 		fmt.Fprintln(w, "off")
 		return nil
 	}
 	fmt.Fprintln(w, v)
 	return nil
+}
+
+// cmdFullAuto reads or sets the NoBrakes full-auto flag
+// (nobrakes:full_auto): `jarvis-jobs fullauto [on|off]`.
+func cmdFullAuto(w io.Writer, args []string) error {
+	return cmdFlag(w, args, "full auto",
+		func(ctx context.Context, st *nobrakes.Store) (string, error) { return st.GetFullAuto(ctx) },
+		func(ctx context.Context, st *nobrakes.Store, on bool) error { return st.SetFullAuto(ctx, on) })
+}
+
+// cmdAutoMode reads or sets the NoBrakes auto_mode flag
+// (nobrakes:auto_mode): `jarvis-jobs automode [on|off]`. The nightly gate
+// (`jarvis-jobs nightly`) is the only reader of this flag in the loop.
+func cmdAutoMode(w io.Writer, args []string) error {
+	return cmdFlag(w, args, "auto mode",
+		func(ctx context.Context, st *nobrakes.Store) (string, error) { return st.GetAutoMode(ctx) },
+		func(ctx context.Context, st *nobrakes.Store, on bool) error { return st.SetAutoMode(ctx, on) })
+}
+
+// cmdKeepGoing reads or sets the NoBrakes keep-going flag
+// (nobrakes:keep_going): `jarvis-jobs keepgoing [on|off]`. When on, a
+// failed auto job notifies the owner without pausing autonomous execution.
+func cmdKeepGoing(w io.Writer, args []string) error {
+	return cmdFlag(w, args, "keep going",
+		func(ctx context.Context, st *nobrakes.Store) (string, error) { return st.GetKeepGoing(ctx) },
+		func(ctx context.Context, st *nobrakes.Store, on bool) error { return st.SetKeepGoing(ctx, on) })
 }
 
 // errAutoHeld marks the "another auto job is running" outcome of
@@ -420,6 +496,22 @@ func runAuto(store *agentjob.Store, id, driver, round, note string) error {
 	return err
 }
 
+// failureReason pulls the human reason out of a finished job: the stored
+// error, or a fallback when the store has none.
+func failureReason(j agentjob.Job) string {
+	reason := strings.TrimSpace(j.Error)
+	if reason == "" {
+		reason = "the round exited non-zero"
+	}
+	return reason
+}
+
+// autoFailureMessage is the shared first half of the owner-facing
+// notification for a failed auto job: which job, and why.
+func autoFailureMessage(j agentjob.Job) string {
+	return fmt.Sprintf("NoBrakes: auto job %q (%s) failed: %s", j.Title, j.ID, failureReason(j))
+}
+
 // cmdAutoPause is the NoBrakes error path (6/6): an auto-executed job
 // failed, so autonomous execution is paused — auto_mode and full_auto
 // are both set off — and the owner is told on Discord which job failed
@@ -436,10 +528,7 @@ func cmdAutoPause(store *agentjob.Store, args []string, notify func(string) erro
 	if err != nil {
 		return err
 	}
-	reason := strings.TrimSpace(j.Error)
-	if reason == "" {
-		reason = "the round exited non-zero"
-	}
+	reason := failureReason(j)
 	if addr := agentjob.StreamAddr(); addr == "off" || addr == "none" {
 		fmt.Fprintln(os.Stderr, "jarvis-jobs: autopause: NoBrakes disabled (JARVIS_REDIS off) — nothing to pause")
 	} else if flags, err := nobrakes.New(addr); err != nil {
@@ -450,12 +539,35 @@ func cmdAutoPause(store *agentjob.Store, args []string, notify func(string) erro
 			fmt.Fprintf(os.Stderr, "jarvis-jobs: autopause: pause: %v — flags left as-is (they read off anyway)\n", err)
 		}
 	}
-	msg := fmt.Sprintf("NoBrakes: auto job %q (%s) failed: %s. Autonomous execution is paused — auto_mode and full_auto are now off; re-enable with !automode on / !fullauto on.",
-		j.Title, j.ID, reason)
+	msg := autoFailureMessage(j) +
+		" Autonomous execution is paused — auto_mode and full_auto are now off; re-enable with !automode on / !fullauto on."
 	if err := notify(msg); err != nil {
 		return fmt.Errorf("discord notify: %w", err)
 	}
 	fmt.Printf("auto mode paused: %s (%s): %s\n", j.ID, j.Title, reason)
+	return nil
+}
+
+// cmdFailNote is the keep-going failure path: an auto-executed job failed
+// but keep_going is on, so autonomous execution is NOT paused — the owner
+// is still told on Discord which job failed and why. It never touches a
+// flag. The failed job stays "failed" in the store (it is not re-picked);
+// the loop moves on to the next ready job. The notification goes out even
+// with a dead Redis — the owner must hear about the failure.
+func cmdFailNote(store *agentjob.Store, args []string, notify func(string) error) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: jarvis-jobs failnote <id>")
+	}
+	j, err := store.Get(args[0])
+	if err != nil {
+		return err
+	}
+	msg := autoFailureMessage(j) +
+		" Keep going is on, so autonomous execution continues with the next ready job — say !keepgoing off (or !fullauto off) to stop."
+	if err := notify(msg); err != nil {
+		return fmt.Errorf("discord notify: %w", err)
+	}
+	fmt.Printf("keep going: %s (%s) failed: %s — not pausing\n", j.ID, j.Title, failureReason(j))
 	return nil
 }
 
@@ -592,11 +704,15 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 		die("history: %v", err)
 	}
 	r := &agentjob.Runner{Store: store, History: h}
-	if conf := os.Getenv("JARVIS_CONF"); conf != "" {
+	if conf := confDir(); conf != "" {
 		r.SignalFile = conf + "/pause-signal"
 		// !restart DM (jarvis-chat) writes this; the signal watcher kills
 		// the round and re-queues the job for a fresh run.
 		r.RestartSignalFile = conf + "/restart-signal"
+		// Stop button (dashboard) or `jarvis-jobs stop` writes this; the
+		// signal watcher kills the round and parks the job so the loop
+		// skips to the next work.
+		r.StopSignalFile = conf + "/stop-signal"
 	}
 	// Sample GPU power for the whole round; the total lands in the job
 	// state and history as kWh + $ at the configured JARVIS_POWER_RATE.
@@ -606,6 +722,67 @@ func runner(store *agentjob.Store) *agentjob.Runner {
 		return s.Stop
 	}
 	return r
+}
+
+// confDir returns JARVIS_CONF, defaulting to ~/.config/jarvis — the same
+// directory jarvis-chat and the dashboard use for signal files. The runner
+// only polled signal files when JARVIS_CONF was set, which it is not in
+// production, so !pause / !restart / stop were silently dead before.
+func confDir() string {
+	if d := os.Getenv("JARVIS_CONF"); d != "" {
+		return d
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "jarvis")
+}
+
+// stopJob stops a running job: it writes the stop-signal file the runner's
+// signal watcher polls, then waits for the job to be parked. If the watcher
+// never acts (an old runner binary, or the round already ending), it parks
+// the job directly so the loop skips it either way.
+func stopJob(store *agentjob.Store, id string) error {
+	j, err := store.Get(id)
+	if err != nil {
+		return err
+	}
+	switch j.Status {
+	case agentjob.Parked:
+		fmt.Printf("already parked: %s (re-queue with: jarvis-jobs requeue %s)\n", j.ID, j.ID)
+		return nil
+	case agentjob.Running, agentjob.Claimed:
+		// fall through — write the signal
+	default:
+		return fmt.Errorf("job %s is %s, not running", j.ID, j.Status)
+	}
+	conf := confDir()
+	if conf == "" {
+		return errors.New("cannot determine the JARVIS_CONF directory")
+	}
+	if err := os.WriteFile(conf+"/stop-signal", nil, 0o644); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if j, err := store.Get(id); err == nil && j.Status == agentjob.Parked {
+			fmt.Printf("stopped: %s — parked (re-queue with: jarvis-jobs requeue %s)\n", j.ID, j.ID)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	// The watcher did not act: park the store entry directly. If the job
+	// has finished meanwhile, Stop refuses and the stale signal is cleared.
+	if err := store.Stop(id); err != nil {
+		os.Remove(conf + "/stop-signal")
+		return err
+	}
+	fmt.Printf("stopped: %s — parked (re-queue with: jarvis-jobs requeue %s)\n", j.ID, j.ID)
+	return nil
 }
 
 // cmdList prints all jobs in queue order, optionally filtered to one status

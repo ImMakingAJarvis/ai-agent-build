@@ -33,8 +33,8 @@ func TestLoadRealRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(f.Models) != 3 {
-		t.Fatalf("got %d models, want 3", len(f.Models))
+	if len(f.Models) != 4 {
+		t.Fatalf("got %d models, want 4", len(f.Models))
 	}
 	byID := make(map[string]Model, len(f.Models))
 	for _, m := range f.Models {
@@ -76,6 +76,29 @@ func TestLoadRealRegistry(t *testing.T) {
 		}
 		if len(m.Roles) != 1 || m.Roles[0] != "planner" {
 			t.Errorf("roles = %v, want [planner]", m.Roles)
+		}
+		if m.HomeLocation != "gpu" || m.FallbackLocation != "cpu" {
+			t.Errorf("home/fallback = %s/%s, want gpu/cpu", m.HomeLocation, m.FallbackLocation)
+		}
+	})
+
+	t.Run("glm5.3-flash", func(t *testing.T) {
+		m, ok := byID["glm5.3-flash"]
+		if !ok {
+			t.Fatal("missing glm5.3-flash entry")
+		}
+		if m.Enabled {
+			t.Error("the GLM MoE must stay disabled until it is pulled")
+		}
+		if len(m.Roles) != 1 || m.Roles[0] != "planner" {
+			t.Errorf("roles = %v, want [planner]", m.Roles)
+		}
+		if m.Location != "local" || m.Engine != "llama.cpp" {
+			t.Errorf("location/engine = %s/%s, want local/llama.cpp", m.Location, m.Engine)
+		}
+		// FreeToken serve port; 11435 belongs to the iGPU helper.
+		if m.Endpoint != "http://localhost:11436/v1" {
+			t.Errorf("endpoint = %s, want the 11436 FreeToken port", m.Endpoint)
 		}
 		if m.HomeLocation != "gpu" || m.FallbackLocation != "cpu" {
 			t.Errorf("home/fallback = %s/%s, want gpu/cpu", m.HomeLocation, m.FallbackLocation)
@@ -267,7 +290,8 @@ func TestByRoleRealRegistry(t *testing.T) {
 		role string
 		want []string
 	}{
-		// qwen3.8-flash-next is a planner but disabled, so it must not appear.
+		// qwen3.8-flash-next and glm5.3-flash are planners but disabled,
+		// so they must not appear.
 		{"planner", []string{"qwen3.8-27b", "claude-sonnet-5-5"}},
 		{"executor", []string{"qwen3.8-27b"}},
 		{"reviewer", []string{"claude-sonnet-5-5"}},
