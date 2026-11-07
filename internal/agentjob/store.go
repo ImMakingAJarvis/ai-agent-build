@@ -13,6 +13,8 @@ import (
 	"sort"
 	"syscall"
 	"time"
+
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 )
 
 // Job statuses.
@@ -355,6 +357,34 @@ func alive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
+// Edit updates a ready job's title and/or instructions — the text of the
+// work. A non-empty field is replaced; an empty field leaves the stored
+// text unchanged. It refuses jobs that are not ready: the queue UI edits
+// queued work only, and re-writing the text under an in-flight or finished
+// job would be wrong (finished jobs are re-triggered with Refresh instead).
+func (s *Store) Edit(id, title, instructions string) error {
+	if !ValidID(id) {
+		return fmt.Errorf("agentjob: bad job id %q", id)
+	}
+	if title == "" && instructions == "" {
+		return fmt.Errorf("agentjob: nothing to edit for job %s", id)
+	}
+	j, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if j.Status != Ready {
+		return fmt.Errorf("agentjob: job %s is %s, not ready", id, j.Status)
+	}
+	if title != "" {
+		j.Title = title
+	}
+	if instructions != "" {
+		j.Instructions = instructions
+	}
+	return writeJSON(filepath.Join(s.JobDir(id), "job.json"), j.Spec)
+}
+
 // Recover puts claimed/running jobs whose owner process is gone (crash or
 // reboot) back to ready. A job whose owner is alive is left alone, so it is
 // never run twice at once.
@@ -409,6 +439,42 @@ func (s *Store) Next() (*Job, error) {
 		}
 	}
 	return nil, nil
+}
+
+// PhotoReady returns every ready photo-tagged job whose dependencies are all
+// done, in List() (run) order. This is the batch the agent-run watcher
+// brackets with ONE brain-swap window: it opens the window for the batch,
+// runs each photo job's iGPU round, and closes it when the batch drains.
+// jarvis-jobs photo-ready prints their ids comma-separated.
+func (s *Store) PhotoReady() ([]Job, error) {
+	if err := s.Recover(); err != nil {
+		return nil, err
+	}
+	jobs, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	status := map[string]string{}
+	for _, j := range jobs {
+		status[j.ID] = j.Status
+	}
+	var ready []Job
+	for _, j := range jobs {
+		if j.Status != Ready || !j.HasTag(photo.Tag) {
+			continue
+		}
+		ok := true
+		for _, d := range j.DependsOn {
+			if status[d] != Done {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			ready = append(ready, j)
+		}
+	}
+	return ready, nil
 }
 
 // Claim marks a ready job as claimed by this process. It fails if the job
