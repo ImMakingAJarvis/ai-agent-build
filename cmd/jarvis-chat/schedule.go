@@ -11,6 +11,7 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 )
 
 const chatJobPriority = 80
@@ -186,6 +187,74 @@ func enqueueFromChat(in chat.Incoming, class, title, instructions string) (id st
 		DiscordMessageID: in.MessageID,
 	})
 	return id, err
+}
+
+// photoJobPriority / photoNowJobPriority place photo work in the queue. A
+// plain !photo sits at the top of the build band — after every fix, ahead of
+// ordinary build work ("lower than fix, higher than build") — while a
+// !photonow sits at the top of the fix band, ahead of ordinary fixes, so it
+// is pulled before anything else once the current round is interrupted.
+const (
+	photoJobPriority    = 999
+	photoNowJobPriority = 1000
+)
+
+// enqueuePhotoJob stores a queued photo: the brain-expanded prompt goes to a
+// sidecar file (the iGPU round reads it via jarvis-photo), and the job
+// itself is tagged photo so the swap-window watcher brackets it. now=true
+// places the job at the top of the fix band instead of the top of the build
+// band.
+func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt string, now bool) (id string, err error) {
+	if strings.TrimSpace(usedPrompt) == "" {
+		return "", fmt.Errorf("empty prompt")
+	}
+	dataDir := agentjob.DataDir()
+	store, err := agentjob.Open(dataDir)
+	if err != nil {
+		return "", err
+	}
+	id = newChatJobID()
+	// Store the prompt first so the round can always read it back.
+	if err := photo.WritePrompt(dataDir, id, usedPrompt); err != nil {
+		return "", err
+	}
+	class, prio := agentjob.ClassBuild, photoJobPriority
+	if now {
+		class, prio = agentjob.ClassFix, photoNowJobPriority
+	}
+	_, err = store.Ingest(agentjob.Spec{
+		ID:               id,
+		Title:            "photo: " + shortTitle(raw),
+		Instructions:     photoJobInstructions(id),
+		Driver:           "igpu",
+		Class:            class,
+		Priority:         prio,
+		Source:           "discord",
+		DiscordChannelID: in.ChannelID,
+		DiscordMessageID: in.MessageID,
+		Tags:             []string{photo.Tag},
+	})
+	return id, err
+}
+
+// photoJobInstructions is what the iGPU round reads for a photo job: run the
+// executor, which generates the photo on the art service (the 4090 is free
+// during the brain-swap window) and delivers the finished image to the
+// owner's Discord DM.
+func photoJobInstructions(id string) string {
+	return "This is a queued photo job. Do exactly one thing and nothing else:\n\n" +
+		"    jarvis-photo make --job " + id + "\n\n" +
+		"It reads the job's prompt, generates the photo on the art service (the brain is swapped out, so the 4090 is free) and sends the finished image to the owner's Discord DM.\n\n" +
+		"When it prints 'sent' and exits 0 you are done — reply: photo sent. If it exits non-zero, reply with the error it printed and nothing else."
+}
+
+// shortTitle trims a photo prompt for use as the job title.
+func shortTitle(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 60 {
+		s = s[:60]
+	}
+	return s
 }
 
 func applySchedule(answer string, in chat.Incoming) (visible, extra string) {
