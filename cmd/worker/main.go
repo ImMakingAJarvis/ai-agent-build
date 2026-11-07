@@ -87,8 +87,8 @@ func run() error {
 	})
 	streamWatcher.Start(streamCh)
 
-	// Engine manager controls the jarvis-engine systemd service.
-	engMgr := engine.New("jarvis-engine.service")
+	// Engine manager controls the jarvis-engine docker container.
+	engMgr := engine.New("jarvis-engine")
 
 	// streamBlocked is true while a stream is active and the engine is
 	// stopped to free VRAM.  The healthcheck below reads it atomically.
