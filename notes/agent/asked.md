@@ -78,3 +78,4 @@
 - 2026-11-06T04:48Z Nathan: audit 8 days of work logs, find where the model repeats the same questions or re-investigates machine state it should already know, and update tools/prompt/references to eliminate the repeated thinking.
 - 2026-11-06T23:09Z Nathan: photos need their own priority (below fix, above build/background); !photo should queue + batch rather than fail when VRAM is tight; !photonow / !photoassistnow go on a queue above fix and pause everything (swap out -> generate -> swap back -> brain resumes); sending images to Discord is welcome, not annoying
 - 2026-11-07T01:00Z Nathan: !photonow/!photo images were not being posted to Discord (root causes: un-restarted watcher + failed rounds marked done); also asked for a link on the queue dashboard to the page with all generated images.
+- 2026-11-07T03:02Z Nathan: fix all open PRs to make them mergable (job chat-1794017962-5065)
