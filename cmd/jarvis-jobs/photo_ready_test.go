@@ -22,8 +22,15 @@ func TestPhotoReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ids, err := s.PhotoReady(); err != nil || len(ids) != 0 {
-		t.Fatalf("empty store: ids=%v err=%v", ids, err)
+	idsOf := func(jobs []agentjob.Job) []string {
+		ids := make([]string, 0, len(jobs))
+		for _, j := range jobs {
+			ids = append(ids, j.ID)
+		}
+		return ids
+	}
+	if jobs, err := s.PhotoReady(); err != nil || len(jobs) != 0 {
+		t.Fatalf("empty store: ids=%v err=%v", jobs, err)
 	}
 
 	seedPhotoJob(t, s, "p1", agentjob.Ready)
@@ -31,9 +38,9 @@ func TestPhotoReady(t *testing.T) {
 	seedPhotoJob(t, s, "p3", agentjob.Done)   // tagged and finished
 	seedJobs(t, s, "p4", agentjob.Ready)      // ready but not tagged
 
-	if ids, err := s.PhotoReady(); err != nil {
+	if jobs, err := s.PhotoReady(); err != nil {
 		t.Fatal(err)
-	} else if got := strings.Join(ids, ","); got != "p1" {
+	} else if got := strings.Join(idsOf(jobs), ","); got != "p1" {
 		t.Fatalf("PhotoReady = %q, want \"p1\"", got)
 	}
 
@@ -41,7 +48,7 @@ func TestPhotoReady(t *testing.T) {
 	if err := s.SetStatus("p1", agentjob.State{Status: agentjob.Failed}); err != nil {
 		t.Fatal(err)
 	}
-	if ids, err := s.PhotoReady(); err != nil || len(ids) != 0 {
-		t.Fatalf("drained: ids=%v err=%v", ids, err)
+	if jobs, err := s.PhotoReady(); err != nil || len(jobs) != 0 {
+		t.Fatalf("drained: ids=%v err=%v", jobs, err)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
@@ -582,6 +583,20 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 	default:
 		j.Status, j.Error = Done, ""
 	}
+	// Photo jobs: the iGPU round wraps `jarvis-photo make`, which exits 0
+	// only when the image was generated AND delivered — but the agent (the
+	// small iGPU model) ends the round with 0 even when the command failed.
+	// So a photo round that ends done without the delivery marker is a
+	// failure, not a done job: the image was never sent, and the job must
+	// stay re-queueable instead of being silently lost.
+	photoFailed := false
+	if j.Status == Done && j.HasTag(photo.Tag) {
+		if _, err := os.Stat(photo.SentPath(r.Store.Dir(), id)); err != nil {
+			j.Status, j.Error = Failed, "photo round ended but no delivery marker (" +
+				filepath.Base(photo.SentPath(r.Store.Dir(), id)) + "): the image was not sent — re-queue to retry"
+			photoFailed = true
+		}
+	}
 	if err := r.Store.SetStatus(id, j.State); err != nil {
 		return j, err
 	}
@@ -593,9 +608,11 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 		}
 		rec.PRURL, rec.Summary = pr, j.Summary
 		rec.Kwh, rec.PowerCost = j.Kwh, j.PowerCost
-		if runErr != nil {
+		if runErr != nil || photoFailed {
 			failErr := runErr
 			switch {
+			case photoFailed:
+				failErr = errors.New(j.Error)
 			case restarted:
 				failErr = errors.New("restarted by owner")
 			case cur.Status == Parked:

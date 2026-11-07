@@ -44,14 +44,14 @@ func DefaultActions() []Action {
 		},
 		{
 			Key:         "start_engine",
-			Description: "Start the jarvis-engine systemd service",
+			Description: "Start the jarvis-engine docker container",
 			Run: func(ctx context.Context, params map[string]string) (string, error) {
 				return runStartEngine(ctx, params)
 			},
 		},
 		{
 			Key:         "stop_engine",
-			Description: "Stop the jarvis-engine systemd service",
+			Description: "Stop the jarvis-engine docker container",
 			Run: func(ctx context.Context, params map[string]string) (string, error) {
 				return runStopEngine(ctx, params)
 			},
@@ -108,8 +108,8 @@ func runEnqueueJob(_ context.Context, params map[string]string) (string, error) 
 }
 
 func runCheckStatus(_ context.Context, _ map[string]string) (string, error) {
-	// Check engine service status via systemctl.
-	out, err := exec.Command("systemctl", "is-active", "jarvis-engine").Output()
+	// Check engine container status via docker.
+	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", "jarvis-engine").Output()
 	status := "unknown"
 	if err == nil {
 		status = strings.TrimSpace(string(out))
@@ -154,7 +154,7 @@ func runListJobs(_ context.Context, _ map[string]string) (string, error) {
 }
 
 func runStartEngine(_ context.Context, _ map[string]string) (string, error) {
-	out, err := exec.Command("systemctl", "start", "jarvis-engine").CombinedOutput()
+	out, err := exec.Command("docker", "start", "jarvis-engine").CombinedOutput()
 	if err != nil {
 		return fmt.Sprintf("failed to start engine: %s", string(out)), nil
 	}
@@ -162,7 +162,7 @@ func runStartEngine(_ context.Context, _ map[string]string) (string, error) {
 }
 
 func runStopEngine(_ context.Context, _ map[string]string) (string, error) {
-	out, err := exec.Command("systemctl", "stop", "jarvis-engine").CombinedOutput()
+	out, err := exec.Command("docker", "stop", "jarvis-engine").CombinedOutput()
 	if err != nil {
 		return fmt.Sprintf("failed to stop engine: %s", string(out)), nil
 	}

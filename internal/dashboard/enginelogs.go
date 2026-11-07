@@ -16,8 +16,8 @@ import (
 
 // The engine runs with --log-disable and the dashboard user cannot read the
 // system journal, so when the local model dies there is nothing to look at.
-// /logs shows what is reachable without privileges: the engine unit's state
-// (systemctl show), a /health probe, and tails of the jarvis state-dir logs.
+// /logs shows what is reachable without privileges: the engine container's state
+// (docker inspect), a /health probe, and tails of the jarvis state-dir logs.
 
 const maxLogTail = 1 << 20
 
@@ -40,7 +40,7 @@ func stateLogDir() string {
 	return filepath.Join(home, ".local", "state", "jarvis")
 }
 
-// EngineStatus is the engine unit state shown on the logs page.
+// EngineStatus is the engine container state shown on the logs page.
 type EngineStatus struct {
 	Unit        string `json:"unit"`
 	ActiveState string `json:"active_state"`
@@ -58,32 +58,18 @@ func (s *Server) engineStatus(ctx context.Context) EngineStatus {
 	st := EngineStatus{Unit: unit}
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(cctx, "systemctl", "show", unit,
-		"-p", "ActiveState,SubState,Result,ExecMainStatus,StateChangeTimestamp,NRestarts").Output()
+	out, err := exec.CommandContext(cctx, "docker", "inspect", "-f",
+		"{{.State.Status}}|{{.State.ExitCode}}|{{.State.StartedAt}}|{{.RestartCount}}", unit).Output()
 	if err != nil {
 		st.ActiveState = "unknown"
+	} else if f := strings.Split(strings.TrimSpace(string(out)), "|"); len(f) == 4 {
+		st.ActiveState = f[0]
+		st.SubState = f[0]
+		st.ExitStatus = f[1]
+		st.Since = f[2]
+		st.Restarts = f[3]
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		switch k {
-		case "ActiveState":
-			st.ActiveState = v
-		case "SubState":
-			st.SubState = v
-		case "Result":
-			st.Result = v
-		case "ExecMainStatus":
-			st.ExitStatus = v
-		case "StateChangeTimestamp":
-			st.Since = v
-		case "NRestarts":
-			st.Restarts = v
-		}
-	}
-	// Probe the engine itself; a stopped unit and a hung server differ.
+	// Probe the engine itself; a stopped container and a hung server differ.
 	req, _ := http.NewRequestWithContext(cctx, http.MethodGet, strings.TrimRight(s.engineClient.BaseURL, "/")+"/health", nil)
 	resp, herr := s.engineClient.HTTP.Do(req)
 	if herr != nil {

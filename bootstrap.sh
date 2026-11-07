@@ -451,7 +451,7 @@ the snapshot, or while debugging a specific failure.
 
 You ARE the local brain (llama.cpp on port 11434). Never stop or kill
 it — no `docker compose stop engine`, `docker compose restart engine`,
-`systemctl stop jarvis-engine` or `pkill llama-server`. Your next API
+`docker stop jarvis-engine` or `pkill llama-server`. Your next API
 call would die with "Connection refused" and the engine stays down for
 every later round; that is exactly what happened 2026-11-04 (see
 docs/worker-moe-incident-2026-11-04.md). If a job needs the 4090 free
