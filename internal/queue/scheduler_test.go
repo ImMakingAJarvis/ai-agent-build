@@ -5,14 +5,14 @@ import "testing"
 // priorityOrder lists the queues from highest to lowest priority. It is the
 // contract under test: a queue is unpaused exactly when no higher-priority
 // queue has work, so the worker always pulls from the highest non-empty queue.
-var priorityOrder = []string{VoiceQueue, FixQueue, CodingQueue, BackgroundQueue}
+var priorityOrder = []string{VoiceQueue, FixQueue, ImageQueue, CodingQueue, BackgroundQueue}
 
 func TestNewSchedulerInitialPauses(t *testing.T) {
 	s := NewScheduler()
 	if s.IsPaused(VoiceQueue) {
 		t.Error("voice should start unpaused")
 	}
-	for _, q := range []string{FixQueue, CodingQueue, BackgroundQueue} {
+	for _, q := range priorityOrder[1:] {
 		if !s.IsPaused(q) {
 			t.Errorf("queue %s should start paused", q)
 		}
@@ -82,7 +82,7 @@ func TestSetDepthsFixUnpausesItself(t *testing.T) {
 // work, every lower queue is paused and voice itself is never paused.
 func TestSetDepthsVoicePreemptsAll(t *testing.T) {
 	s := NewScheduler()
-	s.SetDepths(map[string]int{VoiceQueue: 1, FixQueue: 1, CodingQueue: 1, BackgroundQueue: 1})
+	s.SetDepths(map[string]int{VoiceQueue: 1, FixQueue: 1, ImageQueue: 1, CodingQueue: 1, BackgroundQueue: 1})
 	if s.IsPaused(VoiceQueue) {
 		t.Error("voice must never be paused")
 	}
@@ -93,12 +93,61 @@ func TestSetDepthsVoicePreemptsAll(t *testing.T) {
 	}
 }
 
+// TestSetDepthsImagePriority pins the image queue's position: it takes
+// priority over coding and background, but waits behind voice and fix
+// (job chat-1793929405-6103).
+func TestSetDepthsImagePriority(t *testing.T) {
+	s := NewScheduler()
+
+	// Only image has work: it runs, the rest wait.
+	s.SetDepths(map[string]int{ImageQueue: 1})
+	if s.IsPaused(ImageQueue) {
+		t.Error("image queue must be unpaused when it is the highest non-empty queue")
+	}
+	if !s.IsPaused(CodingQueue) || !s.IsPaused(BackgroundQueue) {
+		t.Error("coding and background must be paused while image has work")
+	}
+
+	// A coding job arrives too — image still wins.
+	s.SetDepths(map[string]int{ImageQueue: 1, CodingQueue: 1, BackgroundQueue: 1})
+	if s.IsPaused(ImageQueue) {
+		t.Error("image queue must stay unpaused while coding also has work")
+	}
+	if !s.IsPaused(CodingQueue) || !s.IsPaused(BackgroundQueue) {
+		t.Error("coding and background must stay paused while image has work")
+	}
+
+	// A fix job arrives — image waits behind it.
+	s.SetDepths(map[string]int{FixQueue: 1, ImageQueue: 1, CodingQueue: 1})
+	if !s.IsPaused(ImageQueue) {
+		t.Error("image queue must be paused while fix has work")
+	}
+	if s.IsPaused(FixQueue) {
+		t.Error("fix queue must be unpaused when it is the highest non-empty queue")
+	}
+
+	// Voice arrives — image waits behind it too.
+	s.SetDepths(map[string]int{VoiceQueue: 1, FixQueue: 1, ImageQueue: 1})
+	if !s.IsPaused(FixQueue) || !s.IsPaused(ImageQueue) {
+		t.Error("fix and image must be paused while voice has work")
+	}
+
+	// Voice and fix drain — image is up again ahead of coding/background.
+	s.SetDepths(map[string]int{ImageQueue: 1, CodingQueue: 1})
+	if s.IsPaused(ImageQueue) {
+		t.Error("image queue must be unpaused once voice and fix are idle")
+	}
+	if !s.IsPaused(CodingQueue) {
+		t.Error("coding must stay paused while image has work")
+	}
+}
+
 // TestSetDepthsAllIdleUnpausesEverything covers the empty-queue case: with no
 // pending work no queue is paused, so a newly arriving job can start.
 func TestSetDepthsAllIdleUnpausesEverything(t *testing.T) {
 	s := NewScheduler()
 	// Start from a fully paused lower tier, then drain to idle.
-	s.SetDepths(map[string]int{VoiceQueue: 1, FixQueue: 1, CodingQueue: 1, BackgroundQueue: 1})
+	s.SetDepths(map[string]int{VoiceQueue: 1, FixQueue: 1, ImageQueue: 1, CodingQueue: 1, BackgroundQueue: 1})
 	s.SetDepths(map[string]int{})
 	for _, q := range priorityOrder {
 		if s.IsPaused(q) {
