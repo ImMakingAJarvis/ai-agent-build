@@ -474,10 +474,16 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, mem *mem
 				memory.FormatContext(hits, 1200)
 		}
 
+		// When the owner Discord-replies to a message, hand the brain the
+		// message being replied to so it knows what the reply refers to.
+		// Only the chat sees it; the plain words still go to history and the
+		// conversation log.
+		chatMsg := withReplyContext(in)
+
 		answerCh := make(chan string, 1)
 		errCh2 := make(chan error, 1)
 		go func() {
-			a, err := hAgent.Chat(ctx, systemPrompt, *history, content)
+			a, err := hAgent.Chat(ctx, systemPrompt, *history, chatMsg)
 			if err != nil {
 				errCh2 <- err
 				return
@@ -828,6 +834,21 @@ func typingLoop(ctx context.Context, d sender) {
 			_ = d.Typing()
 		}
 	}
+}
+
+// withReplyContext returns the user turn the brain should see for a chat:
+// when the owner Discord-replies to a message, the content of that message
+// (and who sent it) is prepended so the brain knows what the reply refers
+// to. When there is no reply, the message is returned unchanged.
+func withReplyContext(in chat.Incoming) string {
+	if strings.TrimSpace(in.ReplyTo) == "" {
+		return in.Content
+	}
+	who := "a message"
+	if a := strings.TrimSpace(in.ReplyAuthor); a != "" {
+		who = "a message from " + a
+	}
+	return "You are replying to " + who + ":\n" + in.ReplyTo + "\n\n" + in.Content
 }
 
 // buildMessages constructs the Ollama chat messages from the system prompt,
