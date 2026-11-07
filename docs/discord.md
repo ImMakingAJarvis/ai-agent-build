@@ -45,6 +45,8 @@ involved):
   *service* (defers until the current round ends unless `now`). Works when
   the service is down. See docs/agent-run.md.
 - `!photo <prompt>` — generate a photo with the local art model.
+- `!photoassist <prompt>` — photo with iterative prompt assistance.
+- `!photocheck <prompt>` — generate, critique, improve the prompt, regenerate.
 - `!build <title…>` / `!fix <title…>` — queue a build/fix job.
 - `!automode on` / `!automode off` — NoBrakes nightly switch (auto-enqueue
   of nightly jobs). If the loop is stopped when you turn it on, the reply
@@ -52,6 +54,12 @@ involved):
 - `!fullauto on` / `!fullauto off` — NoBrakes full-auto switch (run every
   ready job immediately). Turning it on also starts the agent-run loop if
   it is stopped, so it takes effect right away. See docs/nobrakes/redis.md.
+- `!keepgoing on` / `!keepgoing off` — NoBrakes keep-going switch (a failed
+  auto job notifies without pausing autonomous execution). See
+  docs/nobrakes/redis.md.
+
+The full reference — daemon commands, plain-language (Hermes) actions,
+checkpoint buttons, access levels — is in docs/system-frame.md §3.
 
   The same switches work in plain language through the brain ("turn on
   full auto") — `set_automode` / `set_fullauto`, never via a queued job.
