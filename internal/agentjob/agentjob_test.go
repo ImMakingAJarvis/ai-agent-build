@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
@@ -1058,4 +1059,42 @@ func newMockEngine(t *testing.T, handler func(action string) int) *mockEngine {
 	go s.Serve(sock)
 	t.Cleanup(func() { s.Close() })
 	return &mockEngine{Server: s, URL: "http://" + sock.Addr().String()}
+}
+
+// The iGPU agent exits 0 even when jarvis-photo failed, so a photo round
+// that ends without the delivery marker must be recorded failed (re-queue-
+// able), not done — otherwise a lost photo is silently closed.
+func TestPhotoRoundWithoutDeliveryMarkerFails(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Tags: []string{photo.Tag}})
+	r := runner(t, s, `true`)
+	j, err := r.Run(context.Background(), "a", "r1", "igpu", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != Failed || !strings.Contains(j.Error, "delivery marker") {
+		t.Fatalf("want failed photo job, got status=%s error=%q", j.Status, j.Error)
+	}
+	if got, _ := s.Get("a"); got.Status != Failed {
+		t.Fatalf("store status = %s, want failed", got.Status)
+	}
+}
+
+func TestPhotoRoundWithDeliveryMarkerDone(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Tags: []string{photo.Tag}})
+	// The round's jarvis-photo generated and delivered: it writes the
+	// marker before the agent exits 0.
+	script := "mkdir -p " + s.Dir()+"/" + photo.PromptSubdir +
+		" && echo ok > " + photo.SentPath(s.Dir(), "a")
+	r := runner(t, s, script)
+	j, err := r.Run(context.Background(), "a", "r1", "igpu", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != Done {
+		t.Fatalf("want done, got status=%s error=%q", j.Status, j.Error)
+	}
 }

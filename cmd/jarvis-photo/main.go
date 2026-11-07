@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -49,6 +50,14 @@ func run(args []string) int {
 		return 1
 	}
 
+	// Drop any delivery marker from an earlier round: only this round's
+	// delivery can count, so a failed re-run fails the job (re-queueable)
+	// instead of being marked done on the old marker.
+	if err := photo.ClearSent(dataDir, id); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "jarvis-photo: clear sent marker: %v\n", err)
+		return 1
+	}
+
 	// A few minutes: the art service waits up to ~90s for free VRAM, then a
 	// 1024x1024 image takes tens of seconds.
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
@@ -63,6 +72,13 @@ func run(args []string) int {
 		truncatePrompt(prompt, 600), img.Seed, img.Width, img.Height, img.Seconds, art.GalleryURL())
 	if err := deliver(img.Path, caption); err != nil {
 		fmt.Fprintf(os.Stderr, "jarvis-photo: photo made (%s) but delivery failed: %v\n", img.Path, err)
+		return 1
+	}
+	// The image reached Discord: mark the job delivered so the run wrapper
+	// records the round done (a round that ends without this marker is a
+	// failure the owner can re-queue).
+	if err := photo.MarkSent(dataDir, id); err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-photo: delivery marker: %v\n", err)
 		return 1
 	}
 	fmt.Println("sent " + filepath.Base(img.Path))
