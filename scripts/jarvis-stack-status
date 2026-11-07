@@ -309,7 +309,7 @@ def swap_state():
     brain = maint = None
     for line in out.splitlines():
         line = line.strip()
-        if line.startswith("brain unit"):
+        if line.startswith("brain ctr"):
             t = line.split()
             brain = t[2] if len(t) > 2 else None
         elif line.startswith("maintenance"):

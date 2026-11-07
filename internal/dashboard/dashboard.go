@@ -24,6 +24,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/art"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
@@ -427,14 +428,17 @@ func (s *Server) basicAuth(next http.Handler) http.Handler {
 }
 
 // handleIndex serves the static shell. It touches no backend so the first
-// paint is instant; every section loads itself via HTMX.
+// paint is instant; every section loads itself via HTMX. The only data
+// rendered server-side is the photo gallery URL (the art service's gallery
+// page, linked from the queue section) — the same URL the photo DM captions
+// carry (art.GalleryURL).
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
 	var buf bytes.Buffer
-	if err := s.tmpl.ExecuteTemplate(&buf, "index.html", nil); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&buf, "index.html", map[string]any{"GalleryURL": art.GalleryURL()}); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 		return
 	}
