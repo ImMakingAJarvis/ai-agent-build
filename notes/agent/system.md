@@ -80,3 +80,4 @@
 - 2026-11-07T02:05Z Photo window can strand the brain: if photo jobs fail and the re-flip errors, the maintenance window stays open to its deadline. Fix: jarvis-swap in. 'jarvis-engine container exited' in the stack snapshot is the legacy compose container, not the brain.
 - 2026-11-07T02:36Z jarvis-swap and jarvis-watchdog live only in /usr/local/bin (not the repo); both manage the brain via docker stop|start jarvis-engine — keep it that way
 - 2026-11-07T03:02Z Open-PR mergeability: check each PR's baseRefName before fixing conflicts — PR177 (reel-gate1-decisions) targets phase-reel (stacked on PR #178), not main; merging main into it does nothing for its CONFLICTING state. Reel series PRs are stacked on phase-reel.
+- 2026-11-07T04:00Z Repo Go files are NOT gofmt-clean under go1.26.2 (HEAD's queue.go/dashboard.go fail gofmt -l) — match each file's committed alignment, don't reformat whole files; gh on this box uses -F/--body-file, not --description-file
