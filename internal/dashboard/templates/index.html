@@ -441,9 +441,11 @@
     border-bottom: 1px solid var(--border);
     border-left: 3px solid var(--muted);
   }
+  .qband-photo .qband-head { border-left-color: var(--purple); }
   .qband-fix .qband-head { border-left-color: var(--red); }
   .qband-build .qband-head { border-left-color: var(--yellow); }
   .qband-background .qband-head { border-left-color: var(--blue); }
+  .qjob-photo { border-color: var(--purple); }
   .qband-count { color: var(--muted); font-weight: 400; font-size: 0.72rem; }
   .qband-body { padding: 6px; min-height: 44px; }
   .qband-empty {
@@ -480,6 +482,41 @@
   .qjob-title { color: var(--fg); font-size: 0.83rem; font-weight: 500; }
   .qjob-meta { color: var(--muted); font-size: 0.7rem; margin-top: 3px; }
   .qjob-blocked { color: var(--yellow); font-weight: 600; }
+  /* Edit: the button sits at the card's right edge; the form (title input +
+     text area) replaces the card's content while it is open. */
+  .qjob-edit {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    margin-top: 2px;
+    font-size: 0.7rem;
+    padding: 2px 10px;
+  }
+  .qedit-title {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    font-size: 0.8rem;
+    padding: 4px 6px;
+    background: var(--card);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .qedit-text {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    font-size: 0.78rem;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    padding: 4px 6px;
+    background: var(--card);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    resize: vertical;
+  }
+  .qedit-title:focus, .qedit-text:focus { outline: none; border-color: var(--blue); }
+  .qedit-actions { display: flex; gap: 6px; margin-top: 6px; }
   @media (max-width: 640px) {
     body { padding: 12px; }
     .cost-row, .queue-row, .slots-row { grid-template-columns: 1fr 1fr; }
@@ -508,8 +545,12 @@
   </div>
   <!-- Interactive queue: drag ready jobs to reorder a band or reclassify a job.
        Lives in the static shell so a 15s refresh never wipes a drag in flight;
-       it loads itself and refreshes on a timer that pauses while dragging. -->
-  {{ template "queue-section" }}
+       it loads itself and refreshes on a timer that pauses while dragging.
+       The dot must be passed explicitly: since Go 1.26 a template call
+       without an argument runs the section with nil data, so the section's
+       own .GalleryURL (the photo-gallery link) would render empty.
+       (No double braces in this comment — html/template parses them.) -->
+  {{ template "queue-section" . }}
   <!-- Plans: upload a plan file (md or anything else). The dashboard saves it
        and enqueues a ready plan job; the worker's round for that job reads the
        plan and creates all the jobs around it. Lives in the static shell so a
@@ -562,7 +603,7 @@
       </div>
     </div>
   </div>
-  {{ template "pending-section" }}
+  {{ template "pending-section" . }}
   <div class="section">
     <div class="section-title">Approval Queue</div>
     <div id="approvals" hx-get="/api/approvals" hx-trigger="load, every 5s" hx-swap="outerHTML"></div>
