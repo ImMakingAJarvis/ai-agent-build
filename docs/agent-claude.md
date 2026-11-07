@@ -5,6 +5,44 @@ This is the local agent's personal note file. It is installed to
 it in every session, on top of the repo's `CLAUDE.md` (which is about
 conversation notes).
 
+## Machine state — the snapshot is in every round prompt
+
+Every round prompt starts with a **MACHINE SNAPSHOT** taken at round start
+by `jarvis-stack-status` — the one command that tells you the state of
+the machine: docker containers, loaded llama.cpp engines (model, quant,
+context, VRAM, health), host RAM/load/uptime/disk, systemd services
+(agent-run, jarvis-watchdog, plane-bridge, task-runner), agent-job queue
+counts, and the swap-window state. Exit 1 means something is down (the
+report still prints). If your round prompt has no snapshot (the running
+jarvis-jobs binary predates the injection), run it yourself at the
+start of the round.
+
+    jarvis-stack-status            # human readable
+    jarvis-stack-status --json     # machine readable
+
+**Treat the snapshot as the current state of the machine.** Do not
+re-discover the layout: no `systemctl list-units`, `ss -tlnp`,
+`docker ps`, or curl to engine ports just to see what is running. Probe
+deeper (`journalctl`, `nvidia-smi`, `ps`) only when the job's evidence
+contradicts the snapshot, or while debugging a specific failure.
+
+Stable facts (trust them; re-verify only when a job says otherwise):
+- **Brain**: Qwen3.8-27B Q4_K_M (27.3B, 15.3 GiB), llama.cpp in the
+  `jarvis-engine` container, port **11434**, 128K ctx. Holds ~18.5 GB of
+  the 4090's 24.5 GB at idle → ~6 GB free; 1.5–2.7 GB free while it is
+  in a conversation. This engine is serving this conversation — never
+  stop or kill it (the round brief explains why and what to do when a
+  job needs the 4090 free: requeue it on its spec driver).
+- **iGPU helper**: Qwen2.5-3B Q4_K_M (3.4B), llama.cpp unit
+  `jarvis-engine-igpu`, port **11435**, 32K ctx, Vulkan.
+- **Photo generation** needs ~12 GB of free VRAM, so it runs in the
+  brain's swap window (runbook `docs/brain-swap.md`, state
+  `jarvis-swap status`).
+- **Services**: `agent-run` (job loop), `jarvis-watchdog`,
+  `plane-bridge` (Plane webhooks), `task-runner` (kanban; dashboard on
+  :8080), `jarvis-memory` (:8101), `jarvis-engine-igpu`. Plane at
+  111.1.2.222:8088.
+
 ## Helper model — small, always-on, on the iGPU
 
 When you need to change your own setup or restart something, ask the
@@ -117,11 +155,13 @@ A PR is not done while it conflicts with main. Before finishing any
 job that opens or updates a PR, verify the branch has no merge
 conflict:
 
-- `GH_TOKEN=$(ghapp-token) gh pr view <n> --json mergeable` must say
-  `MERGEABLE`. `UNKNOWN` means GitHub is still computing — wait and
-  re-check; `CONFLICTING` means fix it first.
+- `gh-pr-wait <n>` (polls every 15 s, so the waiting happens outside
+  your context) must exit **0** = open and `MERGEABLE`. Exit **1** =
+  `CONFLICTING` — fix it first; exit **2** = merged or closed, nothing
+  left to do; exit **3** = timed out while GitHub was still computing
+  (re-run it).
 - If it conflicts: merge `origin/main` into the branch (in the
-  branch's worktree), resolve, push, re-check.
+  branch's worktree), resolve, push, and re-run `gh-pr-wait`.
 
 The usual conflict is `notes/conversations/agent-<date>.md` — every
 round appends to it. Resolve by keeping ALL entries from both sides

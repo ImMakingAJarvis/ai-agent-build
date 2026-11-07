@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
@@ -41,8 +43,9 @@ func runner(t *testing.T, s *Store, script string) *Runner {
 	return &Runner{
 		Store: s, History: h,
 		Command:  func(driver, prompt, effort string) *exec.Cmd { return exec.Command("sh", "-c", script) },
-		PRLookup: func(string) string { return "" },
-		Brief:    func(string) string { return "RULES" },
+		PRLookup:   func(string) string { return "" },
+		Brief:      func(string) string { return "RULES" },
+		StackStatus: func() string { return "" },
 	}
 }
 
@@ -300,7 +303,7 @@ func TestDefaultCommandSuperagentDriver(t *testing.T) {
 
 func TestPromptHasRulesJobAndNote(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir()) // don't drain the real inbox
-	r := &Runner{Brief: func(string) string { return "RULES" }}
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT", Branch: "br"}}, "local", "NOTE")
 	for _, w := range []string{"RULES", "d0", "TEXT", "br", "NOTE"} {
 		if !strings.Contains(p, w) {
@@ -309,12 +312,41 @@ func TestPromptHasRulesJobAndNote(t *testing.T) {
 	}
 }
 
+func TestPromptIncludesMachineSnapshot(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	snap := "STACK 2026-11-05\nOK: 3 engine(s) serving"
+	r := &Runner{
+		Brief:       func(string) string { return "RULES" },
+		StackStatus: func() string { return snap },
+	}
+	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
+	for _, w := range []string{"MACHINE SNAPSHOT at round start", snap} {
+		if !strings.Contains(p, w) {
+			t.Fatalf("prompt lacks %q:\n%s", w, p)
+		}
+	}
+	// Order: brief, then snapshot, then the job line.
+	bi, si, ji := strings.Index(p, "RULES"), strings.Index(p, "MACHINE SNAPSHOT"), strings.Index(p, "=== YOUR JOB THIS ROUND")
+	if !(bi < si && si < ji) {
+		t.Fatalf("bad ordering: brief=%d snapshot=%d job=%d", bi, si, ji)
+	}
+}
+
+func TestPromptOmitsEmptySnapshot(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
+	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
+	if strings.Contains(p, "MACHINE SNAPSHOT") {
+		t.Fatal("empty snapshot must not add a section")
+	}
+}
+
 func TestPromptIncludesIdleOwnerMessages(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
 	if _, err := inbox.Send("hello from the owner"); err != nil {
 		t.Fatal(err)
 	}
-	r := &Runner{Brief: func(string) string { return "RULES" }}
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
 	if !strings.Contains(p, "hello from the owner") ||
 		!strings.Contains(p, "while the agent was idle") {
@@ -1028,4 +1060,78 @@ func newMockEngine(t *testing.T, handler func(action string) int) *mockEngine {
 	go s.Serve(sock)
 	t.Cleanup(func() { s.Close() })
 	return &mockEngine{Server: s, URL: "http://" + sock.Addr().String()}
+}
+
+// The iGPU agent exits 0 even when jarvis-photo failed, so a photo round
+// that ends without the delivery marker must be recorded failed (re-queue-
+// able), not done — otherwise a lost photo is silently closed.
+func TestPhotoRoundWithoutDeliveryMarkerFails(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Tags: []string{photo.Tag}})
+	r := runner(t, s, `true`)
+	j, err := r.Run(context.Background(), "a", "r1", "igpu", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != Failed || !strings.Contains(j.Error, "delivery marker") {
+		t.Fatalf("want failed photo job, got status=%s error=%q", j.Status, j.Error)
+	}
+	if got, _ := s.Get("a"); got.Status != Failed {
+		t.Fatalf("store status = %s, want failed", got.Status)
+	}
+}
+
+func TestPhotoRoundWithDeliveryMarkerDone(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A", Tags: []string{photo.Tag}})
+	// The round's jarvis-photo generated and delivered: it writes the
+	// marker before the agent exits 0.
+	script := "mkdir -p " + s.Dir()+"/" + photo.PromptSubdir +
+		" && echo ok > " + photo.SentPath(s.Dir(), "a")
+	r := runner(t, s, script)
+	j, err := r.Run(context.Background(), "a", "r1", "igpu", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != Done {
+		t.Fatalf("want done, got status=%s error=%q", j.Status, j.Error)
+	}
+}
+
+// photo-ready is the watcher's batch view: every ready photo job in run
+// order — non-photo ready jobs and dependency-blocked photo jobs excluded.
+func TestPhotoReady(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A"})
+	ingest(t, s, Spec{ID: "b", Title: "B", Tags: []string{photo.Tag}})
+	ingest(t, s, Spec{ID: "c", Title: "C", Tags: []string{photo.Tag}, DependsOn: []string{"a"}})
+	ingest(t, s, Spec{ID: "d", Title: "D", Tags: []string{photo.Tag, "x"}})
+	ids := func(jobs []Job) []string {
+		out := make([]string, 0, len(jobs))
+		for _, j := range jobs {
+			out = append(out, j.ID)
+		}
+		return out
+	}
+	got, err := s.PhotoReady()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"b", "d"}; !reflect.DeepEqual(ids(got), want) {
+		t.Fatalf("PhotoReady = %v, want %v", ids(got), want)
+	}
+	// When the blocker is done, the blocked photo joins the batch.
+	if err := s.setState("a", State{Status: Done}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.PhotoReady()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"b", "c", "d"}; !reflect.DeepEqual(ids(got), want) {
+		t.Fatalf("PhotoReady after a=done = %v, want %v", ids(got), want)
+	}
 }
