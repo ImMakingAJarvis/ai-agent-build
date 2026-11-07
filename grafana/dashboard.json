@@ -1876,7 +1876,7 @@
     },
     {
       "id": 607,
-      "title": "Tokens per Month",
+      "title": "Tokens per Month (30-day buckets)",
       "type": "bargraph",
       "datasource": {
         "type": "prometheus",
@@ -1914,13 +1914,13 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(jarvis_tokens_total{kind=~\"prompt|generated\"}[1M]))",
+          "expr": "sum(increase(jarvis_tokens_total{kind=~\"prompt|generated\"}[30d]))",
           "refId": "A",
-          "interval": "1M",
-          "minInterval": "1M"
+          "interval": "30d",
+          "minInterval": "30d"
         }
       ],
-      "description": "Tokens processed per calendar month across the visible range (retention 180d)."
+      "description": "Tokens processed in 30-day buckets across the visible range (retention 180d). PromQL has no calendar-month duration, so buckets are rolling 30-day windows."
     }
   ],
   "refresh": "10s",
