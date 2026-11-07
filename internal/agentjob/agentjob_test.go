@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1096,5 +1097,41 @@ func TestPhotoRoundWithDeliveryMarkerDone(t *testing.T) {
 	}
 	if j.Status != Done {
 		t.Fatalf("want done, got status=%s error=%q", j.Status, j.Error)
+	}
+}
+
+// photo-ready is the watcher's batch view: every ready photo job in run
+// order — non-photo ready jobs and dependency-blocked photo jobs excluded.
+func TestPhotoReady(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a", Title: "A"})
+	ingest(t, s, Spec{ID: "b", Title: "B", Tags: []string{photo.Tag}})
+	ingest(t, s, Spec{ID: "c", Title: "C", Tags: []string{photo.Tag}, DependsOn: []string{"a"}})
+	ingest(t, s, Spec{ID: "d", Title: "D", Tags: []string{photo.Tag, "x"}})
+	ids := func(jobs []Job) []string {
+		out := make([]string, 0, len(jobs))
+		for _, j := range jobs {
+			out = append(out, j.ID)
+		}
+		return out
+	}
+	got, err := s.PhotoReady()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"b", "d"}; !reflect.DeepEqual(ids(got), want) {
+		t.Fatalf("PhotoReady = %v, want %v", ids(got), want)
+	}
+	// When the blocker is done, the blocked photo joins the batch.
+	if err := s.setState("a", State{Status: Done}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.PhotoReady()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"b", "c", "d"}; !reflect.DeepEqual(ids(got), want) {
+		t.Fatalf("PhotoReady after a=done = %v, want %v", ids(got), want)
 	}
 }
