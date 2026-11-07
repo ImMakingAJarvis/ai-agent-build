@@ -53,9 +53,10 @@ header (`voiceChatURLFromHost`), never hardcoded:
 
 ## Talking to the worker (interrupt without stopping)
 
-The **Talk to the worker** box on the dashboard sends the agent a message
-the way you interrupt Claude or Cursor: the running process is never
-stopped or restarted — the message is injected into the agent's context.
+The **Talk to the worker** box — on the dashboard and on each job's log
+page (`/jobs/<id>`) — sends the agent a message the way you interrupt
+Claude or Cursor: the running process is never stopped or restarted — the
+message is injected into the agent's context.
 
 - `POST /api/owner-message` stores the message in the agent inbox
   (`$JARVIS_DATA_DIR/inbox/`, default `~/.local/share/jarvis/inbox/`).
@@ -80,6 +81,27 @@ stopped or restarted — the message is injected into the agent's context.
 Discord still has its old interrupt behavior (pause + `jarvis-reply`): a
 DM to the bot pauses the job when the chat slot is busy. The dashboard
 box is the non-pausing path.
+
+## Stopping a running job
+
+The job log page (`/jobs/<id>`) shows a **Stop work** button while the job
+is running. It kills the round and **parks** the job: out of the active
+queue, so the agent-run loop skips to the next work (full auto included).
+Re-queue it any time with `jarvis-jobs requeue <id>` to run it again.
+
+- `POST /api/jobs/{id}/stop` writes `$JARVIS_CONF/stop-signal`
+  (default `~/.config/jarvis/stop-signal`), which the running job's signal
+  watcher polls every second; the watcher parks the job and kills the
+  round, and the page's live stream flips to "parked" on its own.
+  `jarvis-jobs stop <id>` does the same from the shell and waits for the
+  park.
+- A stop that lands after the round already finished is a no-op:
+  `Store.Stop` only acts on a running job. A stale signal file is cleared
+  by agent-run before each round (and by the runner before it claims), so
+  it can never park the next job.
+- Parked is different from paused: a paused job is answered with
+  `jarvis-reply` and re-queued by agent-run; a parked job simply waits —
+  the loop moves on and stays moved on until it is re-queued.
 
 ## Inhibit
 

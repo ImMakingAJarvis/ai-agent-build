@@ -3,6 +3,8 @@ package superagent
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,8 +13,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
 const (
@@ -38,6 +43,7 @@ func Specs() []ToolSpec {
 		{"write_file", `{"path": "...", "content": "..."} — create/overwrite a file in the work dir`},
 		{"list_dir", `{"path": "."} — list a directory`},
 		{"memory_search", `{"query": "...", "k": 5} — search the memory graph of past work`},
+		{"rabbitmq", `{"op":"publish|consume|peek|depth","queue":"flow.x","title":"...","instructions":"...","context":"...","n":1} — event handoff: publish a job to a queue (flow.* are created on demand) or consume results another model left there (docs/event-driven.md)`},
 		{"web_fetch", `{"url": "..."} — fetch a URL and return the first part of the body`},
 		{"step_done", `{"note": "..."} — this step is achieved; note how it was verified`},
 		{"replan", `{"reason": "..."} — the plan no longer fits; the planner runs again`},
@@ -56,9 +62,9 @@ type Tools struct {
 // NewTools builds the default toolset for workdir.
 func NewTools(workdir string) *Tools {
 	return &Tools{
-		Guard:  &Guard{WorkDir: workdir},
+		Guard:     &Guard{WorkDir: workdir},
 		MemoryURL: "http://localhost:8101",
-		HTTP:   &http.Client{Timeout: 60 * time.Second},
+		HTTP:      &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -75,6 +81,8 @@ func (t *Tools) Run(ctx context.Context, a Action) (string, error) {
 		return t.runList(a)
 	case "memory_search":
 		return t.runMemory(ctx, a)
+	case "rabbitmq":
+		return t.runMQ(ctx, a)
 	case "web_fetch":
 		return t.runFetch(ctx, a)
 	default:
@@ -231,6 +239,112 @@ func (t *Tools) runMemory(ctx context.Context, a Action) (string, error) {
 		fmt.Fprintf(&sb, "%d. %s (score %.2f, %s)\n   %s\n", i+1, r.Title, r.Score, r.Path, truncate(strings.TrimSpace(r.Text), 240))
 	}
 	return truncate(sb.String(), maxOutput), nil
+}
+
+// saRandSuffix is a short random suffix for published message ids, so two
+// publishes in the same second never collide (the worker uses the id as
+// the agent-job id when it ingests kind=agent).
+func saRandSuffix() string {
+	b := make([]byte, 3)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	return hex.EncodeToString(b)
+}
+
+// runMQ is the event-driven handoff tool: publish a job to a queue for
+// another model to pick up, or consume the result one left there
+// (docs/event-driven.md). It is the in-process form of the jarvis-mq CLI.
+func (t *Tools) runMQ(ctx context.Context, a Action) (string, error) {
+	op := argStr(a.Args, "op", "")
+	q := argStr(a.Args, "queue", "")
+	if q == "" {
+		return "", fmt.Errorf("rabbitmq needs a queue")
+	}
+	conn, err := queue.NewConn()
+	if err != nil {
+		return "rabbitmq unreachable: " + err.Error(), nil
+	}
+	defer conn.Close()
+
+	switch op {
+	case "publish":
+		payload := map[string]string{}
+		if c := argStr(a.Args, "context", ""); c != "" {
+			payload["context"] = c
+		}
+		if p := argStr(a.Args, "prompt", ""); p != "" {
+			payload["prompt"] = p
+		}
+		m := queue.Message{
+			ID:           "sa-" + strconv.FormatInt(time.Now().Unix(), 10) + "-" + saRandSuffix(),
+			Type:         "event",
+			CreatedAt:    time.Now().UTC(),
+			Source:       "superagent",
+			Payload:      payload,
+			Kind:         argStr(a.Args, "kind", ""),
+			Title:        argStr(a.Args, "title", ""),
+			Instructions: argStr(a.Args, "instructions", ""),
+		}
+		if queue.IsFlowQueue(q) {
+			if err := conn.PublishFlow(ctx, q, m); err != nil {
+				return "", err
+			}
+		} else {
+			if err := conn.Publish(m, q+".default"); err != nil {
+				return "", err
+			}
+		}
+		return fmt.Sprintf("published %s → %s", m.ID, q), nil
+	case "consume", "peek":
+		n := argInt(a.Args, "n", 1)
+		var (
+			msgs []queue.Message
+			err  error
+		)
+		if op == "consume" {
+			msgs, err = conn.PopFlow(q, n)
+		} else {
+			msgs, err = conn.PeekFlow(q, n)
+		}
+		if err != nil {
+			return "", err
+		}
+		if len(msgs) == 0 {
+			return q + ": empty", nil
+		}
+		var sb strings.Builder
+		for _, m := range msgs {
+			fmt.Fprintf(&sb, "--- %s (kind=%s)\n", m.ID, m.Kind)
+			if m.Title != "" {
+				sb.WriteString("title: " + m.Title + "\n")
+			}
+			if m.Instructions != "" {
+				sb.WriteString("instructions: " + m.Instructions + "\n")
+			}
+			for _, k := range sortedArgKeys(m.Payload) {
+				fmt.Fprintf(&sb, "payload[%s]: %s\n", k, m.Payload[k])
+			}
+		}
+		return truncate(sb.String(), maxOutput), nil
+	case "depth":
+		d, err := conn.QueueDepth(q)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s: %d", q, d), nil
+	default:
+		return "", fmt.Errorf("rabbitmq op must be publish, consume, peek or depth (got %q)", op)
+	}
+}
+
+func sortedArgKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (t *Tools) runFetch(ctx context.Context, a Action) (string, error) {

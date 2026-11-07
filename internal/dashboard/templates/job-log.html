@@ -92,6 +92,68 @@
     user-select: none;
   }
   .log-controls .chk input { margin: 0; }
+  .log-controls .btn-stop {
+    border-color: var(--red);
+    color: var(--red);
+  }
+  .log-controls .btn-stop:hover { background: rgba(248, 81, 73, 0.12); }
+  .log-controls .btn-stop:disabled { opacity: 0.5; cursor: default; }
+  .stop-result {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--red);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    font-size: 0.85rem;
+  }
+  .talk-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--blue);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+  }
+  .talk-box label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--blue);
+    display: block;
+    margin-bottom: 6px;
+  }
+  .talk-row { display: flex; gap: 8px; align-items: flex-end; }
+  .talk-row textarea {
+    flex: 1;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+    font-family: inherit;
+    font-size: 0.85rem;
+    resize: vertical;
+    min-height: 40px;
+  }
+  .talk-row textarea:focus { outline: none; border-color: var(--blue); }
+  .talk-row .btn {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    font-size: 0.8rem;
+    cursor: pointer;
+    background: var(--card);
+    color: var(--fg);
+  }
+  .talk-row .btn:hover { background: var(--card-hover); }
+  .talk-row .btn:disabled { opacity: 0.5; cursor: default; }
+  .talk-box .talk-note {
+    color: var(--muted);
+    font-size: 0.75rem;
+    display: block;
+    margin-top: 6px;
+  }
   /* Live event cards */
   #live-log {
     display: flex;
@@ -174,7 +236,7 @@
     {{ if .Live }}<span class="live-dot"></span><span class="live" style="color: var(--yellow)">running now</span>{{ end }}
   </p>
   <div class="meta">
-    {{ if .Status }}<span>Status <strong class="{{ statusClass .Status }}">{{ .Status }}</strong></span>{{ end }}
+    {{ if .Status }}<span>Status <strong id="meta-status" class="{{ statusClass .Status }}">{{ .Status }}</strong></span>{{ end }}
     {{ if .Driver }}<span>Driver <strong>{{ .Driver }}</strong></span>{{ end }}
     {{ if .Model }}<span>Model <strong>{{ .Model }}</strong></span>{{ end }}
     {{ if .Duration }}<span>Duration <strong>{{ .Duration}}</strong></span>{{ end }}
@@ -184,9 +246,19 @@
   {{ if .Error }}<p class="subtitle" style="color: var(--red);">{{ .Error }}</p>{{ end }}
   <div class="log-controls">
     <span class="status" id="log-status">Connecting…</span>
+    {{ if .Live }}<button class="btn btn-stop" id="btn-stop" onclick="stopJob()" title="Kill the round and park the job — the loop skips to the next work">Stop work</button>{{ end }}
     <button class="btn" onclick="connect()">Reconnect</button>
     <label class="chk" title="Show the log as readable events; uncheck for the raw json stream"><input type="checkbox" id="chk-human" checked> Human readable</label>
     <button class="btn" id="btn-log" onclick="toggleLog()">Log</button>
+  </div>
+  <div id="stop-result" class="stop-result" style="display:none"></div>
+  <div class="talk-box">
+    <label for="talk-input">Talk to the worker</label>
+    <div class="talk-row">
+      <textarea id="talk-input" rows="2" placeholder="Extra info or a nudge — injected into the worker's thought loop at its next step."></textarea>
+      <button class="btn" id="btn-talk" onclick="sendTalk()">Send</button>
+    </div>
+    <span class="talk-note" id="talk-status"></span>
   </div>
   <div id="live-log"></div>
   <div id="log-events" class="log-events" style="display:none"></div>
@@ -229,6 +301,74 @@
       statusEl.textContent = text;
       statusEl.style.color = live ? 'var(--yellow)' : 'var(--muted)';
     }
+    function statusCSS(status) {
+      switch (status) {
+        case 'running': return 'status-running';
+        case 'failed': return 'status-failed';
+        case 'done':
+        case 'completed': return 'status-completed';
+        default: return '';
+      }
+    }
+    // The job left running: drop the Stop button and update the meta line.
+    function jobFinished(status) {
+      const btn = document.getElementById('btn-stop');
+      if (btn) btn.remove();
+      const meta = document.getElementById('meta-status');
+      if (meta) {
+        meta.textContent = status;
+        meta.className = statusCSS(status);
+      }
+    }
+    const talkInput = document.getElementById('talk-input');
+    const talkStatus = document.getElementById('talk-status');
+    const talkBtn = document.getElementById('btn-talk');
+    // Send a message into the worker's thought loop (owner-message inbox).
+    async function sendTalk() {
+      const msg = talkInput.value.trim();
+      if (!msg) return;
+      talkBtn.disabled = true;
+      talkStatus.textContent = 'Sending…';
+      try {
+        const r = await fetch('/api/owner-message', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg }),
+        });
+        talkStatus.innerHTML = r.ok ? await r.text() : 'Send failed: ' + r.status;
+        if (r.ok) talkInput.value = '';
+      } catch (e) {
+        talkStatus.textContent = 'Send failed: ' + e;
+      }
+      talkBtn.disabled = false;
+    }
+    talkInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendTalk();
+    });
+    // Stop the running work: the round is killed and the job parked.
+    async function stopJob() {
+      if (!confirm('Stop this work? The round ends now and the job is parked out of the queue — the loop skips to the next work. Re-queue it later to run it again.')) return;
+      const btn = document.getElementById('btn-stop');
+      if (btn) btn.disabled = true;
+      const out = document.getElementById('stop-result');
+      out.style.display = 'block';
+      out.textContent = 'Stopping…';
+      try {
+        const r = await fetch('/api/jobs/{{ .ID }}/stop', { method: 'POST' });
+        out.innerHTML = await r.text();
+        if (r.ok) {
+          setStatus('Stopped', false);
+          if (btn) btn.remove();
+        } else {
+          setStatus('Stop failed: ' + r.status, false);
+          if (btn) btn.disabled = false;
+        }
+      } catch (e) {
+        out.textContent = 'Stop failed: ' + e;
+        setStatus('Stop failed', false);
+        if (btn) btn.disabled = false;
+      }
+    }
     function connect() {
       if (es) es.close();
       liveBox.innerHTML = '';
@@ -238,7 +378,10 @@
       es.addEventListener('meta', e => {
         const m = JSON.parse(e.data);
         if (m.live) setStatus('Live — streaming…', true);
-        else setStatus('Finished — ' + m.status, false);
+        else {
+          setStatus('Finished — ' + m.status, false);
+          jobFinished(m.status);
+        }
       });
       es.addEventListener('seed', e => {
         const s = JSON.parse(e.data);
@@ -248,6 +391,7 @@
       es.addEventListener('done', e => {
         const d = JSON.parse(e.data);
         setStatus('Finished — ' + d.status + (d.error ? ': ' + d.error : ''), false);
+        jobFinished(d.status);
         es.close();
       });
       es.onerror = () => setStatus('Reconnecting…', true);

@@ -5,6 +5,8 @@
 //	jarvis-discord notify --item AAB-4 <msg> send the message with the Plane
 //	                                       board link for the item appended
 //	jarvis-discord ask [flags] <question>    send a question, print the answer
+//	jarvis-discord image <path> [caption]    send a local image file as an
+//	                                       attachment (art service output)
 //
 // ask flags:
 //
@@ -43,6 +45,7 @@ import (
 const usage = `usage:
   jarvis-discord notify [--item AAB-43] <message>
   jarvis-discord ask [-choices a,b,c] [-timeout 2h] <question>
+  jarvis-discord image <path> [caption...]
   jarvis-discord watch
   jarvis-discord parrot <channelID> <messageID>`
 
@@ -52,8 +55,17 @@ func main() {
 	}
 	loadEnvFile()
 
+	// Default JARVIS_CONF to ~/.config/jarvis, like jarvis-chat and
+	// jarvis-jobs: in production the variable is unset, and without the
+	// default the pause-signal (talk-to-the-worker pause) is never written.
+	conf := os.Getenv("JARVIS_CONF")
+	if conf == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			conf = filepath.Join(home, ".config", "jarvis")
+		}
+	}
 	signalFile := ""
-	if conf := os.Getenv("JARVIS_CONF"); conf != "" {
+	if conf != "" {
 		signalFile = conf + "/pause-signal"
 	}
 	d, err := chat.NewDiscord(chat.Config{
@@ -89,6 +101,22 @@ func main() {
 		if err := d.ReactRainbowParrot(ctx, os.Args[2], os.Args[3]); err != nil {
 			fail(err.Error())
 		}
+
+	case "image":
+		// jarvis-discord image <path> [caption...] — send a local image
+		// file (art service output) as an attachment in the owner DM.
+		if len(os.Args) < 3 {
+			fail("usage: jarvis-discord image <path> [caption]")
+		}
+		path := os.Args[2]
+		caption := strings.Join(os.Args[3:], " ")
+		if _, err := os.Stat(path); err != nil {
+			fail(fmt.Sprintf("cannot read %s: %v", path, err))
+		}
+		if err := d.SendImage(ctx, caption, path); err != nil {
+			fail(err.Error())
+		}
+		fmt.Println("sent " + filepath.Base(path))
 
 	case "notify":
 		fs := flag.NewFlagSet("notify", flag.ExitOnError)

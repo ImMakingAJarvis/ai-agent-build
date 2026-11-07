@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
@@ -36,6 +37,9 @@ type Runner struct {
 	// Brief returns the stage-3 rules for a driver. The default reads
 	// $JARVIS_CONF/stage3-<driver>.txt.
 	Brief func(driver string) string
+	// StackStatus returns the machine snapshot included in the round
+	// prompt (default: runs jarvis-stack-status). Return "" to omit it.
+	StackStatus func() string
 	// Tee, if set, also receives the agent's output live (agent.log).
 	Tee io.Writer
 	// SignalFile, if non-empty, is polled during job execution. When it
@@ -50,6 +54,13 @@ type Runner struct {
 	// consumed, and a stale file from a previous round is cleared by
 	// agent-run before it starts the next one.
 	RestartSignalFile string
+	// StopSignalFile, if non-empty, is polled during job execution. When it
+	// appears (written by the dashboard's Stop button or `jarvis-jobs stop`),
+	// the running command is killed and the job is parked: out of the active
+	// queue, so the agent-run loop skips to the next work. The file is
+	// consumed, and a stale file from a previous round is cleared by
+	// agent-run before it starts the next one.
+	StopSignalFile string
 	// ReplySignalFile, if non-empty, is written by signalWatcher when a
 	// Discord message arrives but the engine slot is free — the round is NOT
 	// paused. After the job completes, agent-run checks for this file and
@@ -206,11 +217,45 @@ func (r *Runner) brief(driver string) string {
 	return string(b)
 }
 
-// Prompt is the stage-3 rules plus the job text (and any typed note).
+// defaultStackStatus runs jarvis-stack-status and returns its report for
+// the round prompt. The report is kept even on a non-zero exit (the tool
+// prints the full report and exits 1 when something is down — a down
+// engine is exactly the state a round needs to see). It returns "" only
+// when the tool is missing, times out, or prints no report.
+func defaultStackStatus() string {
+	bin := "/usr/local/bin/jarvis-stack-status"
+	if _, err := os.Stat(bin); err != nil {
+		bin = "jarvis-stack-status"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin).CombinedOutput()
+	s := strings.TrimSpace(string(out))
+	if ctx.Err() == context.DeadlineExceeded {
+		return "" // never block the round on a wedged snapshot
+	}
+	if err != nil && !strings.Contains(s, "STACK") {
+		return "" // missing tool or no report
+	}
+	return s
+}
+
+func (r *Runner) stackStatus() string {
+	if r.StackStatus != nil {
+		return r.StackStatus()
+	}
+	return defaultStackStatus()
+}
+
+// Prompt is the stage-3 rules, the machine snapshot, and the job text
+// (plus any typed note).
 func (r *Runner) Prompt(j Job, driver, note string) string {
 	var b strings.Builder
 	b.WriteString(r.brief(driver))
-	fmt.Fprintf(&b, "\n\n=== YOUR JOB THIS ROUND: %s — %s ===\n", j.ID, j.Title)
+	if snap := r.stackStatus(); snap != "" {
+		fmt.Fprintf(&b, "\nMACHINE SNAPSHOT at round start (jarvis-stack-status):\n%s\nTreat this as the current state of the machine: containers, loaded engines + VRAM, services, job queue, swap window. Do not re-discover the layout (systemctl list-units, ss -tlnp, docker ps, curl to engine ports). Probe deeper only when the job's evidence contradicts this snapshot, or while debugging a specific failure.\n", snap)
+	}
+	fmt.Fprintf(&b, "\n=== YOUR JOB THIS ROUND: %s — %s ===\n", j.ID, j.Title)
 	if j.Branch != "" {
 		fmt.Fprintf(&b, "Branch: %s\n", j.Branch)
 	}
@@ -319,6 +364,13 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	if driver == "" {
 		driver = "local"
 	}
+	// A stop signal left over from a previous round (one that landed after
+	// that round's watcher was gone) must not park this round's job: clear
+	// it before the claim. A stop pressed during this round lands after the
+	// command has started, and the watcher picks it up from there.
+	if r.StopSignalFile != "" {
+		_ = os.Remove(r.StopSignalFile)
+	}
 	j, err := r.Store.Claim(id, round, driver)
 	if err != nil {
 		return j, err
@@ -388,7 +440,7 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	if err := cmd.Start(); err != nil {
 		return j, err
 	}
-	if r.SignalFile != "" || r.RestartSignalFile != "" {
+	if r.SignalFile != "" || r.RestartSignalFile != "" || r.StopSignalFile != "" {
 		go r.signalWatcher(j.ID, cmd)
 	}
 	runErr := cmd.Wait()
@@ -402,12 +454,15 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	return r.finish(j, rec, buf.String(), runErr, wh)
 }
 
-// signalWatcher polls SignalFile and RestartSignalFile every second. A
-// restart signal (a "!restart" DM) kills the running command and re-queues
-// the job for a fresh run. A pause signal (an incoming user message) checks
-// whether the engine's chat slot is free. If free, it writes ReplySignalFile
-// and lets the round finish (agent-run sends a light reply after completion).
-// If the slot is busy, it kills the running command and pauses the job.
+// signalWatcher polls SignalFile, RestartSignalFile and StopSignalFile
+// every second. A restart signal (a "!restart" DM) kills the running command
+// and re-queues the job for a fresh run. A stop signal (the dashboard's Stop
+// button or `jarvis-jobs stop`) kills the command and parks the job, so the
+// agent-run loop skips to the next work. A pause signal (an incoming user
+// message) checks whether the engine's chat slot is free. If free, it writes
+// ReplySignalFile and lets the round finish (agent-run sends a light reply
+// after completion). If the slot is busy, it kills the running command and
+// pauses the job.
 func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 	for {
 		if r.RestartSignalFile != "" {
@@ -420,6 +475,20 @@ func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 				}
 				_ = r.Store.Restart(id)
 				_ = os.Remove(r.RestartSignalFile) // consume; don't kill the next round
+				return
+			}
+		}
+		if r.StopSignalFile != "" {
+			if _, err := os.Stat(r.StopSignalFile); err == nil {
+				// Owner stopped the work: park before kill, like pause —
+				// finish() reads the status after Wait returns, so a job
+				// that is already Parked keeps it instead of showing up
+				// as failed. The file is consumed so a stale stop never
+				// hits the next round.
+				if err := r.Store.Stop(id); err == nil && cmd.Process != nil {
+					cmd.Process.Kill()
+				}
+				_ = os.Remove(r.StopSignalFile)
 				return
 			}
 		}
@@ -502,6 +571,9 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 	switch {
 	case cur.Status == Paused:
 		j.Status = Paused
+	case cur.Status == Parked:
+		// Stop: the watcher already took the job out of the queue.
+		j.Status = Parked
 	case cur.Status == Ready:
 		// !restart: the watcher already put the job back in the queue.
 		j.Status = Ready
@@ -510,6 +582,20 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 		j.Status, j.Error = Failed, runErr.Error()
 	default:
 		j.Status, j.Error = Done, ""
+	}
+	// Photo jobs: the iGPU round wraps `jarvis-photo make`, which exits 0
+	// only when the image was generated AND delivered — but the agent (the
+	// small iGPU model) ends the round with 0 even when the command failed.
+	// So a photo round that ends done without the delivery marker is a
+	// failure, not a done job: the image was never sent, and the job must
+	// stay re-queueable instead of being silently lost.
+	photoFailed := false
+	if j.Status == Done && j.HasTag(photo.Tag) {
+		if _, err := os.Stat(photo.SentPath(r.Store.Dir(), id)); err != nil {
+			j.Status, j.Error = Failed, "photo round ended but no delivery marker (" +
+				filepath.Base(photo.SentPath(r.Store.Dir(), id)) + "): the image was not sent — re-queue to retry"
+			photoFailed = true
+		}
 	}
 	if err := r.Store.SetStatus(id, j.State); err != nil {
 		return j, err
@@ -522,10 +608,15 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 		}
 		rec.PRURL, rec.Summary = pr, j.Summary
 		rec.Kwh, rec.PowerCost = j.Kwh, j.PowerCost
-		if runErr != nil {
+		if runErr != nil || photoFailed {
 			failErr := runErr
-			if restarted {
+			switch {
+			case photoFailed:
+				failErr = errors.New(j.Error)
+			case restarted:
 				failErr = errors.New("restarted by owner")
+			case cur.Status == Parked:
+				failErr = errors.New("stopped by owner")
 			}
 			r.History.Fail(rec, failErr)
 		} else {

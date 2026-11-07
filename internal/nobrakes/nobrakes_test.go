@@ -133,6 +133,94 @@ func TestGetFullAutoCorruptValueIsOff(t *testing.T) {
 	}
 }
 
+func TestGetKeepGoingMissingKeyIsOff(t *testing.T) {
+	s := newTestStore(t)
+	v, err := s.GetKeepGoing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != AutoModeOff {
+		t.Fatalf("missing key = %q, want %q", v, AutoModeOff)
+	}
+	on, err := s.KeepGoingOn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on {
+		t.Error("KeepGoingOn with missing key = true, want false")
+	}
+}
+
+func TestSetKeepGoingRoundtrip(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.SetKeepGoing(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.GetKeepGoing(ctx); v != AutoModeOn {
+		t.Fatalf("after on: %q", v)
+	}
+	if on, _ := s.KeepGoingOn(ctx); !on {
+		t.Error("KeepGoingOn = false after SetKeepGoing(true)")
+	}
+	if err := s.SetKeepGoing(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.GetKeepGoing(ctx); v != AutoModeOff {
+		t.Fatalf("after off: %q", v)
+	}
+	// The switch is independent of the execution flags: keep_going must
+	// not read full_auto (and vice versa).
+	if err := s.SetFullAuto(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := s.KeepGoingOn(ctx); on {
+		t.Error("KeepGoingOn = true with only full_auto on — flags must be independent")
+	}
+	if on, _ := s.FullAutoOn(ctx); !on {
+		t.Error("FullAutoOn = false with SetFullAuto(true)")
+	}
+}
+
+func TestGetKeepGoingCorruptValueIsOff(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.client.Set(ctx, KeepGoingKey, "banana", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.GetKeepGoing(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != AutoModeOff {
+		t.Fatalf("corrupt value = %q, want %q", v, AutoModeOff)
+	}
+}
+
+// TestPauseLeavesKeepGoingUntouched pins the design decision: Pause turns
+// off the execution switches (auto_mode, full_auto) but never the failure
+// modifier — keep_going is not an execution switch, and with both
+// switches off there is no auto failure left for it to change.
+func TestPauseLeavesKeepGoingUntouched(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.SetKeepGoing(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFullAuto(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.GetFullAuto(ctx); v != AutoModeOff {
+		t.Fatalf("full_auto = %q after Pause, want off", v)
+	}
+	if v, _ := s.GetKeepGoing(ctx); v != AutoModeOn {
+		t.Fatalf("keep_going = %q after Pause, want on (untouched)", v)
+	}
+}
+
 func TestNightlyFlag(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -185,6 +273,9 @@ func TestEnsureDefaultsIsIdempotent(t *testing.T) {
 	}
 	if v, err := s.client.Get(ctx, FullAutoKey).Result(); err != nil || v != AutoModeOff {
 		t.Fatalf("full_auto = %q, %v; want %q", v, err, AutoModeOff)
+	}
+	if v, err := s.client.Get(ctx, KeepGoingKey).Result(); err != nil || v != AutoModeOff {
+		t.Fatalf("keep_going = %q, %v; want %q", v, err, AutoModeOff)
 	}
 	// Operator state must survive a second call.
 	if err := s.SetAutoMode(ctx, true); err != nil {
