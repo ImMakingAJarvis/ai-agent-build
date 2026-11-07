@@ -545,8 +545,12 @@
   </div>
   <!-- Interactive queue: drag ready jobs to reorder a band or reclassify a job.
        Lives in the static shell so a 15s refresh never wipes a drag in flight;
-       it loads itself and refreshes on a timer that pauses while dragging. -->
-  {{ template "queue-section" }}
+       it loads itself and refreshes on a timer that pauses while dragging.
+       The dot must be passed explicitly: since Go 1.26 a template call
+       without an argument runs the section with nil data, so the section's
+       own .GalleryURL (the photo-gallery link) would render empty.
+       (No double braces in this comment — html/template parses them.) -->
+  {{ template "queue-section" . }}
   <!-- Plans: upload a plan file (md or anything else). The dashboard saves it
        and enqueues a ready plan job; the worker's round for that job reads the
        plan and creates all the jobs around it. Lives in the static shell so a
@@ -599,7 +603,7 @@
       </div>
     </div>
   </div>
-  {{ template "pending-section" }}
+  {{ template "pending-section" . }}
   <div class="section">
     <div class="section-title">Approval Queue</div>
     <div id="approvals" hx-get="/api/approvals" hx-trigger="load, every 5s" hx-swap="outerHTML"></div>

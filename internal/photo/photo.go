@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // PromptSubdir is the directory, under the jarvis data dir, that holds one
@@ -42,4 +43,32 @@ func ReadPrompt(dataDir, id string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// SentPath is the marker a photo job's round leaves behind once its image
+// was generated AND delivered to Discord (jarvis-photo writes it). The run
+// wrapper (agentjob Runner.finish) treats a photo round that ends without
+// the marker as a failure, not a done job: the iGPU agent exits 0 even when
+// jarvis-photo failed, and without the marker a failed photo would be
+// recorded done — nothing sent, no retry, the image silently lost.
+func SentPath(dataDir, id string) string {
+	return filepath.Join(dataDir, PromptSubdir, id+".sent")
+}
+
+// MarkSent records that the job's photo was delivered, replacing any stale
+// marker from an earlier round.
+func MarkSent(dataDir, id string) error {
+	p := SentPath(dataDir, id)
+	_ = os.Remove(p)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
+}
+
+// ClearSent removes a stale delivery marker. jarvis-photo calls it at the
+// start of a round so that only this round's delivery can count: a re-run
+// that fails again must fail the job, not pass on the first round's marker.
+func ClearSent(dataDir, id string) error {
+	return os.Remove(SentPath(dataDir, id))
 }
