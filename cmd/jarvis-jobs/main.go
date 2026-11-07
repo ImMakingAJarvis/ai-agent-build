@@ -7,6 +7,10 @@
 //	                                       is skipped (left ready), so the
 //	                                       worker idles through a brain-swap
 //	                                       window (docs/brain-swap.md)
+//	jarvis-jobs photo-ready                comma-separated ids of the ready
+//	                                       photo-tagged batch — the set the
+//	                                       agent-run watcher brackets with one
+//	                                       brain-swap window (empty when none)
 //	jarvis-jobs run <id> [-driver local|igpu|sonnet|superagent] [-round N] [-note TEXT]
 //	                   [-auto]             run under the NoBrakes guard:
 //	                                       take the auto-run marker (at most
@@ -82,7 +86,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue")
+		die("usage: jarvis-jobs list [status]|next|photo-ready|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -107,6 +111,18 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("%s\t%s\n", j.ID, j.Title)
+	case "photo-ready":
+		jobs, err := store.PhotoReady()
+		if err != nil {
+			die("%v", err)
+		}
+		ids := make([]string, 0, len(jobs))
+		for _, j := range jobs {
+			ids = append(ids, j.ID)
+		}
+		// The agent-run watcher reads this: one line, comma-separated ids,
+		// empty line when the photo batch is empty.
+		fmt.Println(strings.Join(ids, ","))
 	case "show":
 		if len(args) != 1 {
 			die("show <id>")
