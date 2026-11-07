@@ -19,6 +19,7 @@ ExecStart=/opt/jarvis-igpu/bin/llama-server \
     -ngl 99 \
     --ctx-size 32768 \
     --jinja \
+    --metrics \
     --log-disable
 Restart=always
 RestartSec=10
