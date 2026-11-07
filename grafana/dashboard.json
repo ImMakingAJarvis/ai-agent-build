@@ -1781,7 +1781,7 @@
     {
       "id": 605,
       "title": "Tokens per Day",
-      "type": "bargraph",
+      "type": "barchart",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1829,7 +1829,7 @@
     {
       "id": 606,
       "title": "Tokens per Week",
-      "type": "bargraph",
+      "type": "barchart",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1877,7 +1877,7 @@
     {
       "id": 607,
       "title": "Tokens per Month (30-day buckets)",
-      "type": "bargraph",
+      "type": "barchart",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
