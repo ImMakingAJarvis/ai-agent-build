@@ -157,3 +157,22 @@ func TestParseCountersEmpty(t *testing.T) {
 		t.Errorf("parsed %v, want nothing", got)
 	}
 }
+
+func TestParseCountersScientificNotation(t *testing.T) {
+	// llama.cpp prints large counters with 6 significant digits in
+	// scientific notation (verified live: "1.72169e+06").
+	body := "llamacpp:prompt_tokens_total 172169\nllamacpp:tokens_predicted_total 1.72169e+06\nllamacpp:prompt_tokens_cached_total 2e+07\n"
+	got, err := ParseCounters(body)
+	if err != nil {
+		t.Fatalf("ParseCounters: %v", err)
+	}
+	if got[KindPrompt] != 172169 {
+		t.Errorf("prompt = %d, want 172169", got[KindPrompt])
+	}
+	if got[KindGenerated] != 1721690 {
+		t.Errorf("generated = %d, want 1721690 (quantised by source)", got[KindGenerated])
+	}
+	if got[KindPromptCached] != 20000000 {
+		t.Errorf("cached = %d, want 20000000", got[KindPromptCached])
+	}
+}

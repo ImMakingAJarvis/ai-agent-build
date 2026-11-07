@@ -15,6 +15,7 @@ package tokenledger
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -158,6 +159,13 @@ func (l *Ledger) Save() error {
 // are written unquoted by llama.cpp, so the body is scanned line by
 // line for an exact "name value" match. Kinds whose counter is absent
 // are omitted from the result.
+//
+// Values are parsed as floats: llama.cpp prints them with 6
+// significant digits and switches to scientific notation at 1e6
+// ("1.72169e+06"), so the last digit(s) of large counters are
+// quantised by the source itself. The accumulated total therefore
+// drifts by at most half a quantisation step per crossing — fine for
+// dashboard-scale numbers.
 func ParseCounters(body string) (map[Kind]uint64, error) {
 	out := map[Kind]uint64{}
 	for _, line := range strings.Split(body, "\n") {
@@ -175,11 +183,11 @@ func ParseCounters(body string) (map[Kind]uint64, error) {
 			if strings.ContainsAny(raw, "{}") {
 				continue
 			}
-			v, err := strconv.ParseUint(raw, 10, 64)
-			if err != nil {
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil || v < 0 {
 				return nil, fmt.Errorf("tokenledger: parse %s: %w", name, err)
 			}
-			out[kind] = v
+			out[kind] = uint64(math.Round(v))
 		}
 	}
 	return out, nil
