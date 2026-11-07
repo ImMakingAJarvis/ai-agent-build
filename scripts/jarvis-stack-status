@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""jarvis-stack-status — report the running containers and the models currently loaded.
+"""jarvis-stack-status — report the state of the whole machine stack.
 
-Prints a snapshot of the stack:
+The one command that answers "what state is the machine in?" — run it
+once instead of re-probing with systemctl / docker ps / ss -tlnp /
+nvidia-smi / journalctl. Prints a snapshot of the stack:
 
   1. Docker containers — running by default (`--all` includes stopped):
      name, image, uptime, published ports.
@@ -10,6 +12,12 @@ Prints a snapshot of the stack:
      (queried live from the engine's /v1/models endpoint), context size,
      and memory in use (process RSS, plus GPU VRAM when nvidia-smi
      answers). A new engine shows up without changing this script.
+  3. Host — free RAM, load average, uptime, and free space on /.
+  4. Services — active state of the fixed list of jarvis systemd units
+     (the ones that are not already covered by the engine section).
+  5. Queue — agent job counts per state (jarvis-jobs list).
+  6. Swap — brain-swap window state (jarvis-swap status): whether a
+     maintenance window is open and the brain engine's state.
 
 Known engines are checked even when down, so a dead engine is reported
 rather than silently missing:
@@ -238,6 +246,79 @@ def gpu_vram():
     return {"used_mib": int(first[0]), "total_mib": int(first[1])}
 
 
+def host_info():
+    """Free RAM, load average, uptime, and free space on / — one line each."""
+    info = {}
+    rc, out = sh(["free", "-b"], timeout=5)
+    if rc == 0:
+        for line in out.splitlines():
+            if line.startswith("Mem:"):
+                t = line.split()  # Mem: total free shared buff/cache available
+                info["ram_free"] = human_bytes(float(t[2]))
+                info["ram_total"] = human_bytes(float(t[1]))
+    try:
+        with open("/proc/loadavg") as f:
+            info["load"] = " ".join(f.readline().split()[:3])
+    except OSError:
+        pass
+    rc, out = sh(["uptime", "-p"], timeout=5)
+    if rc == 0 and out.strip():
+        info["uptime"] = out.strip()
+    rc, out = sh(["df", "-B1", "--output=avail,size", "/"], timeout=5)
+    if rc == 0:
+        t = out.strip().splitlines()[-1].split()
+        if len(t) == 2:
+            info["disk_free"] = human_bytes(float(t[0]))
+            info["disk_total"] = human_bytes(float(t[1]))
+    return info
+
+
+# Systemd units that are part of the stack but not covered by the engine
+# section (engines are reported via known_engines + the /proc scan).
+SERVICES = ["agent-run", "jarvis-watchdog", "plane-bridge", "task-runner"]
+
+
+def services_states():
+    """Active state of each service in SERVICES; {} when systemctl fails."""
+    rc, out = sh(["systemctl", "is-active"] + SERVICES, timeout=10)
+    if rc not in (0, 1):  # 1 = at least one inactive, states still printed
+        return {}
+    states = out.split()
+    return {name: states[i] if i < len(states) else "?" for i, name in enumerate(SERVICES)}
+
+
+def queue_counts():
+    """Agent job counts per state from `jarvis-jobs list`; {} if unavailable."""
+    rc, out = sh(["jarvis-jobs", "list"], timeout=10)
+    if rc != 0:
+        return {}
+    counts = {}
+    for line in out.splitlines():
+        parts = line.split()
+        # skip the trailing summary line ("# 431 jobs: ...") and blanks
+        if parts and not parts[0].startswith("#"):
+            counts[parts[0]] = counts.get(parts[0], 0) + 1
+    return counts
+
+
+def swap_state():
+    """Brain-swap window state: (brain_state, maintenance) or None."""
+    rc, out = sh(["jarvis-swap", "status"], timeout=10)
+    if rc != 0:
+        return None
+    brain = maint = None
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("brain ctr"):
+            t = line.split()
+            brain = t[2] if len(t) > 2 else None
+        elif line.startswith("maintenance"):
+            maint = line.split(None, 1)[1] if len(line.split(None, 1)) > 1 else "?"
+    if brain is None and maint is None:
+        return None
+    return {"brain": brain or "?", "maintenance": maint or "unknown"}
+
+
 def known_engine_states(container_ids):
     """State of each known engine source (container / systemd unit)."""
     states = []
@@ -319,6 +400,14 @@ def build_report(include_stopped):
         if port and entry["health"] != "ok":
             report["problems"].append(f"engine {source} (port {port}): health {entry['health']}")
 
+    report["host"] = host_info()
+    report["services"] = services_states()
+    report["queue"] = queue_counts()
+    report["swap"] = swap_state()
+    for name, state in report["services"].items():
+        if state != "active":
+            report["problems"].append(f"service {name} is {state}")
+
     # known engines that are up but produced no process, or down outright
     seen_sources = {e["source"] for e in engines}
     for st in report["known_engines"]:
@@ -381,6 +470,43 @@ def print_human(r):
     for st in r["known_engines"]:
         if st["state"] != "running":
             print(f"  [DOWN] known engine {st['kind']}={st['name']} — {st['state']}")
+
+    h = r.get("host") or {}
+    if h:
+        bits = []
+        if h.get("ram_free"):
+            bits.append(f"ram {h['ram_free']} free of {h['ram_total']}")
+        if h.get("load"):
+            bits.append(f"load {h['load']}")
+        if h.get("uptime"):
+            bits.append(h["uptime"])
+        if h.get("disk_free"):
+            bits.append(f"disk / {h['disk_free']} free of {h['disk_total']}")
+        print("Host:")
+        print(f"  {'   '.join(bits) if bits else '-'}")
+        print()
+
+    svcs = r.get("services") or {}
+    if svcs:
+        print("Services (systemd):")
+        for name in SERVICES:
+            if name in svcs:
+                print(f"  {name:<20} {svcs[name]}")
+        print()
+
+    q = r.get("queue") or {}
+    if q:
+        # active states only — done/skipped are history, not current state
+        active = [f"{k} {v}" for k, v in sorted(q.items())
+                  if k in ("ready", "pending", "running", "failed", "parked")]
+        print("Queue (agent jobs):")
+        print(f"  {', '.join(active) if active else 'none active'}  (done {q.get('done', 0)})")
+        print()
+
+    sw = r.get("swap")
+    if sw:
+        print(f"Swap: brain={sw['brain']}  maintenance={sw['maintenance']}")
+        print()
 
     if r["ok"]:
         print(f"OK: {len(r['engines'])} engine(s) serving, {len(cs)} container(s) running")

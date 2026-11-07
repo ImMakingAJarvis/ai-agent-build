@@ -68,9 +68,8 @@ const (
 
 // Timeouts are variables so tests can shorten them.
 var (
-	busyTimeout  = 20 * time.Second  // send busy notice after this long
-	maxTimeout   = 4 * time.Minute   // give up after this long
-	photoTimeout = 3 * time.Minute   // one photo generation
+	busyTimeout = 20 * time.Second // send busy notice after this long
+	maxTimeout  = 4 * time.Minute  // give up after this long
 	// photoCheckTimeout covers the photocheck loop: two generations plus
 	// two thinking-mind calls.
 	photoCheckTimeout = 6 * time.Minute
@@ -279,7 +278,7 @@ func main() {
 				// with the local art model (prompt expanded by the
 				// thinking mind) and send it back as an attachment.
 				if mode, prompt, ok := cutPhotoCmd(content); ok {
-					handlePhoto(d, photoSvc, mode, prompt)
+					handlePhoto(d, photoSvc, in, confDir, mode, prompt)
 					return
 				}
 
@@ -558,22 +557,29 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, mem *mem
 	}
 }
 
-// handlePhoto runs a photo request through the thinking mind and then
-// the art service, and sends the result to the owner as an attachment.
-// mode selects the flavor: "" (plain) expands the prompt with the mind,
-// "assist" also sends the mind's full prompt as a chat message, and
-// "check" iterates draft -> generate -> critique -> improve -> generate.
-// When the brain is unreachable it falls back to the owner's raw words.
-// A 1024x1024 image takes tens of seconds; the typing indicator stays
-// up for the whole run.
-func handlePhoto(d photoSender, svc *photomind.Service, mode, prompt string) {
+// handlePhoto routes a photo request. The plain, "assist" and "now" flavors
+// are QUEUED: the prompt is expanded now (the brain is up), then a photo job
+// is enqueued that generates and delivers the image in the brain-swap window,
+// when the 4090 is free — so a full GPU no longer makes the request fail
+// synchronously. "now" additionally interrupts the running job so the photo
+// runs next (it is queued at the top of the fix band). "check" keeps its
+// synchronous draft→generate→critique loop, which needs the brain resident
+// and therefore cannot run in the swap window.
+func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDir, mode, prompt string) {
 	prompt = strings.TrimSpace(prompt)
 	cmdName := "!photo"
+	now := false
 	switch mode {
 	case "assist":
 		cmdName = "!photoassist"
+	case "assistnow":
+		cmdName = "!photoassistnow"
+		now = true
 	case "check":
 		cmdName = "!photocheck"
+	case "now":
+		cmdName = "!photonow"
+		now = true
 	}
 	if prompt == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -582,15 +588,80 @@ func handlePhoto(d photoSender, svc *photomind.Service, mode, prompt string) {
 		return
 	}
 
+	// "check" needs the brain resident (it critiques after each draft), so it
+	// stays synchronous — the queued swap-window flow does not provide that.
+	if mode == "check" {
+		runPhotoCheck(d, svc, prompt)
+		return
+	}
+
+	// Everything else is queued. Expand the prompt now, while the brain is up.
 	typingCtx, typingCancel := context.WithCancel(context.Background())
 	defer typingCancel()
 	go typingLoop(typingCtx, d)
 
-	timeout := photoTimeout
-	if mode == "check" {
-		timeout = photoCheckTimeout
+	usedPrompt := prompt
+	note := ""
+	if !svc.Healthy() {
+		note = "thinking mind is down — I used your words as-is"
+	} else if p, err := assistPrompt(svc, prompt); err == nil {
+		usedPrompt = p
+	} else {
+		note = "the thinking mind was down — I used your words as-is"
+		log.Printf("jarvis-chat: photo assist: %v", err)
 	}
-	genCtx, genCancel := context.WithTimeout(context.Background(), timeout)
+
+	if mode == "assist" || mode == "assistnow" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = d.Notify(ctx, "Here's the prompt I'll use:\n\n"+usedPrompt)
+		cancel()
+	}
+
+	id, err := enqueuePhotoJob(in, prompt, usedPrompt, now)
+	if err != nil {
+		log.Printf("jarvis-chat: photo enqueue: %v", err)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = d.Notify(ctx, "Could not queue your photo: "+err.Error())
+		cancel()
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if now {
+		// Interrupt the running job (if any) so this top-priority photo runs
+		// next; the interrupted job is re-queued and resumes after the photo.
+		preemptRound(confDir)
+		_ = d.Notify(ctx, "Now! I've queued your photo at the very top ("+id+"). I'll pause the current job, generate it in the brain-swap window, send it to your DM, then pick the paused work back up.")
+	} else {
+		msg := "Queued your photo as " + id + ". It'll run in the brain-swap window — after any running fix work, ahead of ordinary build work — and I'll send it to your DM as soon as it's generated."
+		if note != "" {
+			msg = note + ". " + msg
+		}
+		_ = d.Notify(ctx, msg)
+	}
+	cancel()
+}
+
+// assistPrompt asks the thinking mind to expand a casual photo request into a
+// detailed image prompt. It is isolated so handlePhoto can fall back to the
+// owner's raw words on any brain hiccup.
+func assistPrompt(svc *photomind.Service, request string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	return svc.Assist(ctx, request)
+}
+
+// runPhotoCheck is the synchronous !photocheck loop: draft → generate →
+// critique → improve → generate. It needs the brain resident (for the
+// critique) and the 4090 free (for generation), so it stays synchronous
+// rather than queued.
+func runPhotoCheck(d photoSender, svc *photomind.Service, prompt string) {
+	typingCtx, typingCancel := context.WithCancel(context.Background())
+	defer typingCancel()
+	go typingLoop(typingCtx, d)
+
+	genCtx, genCancel := context.WithTimeout(context.Background(), photoCheckTimeout)
+	defer genCancel()
 
 	var (
 		img        *art.Image
@@ -598,40 +669,29 @@ func handlePhoto(d photoSender, svc *photomind.Service, mode, prompt string) {
 		note       string
 		err        error
 	)
-
-	switch {
-	case !svc.Healthy():
-		note = "thinking mind is down — I used your words as-is"
-		img, err = svc.Art.Generate(genCtx, prompt)
-	case mode == "assist":
-		usedPrompt, err = svc.Assist(genCtx, prompt)
-		if err == nil {
-			_ = d.Notify(genCtx, "Here's the prompt I came up with:\n\n"+usedPrompt)
-			img, err = svc.Art.Generate(genCtx, usedPrompt)
+	var res *photomind.CheckResult
+	res, err = svc.Check(genCtx, prompt)
+	if res != nil {
+		img, usedPrompt = res.Image, res.Prompt
+		if len(res.Drafts) > 1 {
+			note = "photocheck: 2 passes — critiqued the first prompt, improved it, re-generated"
 		}
-	case mode == "check":
-		var res *photomind.CheckResult
-		res, err = svc.Check(genCtx, prompt)
-		if res != nil {
-			img, usedPrompt = res.Image, res.Prompt
-			if len(res.Drafts) > 1 {
-				note = "photocheck: 2 passes — critiqued the first prompt, improved it, re-generated"
-			}
-		}
-	default:
-		img, usedPrompt, err = svc.GenerateAssisted(genCtx, prompt)
 	}
 	genCancel()
 	typingCancel()
 
-	if err != nil {
-		if img == nil {
-			log.Printf("jarvis-chat: photo: %v", err)
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			_ = d.Notify(ctx, photoErrorMessage(err))
-			return
+	if img == nil {
+		msg := "Photo generation returned nothing; try again in a moment."
+		if err != nil {
+			msg = photoErrorMessage(err)
 		}
+		log.Printf("jarvis-chat: photocheck: %v", err)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = d.Notify(ctx, msg)
+		return
+	}
+	if err != nil {
 		// A check loop that died after the first pass: show what we have.
 		note += " — " + photoErrorMessage(err)
 	}
@@ -644,6 +704,17 @@ func handlePhoto(d photoSender, svc *photomind.Service, mode, prompt string) {
 		log.Printf("jarvis-chat: photo send: %v", err)
 		_ = d.Notify(sendCtx, "The photo is done ("+img.Path+") but I could not send the file: "+err.Error())
 	}
+}
+
+// preemptRound interrupts the running job (if any) so a top-priority photo
+// runs next, mirroring the !restart signal. Between rounds it is a no-op: the
+// loop clears the signal before each round and Store.Restart only acts on a
+// running job, so a stale signal cannot interrupt the next job.
+func preemptRound(confDir string) {
+	if confDir == "" {
+		return
+	}
+	_ = os.WriteFile(confDir+"/restart-signal", []byte("!photonow"), 0o644)
 }
 
 // photoCaption builds the caption under a generated photo: an optional
@@ -666,15 +737,19 @@ func photoCaption(img *art.Image, usedPrompt, note string) string {
 
 // cutPhotoCmd recognizes the photo commands. A word boundary is
 // required, so "!photograph a sunset" stays a chat message. mode is ""
-// for plain !photo, "assist" for !photoassist, "check" for !photocheck.
-// The longer commands are tried first.
+// for plain !photo, "assist" for !photoassist, "check" for !photocheck,
+// "now" for !photonow and "assistnow" for !photoassistnow (the top-priority
+// variants). The longer commands are tried first so a prefix never
+// mis-matches (e.g. !photoassistnow is not cut as !photoassist).
 func cutPhotoCmd(content string) (mode, prompt string, ok bool) {
 	for _, c := range []struct {
 		cmd  string
 		mode string
 	}{
-		{"!photocheck", "check"},
+		{"!photoassistnow", "assistnow"},
 		{"!photoassist", "assist"},
+		{"!photocheck", "check"},
+		{"!photonow", "now"},
 		{"!photo", ""},
 	} {
 		rest := strings.TrimPrefix(content, c.cmd)
