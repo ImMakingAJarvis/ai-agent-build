@@ -123,6 +123,12 @@ func main() {
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
+	// Counter series are exposed by Add-ing the delta since the last
+	// exposure (the cumulatives never decrease, so the delta is always
+	// >= 0 and the counter stays reset-free across this process's
+	// restarts — the state file carries the value over).
+	exposed := map[string]uint64{}
+
 	pollOnce := func() {
 		for _, e := range engines {
 			body, ok := fetch(client, e.url+"/metrics")
@@ -141,6 +147,19 @@ func main() {
 				continue
 			}
 			ledger.Observe(e.name, values)
+		}
+		// Expose the cumulatives as a never-resetting counter.
+		for eng, kinds := range ledger.Totals() {
+			for kind, v := range kinds {
+				key := eng + "|" + string(kind)
+				c := tokensTotal.WithLabelValues(eng, string(kind))
+				if prev, seen := exposed[key]; !seen {
+					c.Add(float64(v)) // first exposure: seed the series
+				} else {
+					c.Add(float64(v - prev))
+				}
+				exposed[key] = v
+			}
 		}
 		if err := ledger.Save(); err != nil {
 			log.Printf("token-ledger: save state: %v", err)
