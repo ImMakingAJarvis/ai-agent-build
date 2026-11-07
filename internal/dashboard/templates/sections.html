@@ -254,6 +254,7 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
       </select>
     </label>
     <button class="btn" id="queue-refresh-btn" onclick="qLoad(true)">Refresh</button>
+    <a class="btn" href="{{ .GalleryURL }}" target="_blank" rel="noopener" style="text-decoration:none" title="Every photo the art service has generated">Gallery</a>
   </div>
   <p class="subtitle">Photo jobs are listed first &mdash; they run in the brain-swap window. Drag a job&rsquo;s handle to reorder its band, or drop it in another band to reclassify it; press <em>Edit</em> on a job to change its text (title and instructions, or the prompt for a photo job). Band priority (highest first): <span id="q-band-order-label">fix &rarr; build &rarr; background</span>. A job shown as &ldquo;blocked&rdquo; waits on its dependencies and still runs later in the band.</p>
   <div id="queue-content">
