@@ -33,8 +33,7 @@ itself can run while the round works.
 ## Method (per point)
 
 1. `docker compose stop engine` — the brain llama-server is the compose
-   container `jarvis-engine` on :11434 (the legacy systemd
-   `jarvis-engine.service` is stopped/legacy, do not start it). Verify
+   container `jarvis-engine` on :11434. Verify
    ~24 GB free of the 24,564 MiB card.
 2. Start: `/home/agent/ftvenv/bin/ft serve --model
    /home/agent/models/qwen3.8-flash-next/UD-IQ4_XS --port 11436

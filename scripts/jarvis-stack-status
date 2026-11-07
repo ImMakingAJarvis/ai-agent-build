@@ -22,7 +22,7 @@ nvidia-smi / journalctl. Prints a snapshot of the stack:
 Known engines are checked even when down, so a dead engine is reported
 rather than silently missing:
 
-  main   systemd unit `jarvis-engine`        (brain on the RTX 4090, :11434)
+  main   docker container `jarvis-engine`   (brain on the RTX 4090, :11434)
   igpu   systemd unit `jarvis-engine-igpu`  (helper on the iGPU, :11435)
 
 Usage:
@@ -46,7 +46,7 @@ import urllib.request
 
 KNOWN_ENGINES = [
     # (label, kind, name, hint shown in the report)
-    ("main", "unit", "jarvis-engine", "brain on the RTX 4090"),
+    ("main", "container", "jarvis-engine", "brain on the RTX 4090"),
     ("igpu", "unit", "jarvis-engine-igpu", "helper on the Ryzen iGPU"),
 ]
 HTTP_TIMEOUT = 3.0
@@ -309,7 +309,7 @@ def swap_state():
     brain = maint = None
     for line in out.splitlines():
         line = line.strip()
-        if line.startswith("brain unit"):
+        if line.startswith("brain ctr"):
             t = line.split()
             brain = t[2] if len(t) > 2 else None
         elif line.startswith("maintenance"):
