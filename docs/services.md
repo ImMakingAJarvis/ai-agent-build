@@ -52,8 +52,7 @@ Not containerized, on purpose:
   queries it via the `jarvis-helper` CLI for setup-change and self-restart
   questions; it costs no CPU cores (docs/igpu-model-handler.md). Model:
   `/opt/jarvis-igpu/models/jarvis-igpu.gguf`; deploy: `scripts/install_helper.sh`.
-- **`ollama`** — installed but disabled (`Conflicts=jarvis-engine.service`);
-  the engine superseded it. Left as a host option, not part of the stack.
+- **`ollama`** — installed but disabled (the engine container superseded it, and both want port 11434). Left as a host option, not part of the stack.
 - **CLIs** (`jarvis-jobs`, `jarvis-discord`, `enqueue`, `jarvis-reply`,
   `jarvis-migrate`, `agent-local`, `agent-run`) — not services; run on demand.
   `jarvis-jobs` store: `~/.local/share/jarvis/jobs`.
@@ -125,9 +124,8 @@ docker compose stop chat
 sudo systemctl enable --now jarvis-chat.service
 ```
 
-…and the reverse to go back to Docker. The engine's native unit
-(`jarvis-engine.service`, `Restart=always` drop-in included) is the fastest
-fallback for the brain.
+…and the reverse to go back to Docker. The brain has no native fallback:
+it is only ever the `jarvis-engine` container (`docker compose start engine`).
 
 Never run the chat container and the host unit at the same time: both
 daemons receive every owner DM on the gateway, so they double-reply and

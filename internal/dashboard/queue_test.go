@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 )
 
 // ingestAgentJob adds a ready agent job to the test store.
@@ -98,11 +100,15 @@ func TestQueueBandsDefaultOrder(t *testing.T) {
 	setAgentStatus(t, "done1", agentjob.Done)
 
 	r := getQueue(t, s)
-	if len(r.Bands) != 3 ||
-		r.Bands[0].Name != agentjob.ClassFix ||
-		r.Bands[1].Name != agentjob.ClassBuild ||
-		r.Bands[2].Name != agentjob.ClassBackground {
-		t.Fatalf("bands out of the default band order: %+v", r.Bands)
+	if len(r.Bands) != 4 ||
+		r.Bands[0].Name != PhotoBand ||
+		r.Bands[1].Name != agentjob.ClassFix ||
+		r.Bands[2].Name != agentjob.ClassBuild ||
+		r.Bands[3].Name != agentjob.ClassBackground {
+		t.Fatalf("bands out of order (photo band first, then the runtime band order): %+v", r.Bands)
+	}
+	if len(r.Bands[0].Jobs) != 0 {
+		t.Fatalf("photo band = %+v, want empty", r.Bands[0].Jobs)
 	}
 	// Within build, higher priority first: b2 then b1. done1 is not ready.
 	if got := bandIDs(r, agentjob.ClassBuild); strings.Join(got, ",") != "b2,b1" {
@@ -194,7 +200,8 @@ func TestQueueRoutesEndToEnd(t *testing.T) {
 	ingestAgentJob(t, "g1", agentjob.ClassBackground, 1, nil)
 	h := s.routes()
 
-	// GET /api/queue: three bands in the default band order, one ready job each.
+	// GET /api/queue: the photo band plus the three class bands in the
+	// default band order, one ready job in each class band.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/queue", nil))
 	if w.Code != http.StatusOK {
@@ -204,11 +211,12 @@ func TestQueueRoutesEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &r); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Bands) != 3 ||
-		r.Bands[0].Name != agentjob.ClassFix ||
-		r.Bands[1].Name != agentjob.ClassBuild ||
-		r.Bands[2].Name != agentjob.ClassBackground {
-		t.Fatalf("bands out of the default band order: %+v", r.Bands)
+	if len(r.Bands) != 4 ||
+		r.Bands[0].Name != PhotoBand ||
+		r.Bands[1].Name != agentjob.ClassFix ||
+		r.Bands[2].Name != agentjob.ClassBuild ||
+		r.Bands[3].Name != agentjob.ClassBackground {
+		t.Fatalf("bands out of order: %+v", r.Bands)
 	}
 
 	// POST /api/queue/reorder: promote background job g1 to the top of build.
@@ -244,13 +252,14 @@ func TestQueueBandOrderDynamic(t *testing.T) {
 	ingestAgentJob(t, "b1", agentjob.ClassBuild, 5, nil)
 	ingestAgentJob(t, "g1", agentjob.ClassBackground, 1, nil)
 
-	// Default order is reported and the bands follow it.
+	// Default order is reported and the bands follow it (photo band first,
+	// outside the runtime band order).
 	r := getQueue(t, s)
 	if strings.Join(r.Order, ",") != "fix,build,background" {
 		t.Fatalf("order = %v, want default fix,build,background", r.Order)
 	}
-	if r.Bands[0].Name != agentjob.ClassFix || r.Bands[1].Name != agentjob.ClassBuild ||
-		r.Bands[2].Name != agentjob.ClassBackground {
+	if r.Bands[0].Name != PhotoBand || r.Bands[1].Name != agentjob.ClassFix ||
+		r.Bands[2].Name != agentjob.ClassBuild || r.Bands[3].Name != agentjob.ClassBackground {
 		t.Fatalf("bands do not follow order: %+v", r.Bands)
 	}
 
@@ -262,8 +271,8 @@ func TestQueueBandOrderDynamic(t *testing.T) {
 	if strings.Join(r.Order, ",") != "background,build,fix" {
 		t.Fatalf("order after set = %v, want background,build,fix", r.Order)
 	}
-	if r.Bands[0].Name != agentjob.ClassBackground || r.Bands[1].Name != agentjob.ClassBuild ||
-		r.Bands[2].Name != agentjob.ClassFix {
+	if r.Bands[0].Name != PhotoBand || r.Bands[1].Name != agentjob.ClassBackground ||
+		r.Bands[2].Name != agentjob.ClassBuild || r.Bands[3].Name != agentjob.ClassFix {
 		t.Fatalf("bands not re-sorted: %+v", r.Bands)
 	}
 
@@ -337,5 +346,239 @@ func TestQueueBandOrderValidation(t *testing.T) {
 	s.handleQueueBandOrder(w, httptest.NewRequest("POST", "/api/queue/band-order", strings.NewReader("not json")))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad body: status %d", w.Code)
+	}
+}
+
+// ingestPhotoJob adds a ready photo-tagged job plus its prompt sidecar — the
+// same pair of files jarvis-chat's !photo enqueue writes.
+func ingestPhotoJob(t *testing.T, id, class string, priority int, prompt string) {
+	t.Helper()
+	st, err := agentjob.Open(agentjob.DataDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := agentjob.Spec{
+		ID:           id,
+		Title:        "photo: " + id,
+		Instructions: "run jarvis-photo make --job " + id,
+		Class:        class,
+		Priority:     priority,
+		Tags:         []string{photo.Tag},
+	}
+	if _, err := st.Ingest(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := photo.WritePrompt(st.Dir(), id, prompt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func postEdit(t *testing.T, s *Server, id, title, instructions string) (*httptest.ResponseRecorder, queueResponse) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"id": id, "title": title, "instructions": instructions})
+	req := httptest.NewRequest("POST", "/api/queue/edit", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.handleQueueEdit(w, req)
+	var r queueResponse
+	if w.Code == http.StatusOK {
+		json.Unmarshal(w.Body.Bytes(), &r)
+	}
+	return w, r
+}
+
+// TestQueuePhotoBand covers the dedicated photo band: photo-tagged ready
+// jobs are listed first in their own display-only band (with the sidecar
+// prompt as their editable text) and are absent from the class bands; the
+// runtime band order is unaffected.
+func TestQueuePhotoBand(t *testing.T) {
+	s := newTestServer(t)
+	ingestPhotoJob(t, "p1", agentjob.ClassBuild, 999, "a red fox in a snowstorm")
+	ingestPhotoJob(t, "p2", agentjob.ClassFix, 1000, "a lighthouse at dawn")
+	ingestAgentJob(t, "b1", agentjob.ClassBuild, 5, nil)
+	ingestAgentJob(t, "pd", agentjob.ClassBuild, 50, nil)
+	setAgentStatus(t, "pd", agentjob.Done) // a done photo job is not queued
+
+	r := getQueue(t, s)
+	if len(r.Bands) != 4 || r.Bands[0].Name != PhotoBand {
+		t.Fatalf("photo band missing or out of place: %+v", r.Bands)
+	}
+	if got := bandIDs(r, PhotoBand); strings.Join(got, ",") != "p2,p1" {
+		t.Fatalf("photo band = %v, want [p2 p1] (priority order within the batch)", got)
+	}
+	if got := bandIDs(r, agentjob.ClassBuild); strings.Join(got, ",") != "b1" {
+		t.Fatalf("build band = %v, want only [b1] (photo jobs split out)", got)
+	}
+	if len(r.Order) != 3 || strings.Join(r.Order, ",") != "fix,build,background" {
+		t.Fatalf("order = %v, want the 3-class runtime band order unchanged", r.Order)
+	}
+	// The photo job carries its sidecar prompt as the editable text and keeps
+	// its class for the run order.
+	var p1 *queueJob
+	for i := range r.Bands[0].Jobs {
+		if r.Bands[0].Jobs[i].ID == "p1" {
+			p1 = &r.Bands[0].Jobs[i]
+		}
+	}
+	if p1 == nil || !p1.Photo {
+		t.Fatalf("p1 not flagged photo in the photo band: %+v", r.Bands[0].Jobs)
+	}
+	if p1.Prompt != "a red fox in a snowstorm" {
+		t.Errorf("p1 prompt = %q, want the sidecar prompt", p1.Prompt)
+	}
+	if p1.Class != agentjob.ClassBuild {
+		t.Errorf("p1 class = %q, want build (run order is unchanged)", p1.Class)
+	}
+}
+
+// TestQueueReorderWithPhotoJobs covers the reorder contract with photo jobs
+// present: they are exempt from the exactly-once rule (the client may omit
+// them), and a photo job listed under a class band is reclassified like any
+// other job.
+func TestQueueReorderWithPhotoJobs(t *testing.T) {
+	s := newTestServer(t)
+	ingestPhotoJob(t, "p1", agentjob.ClassBuild, 999, "a red fox")
+	ingestAgentJob(t, "b1", agentjob.ClassBuild, 1, nil)
+	ingestAgentJob(t, "b2", agentjob.ClassBuild, 9, nil)
+
+	// The photo job is omitted (the UI never posts it): accepted, and it
+	// stays in the photo band.
+	w, r := postReorder(t, s, map[string][]string{
+		agentjob.ClassBuild: {"b1", "b2"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("reorder omitting the photo job: %d %s", w.Code, w.Body.String())
+	}
+	if got := bandIDs(r, PhotoBand); strings.Join(got, ",") != "p1" {
+		t.Fatalf("photo band = %v, want [p1]", got)
+	}
+	if got := bandIDs(r, agentjob.ClassBuild); strings.Join(got, ",") != "b1,b2" {
+		t.Fatalf("build band = %v, want [b1 b2]", got)
+	}
+
+	// The photo job listed under a class band reclassifies (old-frontend
+	// behavior) and still shows in the photo band — membership is by tag.
+	// The other ready jobs are still listed, as always.
+	w, r = postReorder(t, s, map[string][]string{
+		agentjob.ClassFix:   {"p1"},
+		agentjob.ClassBuild: {"b1", "b2"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("reorder listing the photo job under fix: %d %s", w.Code, w.Body.String())
+	}
+	if got := bandIDs(r, PhotoBand); strings.Join(got, ",") != "p1" {
+		t.Fatalf("photo band = %v, want [p1]", got)
+	}
+	st, err := agentjob.Open(agentjob.DataDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j, err := st.Get("p1"); err != nil || j.Class != agentjob.ClassFix {
+		t.Fatalf("p1 class = %q, %v; want fix after reclassification", j.Class, err)
+	}
+}
+
+// TestQueueEdit covers editing the text of a queued job: ordinary jobs get
+// their title/instructions rewritten in job.json; a photo job's text is the
+// generation prompt, so it goes to the sidecar file and the generic
+// instructions in job.json are left as-is; not-ready, unknown, and empty
+// edits are refused.
+func TestQueueEdit(t *testing.T) {
+	s := newTestServer(t)
+	ingestAgentJob(t, "b1", agentjob.ClassBuild, 5, nil)
+	ingestPhotoJob(t, "p1", agentjob.ClassBuild, 999, "a red fox in a snowstorm")
+	ingestAgentJob(t, "d1", agentjob.ClassBuild, 1, nil)
+	setAgentStatus(t, "d1", agentjob.Done)
+
+	// Ordinary job: title and instructions are replaced.
+	w, r := postEdit(t, s, "b1", "b1 edited", "do the thing, but carefully")
+	if w.Code != http.StatusOK {
+		t.Fatalf("edit b1: %d %s", w.Code, w.Body.String())
+	}
+	st, err := agentjob.Open(agentjob.DataDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := st.Get("b1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Title != "b1 edited" || j.Instructions != "do the thing, but carefully" {
+		t.Fatalf("b1 = %+v, want edited title and instructions", j)
+	}
+	if got := bandIDs(r, agentjob.ClassBuild); len(got) != 1 || got[0] != "b1" {
+		t.Fatalf("build band after edit = %v, want [b1]", got)
+	}
+	var b1 *queueJob
+	for i := range r.Bands {
+		for k := range r.Bands[i].Jobs {
+			if r.Bands[i].Jobs[k].ID == "b1" {
+				b1 = &r.Bands[i].Jobs[k]
+			}
+		}
+	}
+	if b1 == nil || b1.Title != "b1 edited" || b1.Instructions != "do the thing, but carefully" {
+		t.Fatalf("edited job not reflected in the queue response: %+v", b1)
+	}
+
+	// Photo job: the text goes to the prompt sidecar; job.json keeps its
+	// generic instructions (the iGPU round acts on them, not the prompt).
+	w, _ = postEdit(t, s, "p1", "p1 edited", "a blue whale, cinematic")
+	if w.Code != http.StatusOK {
+		t.Fatalf("edit p1: %d %s", w.Code, w.Body.String())
+	}
+	pb, err := os.ReadFile(photo.PromptPath(st.Dir(), "p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pb) != "a blue whale, cinematic" {
+		t.Errorf("sidecar = %q, want the new prompt", pb)
+	}
+	j, err = st.Get("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Title != "p1 edited" {
+		t.Errorf("p1 title = %q, want the edited title", j.Title)
+	}
+	if j.Instructions != "run jarvis-photo make --job p1" {
+		t.Errorf("p1 instructions = %q, want the generic ones unchanged", j.Instructions)
+	}
+	// The next queue read offers the new prompt as p1's editable text.
+	r = getQueue(t, s)
+	var p1 *queueJob
+	for i := range r.Bands {
+		for k := range r.Bands[i].Jobs {
+			if r.Bands[i].Jobs[k].ID == "p1" {
+				p1 = &r.Bands[i].Jobs[k]
+			}
+		}
+	}
+	if p1 == nil || !p1.Photo || p1.Prompt != "a blue whale, cinematic" {
+		t.Fatalf("p1 after edit = %+v, want photo job with the new prompt", p1)
+	}
+
+	// A not-ready job is refused.
+	if w, _ := postEdit(t, s, "d1", "x", "y"); w.Code != http.StatusConflict {
+		t.Fatalf("edit done job: status %d, want %d", w.Code, http.StatusConflict)
+	}
+	// An unknown job is a 404.
+	if w, _ := postEdit(t, s, "nope", "x", "y"); w.Code != http.StatusNotFound {
+		t.Fatalf("edit unknown job: status %d, want %d", w.Code, http.StatusNotFound)
+	}
+	// Nothing to edit is a 400.
+	if w, _ := postEdit(t, s, "b1", "", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("empty edit: status %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	// Bad body is a 400.
+	req := httptest.NewRequest("POST", "/api/queue/edit", strings.NewReader("not json"))
+	w = httptest.NewRecorder()
+	s.handleQueueEdit(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad body: status %d", w.Code)
+	}
+	// A bad id is a 400.
+	if w, _ := postEdit(t, s, "../etc", "x", "y"); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad id: status %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
