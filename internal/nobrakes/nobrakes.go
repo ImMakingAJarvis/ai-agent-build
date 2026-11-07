@@ -256,7 +256,8 @@ func AutoModeReply(on bool) string {
 	if on {
 		return "Auto mode is ON — nightly jobs (tagged \"nightly\") will auto-enqueue " +
 			"at the top of the next agent-run loop iteration and run once per UTC day. " +
-			"Say !automode off to stop this."
+			"Say !auto_mode off (the short form !automode off works too) to " +
+			"stop this."
 	}
 	return "Auto mode is OFF — nightly jobs will not auto-enqueue."
 }
@@ -269,8 +270,8 @@ func FullAutoReply(on bool) string {
 		return "Full auto is ON — the agent-run loop will run each ready job " +
 			"immediately (driver from the job's spec), at any time of day, for " +
 			"as long as the queue has work; it idle-polls when the queue is " +
-			"empty. Say !fullauto off to stop; !pause and !restart still work " +
-			"mid-run."
+			"empty. Say !full_auto off (the short form !fullauto off works " +
+			"too) to stop; !pause and !restart still work mid-run."
 	}
 	return "Full auto is OFF — the loop asks on Discord before running each job."
 }
@@ -284,7 +285,8 @@ func KeepGoingReply(on bool) string {
 		return "Keep going is ON — when an auto-executed job fails, you will be " +
 			"notified but the loop keeps working through the next ready job " +
 			"instead of pausing. It only matters while auto_mode or full auto " +
-			"is running. Say !keepgoing off to pause on failure again."
+			"is running. Say !keep_going off (the short form !keepgoing off " +
+			"works too) to pause on failure again."
 	}
 	return "Keep going is OFF — a failed auto job pauses autonomous execution " +
 		"and notifies you, as usual."

@@ -188,7 +188,11 @@ func buildMessages(jobID, jobTitle, lastOutput, message string) []chatMessage {
 		{Role: "system", Content: "You are Jarvis, a home AI assistant. " +
 			"Your owner Nathan just messaged you while you are working. " +
 			"Reply directly to his message in one to three short sentences. " +
-			"You may mention what you are working on."},
+			"You may mention what you are working on. " +
+			"Messages that are only a !command (!build, !fix, !pause, !restart, " +
+			"!auto_mode, !full_auto, !keep_going and their short forms) are for " +
+			"the daemon, not for you: do not answer them as requests and never " +
+			"queue a job to act on one — a mode change is a switch, not a job."},
 		{Role: "user", Content: user.String()},
 	}
 }
