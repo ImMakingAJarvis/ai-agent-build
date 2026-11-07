@@ -1,4 +1,4 @@
-// Package engine manages the Jarvis engine (llama.cpp) systemd service
+// Package engine manages the Jarvis engine (llama.cpp) docker container
 // lifecycle — starting and stopping it in response to GPU contention.
 package engine
 
@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Manager controls the jarvis-engine systemd service.
+// Manager controls the jarvis-engine docker container.
 type Manager struct {
 	serviceName string
 
@@ -22,7 +22,7 @@ type Manager struct {
 	stopped     atomic.Bool   // true when engine has been stopped
 }
 
-// New creates a Manager for the given systemd service name.
+// New creates a Manager for the given docker container name.
 func New(serviceName string) *Manager {
 	return &Manager{
 		serviceName: serviceName,
@@ -43,7 +43,7 @@ func (m *Manager) IsStopped() bool {
 	return m.stopped.Load()
 }
 
-// StartService starts the systemd service and waits for it to become ready
+// StartService starts the container and waits for it to become ready
 // (health check on port 11434 passes). Returns an error if starting or
 // health-checking fails.
 func (m *Manager) StartService() error {
@@ -57,7 +57,7 @@ func (m *Manager) StartService() error {
 	m.mu.Unlock()
 
 	log.Printf("engine: starting %s", m.serviceName)
-	if err := m.runCmd("systemctl", "start", m.serviceName); err != nil {
+	if err := m.runCmd("docker", "start", m.serviceName); err != nil {
 		log.Printf("engine: start %s: %v", m.serviceName, err)
 		return err
 	}
@@ -73,7 +73,7 @@ func (m *Manager) StartService() error {
 	return nil
 }
 
-// StopService stops the systemd service.
+// StopService stops the container.
 func (m *Manager) StopService() error {
 	m.mu.Lock()
 	if !m.running || m.stopping {
@@ -84,7 +84,7 @@ func (m *Manager) StopService() error {
 	m.mu.Unlock()
 
 	log.Printf("engine: stopping %s", m.serviceName)
-	if err := m.runCmd("systemctl", "stop", m.serviceName); err != nil {
+	if err := m.runCmd("docker", "stop", m.serviceName); err != nil {
 		log.Printf("engine: stop %s: %v", m.serviceName, err)
 		return err
 	}

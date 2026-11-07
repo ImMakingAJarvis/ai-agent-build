@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/art"
 )
 
 func TestParseTranscriptJSON(t *testing.T) {
@@ -327,6 +328,11 @@ func TestIndexIsStaticShell(t *testing.T) {
 		if !strings.Contains(body, w) {
 			t.Errorf("index lacks queue markup %q", w)
 		}
+	}
+	// The queue section links to the art service's all-images gallery —
+	// the same URL the photo DM captions carry.
+	if !strings.Contains(body, `href="`+art.GalleryURL()+`"`) {
+		t.Errorf("index lacks gallery link %q", art.GalleryURL())
 	}
 }
 
