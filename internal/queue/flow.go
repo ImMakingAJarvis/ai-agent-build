@@ -66,16 +66,11 @@ func (c *Conn) PublishFlow(ctx context.Context, name string, m Message) error {
 	}
 	confirms := make(chan amqp.Confirmation, 1)
 	ch.NotifyPublish(confirms)
-	body, err := encodeMessage(m)
+	pub, err := newPublishing(m, 0)
 	if err != nil {
 		return fmt.Errorf("flow %s: encode job %s: %w", name, m.ID, err)
 	}
-	if err := ch.PublishWithContext(ctx, c.Exchange(), name+".default", false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		Body:         body,
-		DeliveryMode: amqp.Persistent,
-		Timestamp:    m.CreatedAt,
-	}); err != nil {
+	if err := ch.PublishWithContext(ctx, c.Exchange(), name+".default", false, false, pub); err != nil {
 		return fmt.Errorf("flow %s: publish: %w", name, err)
 	}
 	select {
