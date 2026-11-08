@@ -27,6 +27,14 @@ func TestCutAutoMode(t *testing.T) {
 		{"!automode2 on", false, false, false},
 		{"hello !automode on", false, false, false}, // must start the message
 		{"!photo on", false, false, false},
+		// the underscored spelling the owner tends to type
+		{"!auto_mode on", true, true, true},
+		{"!auto_mode off", false, true, true},
+		{"!auto_mode ON", true, true, true}, // case-insensitive
+		{"!auto_mode", false, false, true}, // the command, but no argument
+		{"!auto_mode maybe", false, false, true},
+		{"!auto_mode on extra", false, false, true},
+		{"!auto_modex", false, false, false}, // word boundary required
 	}
 	for _, c := range cases {
 		on, valid, isCommand := cutAutoMode(c.in)
@@ -89,7 +97,8 @@ func TestHandleAutoModeOff(t *testing.T) {
 	addr, mr := miniredisURL(t)
 	mr.Set(nobrakes.AutoModeKey, nobrakes.AutoModeOn) // start "on" so the test proves the clear
 	d := &testDiscord{}
-	handleAutoMode(d, addr, "!automode off")
+	// the underscored spelling, end to end
+	handleAutoMode(d, addr, "!auto_mode off")
 
 	if got, err := mr.Get(nobrakes.AutoModeKey); err != nil || got != nobrakes.AutoModeOff {
 		t.Fatalf("redis %s = %q, err=%v; want %q", nobrakes.AutoModeKey, got, err, nobrakes.AutoModeOff)
@@ -101,7 +110,7 @@ func TestHandleAutoModeOff(t *testing.T) {
 
 func TestHandleAutoModeBadArgLeavesFlagUntouched(t *testing.T) {
 	addr, mr := miniredisURL(t)
-	for _, in := range []string{"!automode", "!automode maybe"} {
+	for _, in := range []string{"!automode", "!automode maybe", "!auto_mode", "!auto_mode maybe"} {
 		d := &testDiscord{}
 		handleAutoMode(d, addr, in)
 		if msg := d.lastNotify(); !strings.Contains(msg, "Usage") {

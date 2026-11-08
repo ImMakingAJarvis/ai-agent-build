@@ -1,0 +1,60 @@
+name: reel
+
+on:
+  push:
+    branches: [main, phase-reel]
+    paths: ["reel/**", ".github/workflows/reel-ci.yml"]
+  pull_request:
+    paths: ["reel/**", ".github/workflows/reel-ci.yml"]
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: reel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: reel/go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: reel
+      - run: go test ./...
+
+  spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install openapi-spec-validator
+      - run: openapi-spec-validator reel/openapi.yaml
+
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: reel/go.mod
+      - name: Build server binary
+        working-directory: reel
+        run: go build -o reeld ./cmd/reeld
+      - name: Boot server and check /health
+        working-directory: reel
+        run: |
+          REEL_DB=/tmp/reel-contract.db REEL_ADDR=127.0.0.1:18123 ./reeld &
+          for i in $(seq 1 50); do
+            curl -sf http://127.0.0.1:18123/health && exit 0
+            sleep 0.2
+          done
+          exit 1
+      - name: Contract test against the spec
+        working-directory: reel
+        run: go test ./internal/api/ -run TestContract -v

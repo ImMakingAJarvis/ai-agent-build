@@ -68,15 +68,10 @@ func run() error {
 		log.Printf("worker: engine is not Ollama — idle-unload disabled (llama.cpp keeps its model resident)")
 	}
 
-	// Location workers (A6): one worker per jobs.gpu/jobs.cpu/jobs.igpu
-	// queue so CPU and iGPU jobs run in parallel with the GPU job instead
-	// of waiting behind it. In Phase A the handler records the job and
-	// acks; the model-swap / cloud dispatch that actually runs a location
-	// job arrives with Phase B (B2) and C1.
-	locWorkers := queue.NewLocationWorkers(conn, func(msg queue.Message) error {
-		log.Printf("worker: location job %s (type=%s) received — executor lands in Phase B/C", msg.ID, msg.Type)
-		return nil
-	})
+	// The location queues (jobs.gpu/jobs.cpu/jobs.igpu, A6) are consumed
+	// host-side by the task-runner (C1): the worker mounts the repo
+	// read-only and has no git or toolchain, so the execution loop — and
+	// the only consumer of these queues — lives on the host.
 
 	// Stream watcher detects active Sunshine/Steam streams so we can free
 	// GPU memory while a stream is active.
@@ -98,22 +93,21 @@ func run() error {
 	go func() {
 		for change := range streamCh {
 			if change.Stream != streamwatcher.NoStream {
-				// Stream started — stop the engine to free ~22GB VRAM and
-				// pause the GPU location queue. The game watchdog pauses
-				// only the GPU queue: CPU and iGPU jobs keep running (A6).
-				log.Printf("worker: stream %s started — stopping engine, pausing GPU queue", change.Stream)
-				locWorkers.Pause(queue.JobsGPUQueue)
+				// Stream started — stop the engine to free ~22GB VRAM.
+				// The host task-runner's stream watcher pauses the GPU
+				// location queue (the game watchdog pauses only the GPU
+				// queue: CPU and iGPU jobs keep running, A6).
+				log.Printf("worker: stream %s started — stopping engine", change.Stream)
 				if err := engMgr.StopService(); err != nil {
 					log.Printf("worker: stop engine: %v", err)
 				} else {
 					streamBlocked.Store(true)
 				}
 			} else {
-				// Stream ended — restart the engine and resume the GPU
-				// location queue.
-				log.Printf("worker: stream ended — restarting engine, resuming GPU queue")
+				// Stream ended — restart the engine (the host task-runner
+				// resumes the GPU location queue).
+				log.Printf("worker: stream ended — restarting engine")
 				streamBlocked.Store(false)
-				locWorkers.Resume(queue.JobsGPUQueue)
 				if err := engMgr.StartService(); err != nil {
 					log.Printf("worker: start engine: %v", err)
 				}
@@ -313,16 +307,42 @@ func run() error {
 					return handlePlan(msg, job)
 				}
 			}
-			added, err := jobStore.Ingest(agentjob.Spec{
+			spec := agentjob.Spec{
 				ID: msg.ID, Title: msg.Title, Instructions: msg.Instructions,
 				Branch: msg.Branch, DependsOn: msg.DependsOn, Driver: msg.Driver,
 				Class: msg.Class, Priority: msg.Priority, CreatedAt: msg.CreatedAt, Source: msg.Source,
 				ReasoningEffort: msg.ReasoningEffort,
-			})
+			}
+			if msg.Type == queue.ImageQueue {
+				photoSpecDefaults(&spec, msg.Payload["prompt"])
+			}
+			added, err := jobStore.Ingest(spec)
 			if err != nil {
 				return fmt.Errorf("ingest agent job %s: %w", msg.ID, err)
 			}
 			log.Printf("worker: agent job %s ingested (new=%v)", msg.ID, added)
+			return nil
+		}
+
+		// Image jobs (photo generation) never run as text jobs — the photo
+		// pipeline (docs/art-model.md, docs/brain-swap.md) runs them as agent
+		// rounds. A plain {type: image, payload: {prompt}} message becomes an
+		// agent job too, so publishing to the image queue always lands in the
+		// photo pipeline instead of a prompt for the local model.
+		if msg.Type == queue.ImageQueue {
+			spec := agentjob.Spec{
+				ID: msg.ID, Title: msg.Title, Instructions: msg.Instructions,
+				Branch: msg.Branch, DependsOn: msg.DependsOn, Driver: msg.Driver,
+				Class: msg.Class, Priority: msg.Priority, CreatedAt: msg.CreatedAt, Source: msg.Source,
+				ReasoningEffort: msg.ReasoningEffort,
+			}
+			photoSpecDefaults(&spec, msg.Payload["prompt"])
+			added, err := jobStore.Ingest(spec)
+			if err != nil {
+				return fmt.Errorf("ingest image job %s: %w", msg.ID, err)
+			}
+			log.Printf("worker: image job %s ingested as agent job (new=%v, class=%s, priority=%d, driver=%s)",
+				msg.ID, added, spec.Class, spec.Priority, spec.Driver)
 			return nil
 		}
 
@@ -428,11 +448,6 @@ func run() error {
 		}
 	}()
 
-	// Start location workers (one per jobs.gpu/jobs.cpu/jobs.igpu queue).
-	if err := locWorkers.Start(); err != nil {
-		return fmt.Errorf("location workers start: %w", err)
-	}
-
 	// Start consumer.
 	consumer := queue.NewConsumer(conn, handle)
 	if err := consumer.Start(); err != nil {
@@ -452,7 +467,6 @@ func run() error {
 	streamWatcher.Stop()
 	close(streamCh)
 	consumer.Stop()
-	locWorkers.Stop()
 	return nil
 }
 
@@ -547,6 +561,36 @@ func resolvePlanJobStore(store *agentjob.Store, msg queue.Message, model, summar
 	}
 	if err := store.SetStatus(msg.ID, st); err != nil {
 		log.Printf("worker: plan job %s: store resolution: %v", msg.ID, err)
+	}
+}
+
+// photoSpecDefaults fills the photo-pipeline defaults into an image job's
+// spec when the message left a field empty: the prompt becomes the
+// title/instructions, the job runs as class fix at the front of the band
+// (photo jobs almost always take priority), and on the igpu driver — the
+// brain-swap window is what runs photo jobs (docs/brain-swap.md).
+func photoSpecDefaults(spec *agentjob.Spec, prompt string) {
+	if spec.Title == "" {
+		spec.Title = prompt
+	}
+	if spec.Instructions == "" {
+		spec.Instructions = prompt
+	}
+	if spec.Class == "" {
+		spec.Class = agentjob.ClassFix
+	}
+	if spec.Priority == 0 {
+		spec.Priority = 100
+	}
+	if spec.Driver == "" {
+		spec.Driver = "igpu"
+	}
+	// The "photo" tag (agentjob.TagPhoto once it lands on main) is what
+	// the queue watcher keys on to bracket the batch with a brain-swap
+	// window (scripts/agent-run) — photo work never runs with the brain
+	// on the 4090.
+	if !spec.HasTag("photo") {
+		spec.Tags = append(spec.Tags, "photo")
 	}
 }
 

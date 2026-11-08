@@ -337,6 +337,137 @@ func TestHandleMessage_Timeout(t *testing.T) {
 	}
 }
 
+func TestWithReplyContext(t *testing.T) {
+	// No reply: the message is returned unchanged.
+	if got := withReplyContext(chat.Incoming{Content: "hello"}); got != "hello" {
+		t.Errorf("no-reply: got %q, want unchanged", got)
+	}
+
+	// Reply with an author: the replied-to message, its author, and the
+	// owner's words are all present.
+	got := withReplyContext(chat.Incoming{
+		Content:     "thanks, do it again",
+		ReplyTo:     "did it work?",
+		ReplyAuthor: "Nathan",
+	})
+	for _, want := range []string{"did it work?", "Nathan", "thanks, do it again"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("reply: got %q; want it to contain %q", got, want)
+		}
+	}
+	// The owner's own words come last, after the context.
+	if !strings.HasSuffix(got, "thanks, do it again") {
+		t.Errorf("reply: got %q; want the owner's words to come last", got)
+	}
+
+	// Reply without an author: still carries the content and the message.
+	got = withReplyContext(chat.Incoming{
+		Content: "yes",
+		ReplyTo: "should we ship it?",
+	})
+	for _, want := range []string{"should we ship it?", "yes"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("reply (no author): got %q; want %q", got, want)
+		}
+	}
+}
+
+// TestHandleMessage_PassesReplyContextToBrain checks that a Discord reply
+// hands the replied-to message to the brain for the chat, while the owner's
+// plain words are what stay in the history and the conversation log.
+func TestHandleMessage_PassesReplyContextToBrain(t *testing.T) {
+	oldBusy := busyTimeout
+	oldMax := maxTimeout
+	busyTimeout = 500 * time.Millisecond
+	maxTimeout = 2 * time.Second
+	defer func() {
+		busyTimeout = oldBusy
+		maxTimeout = oldMax
+	}()
+
+	// The question "what was that again?" fast-classifies as chat, so the
+	// only LLM call is the chat itself — we can capture it directly.
+	var mu sync.Mutex
+	var requests [][]models.ChatMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []models.ChatMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			mu.Lock()
+			requests = append(requests, req.Messages)
+			mu.Unlock()
+		}
+		resp := models.ChatResponse{
+			Choices: []struct {
+				Message models.ChatMessage `json:"message"`
+			}{
+				{Message: models.ChatMessage{Role: "assistant", Content: "I pinned the Prometheus target."}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	t.Setenv("OLLAMA_URL", server.URL)
+	logDir := t.TempDir()
+	t.Setenv("JARVIS_NOTES_DIR", logDir)
+	client := models.NewClient()
+	hAgent := newTestHermesAgent(client)
+
+	d := &testDiscord{}
+	var history []string
+	in := chat.Incoming{
+		Content:     "what was that again?",
+		ReplyTo:     "how did we fix the redis flag store?",
+		ReplyAuthor: "Nathan",
+	}
+	handleMessage(d, hAgent, voices.Get(""), deadMemory, in, &history)
+
+	mu.Lock()
+	if len(requests) != 1 {
+		mu.Unlock()
+		t.Fatalf("want 1 LLM call (the chat), got %d", len(requests))
+	}
+	msgs := requests[0]
+	mu.Unlock()
+
+	// The last message is the user turn and must carry the reply context.
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" {
+		t.Fatalf("last message role = %q, want user", last.Role)
+	}
+	if !strings.Contains(last.Content, "how did we fix the redis flag store?") {
+		t.Errorf("brain user turn %q; want the replied-to message", last.Content)
+	}
+	if !strings.Contains(last.Content, "what was that again?") {
+		t.Errorf("brain user turn %q; want the owner's words", last.Content)
+	}
+
+	// History keeps the owner's plain words, not the augmented turn.
+	if len(history) != 2 {
+		t.Fatalf("history len = %d, want 2", len(history))
+	}
+	if history[0] != "what was that again?" {
+		t.Errorf("history[0] = %q, want the plain user message", history[0])
+	}
+
+	// The conversation log records the plain exchange only.
+	logName := filepath.Join(logDir, "discord-"+time.Now().Format("2006-01-02")+".md")
+	b, err := os.ReadFile(logName)
+	if err != nil {
+		t.Fatalf("conversation log: %v", err)
+	}
+	logText := string(b)
+	if !strings.Contains(logText, "Nathan: what was that again?") {
+		t.Errorf("conversation log %q; want the plain user line", logText)
+	}
+	if strings.Contains(logText, "how did we fix the redis flag store?") {
+		t.Errorf("conversation log should not embed the replied-to message: %q", logText)
+	}
+}
+
 func TestBuildMessages(t *testing.T) {
 	history := []string{"who are you?", "I am Jarvis."}
 	msgs := buildMessages("what time is it", history)

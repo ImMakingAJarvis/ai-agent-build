@@ -270,6 +270,57 @@ func TestDefaultCommandIgpuDriver(t *testing.T) {
 	}
 }
 
+// TestRunPreservesDriverEnv is the regression test for the igpu photo
+// rounds dying with ECONNREFUSED: Run() used to replace the command's env
+// with the process environment (to add JARVIS_JOB_ID), which dropped the
+// igpu driver's ENGINE_URL/LOCAL_MODEL overrides — every "igpu" round
+// silently ran the brain model instead. The driver's env must survive the
+// tag, with the stale inherited values still stripped.
+func TestRunPreservesDriverEnv(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	// Stale brain values in the process env, as the loop inherits them.
+	t.Setenv("ENGINE_URL", "http://stale:11434")
+	t.Setenv("LOCAL_MODEL", "jarvis-brain")
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "igpu-job", Title: "T", Instructions: "do"})
+	r := &Runner{
+		Store: s,
+		Command: func(driver, prompt, effort string) *exec.Cmd {
+			// The real driver command, with only the binary swapped for
+			// something that prints the env it was given.
+			c := defaultCommand(driver, prompt, effort)
+			c.Path, c.Args = "/bin/sh", []string{"/bin/sh", "-c", "printenv"}
+			return c
+		},
+		PRLookup:    func(string) string { return "" },
+		Brief:       func(string) string { return "RULES" },
+		StackStatus: func() string { return "" },
+	}
+	j, err := r.Run(context.Background(), "igpu-job", "r1", "igpu", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != Done {
+		t.Fatalf("job status %q, want done", j.Status)
+	}
+	out, _ := os.ReadFile(filepath.Join(s.JobDir("igpu-job"), "transcript.txt"))
+	env := string(out)
+	for _, want := range []string{
+		"ENGINE_URL=http://localhost:11435",
+		"LOCAL_MODEL=jarvis-igpu",
+		"JARVIS_JOB_ID=igpu-job",
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf("run env lacks %q", want)
+		}
+	}
+	for _, stale := range []string{"http://stale:11434", "LOCAL_MODEL=jarvis-brain"} {
+		if strings.Contains(env, stale) {
+			t.Errorf("stale value %q leaked into run env", stale)
+		}
+	}
+}
+
 // TestDefaultCommandSuperagentDriver is the acceptance test for the
 // superagent driver: the round runs the superagent CLI (its own
 // plan→act→verify loop, not the Claude Code harness) with the round's
@@ -479,6 +530,55 @@ func TestApplyOrderReordersAndReclassifies(t *testing.T) {
 
 	if err := s.ApplyOrder(map[string][]string{"nope": {"b1"}}); err == nil {
 		t.Fatal("ApplyOrder accepted an unknown class")
+	}
+}
+
+func TestSetDriverRewritesSpec(t *testing.T) {
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "p1", Class: ClassBuild})
+	if err := s.SetDriver("p1", "igpu"); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.Get("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Driver != "igpu" {
+		t.Fatalf("driver %q, want igpu", j.Driver)
+	}
+	// The driver rewrite must not touch the state.
+	if j.Status != Ready {
+		t.Fatalf("status %q, want ready", j.Status)
+	}
+	if err := s.SetDriver("p1", "nope"); err == nil {
+		t.Fatal("SetDriver accepted an unknown driver")
+	}
+}
+
+func TestNextExcluding(t *testing.T) {
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "a"})
+	ingest(t, s, Spec{ID: "b"})
+	j, err := s.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "a" {
+		t.Fatalf("Next got %v, want a", j)
+	}
+	j, err = s.NextExcluding(map[string]bool{"a": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "b" {
+		t.Fatalf("NextExcluding(a) got %v, want b", j)
+	}
+	j, err = s.NextExcluding(map[string]bool{"a": true, "b": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j != nil {
+		t.Fatalf("NextExcluding(a,b) got %v, want nil", j)
 	}
 }
 

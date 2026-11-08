@@ -412,8 +412,15 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	cmd := cmdf(driver, prompt, effort)
 	// Tag the session so the owner-message hook (scripts/owner-message-hook.sh)
 	// knows this is the job's own session and may drain the message inbox;
-	// any other claude session in this repo leaves the inbox alone.
-	cmd.Env = append(stripEnv(os.Environ(), "JARVIS_JOB_ID"), "JARVIS_JOB_ID="+id)
+	// any other claude session in this repo leaves the inbox alone. cmdf may
+	// have set its own env (the igpu driver points ENGINE_URL/LOCAL_MODEL at
+	// the helper); start from that, falling back to the process env, so the
+	// tag never clobbers the driver's env.
+	base := cmd.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	cmd.Env = append(stripEnv(base, "JARVIS_JOB_ID"), "JARVIS_JOB_ID="+id)
 	var buf bytes.Buffer
 	var w io.Writer = &buf
 	if r.Tee != nil {

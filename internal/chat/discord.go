@@ -18,12 +18,18 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
 
 // Discord limits message content to 2000 characters.
 const maxMessageLen = 1900
+
+// replyFetchTimeout bounds how long we wait to retrieve the message the
+// owner is replying to. It runs in the per-message handler goroutine, so a
+// slow or dead fetch never holds up the gateway; it just fails open.
+const replyFetchTimeout = 5 * time.Second
 
 type Config struct {
 	Token   string // bot token
@@ -57,6 +63,13 @@ type Incoming struct {
 	ChannelID string
 	MessageID string
 	Content   string
+	// ReplyTo is the content of the message this one Discord-replies to,
+	// when the owner used a reply. Empty when the message is not a reply
+	// (or the reference could not be resolved).
+	ReplyTo string
+	// ReplyAuthor is the username of the author of the replied-to message.
+	// Empty when unknown.
+	ReplyAuthor string
 }
 
 // waiter is one open question.
@@ -212,7 +225,41 @@ func (d *Discord) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 		os.WriteFile(d.cfg.SignalFile, []byte(m.Content), 0o644)
 	}
 	if d.messageHook != nil && target == nil {
-		d.messageHook(Incoming{ChannelID: m.ChannelID, MessageID: m.ID, Content: m.Content})
+		inc := Incoming{ChannelID: m.ChannelID, MessageID: m.ID, Content: m.Content}
+		d.attachReply(s, m, &inc)
+		d.messageHook(inc)
+	}
+}
+
+// attachReply fetches the message m Discord-replies to (when m carries a
+// reference) and records its content and author on inc, so the chat handler
+// can take the replied-to message into the context. It fails open: on any
+// error, or when the reference has no textual content, inc is left
+// unchanged.
+func (d *Discord) attachReply(s *discordgo.Session, m *discordgo.MessageCreate, inc *Incoming) {
+	ref := m.MessageReference
+	if ref == nil || ref.MessageID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), replyFetchTimeout)
+	defer cancel()
+	refMsg, err := s.ChannelMessage(m.ChannelID, ref.MessageID, discordgo.WithContext(ctx))
+	if err != nil {
+		return
+	}
+	applyReply(refMsg, inc)
+}
+
+// applyReply records the content and author of the replied-to message on
+// inc. It is a no-op when the message has no textual content (for example a
+// pure attachment or embed), so the handler only ever gets real context.
+func applyReply(refMsg *discordgo.Message, inc *Incoming) {
+	if refMsg == nil || strings.TrimSpace(refMsg.Content) == "" {
+		return
+	}
+	inc.ReplyTo = refMsg.Content
+	if refMsg.Author != nil {
+		inc.ReplyAuthor = refMsg.Author.Username
 	}
 }
 
