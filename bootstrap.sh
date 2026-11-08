@@ -222,7 +222,12 @@ tok=$(jq -r .token <<<"$resp")
 exp=$(date -d "$(jq -r .expires_at <<<"$resp")" +%s)
 
 umask 077
-echo "$exp $tok" > "$CACHE"
+# Atomic cache write: concurrent callers (worker PR lookups, git credential
+# helper, agent rounds) used to read a mid-write file and get a truncated
+# token -> gh 401s. tmp + rename keeps the cache line complete.
+tmp="${CACHE}.tmp.$$"
+echo "$exp $tok" > "$tmp"
+mv -T "$tmp" "$CACHE"
 echo "$tok"
 GHAPP_EOF
 sudo chmod 755 /usr/local/bin/ghapp-token
