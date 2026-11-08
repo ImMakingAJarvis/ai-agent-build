@@ -1,8 +1,10 @@
 package photo
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -46,5 +48,116 @@ func TestReadPromptMissing(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := ReadPrompt(dir, "chat-1-xx"); err == nil {
 		t.Fatalf("expected error for missing prompt file")
+	}
+}
+
+func TestFollowupPath(t *testing.T) {
+	want := filepath.Join("/data", "photos", "chat-1-ab.followup")
+	if got := FollowupPath("/data", "chat-1-ab"); got != want {
+		t.Fatalf("FollowupPath = %q, want %q", got, want)
+	}
+}
+
+func TestWriteReadFollowup(t *testing.T) {
+	dir := t.TempDir()
+	body := "driver: local\npriority: 900\ntitle: caption it\n\nCaption {{image}}."
+	if err := WriteFollowup(dir, "chat-1-ab", body); err != nil {
+		t.Fatalf("WriteFollowup: %v", err)
+	}
+	if _, err := os.Stat(FollowupPath(dir, "chat-1-ab")); err != nil {
+		t.Fatalf("followup file missing: %v", err)
+	}
+	got, err := ReadFollowup(dir, "chat-1-ab")
+	if err != nil {
+		t.Fatalf("ReadFollowup: %v", err)
+	}
+	if got != body {
+		t.Fatalf("ReadFollowup = %q, want %q", got, body)
+	}
+}
+
+func TestReadFollowupMissing(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := ReadFollowup(dir, "chat-1-xx"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadFollowup = %v, want os.ErrNotExist", err)
+	}
+}
+
+func TestParseFollowupHeadersAndText(t *testing.T) {
+	body := "driver: local\nclass: build\npriority: 900\ntitle: caption the new photo\n\nCaption {{image}} and post it to #gallery."
+	fu, err := ParseFollowup(body)
+	if err != nil {
+		t.Fatalf("ParseFollowup: %v", err)
+	}
+	if fu.Driver != "local" || fu.Class != "build" || fu.Priority != 900 ||
+		fu.Title != "caption the new photo" {
+		t.Fatalf("headers wrong: %+v", fu)
+	}
+	if fu.Instructions != "Caption {{image}} and post it to #gallery." {
+		t.Fatalf("Instructions = %q", fu.Instructions)
+	}
+}
+
+func TestParseFollowupNoHeader(t *testing.T) {
+	fu, err := ParseFollowup("just do the thing with {{image}}")
+	if err != nil {
+		t.Fatalf("ParseFollowup: %v", err)
+	}
+	if fu.Instructions != "just do the thing with {{image}}" {
+		t.Fatalf("Instructions = %q", fu.Instructions)
+	}
+	if fu.Driver != "" || fu.Class != "" || fu.Priority != 0 || fu.Title != "" {
+		t.Fatalf("expected empty headers: %+v", fu)
+	}
+}
+
+func TestParseFollowupUnknownKeyIsText(t *testing.T) {
+	// A header line that is not a known key is free text: it starts the
+	// instruction and everything after it is text too.
+	body := "post this: the gallery link\nand this line"
+	fu, err := ParseFollowup(body)
+	if err != nil {
+		t.Fatalf("ParseFollowup: %v", err)
+	}
+	if fu.Instructions != "post this: the gallery link\nand this line" {
+		t.Fatalf("Instructions = %q", fu.Instructions)
+	}
+}
+
+func TestParseFollowupKnownHeaderThenColonText(t *testing.T) {
+	// A known header followed by a colon-bearing text line: the text line
+	// ends the header.
+	body := "priority: 50\nCaption it: keep the colons"
+	fu, err := ParseFollowup(body)
+	if err != nil {
+		t.Fatalf("ParseFollowup: %v", err)
+	}
+	if fu.Priority != 50 {
+		t.Fatalf("Priority = %d, want 50", fu.Priority)
+	}
+	if fu.Instructions != "Caption it: keep the colons" {
+		t.Fatalf("Instructions = %q", fu.Instructions)
+	}
+}
+
+func TestParseFollowupBadPriority(t *testing.T) {
+	if _, err := ParseFollowup("priority: high\ndo the thing"); err == nil {
+		t.Fatalf("expected error for non-numeric priority")
+	}
+}
+
+func TestParseFollowupEmptyInstructions(t *testing.T) {
+	if _, err := ParseFollowup("driver: local\n"); err == nil {
+		t.Fatalf("expected error for header-only body")
+	}
+}
+
+func TestStandardInstructions(t *testing.T) {
+	s := StandardInstructions("chat-1-ab")
+	if !strings.Contains(s, "jarvis-photo make --job chat-1-ab") {
+		t.Fatalf("missing executor command: %s", s)
+	}
+	if !strings.Contains(s, "no model round") {
+		t.Fatalf("missing code-executor note: %s", s)
 	}
 }
