@@ -100,6 +100,62 @@ services:
     # job; it counts ALL traffic to the engine (chat, agent, jobs),
     # not just the worker's queue jobs.
 
+  # ---------------- the iGPU helper (port 11435) ---------------------------
+  # The small always-on model (Qwen2.5-3B Q4_K_M) on the Ryzen iGPU,
+  # Vulkan. Its own container and its own port: containers reach it by
+  # name (jarvis-engine-igpu:11435 on the compose net), the host at
+  # 127.0.0.1:11435. It stays up almost the whole time — photo swap
+  # windows stop only the brain (the 4090 VRAM holder), never this engine
+  # (docs/brain-swap.md). The old host systemd unit jarvis-engine-igpu is
+  # disabled (kept for rollback, like the other native units).
+  # Binary + model are bind-mounted from /opt/jarvis-igpu (installed by
+  # scripts/install_igpu_engine.sh), not baked into the image — see
+  # docker/engine-igpu/Dockerfile for the Vulkan runtime bits.
+  engine-igpu:
+    build:
+      context: .
+      dockerfile: docker/engine-igpu/Dockerfile
+    image: jarvis/engine-igpu:local
+    container_name: jarvis-engine-igpu
+    restart: unless-stopped
+    user: "1001:1001"
+    environment:
+      # HOME is unset in the container (uid 1001 has no passwd entry),
+      # which made llama-server log "Failed to create //.cache" and drop
+      # the shader cache. /tmp is writable and ephemeral — the cache is
+      # rebuilt per container, cheap for a 3B model.
+      HOME: /tmp
+    # /dev/dri nodes are root:video / root:render (0660) — the helper's uid
+    # needs both device groups to open them (mirrors the old unit's
+    # SupplementaryGroups=video render). Numeric GIDs: this docker daemon
+    # cannot resolve group names ("no matching entries in group file"),
+    # and the GIDs are stable on this host.
+    group_add: ["44", "990"]   # video, render
+    ports:
+      - "127.0.0.1:11435:11435"
+    volumes:
+      - /opt/jarvis-igpu:/opt/jarvis-igpu:ro
+    devices:
+      - /dev/dri
+    # The iGPU is PCI 0000:0c:00.0 (card2 + renderD129); the 4090 is
+    # 0000:01:00.0. The container carries no NVIDIA Vulkan ICD, so the
+    # iGPU is its only Vulkan device (Vulkan0) even with all of /dev/dri.
+    # `devices:` (not a volume mount) is required: a plain bind of
+    # /dev/dri leaves the nodes outside the container's cgroup device
+    # whitelist, so open() is denied and Vulkan sees no device.
+    # -dev Vulkan0: with only the iGPU's nodes visible the helper's iGPU is
+    # device 0 (on the host it is Vulkan1, the NVIDIA card taking index 0).
+    command:
+      [ "-m", "/opt/jarvis-igpu/models/jarvis-igpu.gguf",
+        "--host", "0.0.0.0",
+        "--port", "11435",
+        "-dev", "Vulkan0",
+        "-ngl", "99",
+        "--ctx-size", "32768",
+        "--jinja",
+        "--metrics",
+        "--log-disable" ]
+
   # ---------------- art (photo generation, port 8120) ---------------------
   # Z-Image-Turbo (6B, 8-step turbo) behind a small FastAPI+diffusers app.
   # The brain owns ~20 GB of the 4090 and the art model doesn't fit in the
@@ -225,13 +281,11 @@ services:
       ART_URL: http://art:8120
       ART_GALLERY_URL: http://111.1.2.27:8120
       # While the worker is deep in a job the brain is saturated, so
-      # classify/chat LLM calls route to the iGPU helper engine (host
-      # loopback 11435 via host-gateway). The worker-busy signal is the job
+      # classify/chat LLM calls route to the iGPU helper engine (its own
+      # container, its own port). The worker-busy signal is the job
       # store, already mounted below.
-      FALLBACK_ENGINE_URL: http://host.docker.internal:11435
+      FALLBACK_ENGINE_URL: http://jarvis-engine-igpu:11435
       FALLBACK_MODEL: jarvis-igpu
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
@@ -260,18 +314,16 @@ services:
       HOME: /home/agent
       JARVIS_CONF: /home/agent/.config/jarvis
       ENGINE_URL: http://engine:11434
-      # Machine panel (GET /html/machine): the iGPU helper is a host
-      # systemd unit (host loopback 11435 via host-gateway), art and the
-      # nvidia exporter are compose services.
-      IGPU_URL: http://host.docker.internal:11435
+      # Machine panel (GET /html/machine): the iGPU helper is its own
+      # container (jarvis-engine-igpu, port 11435), art and the nvidia
+      # exporter are compose services.
+      IGPU_URL: http://jarvis-engine-igpu:11435
       ART_URL: http://art:8120
       NVIDIA_EXPORTER_URL: http://nvidia-exporter:3001
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       # Live job streams (see the redis service above); unset means the
       # dashboard falls back to tailing transcript files.
       JARVIS_REDIS: redis://redis:6379
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
@@ -333,13 +385,10 @@ services:
       OLLAMA_URL: http://engine:11434
       MEMORY_URL: http://memory:8101
       # While the worker is deep in a job the 4090 brain is saturated, so
-      # conversation LLM calls route to the iGPU helper engine instead. It
-      # listens on the host loopback (11435), reachable from this container
-      # via host-gateway.
-      FALLBACK_OLLAMA_URL: http://host.docker.internal:11435
+      # conversation LLM calls route to the iGPU helper engine instead —
+      # its own container (jarvis-engine-igpu) on its own port.
+      FALLBACK_OLLAMA_URL: http://jarvis-engine-igpu:11435
       FALLBACK_MODEL: jarvis-igpu
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - /opt/jarvis-voice:/opt/jarvis-voice
       - /home/agent/.cache/huggingface:/home/agent/.cache/huggingface:ro
@@ -404,6 +453,10 @@ services:
       HOME: /home/agent
       JARVIS_CONF: /home/agent/.config/jarvis
       ENGINE_URL: http://engine:11434
+      # The iGPU helper is a different container from the brain, on its own
+      # port — the worker routes the registry's host-local 11435 endpoint
+      # here instead of collapsing it into the brain (cmd/worker).
+      IGPU_URL: http://jarvis-engine-igpu:11435
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       DASHBOARD_ADDR: dashboard:8080
       # B2 plan worker: the registry is read from the host config dir so
@@ -478,12 +531,10 @@ services:
       LISTEN_ADDR: ":9102"
       POLL_INTERVAL: 15s
       STATE_DIR: /state
-      # Brain over the compose network (pinned container_name, which
-      # survives container recreation), iGPU helper over the host bridge
-      # (it is a systemd unit, not a container).
-      ENGINES: "brain=http://jarvis-engine:11434,igpu=http://host.docker.internal:11435"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # Both engines over the compose network (pinned container_name, which
+      # survives container recreation): the brain container and the iGPU
+      # helper's own container on its own port.
+      ENGINES: "brain=http://jarvis-engine:11434,igpu=http://jarvis-engine-igpu:11435"
     volumes:
       - /home/agent/.local/share/jarvis/token-ledger:/state
 
