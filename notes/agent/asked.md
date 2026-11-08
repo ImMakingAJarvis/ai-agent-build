@@ -3,6 +3,7 @@
 # These are the *themes*; the specific words and history live in the vector
 # graph (job transcripts + Discord logs), searchable via the memory service.
 
+- 2026-10-28T03:22Z [chat-1792998605-81b4] Nathan wants the agent to keep notes (done/system/asked) wired into the vector graph
 - 2026-10-28T03:23Z Local brain / model choice — which model runs the agent; decision: Qwen3.8 27B as the brain, no separate coder model for now (revisit qwen3-coder-next only if the brain's coding proves insufficient).
 - 2026-10-28T03:23Z Voice — wake-word detection, STT/TTS, and the mic path (PWA/HTTPS secure context, client-side VAD auto-stop, webm/opus decode); plus voice-chat tool calling to schedule jobs and search job history.
 - 2026-10-28T03:23Z Queue & worker priority — the ordering jobs > fix > build > background, runtime re-prioritization of band order, and keeping the highest non-empty queue unpaused so fixes take priority.
@@ -12,7 +13,6 @@
 - 2026-10-28T03:23Z Conversation notes — keep notes from all conversations (agent rounds in git; Discord/voice verbatim, gitignored).
 - 2026-10-28T03:23Z Memory — a local vector graph over the work logs so the agent/chatbot can recall what was done and what is queued next; this round: start keeping structured notes (done/system/asked) fed into it.
 - 2026-10-28T03:23Z Recurring "is this clean?" checks — e.g. GLaDOS/Portal: is the branch present and the working tree clean. Expect similar verify-a-state checks; answer with evidence, not a guess.
-- 2026-10-28T03:22Z [chat-1792998605-81b4] Nathan wants the agent to keep notes (done/system/asked) wired into the vector graph
 - 2026-10-28T03:57Z Nathan wants FreeToken as second runner: install+verify now, then VRAM-spare benchmark (100/150/200/250/300 MB free) of qwen3.8-flash-next (job chat-1792976974-392b)
 - 2026-10-28T04:21Z Voice chat app mic: 'permission denied, never asked, still denied with everything allowed' (chat-1793001320-4d10) — classic non-secure-context signature, not a settings issue
 - 2026-10-28T04:39Z Nathan reported the Discord chatbot was 'stumbling' (replying 'Sorry, my brain stumbled'); wanted it fixed so it actually answers.
@@ -65,8 +65,8 @@
 - 2026-11-04T10:05Z Nathan: 'create a new agent based on the features of Deepseek's super agent' and integrate it into the existing system; round instruction !automode on (auto_mode set on)
 - 2026-11-04T17:46Z Nathan: when the worker is done with a task it should update the PLANE task — tool + CLAUDE.md instruction (job chat-1793781308-8f20)
 - 2026-11-04T17:57Z Nathan: enable the fullauto loop (17:35Z '!fullauto on'; the stale chat container queued it as a job — now fixed, the flag is on and the loop runs ready jobs at any time)
-- 2026-11-04T19:48Z Nathan: fix PR #147 (was CONFLICTING after main moved); the round's 'Jarvissfolder is what I meant' was a NAS clarification (share name `Jarviss`, job chat-1793820896-38de) attached to this round, not a PR change
 - 2026-11-04T18:54Z Nathan (Reel P0 round): NAS creds live in bootstrap.env — save in tools, use NAS for storing benchmark/results; clear the Steam library; mount 2TB Windows drive for NAS backup; format+use the empty 1TB SSD.
+- 2026-11-04T19:48Z Nathan: fix PR #147 (was CONFLICTING after main moved); the round's 'Jarvissfolder is what I meant' was a NAS clarification (share name `Jarviss`, job chat-1793820896-38de) attached to this round, not a PR change
 - 2026-11-04T20:01Z Nathan: stop the Steam Big Picture process and delete all of the Steam library for now (job chat-1793821235-c342)
 - 2026-11-04T20:13Z Nathan wanted disk space of all drives visible in Grafana
 - 2026-11-04T20:23Z Nathan: chatbot or flag listener cannot change nobrakes flags — fix it and enable fullauto (done same round; the loop now runs ready jobs unattended)
@@ -76,6 +76,7 @@
 - 2026-11-05T06:07Z Nathan wants GLM 5.3 flash benchmarked alongside the MoE sweep: its own project, cache-amount tests, and a spot in the potential-models registry
 - 2026-11-06T00:07Z Nathan questioned the bot's 'agent-run is not running' status claim — bot status messages must be truthful
 - 2026-11-06T02:20Z Nathan wants the brain to be able to pause, hand watching to the igpu helper, run photo jobs on the 4090, come back, and resume without re-planning — protocol now lives in tools + CLAUDE.md (job chat-1793860390-eb5b, PR #168)
+- 2026-11-06T03:30Z Nathan wants an image generator queue above all queues except voice and fix — photo generation should almost always take priority
 - 2026-11-06T04:48Z Nathan: audit 8 days of work logs, find where the model repeats the same questions or re-investigates machine state it should already know, and update tools/prompt/references to eliminate the repeated thinking.
 - 2026-11-06T11:14Z Nathan asked how to get Plane board work to the agent: tags? set to ready? what's the holdup — answered in docs/plane-to-queue.md (Ready IS the trigger; no per-task tags; holdup was C1 unmerged + broker-restart gap, both fixed). Also asked (Discord buttons, 3am): start planning the ~35 Backlog epic tasks now / a few / later.
 - 2026-11-06T23:09Z Nathan: photos need their own priority (below fix, above build/background); !photo should queue + batch rather than fail when VRAM is tight; !photonow / !photoassistnow go on a queue above fix and pause everything (swap out -> generate -> swap back -> brain resumes); sending images to Discord is welcome, not annoying

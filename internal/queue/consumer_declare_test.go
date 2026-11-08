@@ -5,6 +5,7 @@ import "testing"
 func TestQueueDeclareArgsMatchBroker(t *testing.T) {
 	want := map[string]int64{
 		VoiceQueue:      10,
+		ImageQueue:      10,
 		CodingQueue:     5,
 		BackgroundQueue: 10,
 	}
