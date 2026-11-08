@@ -1,9 +1,8 @@
 # Local brain (stage 2)
 
 ## What was installed
-- **Ollama 0.40.7** via `scripts/install_ollama.sh` (systemd service `ollama`, enabled at boot, listening on `localhost:11434`; Anthropic API at `/v1/messages` needs >= 0.14.0).
-- systemd drop-in `/etc/systemd/system/ollama.service.d/jarvis.conf`: `OLLAMA_KEEP_ALIVE=-1` (models stay loaded forever; the idle unloader comes in Phase 3) and `OLLAMA_FLASH_ATTENTION=1`.
-- **llama.cpp server** (docker compose service `engine`, container `jarvis-engine`) runs the brain model from a GGUF file at `/opt/jarvis-engine/models/jarvis-brain.gguf`, bind-mounted read-only. Defined in `docker-compose.yml` with `--ctx-size 131072`, `--parallel 2`, `--kv-unified`, and q4_0 cache types.
+- **Ollama 0.40.7** via `scripts/install_ollama.sh` — **disabled** (superseded by the llama.cpp engine container; both want `localhost:11434`; kept as a host rollback option, docs/services.md). Its systemd drop-in `/etc/systemd/system/ollama.service.d/jarvis.conf` (`OLLAMA_KEEP_ALIVE=-1`, `OLLAMA_FLASH_ATTENTION=1`) is inert while Ollama is off.
+- **llama.cpp server** (docker compose service `engine`, container `jarvis-engine`) runs the brain model from a GGUF file at `/opt/jarvis-engine/models/jarvis-brain.gguf`, bind-mounted read-only. Defined in `docker-compose.yml` with `--ctx-size 131072`, `--parallel 2`, `--kv-unified`, and q4_0 cache types. This is the **only brain deployment** — the old host `jarvis-engine` systemd unit was removed 2026-11-06 (PR #184).
 - Model `jarvis-brain`, created from `models/brain.Modelfile` (`FROM qwen3.8:27b`, `num_ctx 131072`, `num_gpu 999`).
 - `~/.config/jarvis/local.env`:
   ```
