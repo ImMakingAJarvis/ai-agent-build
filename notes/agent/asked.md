@@ -80,6 +80,7 @@
 - 2026-11-05T16:33Z [chat-1793847447-ba6c] Nathan asked to 'relist' the bunch of jobs that failed in the last few hours — turned out to be a single connection-refused burst when the brain engine was briefly down (Nov 4 ~22:25 → Nov 5 ~00:01)
 - 2026-11-05T17:15Z Nathan wants to steer a running worker from the job log UI: inject messages into its thought loop (Talk box) and stop its work (Stop work button, park + skip to next in auto/full-auto) — delivered in PR #161, verified live 2026-11-05
 - 2026-11-05T21:53Z Nathan asked what the 'zombie engine' means (queue site, 2026-11-05): explained — docker container Up but on no network, unreachable, while the systemd unit serves the real brain. He wants the worker failsafe (this PR) and will need to pick the brain-deployment reconciliation option.
+- 2026-11-05T22:38Z Nathan asked for a frame document: all discord commands + how the whole system works + every container/db/service and their connections (job chat-1793853777-c10e)
 - 2026-11-06T00:07Z Nathan questioned the bot's 'agent-run is not running' status claim — bot status messages must be truthful
 - 2026-11-06T02:20Z Nathan wants the brain to be able to pause, hand watching to the igpu helper, run photo jobs on the 4090, come back, and resume without re-planning — protocol now lives in tools + CLAUDE.md (job chat-1793860390-eb5b, PR #168)
 - 2026-11-06T03:30Z Nathan wants an image generator queue above all queues except voice and fix — photo generation should almost always take priority
