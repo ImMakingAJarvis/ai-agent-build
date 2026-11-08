@@ -19,6 +19,11 @@ sudo cp "$REPO_ROOT/scripts/agent-run" "$BIN_DIR/agent-run.tmp"
 sudo mv -f "$BIN_DIR/agent-run.tmp" "$BIN_DIR/agent-run"
 sudo chmod 755 "$BIN_DIR/agent-run"
 
+echo "==> Installing jarvis-swap atomically (agent-run's photo-window bracket calls it)"
+sudo cp "$REPO_ROOT/scripts/jarvis-swap" "$BIN_DIR/jarvis-swap.tmp"
+sudo mv -f "$BIN_DIR/jarvis-swap.tmp" "$BIN_DIR/jarvis-swap"
+sudo chmod 755 "$BIN_DIR/jarvis-swap"
+
 echo "==> Installing agent-local atomically"
 sudo cp "$REPO_ROOT/scripts/agent-local" "$BIN_DIR/agent-local.tmp"
 sudo mv -f "$BIN_DIR/agent-local.tmp" "$BIN_DIR/agent-local"
