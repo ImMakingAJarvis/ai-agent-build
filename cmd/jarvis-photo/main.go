@@ -1,22 +1,31 @@
-// jarvis-photo runs one queued photo job. The iGPU round that the queue
-// watcher runs for a photo job does exactly one thing: run this. It reads the
-// job's (brain-expanded) prompt, generates the image on the art service —
-// which has the 4090 free during the brain-swap window — and delivers the
-// finished PNG to the owner's Discord DM.
+// jarvis-photo runs one queued photo job — as code, no model round. It is
+// self-sufficient: it reads the job's (brain-expanded) prompt, starts the art
+// service if it is down, waits for the model to load, generates the image
+// (the art service saves it to disk and the gallery at the same time),
+// delivers the finished PNG to the owner's Discord DM, and — if the job
+// carries a trailing instruction — queues that as a new job with the image
+// path. The agentjob Runner runs it directly for photo-tagged jobs
+// (Runner.runPhoto).
 //
 //	jarvis-photo make --job <id>
 //
-// Exit 0 when the image was generated and sent, non-zero otherwise (the round
-// reports the error and the job fails, so it can be re-queued).
+// Exit 0 when the image was generated, sent, and any follow-up was queued;
+// non-zero otherwise (the run records a failure and the job can be
+// re-queued).
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
@@ -50,11 +59,18 @@ func run(args []string) int {
 		return 1
 	}
 
-	// Drop any delivery marker from an earlier round: only this round's
+	// Drop any delivery marker from an earlier run: only this run's
 	// delivery can count, so a failed re-run fails the job (re-queueable)
 	// instead of being marked done on the old marker.
 	if err := photo.ClearSent(dataDir, id); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "jarvis-photo: clear sent marker: %v\n", err)
+		return 1
+	}
+
+	// The executor must stand up the art service itself: nothing else in the
+	// pipeline is guaranteed to have started it.
+	if err := ensureArt(); err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-photo: %v\n", err)
 		return 1
 	}
 
@@ -69,19 +85,154 @@ func run(args []string) int {
 	}
 
 	caption := fmt.Sprintf("**%s**\nseed %d · %dx%d · %.0fs\nGallery: %s",
-		truncatePrompt(prompt, 600), img.Seed, img.Width, img.Height, img.Seconds, art.GalleryURL())
+		truncate(prompt, 600), img.Seed, img.Width, img.Height, img.Seconds, art.GalleryURL())
 	if err := deliver(img.Path, caption); err != nil {
 		fmt.Fprintf(os.Stderr, "jarvis-photo: photo made (%s) but delivery failed: %v\n", img.Path, err)
 		return 1
 	}
 	// The image reached Discord: mark the job delivered so the run wrapper
-	// records the round done (a round that ends without this marker is a
+	// records the run done (a run that ends without this marker is a
 	// failure the owner can re-queue).
 	if err := photo.MarkSent(dataDir, id); err != nil {
 		fmt.Fprintf(os.Stderr, "jarvis-photo: delivery marker: %v\n", err)
 		return 1
 	}
 	fmt.Println("sent " + filepath.Base(img.Path))
+
+	// The job's trailing instruction, if it has one: queue a new job that
+	// gets the generated image. A failure here fails the job (re-queueable);
+	// the re-run regenerates and re-sends, which is the same retry contract
+	// the delivery itself already has.
+	return queueFollowup(dataDir, id, img.Path)
+}
+
+// ensureArt makes sure the art service is up and its model is loaded before
+// a generation. It probes GET /health: if the service is unreachable it
+// starts the art container (docker compose up -d art, the same compose
+// project the swap window uses) and waits; if it is up but the model is not
+// loaded yet it waits for "loaded":true.
+func ensureArt() error {
+	loaded, reachable := probeArt()
+	if !reachable {
+		if err := startArtService(); err != nil {
+			return fmt.Errorf("art service is down and could not be started: %w", err)
+		}
+	} else if !loaded {
+		fmt.Println("art service is up, model not loaded — waiting")
+	}
+	return waitArtLoaded()
+}
+
+// probeArt asks the art service for /health and reports whether it answered
+// and whether the model is loaded.
+func probeArt() (loaded, reachable bool) {
+	body, ok := httpGetJSON(artURL() + "/health")
+	if !ok {
+		return false, false
+	}
+	var h struct {
+		Loaded bool `json:"loaded"`
+	}
+	if json.Unmarshal(body, &h) != nil {
+		return false, true
+	}
+	return h.Loaded, true
+}
+
+// startArtService starts the art container if it is not running. It runs
+// `docker compose up -d art` in the repo (SWAP_REPO, same default as
+// jarvis-swap) — a no-op when the container is already up.
+func startArtService() error {
+	repo := os.Getenv("SWAP_REPO")
+	if repo == "" {
+		repo = "/home/agent/ai-agent-build"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "compose", "up", "-d", "art")
+	cmd.Dir = repo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker compose up -d art: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	fmt.Println("started the art container (docker compose up -d art)")
+	return nil
+}
+
+// waitArtLoaded polls the art service's /health until the model reports
+// loaded (or PHOTO_ART_WAIT_S, default 15 min — the model is tens of GB and
+// takes minutes to load even with the GPU free).
+func waitArtLoaded() error {
+	waitS := envInt("PHOTO_ART_WAIT_S", 900)
+	deadline := time.Now().Add(time.Duration(waitS) * time.Second)
+	var last []byte
+	for time.Now().Before(deadline) {
+		body, ok := httpGetJSON(artURL() + "/health")
+		if ok {
+			last = body
+			var h struct {
+				Loaded bool `json:"loaded"`
+			}
+			if json.Unmarshal(body, &h) == nil && h.Loaded {
+				return nil
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if last != nil {
+		return fmt.Errorf("art model not loaded after %ds (last health: %s)", waitS, truncate(string(last), 300))
+	}
+	return fmt.Errorf("art service at %s did not come up after %ds", artURL(), waitS)
+}
+
+// queueFollowup enqueues the photo job's trailing instruction as a new job,
+// giving it the generated image. With no follow-up sidecar the photo job
+// simply ends. {{image}} in the text is replaced with the image path; when
+// the text has no placeholder, the path and the gallery URL are appended.
+func queueFollowup(dataDir, photoID, imgPath string) int {
+	body, err := photo.ReadFollowup(dataDir, photoID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "jarvis-photo: read follow-up: %v\n", err)
+		return 1
+	}
+	if strings.TrimSpace(body) == "" {
+		return 0
+	}
+	fu, err := photo.ParseFollowup(body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-photo: bad follow-up: %v\n", err)
+		return 1
+	}
+	instr := fu.Instructions
+	if strings.Contains(instr, "{{image}}") {
+		instr = strings.ReplaceAll(instr, "{{image}}", imgPath)
+	} else {
+		instr = fmt.Sprintf("%s\n\nGenerated image: %s\nGallery: %s",
+			strings.TrimRight(instr, "\n"), imgPath, art.GalleryURL())
+	}
+	store, err := agentjob.Open(dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-photo: open job store: %v\n", err)
+		return 1
+	}
+	fid := "fu-" + photoID
+	spec := agentjob.Spec{
+		ID:           fid,
+		Title:        or(fu.Title, "follow-up for photo "+photoID),
+		Instructions: instr,
+		Driver:       or(fu.Driver, "local"),
+		Class:        fu.Class,
+		Priority:     fu.Priority,
+		Source:       "photo-followup",
+	}
+	if _, err := store.Ingest(spec); err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-photo: queue follow-up %s: %v\n", fid, err)
+		return 1
+	}
+	fmt.Println("queued follow-up " + fid)
 	return 0
 }
 
@@ -101,7 +252,50 @@ func deliver(path, caption string) error {
 	return cmd.Run()
 }
 
-func truncatePrompt(s string, n int) string {
+// httpGetJSON GETs url (10s timeout) and returns the body.
+func httpGetJSON(url string) ([]byte, bool) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	res, err := client.Get(url)
+	if err != nil {
+		return nil, false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, 8192))
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// artURL is the base URL of the art service (ART_URL, default the host
+// listener) — same convention as the art client itself.
+func artURL() string {
+	if u := os.Getenv("ART_URL"); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	return art.DefaultBase
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func or(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+func truncate(s string, n int) string {
 	if len(s) > n {
 		return s[:n] + "…"
 	}
