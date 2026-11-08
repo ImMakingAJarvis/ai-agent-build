@@ -330,6 +330,26 @@ func (s *Store) SetOrder(id, class string, priority int) error {
 	return writeJSON(filepath.Join(s.JobDir(id), "job.json"), j.Spec)
 }
 
+// SetDriver rewrites a job's driver (job.json "driver") without touching
+// its state. The brain-swap window uses it to flip queued photo jobs to
+// the iGPU driver while the brain is off (docs/brain-swap.md).
+func (s *Store) SetDriver(id, driver string) error {
+	if !ValidID(id) {
+		return fmt.Errorf("agentjob: bad job id %q", id)
+	}
+	switch driver {
+	case "local", "igpu", "sonnet", "superagent":
+	default:
+		return fmt.Errorf("agentjob: unknown driver %q", driver)
+	}
+	j, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	j.Driver = driver
+	return writeJSON(filepath.Join(s.JobDir(id), "job.json"), j.Spec)
+}
+
 // ApplyOrder rewrites the class and priority of each listed job so that,
 // within each class band, jobs run in the given top-to-bottom order (the
 // first id runs first). The band order itself (fix, build, background) is
@@ -410,7 +430,14 @@ func (s *Store) Recover() error {
 }
 
 // Next returns the next ready job whose dependencies are all done, or nil.
-func (s *Store) Next() (*Job, error) {
+// Next returns the next runnable job: ready, dependencies done.
+func (s *Store) Next() (*Job, error) { return s.NextExcluding(nil) }
+
+// NextExcluding is Next, but never returns a job whose id is in exclude.
+// The CLI uses it to skip jobs whose driver's engine is down (docs/brain-
+// swap.md): while the brain is off for a photo window, local jobs stay
+// ready and the worker idles on them instead of burning a dead round.
+func (s *Store) NextExcluding(exclude map[string]bool) (*Job, error) {
 	if err := s.Recover(); err != nil {
 		return nil, err
 	}
@@ -423,7 +450,7 @@ func (s *Store) Next() (*Job, error) {
 		status[j.ID] = j.Status
 	}
 	for _, j := range jobs {
-		if j.Status != Ready {
+		if j.Status != Ready || exclude[j.ID] {
 			continue
 		}
 		ok := true

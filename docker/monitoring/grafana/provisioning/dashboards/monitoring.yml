@@ -10,5 +10,6 @@ providers:
     updateIntervalSeconds: 30
     allowUiUpdates: true
     options:
-      path: /etc/grafana/provisioning/dashboards/dashboards
+      # Repo grafana/ dir, bind-mounted read-only by compose.
+      path: /etc/grafana/dashboards
       foldersFromFilesStructure: false
