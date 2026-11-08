@@ -658,6 +658,48 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   adds the admin to the scratch project as editor (role 20) first,
   mirroring `live_test.go`.
 
+## C1 — run_task execution loop + task-runner service (2026-11-03)
+
+- **Harness choice: Aider** (not OpenHands). Aider is a single Python CLI
+  pointed at any OpenAI-compatible endpoint (`--openai-api-base`) that
+  edits files on disk; OpenHands is a full agent server (runtime, browser,
+  event loop) — more moving parts for a loop where the runner already owns
+  git, the acceptance check, retries and board state. Aider runs from a
+  venv at `~/.local/share/task-runner/venv` (CPython 3.12 — aider does not
+  install on the system's Python 3.14) and the runner execs its `aider`
+  binary directly (`internal/taskrunner/harness.go`).
+- **Endpoint/model resolution:** the local engines serve the GGUF file
+  path, not the registry id, as the model name, so the harness asks the
+  endpoint's `/v1/models` and requires exactly one model — the runner must
+  know which model it is paying the box's VRAM for. The default endpoint is
+  `http://localhost:11434/v1` (the brain — the registry's only executor at
+  C1 time; a second local executor with a different endpoint needs the
+  `Aider.Endpoint` field set per model).
+- **Host service, not a container:** `cmd/task-runner`
+  (`systemd/task-runner.service`, `/usr/local/bin/task-runner`) is the
+  only consumer of the location queues (`jobs.gpu`/`jobs.cpu`/`jobs.igpu`).
+  The worker's placeholder silent-ack location workers were removed in the
+  same round — they would have been competing consumers that ack and drop
+  run_task jobs. The loop runs on the host because the worker container
+  mounts the repo read-only and carries no git, Go toolchain or Python.
+- **Store settling:** a run_task result settles its agent-job entry —
+  Running while in flight; Passed and Blocked → Done (Blocked is settled:
+  a human moves the card); Waiting → Skipped, the terminal "settled
+  without a verdict" state, so the bridge's next catch-up re-triggers the
+  job while the card is still Ready; infrastructure error → Failed (the
+  bridge re-triggers on a terminal entry + card state, self-healing). A
+  missing entry (the bridge ingest has not landed) is created from the
+  queue payload first, so the store stays whole.
+- **Game watchdog on the lane:** while a Sunshine/Steam stream is active
+  (endpoints set), the GPU lane is paused — GPU jobs wait in the queue
+  instead of fighting the game for the 4090.
+- **Branch shape:** the epic branch is `epics/<PREFIX-<epic seq>>` — the
+  task branch `epic-<PREFIX-<epic seq>>/task-<task seq>` must not sit under
+  a ref named `epic-<code>`, so the epic branch gets the `epics/` prefix.
+  Both live in `.worktrees/` worktrees (excluded from git status); the
+  task worktree is dropped after the merge, the epic worktree is kept so
+  later tasks of the same epic build on it and NOTES.md accumulates there.
+- **Live-verified:** pending the toy-epic run (below).
 ## P6+ — `jarvis-board state`/`done`: worker updates the Plane item on task completion (2026-11-04)
 
 - Job chat-1793781308-8f20 (Nathan): when the worker is done with a task
@@ -683,3 +725,36 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   automatically.
 - Binary reinstalled to `/usr/local/bin/jarvis-board` (root-owned;
   `sudo install` after `go build`).
+
+## Broker-restart survival: bridge publishers + location workers reconnect (2026-11-06)
+
+- **Found (job chat-1793835565-142a):** the RabbitMQ container restarted
+  ~12:20 Nov 5 while both consumers of the queues were up.
+  - `plane-bridge` had wired its publishers once at start and `IsClosed`
+    only reports a Close *we* initiated, so after the broker came back it
+    still held no connection: the TST-3 run job re-triggered and failed
+    every 5-minute catch-up with "no location queue publisher (broker
+    down at bridge start)" until a bridge restart.
+  - `task-runner`'s `LocationWorker.consumeLoop` returned when the
+    deliveries channel closed (the dead broker connection), so the
+    workers went silent forever; the republished TST-3 message sat in
+    `jobs.cpu` unwatched.
+- **Bridge fix (46f6ac6):** the publishers now sit behind a `queueRelay`
+  (mutex-guarded holder of the `bridge` publisher interfaces). A failed
+  start runs a 30 s connect retry; a live one starts a `watchConn`
+  watchdog that calls `Conn.Reconnect` while the new `Conn.Dead` reports
+  the underlying AMQP connection is gone. A publish racing the swap
+  errors once; store-settle + catch-up re-trigger retries it. Unit test:
+  `cmd/plane-bridge/main_test.go` (nil relay fails with the store-settle
+  error; swap changes what publishes see next; interface conformance).
+- **Runner fix:** `LocationWorker.consumeLoop` now re-subscribes when the
+  deliveries channel closes and the worker is still running —
+  `Conn.Reconnect`, then re-declare/bind/QoS/Consume on a fresh channel,
+  5 s backoff while the broker is down. The pause flag is untouched, so a
+  game-watchdog GPU pause survives a broker restart. A `Stop` still wins:
+  the running check happens before the resubscribe.
+- **Live-verified:** both binaries deployed and the services restarted.
+  02:57 — restarted bridge republished TST-3 to `jobs.cpu` on the startup
+  catch-up; 03:03 — the new task-runner picked it up, the TST-3 card
+  moved to In Progress, and the run started (the C1 loop end-to-end, the
+  first Plane task executed by the loop).
