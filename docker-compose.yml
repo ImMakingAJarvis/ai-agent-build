@@ -446,11 +446,38 @@ services:
     command:
       [ "--config.file=/etc/prometheus/prometheus.yml",
         "--storage.tsdb.path=/prometheus",
-        "--storage.tsdb.retention.time=15d",
+        # 180d so the Grafana token panels can bucket per month (increase[1M])
+        # over several months; the all-time total itself is carried by the
+        # token-ledger's persisted counter, not by this retention.
+        "--storage.tsdb.retention.time=180d",
         "--web.listen-address=0.0.0.0:9090" ]
     volumes:
       - ./docker/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
+
+  # Persistent all-time token totals (see docs/services.md): polls the
+  # engines' llamacpp:* counters, folds restarts into a never-resetting
+  # cumulative kept in a host state dir, exposes :9102 for Prometheus.
+  token-ledger:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/token-ledger }
+    image: jarvis/token-ledger:local
+    container_name: jarvis-token-ledger
+    restart: unless-stopped
+    environment:
+      LISTEN_ADDR: ":9102"
+      POLL_INTERVAL: 15s
+      STATE_DIR: /state
+      # Brain over the compose network (pinned container_name, which
+      # survives container recreation), iGPU helper over the host bridge
+      # (it is a systemd unit, not a container).
+      ENGINES: "brain=http://jarvis-engine:11434,igpu=http://host.docker.internal:11435"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /home/agent/.local/share/jarvis/token-ledger:/state
 
   grafana:
     image: grafana/grafana:11.4.0
@@ -460,6 +487,10 @@ services:
       - "3000:3000"
     volumes:
       - ./docker/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      # grafana/dashboard.json is provisioned from the repo (the file
+      # provider in dashboards/monitoring.yml picks it up by uid and
+      # refreshes it on change), so dashboard edits are a compose restart.
+      - ./grafana:/etc/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
 
   # Host metrics: rootfs is bind-mounted read-only (the --collector.systemd

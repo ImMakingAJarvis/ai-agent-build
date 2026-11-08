@@ -1,0 +1,19 @@
+[Unit]
+Description=Jarvis Watchdog — stack failsafe (brain/iGPU/containers/agent-run) + AI-log error watcher
+After=docker.service network-online.target
+Wants=docker.service
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+Environment=HOME=/home/agent
+ExecStart=/usr/local/bin/jarvis-watchdog
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis-watchdog
+
+[Install]
+WantedBy=multi-user.target

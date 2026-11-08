@@ -1,4 +1,4 @@
-// Package queue implements a priority scheduler: voice > fix > coding > background.
+// Package queue implements a priority scheduler: voice > fix > image > coding > background.
 //
 // The scheduler does not consume messages itself; it tells the consumer which
 // queues are active. The consumer only pulls from the highest-priority
@@ -13,24 +13,30 @@ import (
 )
 
 // Scheduler tracks which queues are allowed to process jobs.
-// Voice always runs. Fix runs when voice is idle. Coding runs when voice and fix are idle. Background runs when all are idle.
+// Voice always runs. Fix runs when voice is idle. Image runs when voice and
+// fix are idle. Coding runs when voice, fix and image are idle. Background
+// runs when all are idle.
 type Scheduler struct {
 	voiceActive      atomic.Int32
 	fixActive        atomic.Int32
+	imageActive      atomic.Int32
 	codingActive     atomic.Int32
 	backgroundActive atomic.Int32
 	mu               sync.Mutex
 	paused           map[string]bool
 }
 
-// NewScheduler creates a scheduler. Voice starts active; fix, coding and background are paused.
+// NewScheduler creates a scheduler. Voice starts active; fix, image, coding
+// and background are paused.
 func NewScheduler() *Scheduler {
 	s := &Scheduler{paused: map[string]bool{}}
 	s.voiceActive.Store(1)
 	s.fixActive.Store(0)
+	s.imageActive.Store(0)
 	s.codingActive.Store(0)
 	s.backgroundActive.Store(0)
 	s.paused[FixQueue] = true
+	s.paused[ImageQueue] = true
 	s.paused[CodingQueue] = true
 	s.paused[BackgroundQueue] = true
 	return s
@@ -49,24 +55,28 @@ func (s *Scheduler) SetDepths(depths map[string]int) {
 
 	voiceDepth := depths[VoiceQueue]
 	fixDepth := depths[FixQueue]
+	imageDepth := depths[ImageQueue]
 	codingDepth := depths[CodingQueue]
 	bgDepth := depths[BackgroundQueue]
 
 	// A queue is paused while any strictly higher-priority queue still has
-	// work (voice > fix > coding > background). Setting each flag from the
-	// depths (rather than only the higher queues) guarantees the
+	// work (voice > fix > image > coding > background). Setting each flag
+	// from the depths (rather than only the higher queues) guarantees the
 	// highest-priority non-empty queue is always unpaused: previously the
 	// active queue was left in its prior state, so a queue that started
-	// paused (as NewScheduler leaves fix/coding/background) stayed paused
-	// and its jobs waited out the full pause before the worker pulled them.
+	// paused (as NewScheduler leaves fix/image/coding/background) stayed
+	// paused and its jobs waited out the full pause before the worker pulled
+	// them.
 	s.paused[VoiceQueue] = false
 	s.paused[FixQueue] = voiceDepth > 0
-	s.paused[CodingQueue] = voiceDepth > 0 || fixDepth > 0
-	s.paused[BackgroundQueue] = voiceDepth > 0 || fixDepth > 0 || codingDepth > 0
+	s.paused[ImageQueue] = voiceDepth > 0 || fixDepth > 0
+	s.paused[CodingQueue] = voiceDepth > 0 || fixDepth > 0 || imageDepth > 0
+	s.paused[BackgroundQueue] = voiceDepth > 0 || fixDepth > 0 || imageDepth > 0 || codingDepth > 0
 
 	// Name the single highest-priority queue that currently has work.
 	s.voiceActive.Store(0)
 	s.fixActive.Store(0)
+	s.imageActive.Store(0)
 	s.codingActive.Store(0)
 	s.backgroundActive.Store(0)
 	switch {
@@ -74,6 +84,8 @@ func (s *Scheduler) SetDepths(depths map[string]int) {
 		s.voiceActive.Store(1)
 	case fixDepth > 0:
 		s.fixActive.Store(1)
+	case imageDepth > 0:
+		s.imageActive.Store(1)
 	case codingDepth > 0:
 		s.codingActive.Store(1)
 	case bgDepth > 0:
