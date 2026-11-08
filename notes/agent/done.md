@@ -114,3 +114,4 @@
 - 2026-11-07T03:02Z [chat-1794017962-5065] All 16 open PRs made MERGEABLE (15 fixed: merged origin/main into each branch; notes conflicts resolved keeping all entries chronologically; PR175/168 jarvis-jobs PhotoReady code conflict resolved to main's []Job API; PR177 stacked on phase-reel got that merged) (PR #185)
 - 2026-11-07T04:00Z [chat-1794018010-ac43] Queue page (:8080) shows in-flight photo jobs + Log links on every card (PR #186) (PR #186)
 - 2026-11-07T11:34Z [chat-1794019399-8818] Grafana: historical all-time token totals + per-day/week/month buckets (token-ledger service, PR #187)
+- 2026-11-08T02:41Z [chat-1794016094-a2ac] Fixed all 8 open PRs with merge conflicts (job chat-1794016094-a2ac): #163 #164 #165 #166 #174 #175 union-merged in worktrees (notes/docs files only, count-verified); #176/#169 Nathan merged mid-round; all six verified MERGEABLE. Notes PR #189.
