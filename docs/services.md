@@ -23,10 +23,11 @@ for rollback.
 | `redis` | Live job streams: the runner XADDs the agent's stream-json output per job (`jarvis:job:<id>`, 20k entries, 24 h TTL after the job ends); the dashboard tails it for the live job view. Also the NoBrakes flag store (`nobrakes:auto_mode`, `nobrakes:nightly_flag` — see `docs/nobrakes/redis.md`) | 6379 (127.0.0.1) | `jarvis-redis` | named volume `redis_data` (AOF) |
 | `worker` | Consumes the raw RabbitMQ job queue (voice/coding/background) | — (metrics 9101 when on) | `jarvis-worker` | agentjob store; started by `docker compose up -d` / `jarvis-stack` |
 | `wake-queue` *(optional)* | Bridges wake-word events into the job pipeline | — | `jarvis-wake-queue` | **not running today** — start with `--profile optional` |
-| `prometheus` | Scrapes everything below, 15 d retention | 9090 | `jarvis-prometheus` | named volume `prometheus_data`; config: `docker/monitoring/prometheus/` |
+| `prometheus` | Scrapes everything below, 180 d retention (long enough for per-month token buckets; the all-time total is carried by the ledger, not retention) | 9090 | `jarvis-prometheus` | named volume `prometheus_data`; config: `docker/monitoring/prometheus/` |
 | `grafana` | Dashboards (provisioned from `docker/monitoring/grafana/provisioning/`) | 3000 | `jarvis-grafana` | named volume `grafana_data` |
 | `node-exporter` | Host CPU/RAM/disk metrics (host rootfs bind-mounted RO) | 9100 | `jarvis-node-exporter` | — |
 | `nvidia-exporter` | GPU metrics (nvidia-smi wrapper, nvidia runtime) | 3001 | `jarvis-nvidia-exporter` | — |
+| `token-ledger` | Polls the engines' `llamacpp:*` token counters (brain 11434, iGPU 11435), folds restarts into an all-time cumulative and re-exposes it as `jarvis_tokens_total` — feeds the Grafana "Tokens (historical)" row (all-time stat + per-day/week/month buckets) | 9102 (compose network) | `jarvis-token-ledger` | `~/.local/share/jarvis/token-ledger/state.json` |
 
 Not containerized, on purpose:
 

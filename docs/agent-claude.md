@@ -65,6 +65,34 @@ restart the unit, re-test. If the setup changes substantially, update
 `scripts/jarvis-helper-context.md` and re-run `scripts/install_helper.sh`.
 Investigation + benchmarks: docs/igpu-model-handler.md.
 
+## Brain swap — photo window (mechanical, do not re-plan)
+
+Photo generation (art :8120 / bench :8121) needs 12 GB free of the 4090's
+VRAM; the brain holds ~17.6 GB, so photos run in a swap window: the brain
+stops, photo jobs run on the iGPU helper, the brain comes back. The
+bracket is **automatic**: the queue watcher opens the window when it
+pulls a `photo`-tagged job and closes it when the ready batch drains
+(docs/agent-run.md, "Photo window"). Runbook: `docs/brain-swap.md`.
+State: `jarvis-swap status`.
+
+When photo work needs the GPU, in your own round:
+1. `jarvis-swap handoff`, fill "In flight" + "First thing on return"
+   (2-3 lines each — resume, don't re-plan).
+2. Make sure the photo work is queued with the `photo` tag (image-queue
+   ingestion sets it; otherwise `jarvis-jobs add ... -tags photo
+   -driver igpu`).
+3. End the round — the watcher opens the window on the next pull.
+4. Next brain round after the window: read `notes/brain-handoff.md`, do
+   "First thing on return", verify the photos, `mkdir -p notes/archive &&
+   mv notes/brain-handoff.md notes/archive/`, jarvis-notes done.
+
+Hard rules: never run `jarvis-swap out`/`in` from a local (brain) round —
+the watcher runs them between rounds; a manual run is an igpu round or a
+terminal `--force`. Never stop the brain mid-round. The watchdog maintain
+window re-arms the brain at the deadline no matter what; `jarvis-jobs
+next` skips jobs whose engine is down, so local jobs wait through the
+window.
+
 ## The vector graph — more data than the repo
 
 The **Jarvis Memory Service** (`jarvis-memory` systemd unit,
