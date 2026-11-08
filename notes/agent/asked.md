@@ -74,6 +74,7 @@
 - 2026-11-05T03:43Z requeue all previously failed jobs within the day — scope = failures finished today (local), older failures left alone
 - 2026-11-05T04:37Z Nathan: auto_mode + fullauto buttons on the Discord next-steps question, plus a keep-working-even-if-something-failed mode (job chat-1793831245-3eb6)
 - 2026-11-05T06:07Z Nathan wants GLM 5.3 flash benchmarked alongside the MoE sweep: its own project, cache-amount tests, and a spot in the potential-models registry
+- 2026-11-05T21:53Z Nathan asked what the 'zombie engine' means (queue site, 2026-11-05): explained — docker container Up but on no network, unreachable, while the systemd unit serves the real brain. He wants the worker failsafe (this PR) and will need to pick the brain-deployment reconciliation option.
 - 2026-11-06T00:07Z Nathan questioned the bot's 'agent-run is not running' status claim — bot status messages must be truthful
 - 2026-11-06T02:20Z Nathan wants the brain to be able to pause, hand watching to the igpu helper, run photo jobs on the 4090, come back, and resume without re-planning — protocol now lives in tools + CLAUDE.md (job chat-1793860390-eb5b, PR #168)
 - 2026-11-06T03:30Z Nathan wants an image generator queue above all queues except voice and fix — photo generation should almost always take priority
