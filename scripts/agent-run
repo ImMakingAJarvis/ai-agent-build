@@ -419,6 +419,15 @@ $q"); then
       *)       d=local; note="$answer" ;;
     esac
     shopt -u nocasematch
+    # The spec driver is only authoritative in full-auto; when a supervised
+    # dispatch diverges from it, say so — moe-bench-250 was specced for
+    # sonnet but ran on local and stopped its own brain (2026-11-04).
+    if [[ -n "$job_id" ]]; then
+      specd=$(jarvis-jobs show "$job_id" 2>/dev/null | sed -n 's/^driver: //p')
+      if [[ "$specd" =~ ^(local|igpu|sonnet|superagent)$ && "$specd" != "$d" ]]; then
+        notify "Note: ${job_title} is specced for the $specd driver, but this round runs on $d."
+      fi
+    fi
   fi
 
   if [[ -z "$job_id" ]]; then

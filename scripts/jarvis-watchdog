@@ -1,0 +1,512 @@
+#!/usr/bin/env bash
+# jarvis-watchdog — failsafe for the Jarvis stack + watcher on the AI logs.
+#
+# Born from the 2026-11-04 incident (docs/worker-moe-incident-2026-11-04.md):
+# a benchmark round stopped the brain it ran on, `restart: unless-stopped`
+# never re-armed it, and 11 consecutive rounds died on "Connection refused"
+# with nothing noticing until a human rebooted the box.
+#
+# What it watches (one pass every 60 s by default):
+#   brain        host 11434 (systemd unit jarvis-engine)   -> start/restart the unit
+#   igpu         host 11435 (systemd unit jarvis-engine-igpu) -> restart the unit
+#   engine-ct    docker container jarvis-engine            -> compose start when stopped
+#                 while the host brain is down; ESCALATE (no auto-fix) when it is a
+#                 network-less zombie or a port conflict with the systemd unit
+#   rabbitmq     docker container jarvis-rabbitmq          -> docker start; persistent
+#                 boot failure escalates with the dets-corruption pointer (§3 of the doc)
+#   worker       docker container jarvis-worker            -> docker start (broker first)
+#   agent-run    systemd unit agent-run                    -> reset-failed + start ONLY
+#                 when state is "failed" (crash-loop past the start limit); an
+#                 intentional stop (dashboard Stop button) is left alone
+#   logwatch     tails ~/.local/state/jarvis/agent.log from a tracked byte offset and
+#                 acts on round deaths carrying ECONNREFUSED / "Connection refused" /
+#                 terminal_reason api_error: probes the brain, restarts it if down,
+#                 Discord-notifies. First run starts at the current EOF (old incident
+#                 deaths are already diagnosed; this watcher is for new ones).
+#
+# Maintenance mode — benchmark jobs legitimately need the 4090 (and the brain)
+# down: `jarvis-watchdog maintain 2h` writes a TTL'd deadline. While it is
+# unexpired, brain restarts are skipped; when the window expires, the watcher
+# says so and brain checks resume, so a bench job that dies leaving the engine
+# stopped still gets re-armed at the deadline.
+#
+# Rate limiting: at most $WD_MAX_RESTARTS (default 3) restarts per component
+# per hour; beyond that the watchdog escalates to Discord and cools down
+# instead of hammering a component that will not come up.
+#
+# Usage:
+#   jarvis-watchdog [--once]        loop (default) or a single pass
+#   jarvis-watchdog status          probe everything, print a one-screen report
+#   jarvis-watchdog maintain <dur> [reason]   dur = 45s | 30m | 2h (or plain seconds)
+#   jarvis-watchdog maintain off|status
+#
+# State: ~/.local/state/jarvis/watchdog/ (log offset, restart timestamps,
+# maintenance file, escalation dedupe). Log: ~/.local/state/jarvis/watchdog.log.
+# Env overrides (WD_STATE, WD_LOG, WD_AGENT_LOG, WD_BRAIN_URL, WD_IGPU_URL,
+# WD_*_UNIT, WD_*_CT, WD_REPO, WD_INTERVAL, WD_MAX_RESTARTS, WD_NOTIFY_CMD and
+# WD_*_START/RESTART commands) exist so the decision logic can be exercised
+# against throwaway processes — never test restart paths against the real brain.
+set -u
+
+STATE="${WD_STATE:-$HOME/.local/state/jarvis/watchdog}"
+LOG="${WD_LOG:-$HOME/.local/state/jarvis/watchdog.log}"
+AGENT_LOG="${WD_AGENT_LOG:-$HOME/.local/state/jarvis/agent.log}"
+BRAIN_URL="${WD_BRAIN_URL:-http://127.0.0.1:11434}"
+BRAIN_UNIT="${WD_BRAIN_UNIT:-jarvis-engine}"
+BRAIN_START_CMD="${WD_BRAIN_START_CMD:-sudo systemctl start}"
+BRAIN_RESTART_CMD="${WD_BRAIN_RESTART_CMD:-sudo systemctl restart}"
+IGPU_URL="${WD_IGPU_URL:-http://127.0.0.1:11435}"
+IGPU_UNIT="${WD_IGPU_UNIT:-jarvis-engine-igpu}"
+IGPU_RESTART_CMD="${WD_IGPU_RESTART_CMD:-sudo systemctl restart}"
+ENGINE_CT="${WD_ENGINE_CT:-jarvis-engine}"
+RABBITMQ_CT="${WD_RABBITMQ_CT:-jarvis-rabbitmq}"
+WORKER_CT="${WD_WORKER_CT:-jarvis-worker}"
+AGENTRUN_UNIT="${WD_AGENTRUN_UNIT:-agent-run}"
+AGENTRUN_RESET_CMD="${WD_AGENTRUN_RESET_CMD:-sudo systemctl reset-failed}"
+AGENTRUN_START_CMD="${WD_AGENTRUN_START_CMD:-sudo systemctl start}"
+REPO="${WD_REPO:-/home/agent/ai-agent-build}"
+INTERVAL="${WD_INTERVAL:-60}"
+MAX_RESTARTS="${WD_MAX_RESTARTS:-3}"
+BRAIN_GRACE_S="${WD_BRAIN_GRACE_S:-600}"
+NOTIFY_CMD="${WD_NOTIFY_CMD:-jarvis-discord notify}"
+MAINT_FILE="$STATE/engine-maintenance"
+OFFSET_FILE="$STATE/offset"
+
+mkdir -p "$STATE/restarts" "$STATE/esc"
+
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+}
+
+notify() {
+  local msg="watchdog: $1"
+  log "NOTIFY: $msg"
+  # Discord must never be able to kill the watchdog.
+  $NOTIFY_CMD "$msg" >/dev/null 2>&1 || log "notify failed (continuing): $msg"
+}
+
+# escalate <key> <message> — Discord-notify, deduped to once per key per hour.
+escalate() {
+  local key="$1"; shift
+  local f="$STATE/esc/$key" now last
+  now=$(date +%s)
+  last=$(cat "$f" 2>/dev/null || echo 0)
+  if (( now - last < 3600 )); then
+    log "escalate($key) suppressed (already escalated within the hour)"
+    return 0
+  fi
+  echo "$now" > "$f"
+  notify "ESCALATION [$key] $*"
+}
+
+# restart_limit <component> — 0 (and a slot consumed) if under the hourly cap,
+# 1 if the cap is hit and the caller should escalate instead of restarting.
+restart_limit() {
+  local comp="$1" file="$STATE/restarts/$1" now cutoff
+  now=$(date +%s)
+  cutoff=$((now - 3600))
+  if [[ -f "$file" ]]; then
+    awk -v c="$cutoff" '$1 >= c' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+  fi
+  local count
+  if [[ -f "$file" ]]; then
+    count=$(wc -l < "$file")
+  else
+    count=0
+  fi
+  if (( count >= MAX_RESTARTS )); then
+    return 1
+  fi
+  echo "$now" >> "$file"
+  return 0
+}
+
+# http_probe <base-url> — status code of <base>/health; 000 on connection failure.
+http_probe() {
+  local code
+  code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$1/health" 2>/dev/null) || code=000
+  echo "$code"
+}
+
+# docker_state <container> — running | exited | missing
+docker_state() {
+  if docker inspect "$1" >/dev/null 2>&1; then
+    local r
+    r=$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)
+    [[ "$r" == "true" ]] && echo running || echo exited
+  else
+    echo missing
+  fi
+}
+
+# maint_active — 0 while an unexpired maintenance window covers the brain.
+# An expired file is cleaned up and announced (expiry is the re-arm signal).
+maint_active() {
+  local deadline reason now
+  [[ -f "$MAINT_FILE" ]] || return 1
+  deadline=$(head -1 "$MAINT_FILE" 2>/dev/null || echo 0)
+  reason=$(sed -n 2p "$MAINT_FILE")
+  now=$(date +%s)
+  if (( now >= deadline )); then
+    rm -f "$MAINT_FILE"
+    log "maintenance window expired (was: ${reason:-unspecified}) — brain checks resume"
+    notify "engine maintenance window expired (was: ${reason:-unspecified}) — brain checks resume"
+    return 1
+  fi
+  return 0
+}
+
+# do_brain_restart <why> — shared by check_brain and the log watcher.
+# An active unit that is not yet serving is usually mid model-load (minutes
+# for a 17 GB gguf): restarting it would abort a healthy load, so restarts
+# wait out $BRAIN_GRACE_S of silence. A dead/inactive unit starts at once.
+do_brain_restart() {
+  local st since_file now since
+  st=$(systemctl is-active "$BRAIN_UNIT" 2>/dev/null || echo unknown)
+  log "brain unit $BRAIN_UNIT state: $st"
+  if [[ "$st" == "active" ]]; then
+    since_file="$STATE/brain-not-serving"
+    now=$(date +%s)
+    since=$(cat "$since_file" 2>/dev/null || echo "")
+    if [[ -z "$since" ]]; then
+      echo "$now" > "$since_file"
+      log "brain unit active but not serving yet — grace window open ($BRAIN_GRACE_S s) before any restart is attempted"
+      return 0
+    fi
+    if (( now - since < BRAIN_GRACE_S )); then
+      log "brain still loading ($(( now - since )) s of $BRAIN_GRACE_S s grace) — not restarting"
+      return 0
+    fi
+    rm -f "$since_file"
+    log "brain not serving for $(( BRAIN_GRACE_S / 60 )) min with the unit active — restarting"
+  else
+    rm -f "$STATE/brain-not-serving"
+  fi
+  if restart_limit brain; then
+    if [[ "$st" == "active" ]]; then
+      $BRAIN_RESTART_CMD "$BRAIN_UNIT" && log "restarted $BRAIN_UNIT (active but not serving)" \
+        || log "FAILED to restart $BRAIN_UNIT"
+    else
+      $BRAIN_START_CMD "$BRAIN_UNIT" && log "started $BRAIN_UNIT" \
+      || log "FAILED to start $BRAIN_UNIT"
+    fi
+    notify "brain ($BRAIN_UNIT) was down — restarted it. ${1}"
+  else
+    escalate brain "brain ($BRAIN_UNIT) still down after $MAX_RESTARTS restart attempts in the last hour — manual check: sudo systemctl status $BRAIN_UNIT"
+  fi
+}
+
+check_brain() {
+  local code
+  code=$(http_probe "$BRAIN_URL")
+  if [[ "$code" != "000" ]]; then
+    # 503 = llama.cpp still loading the model: up, give it its minutes.
+    rm -f "$STATE/brain-not-serving"
+    return 0
+  fi
+  if maint_active; then
+    log "brain down but maintenance window active — not restarting"
+    return 0
+  fi
+  log "brain DOWN (no response on $BRAIN_URL/health)"
+  do_brain_restart "If rounds were dying on 'Connection refused', they should recover."
+}
+
+check_igpu() {
+  local code
+  code=$(http_probe "$IGPU_URL")
+  [[ "$code" != "000" ]] && return 0
+  log "iGPU helper DOWN (no response on $IGPU_URL/health)"
+  if restart_limit igpu; then
+    $IGPU_RESTART_CMD "$IGPU_UNIT" && { log "restarted $IGPU_UNIT"; notify "iGPU helper ($IGPU_UNIT) was down — restarted it."; } \
+      || log "FAILED to restart $IGPU_UNIT"
+  else
+    escalate igpu "iGPU helper still down after $MAX_RESTARTS attempts in the last hour — sudo systemctl status $IGPU_UNIT"
+  fi
+}
+
+check_engine_container() {
+  local st
+  st=$(docker_state "$ENGINE_CT")
+  # A maintenance window (a VRAM sweep) legitimately owns the engine; the
+  # window's expiry is what re-arms the checks.
+  if [[ "$st" != running ]] && maint_active; then
+    log "engine container not running but maintenance window active — leaving it"
+    return 0
+  fi
+  case "$st" in
+    missing)
+      log "engine container $ENGINE_CT missing — recreating via compose"
+      if restart_limit engine_ct; then
+        if (cd "$REPO" && docker compose start engine >/dev/null 2>&1); then
+          log "engine container started via compose"
+          notify "engine container was missing — recreated it (docker compose start engine)"
+        else
+          escalate engine_ct "could not start the engine container; port 11434 may be held by the systemd $BRAIN_UNIT unit — reconcile the two brain deployments (docs/worker-moe-incident-2026-11-04.md §4)"
+        fi
+      else
+        escalate engine_ct "engine container still not running after $MAX_RESTARTS attempts in the last hour"
+      fi
+      ;;
+    exited)
+      # An explicit `docker compose stop engine` (the MOE sweep's step 1) lands
+      # here; unless-stopped never re-arms it. Only safe to restart when the
+      # host brain is NOT already serving — otherwise the container would fail
+      # on the port and the two deployments are in conflict anyway.
+      if [[ "$(http_probe "$BRAIN_URL")" != "000" ]]; then
+        log "engine container stopped while systemd $BRAIN_UNIT serves the host brain — left stopped (deployment conflict)"
+        escalate engine_ct "engine container is stopped while the systemd $BRAIN_UNIT unit serves host 11434 — two brain deployments; pick one (docs/worker-moe-incident-2026-11-04.md §4)"
+      elif restart_limit engine_ct; then
+        if (cd "$REPO" && docker compose start engine >/dev/null 2>&1); then
+          log "engine container restarted via compose"
+          notify "engine container was stopped (explicit stops are not re-armed by docker) — restarted it"
+        else
+          escalate engine_ct "engine container restart failed (docker compose start engine)"
+        fi
+      else
+        escalate engine_ct "engine container still stopped after $MAX_RESTARTS attempts in the last hour"
+      fi
+      ;;
+    running)
+      local nets
+      nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$ENGINE_CT" 2>/dev/null)
+      if [[ -z "$nets" ]]; then
+        # The Nov-4 zombie: Up, but attached to no network, so engine:11434
+        # resolves for no one. Not a crash — escalating, not auto-fixing.
+        log "engine container running but on NO docker network — zombie; escalating"
+        escalate engine_ct "engine container is up but attached to no docker network — engine:11434 is unreachable from the stack. Reconcile the brain deployment (docs/worker-moe-incident-2026-11-04.md §4); not auto-healing because this box may be running rounds on the systemd brain."
+      fi
+      ;;
+  esac
+}
+
+check_rabbitmq() {
+  local st
+  st=$(docker_state "$RABBITMQ_CT")
+  [[ "$st" == running ]] && return 0
+  log "rabbitmq container not running (state: $st)"
+  if ! restart_limit rabbitmq; then
+    escalate rabbitmq "rabbitmq still down after $MAX_RESTARTS restart attempts in the last hour — check 'docker logs $RABBITMQ_CT'. Known cause: corrupted 0-byte mqtt_retained_*.dets in the rabbitmq_data volume (docs/worker-moe-incident-2026-11-04.md §3): back it up, remove it, restart."
+    return 0
+  fi
+  docker start "$RABBITMQ_CT" >/dev/null 2>&1 || {
+    escalate rabbitmq "docker start $RABBITMQ_CT failed — docker logs will say why"
+    return 0
+  }
+  # A healthy broker takes a few seconds to open its ports; wait, then verify.
+  local i
+  for i in 1 2 3 4 5 6; do
+    sleep 10
+    [[ "$(docker_state "$RABBITMQ_CT")" == running ]] && break
+  done
+  if [[ "$(docker_state "$RABBITMQ_CT")" != running ]]; then
+    escalate rabbitmq "rabbitmq crash-looped after a restart — check 'docker logs $RABBITMQ_CT'. Known cause: corrupted 0-byte mqtt_retained_*.dets in the rabbitmq_data volume (docs/worker-moe-incident-2026-11-04.md §3): back it up, remove it, restart."
+    return 0
+  fi
+  log "rabbitmq container back up"
+  notify "rabbitmq was down — restarted it (docker start)"
+}
+
+check_worker() {
+  local st
+  st=$(docker_state "$WORKER_CT")
+  [[ "$st" == running ]] && return 0
+  # Starting it with the broker down only adds a crash loop.
+  if [[ "$(docker_state "$RABBITMQ_CT")" != running ]]; then
+    log "worker down but rabbitmq is down too — will retry once the broker is back"
+    return 0
+  fi
+  log "worker container not running (state: $st) — starting"
+  if restart_limit worker; then
+    if docker start "$WORKER_CT" >/dev/null 2>&1; then
+      log "worker container started"
+      notify "jarvis-worker was down — restarted it"
+    else
+      escalate worker "docker start $WORKER_CT failed — docker logs will say why"
+    fi
+  else
+    escalate worker "jarvis-worker still down after $MAX_RESTARTS attempts in the last hour"
+  fi
+}
+
+check_agent_run() {
+  local st
+  st=$(systemctl is-active "$AGENTRUN_UNIT" 2>/dev/null || echo unknown)
+  case "$st" in
+    active) return 0 ;;
+    failed)
+      # Past the start-limit burst: systemd gave up restarting it. This is the
+      # only state we auto-heal — "inactive" means someone stopped it on purpose.
+      log "agent-run unit in 'failed' state (crash-looped past the start limit)"
+      if restart_limit agentrun; then
+        $AGENTRUN_RESET_CMD "$AGENTRUN_UNIT" 2>/dev/null
+        if $AGENTRUN_START_CMD "$AGENTRUN_UNIT" 2>/dev/null; then
+          log "agent-run reset and started"
+          notify "agent-run had crash-looped into 'failed' — reset and started it; queued jobs will resume"
+        else
+          escalate agentrun "agent-run would not start after reset-failed — journalctl -u $AGENTRUN_UNIT"
+        fi
+      else
+        escalate agentrun "agent-run in 'failed' state; too many restart attempts in the last hour"
+      fi
+      ;;
+    *)
+      log "agent-run unit state: $st (intentional stops are left alone)"
+      ;;
+  esac
+}
+
+# watch_agent_log — scan newly-appended bytes of the AI log for the incident's
+# failure signature and act. The offset advances by the region read, so each
+# line is seen exactly once; a rotated/truncated file resets to the new start.
+watch_agent_log() {
+  [[ -f "$AGENT_LOG" ]] || return 0
+  local size off end chunk
+  size=$(stat -c %s "$AGENT_LOG" 2>/dev/null || echo 0)
+  if [[ ! -f "$OFFSET_FILE" ]]; then
+    echo "$size" > "$OFFSET_FILE"
+    log "first run — agent.log watch starts at byte $size (current EOF); earlier deaths are the diagnosed incident"
+    return 0
+  fi
+  off=$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)
+  [[ "$off" =~ ^[0-9]+$ ]] || off=0
+  if (( off > size )); then
+    log "agent.log rotated/truncated (was $off, now $size) — resuming from the top"
+    off=0
+  fi
+  if (( off >= size )); then
+    return 0
+  fi
+  end=$(( off + 1048576 ))   # cap per pass; a burst drains over a few cycles
+  (( end > size )) && end=$size
+  # tail -c uses lseek (fast even on a multi-GB file); dd bs=1 would not be.
+  chunk=$(tail -c +$(( off + 1 )) "$AGENT_LOG" 2>/dev/null | head -c 1048576)
+  echo "$end" > "$OFFSET_FILE"
+
+  local hits n sample
+  hits=$(printf '%s\n' "$chunk" | grep -a '"type":"result"' | grep -a -E 'ECONNREFUSED|Connection refused|"terminal_reason":"api_error"' || true)
+  [[ -z "$hits" ]] && return 0
+  n=$(printf '%s\n' "$hits" | wc -l)
+  sample=$(printf '%s\n' "$hits" | head -1 | grep -aoE '"result":"[^"]{0,200}' | sed 's/^"result":"//' | head -c 160)
+  log "agent.log: $n round death(s) with the ECONNREFUSED/api_error signature: ${sample:-<no result text>}"
+
+  if [[ "$(http_probe "$BRAIN_URL")" == "000" ]]; then
+    if maint_active; then
+      escalate logwatch "rounds are dying on 'Connection refused' while the engine is in a maintenance window — expected until the window ends"
+      return 0
+    fi
+    do_brain_restart "$n round(s) died on 'Connection refused'; they and subsequent queued rounds should recover."
+  else
+    escalate logwatch "$n round(s) died on 'Connection refused'/api_error but the brain is healthy now — the engine may already be back, or the failure is elsewhere. Last result: ${sample:-<none>}"
+  fi
+}
+
+run_checks() {
+  check_brain
+  check_igpu
+  check_engine_container
+  check_rabbitmq
+  check_worker
+  check_agent_run
+  watch_agent_log
+}
+
+parse_dur() {
+  local d="${1//[[:space:]]/}"
+  if [[ "$d" =~ ^([0-9]+)$ ]]; then
+    echo "${BASH_REMATCH[1]}"; return 0
+  fi
+  if [[ "$d" =~ ^([0-9]+)([smh])$ ]]; then
+    local n=$(( BASH_REMATCH[1] ))
+    case "${BASH_REMATCH[2]}" in
+      s) echo "$n" ;;
+      m) echo $(( n * 60 )) ;;
+      h) echo $(( n * 3600 )) ;;
+    esac
+    return 0
+  fi
+  return 1
+}
+
+cmd_maintain() {
+  case "${1:-}" in
+    off)
+      rm -f "$MAINT_FILE"
+      log "maintenance disabled"
+      echo "maintenance off"
+      ;;
+    status)
+      if [[ -f "$MAINT_FILE" ]]; then
+        local dl reason now
+        dl=$(head -1 "$MAINT_FILE"); reason=$(sed -n 2p "$MAINT_FILE"); now=$(date +%s)
+        if (( now >= dl )); then
+          echo "maintenance file present but expired (will be cleared on next pass)"
+        else
+          echo "maintenance active: brain restarts skipped until $(date -d "@$dl" '+%Y-%m-%d %H:%M:%S') ($(($dl - now)) s left) — ${reason:-no reason given}"
+        fi
+      else
+        echo "no maintenance window"
+      fi
+      ;;
+    *)
+      local dur
+      if ! dur=$(parse_dur "${1:-}"); then
+        echo "usage: jarvis-watchdog maintain <45s|30m|2h|seconds> [reason] | off | status" >&2
+        return 1
+      fi
+      local now dl
+      now=$(date +%s); dl=$(( now + dur ))
+      {
+        echo "$dl"
+        echo "${2:-unspecified}"
+      } > "$MAINT_FILE"
+      log "maintenance window set for $dur s (until $(date -d "@$dl" '+%Y-%m-%d %H:%M:%S')): ${2:-unspecified}"
+      echo "maintenance on for $dur (until $(date -d "@$dl" '+%Y-%m-%d %H:%M:%S'))"
+      ;;
+  esac
+}
+
+cmd_status() {
+  local off
+  off=$(cat "$OFFSET_FILE" 2>/dev/null || echo "<unset>")
+  echo "jarvis-watchdog status — $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  echo "  brain          $BRAIN_URL  -> $(http_probe "$BRAIN_URL")"
+  echo "  igpu           $IGPU_URL  -> $(http_probe "$IGPU_URL")"
+  echo "  engine ct      $ENGINE_CT  -> $(docker_state "$ENGINE_CT")"
+  echo "  rabbitmq       $RABBITMQ_CT -> $(docker_state "$RABBITMQ_CT")"
+  echo "  worker         $WORKER_CT  -> $(docker_state "$WORKER_CT")"
+  echo "  agent-run      $AGENTRUN_UNIT -> $(systemctl is-active "$AGENTRUN_UNIT" 2>/dev/null)"
+  echo "  maintenance    $(cmd_maintain status)"
+  echo "  agent.log      $AGENT_LOG (watch offset: $off)"
+  echo "  log            $LOG"
+}
+
+usage() {
+  grep -E '^#( |$)' "$0" | head -30 | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+  --once)
+    run_checks
+    ;;
+  status)
+    cmd_status
+    ;;
+  maintain)
+    cmd_maintain "${2:-}" "${3:-}"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  "")
+    log "watchdog starting (interval ${INTERVAL}s, state $STATE)"
+    while true; do
+      run_checks
+      sleep "$INTERVAL"
+    done
+    ;;
+  *)
+    echo "unknown command: $1 (try: --once | status | maintain <dur>|off|status | help)" >&2
+    exit 2
+    ;;
+esac
