@@ -132,7 +132,8 @@ func igpuURL() string {
 
 // igpuContextTokens is the iGPU engine's context size (its --ctx-size),
 // which caps the Claude Code context window for an iGPU round. Keep it in
-// sync with the jarvis-engine-igpu unit (systemd/jarvis-engine-igpu.service).
+// sync with the jarvis-engine-igpu container (docker-compose.yml, service
+// engine-igpu).
 func igpuContextTokens() string {
 	if v := os.Getenv("IGPU_CONTEXT_TOKENS"); v != "" {
 		return v
