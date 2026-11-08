@@ -129,3 +129,4 @@
 - 2026-11-08T11:25Z [chat-1794102904-04a7] opus is now a job driver (claude --model opus, like sonnet) for the rounds the local model can't close; AGENT_OPUS_MODEL pins the model; new stage3-opus brief (PR #194)
 - 2026-11-08T11:32Z [chat-1794103295-92e6] PR conflict sweep: no open/unmerged PRs existed, nothing to fix; 16 unmerged remote branches are squash-merge leftovers (PR #195 notes)
 - 2026-11-08T16:54Z [plan-plan-event-driven-brain-1794016330-1] EVB-1: notes/** merge=union (.gitattributes) + *.pyc gitignore; test-merge loop 20/23 clean, no notes/ conflicts (PR #204)
+- 2026-11-08T17:15Z [plan-plan-event-driven-brain-1794016330-2] EVB-2 (board EVB-3): verified phase-photo-window already merged to main (PR #175); jarvis-swap install path added to install_agent_run.sh (PR #204)

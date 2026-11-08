@@ -103,3 +103,4 @@
 - 2026-11-08T11:25Z job drivers: local (brain), igpu (3B helper), sonnet, opus, superagent — sonnet & opus run the paid claude API (claude --model sonnet|opus, pinned by AGENT_STAGE2_MODEL / AGENT_OPUS_MODEL); opus added 2026-11-08 (PR #194); local stays the default
 - 2026-11-08T11:32Z Squash merges leave remote branches unmerged-in-git (git branch -r --no-merged shows 16 as of 2026-11-08); they are leftovers, not pending PRs — check PR state before assuming a branch has work
 - 2026-11-08T16:54Z Plane comments API is project-scoped: /workspaces/jarvis/projects/<proj>/work-items/<item>/comments/ (workspace-scoped path 404s); list body is in comment_html. jarvis-board prefixed display ids (EVB-2) resolve the right project.
+- 2026-11-08T17:15Z jarvis-swap + agent-run are /usr/local/bin copies installed by scripts/install_agent_run.sh (jarvis-swap added 2026-11-08); the jarvis-jobs binary is still installed by hand (go build + cp) — drift risk, no installer
