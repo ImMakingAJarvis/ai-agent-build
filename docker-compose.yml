@@ -61,8 +61,8 @@ services:
     container_name: jarvis-engine
     restart: unless-stopped
     # agent's uid on the host: keeps files created in /var/lib/jarvis/slots
-    # agent-owned (the native unit ran as agent), so a rollback to the unit
-    # keeps working.
+    # agent-owned (uid 1001) so host-side tooling can read them. This
+    # container is the only brain deployment — no native brain unit exists.
     user: "1001:1001"
     runtime: nvidia
     # nvidia-container-runtime in CDI "auto" mode injects nothing unless a

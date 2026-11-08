@@ -20,13 +20,12 @@ swap` is that something; the watchdog's maintenance mode is the failsafe.
 
 ## The pieces
 
-- **Brain** = systemd unit `jarvis-engine`, serving `127.0.0.1:11434`
-  (the same unit the watchdog restarts; `BRAIN_START_CMD`). The compose
-  `engine` container is NOT this: it is chat's slow secondary brain
-  (`ENGINE_URL=http://engine:11434`, ~3 GB VRAM + mostly CPU) and it is
-  left running through the window — chat keeps working through it, and
-  its 3 GB still leaves ~20 GB free after the unit stops, so the art
-  gate passes. (Reconciling the two deployments is a separate job.)
+- **Brain** = the docker compose container `jarvis-engine` (compose
+  service `engine`), serving `127.0.0.1:11434` — the same container the
+  watchdog restarts (`BRAIN_START_CMD`). It is the ONLY brain deployment:
+  the old host `jarvis-engine` systemd unit was removed 2026-11-06 (PR
+  #184), so every brain stop/start in scripts and runbooks goes through
+  `docker stop|start jarvis-engine` — never `systemctl`.
 - **iGPU helper** = Qwen2.5-3B on `127.0.0.1:11435` (unit
   `jarvis-engine-igpu`). Jobs with `driver: igpu` in their spec run on
   it — `scripts/agent-run` reads the driver from the job spec (32K
@@ -63,7 +62,7 @@ part is now only:
 Then the loop carries it (no brain required):
 
 4. First photo pull → `jarvis-swap out` opens the watchdog window
-   FIRST, stops the brain unit, waits for the VRAM to clear,
+   FIRST, stops the brain container, waits for the VRAM to clear,
    `docker compose up -d art bench` (no-ops if already up), waits for
    the art model to load, then flips the whole ready batch to `igpu`
    at priority 1000 and notifies Discord.
@@ -71,7 +70,7 @@ Then the loop carries it (no brain required):
    off (expected — that is the whole point). Each pull re-flips the
    batch, so photo jobs that arrive mid-window are picked up too.
 6. When the batch drains, the loop runs `jarvis-swap in`: closes the
-   window, stops art+bench, starts the brain unit, waits up to 15 min
+   window, stops art+bench, starts the brain container, waits up to 15 min
    for `/health`, runs the API check (a real completion must come back,
    not just a 200), notifies Discord.
 7. Next brain round: read `notes/brain-handoff.md`, do "First thing on
@@ -135,6 +134,6 @@ end. A manual window with no photo jobs is left to the owner.
 - The maintain window is opened BEFORE the brain stops, and its expiry
   is the last-resort re-arm — the only reason a mid-swap death cannot
   strand the brain.
-- `jarvis-swap status` = one screen of everything (brain unit, VRAM,
+- `jarvis-swap status` = one screen of everything (brain container, VRAM,
   art, bench, maintenance, handoff age, running jobs). Log:
   `~/.local/state/jarvis/swap.log`.
