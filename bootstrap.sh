@@ -59,6 +59,8 @@
 #                       If the GPU isn't working afterwards it escalates to the
 #                       stage-2 model. Set to sonnet to skip the cheap pass.
 #   AGENT_STAGE2_MODEL  model for everything after that (default: sonnet)
+#   AGENT_OPUS_MODEL    model for jobs with driver "opus" (default: opus) —
+#                       the deeper-reasoning paid-API driver.
 #   NAS_SHARE         SMB share to mount read-write at /mnt/jarvis for the
 #                     agent, e.g. //192.168.1.20/JarvissFolder. Needs
 #                     NAS_USER and NAS_PASSWORD (a NAS account limited to
@@ -95,6 +97,7 @@ GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-ai-agent@users.noreply.github.com}"
 GO_VERSION="${GO_VERSION:-1.26.2}"
 AGENT_STAGE1_MODEL="${AGENT_STAGE1_MODEL:-haiku}"
 AGENT_STAGE2_MODEL="${AGENT_STAGE2_MODEL:-sonnet}"
+AGENT_OPUS_MODEL="${AGENT_OPUS_MODEL:-opus}"
 
 log() { printf '\n==> %s\n' "$1"; }
 die() { printf '\nERROR: %s\n' "$1" >&2; exit 1; }
@@ -265,9 +268,9 @@ export BASH_MAX_TIMEOUT_MS=86400000
 # After a reboot nothing from this shell survives, so save what the
 # resumed run needs.
 AGENT_PATH="/usr/local/go/bin:$AGENT_HOME/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-printf 'ANTHROPIC_API_KEY=%s\nPATH=%s\nBASH_MAX_TIMEOUT_MS=%s\nAGENT_STAGE1_MODEL=%s\nAGENT_STAGE2_MODEL=%s\n' \
+printf 'ANTHROPIC_API_KEY=%s\nPATH=%s\nBASH_MAX_TIMEOUT_MS=%s\nAGENT_STAGE1_MODEL=%s\nAGENT_STAGE2_MODEL=%s\nAGENT_OPUS_MODEL=%s\n' \
   "$ANTHROPIC_API_KEY" "$AGENT_PATH" "$BASH_MAX_TIMEOUT_MS" \
-  "$AGENT_STAGE1_MODEL" "$AGENT_STAGE2_MODEL" | agent_write "$JCONF/agent.env"
+  "$AGENT_STAGE1_MODEL" "$AGENT_STAGE2_MODEL" "$AGENT_OPUS_MODEL" | agent_write "$JCONF/agent.env"
 as_agent rm -f "$JCONF/resume-pending" "$JCONF/resume-count" "$JCONF/stage" "$JCONF/driver"
 as_agent mkdir -p "$AGENT_HOME/.local/state/jarvis"
 
@@ -561,6 +564,44 @@ should watch out for. Then end your run.
 STAGE3S_EOF
 printf '%s\n' "$COMMON"
 } | agent_write "$JCONF/stage3-sonnet.txt"
+
+{
+cat <<'STAGE3O_EOF'
+You are Opus, the most capable model, stepping in on a local AI agent
+build on an Ubuntu machine that a local model (see docs/local-brain.md)
+normally runs. I handed you this round because it needs the deepest
+reasoning — a hard design or debug that the local model (and usually
+Sonnet) could not close.
+
+Work now comes from the queue. This round you do ONE job, given below
+after the "YOUR JOB THIS ROUND" line, and then stop. Do not read TASKS.md
+(it is history). If no job text follows (an older loop started this
+round), run `jarvis-jobs next`, read it with `jarvis-jobs show <id>`, do
+that job, and record it at the end with `jarvis-jobs finish <id> <0 or 1>`. Check `GH_TOKEN=$(ghapp-token) gh pr list --state all`,
+the branches, and the end of ~/.local/state/jarvis/agent.log if the job
+was handed to you after the local model got stuck on it. Leave it in a
+state the local model can continue from. For bulk boilerplate you may
+delegate to the local model with
+`agent-local --dangerously-skip-permissions -p "<task>"` to save API usage.
+
+Machine state: the round prompt includes a MACHINE SNAPSHOT
+(jarvis-stack-status, taken at round start) — containers, loaded engines
++ VRAM, services, job queue, swap window. If the prompt has no snapshot
+section (an older jarvis-jobs binary), run `jarvis-stack-status`
+yourself first. Treat it as the current state of the machine. Do not
+re-discover the layout: no systemctl list-units, ss -tlnp, docker ps,
+or curl to engine ports just to see what is running. Probe deeper
+(journalctl, nvidia-smi, ps) only when the job's evidence contradicts
+the snapshot, or while debugging a specific failure.
+
+A job is done only when every acceptance criterion in it passes; the PR
+says how each was checked. Finish with a pushed branch, an open PR, and a
+jarvis-discord notify with the link and a line on what the local model
+should watch out for. Then end your run.
+
+STAGE3O_EOF
+printf '%s\n' "$COMMON"
+} | agent_write "$JCONF/stage3-opus.txt"
 
 # Run the staged agent as the agent user, with the same environment the
 # resume service gives it after a reboot.

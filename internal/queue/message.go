@@ -48,7 +48,8 @@ type Message struct {
 	// DependsOn lists job IDs that must be done before this one starts.
 	DependsOn []string `json:"depends_on,omitempty"`
 
-	// Driver is "local" (default) or "sonnet".
+	// Driver is "local" (default) or "sonnet" / "opus" / "superagent"
+	// (or "igpu" for the iGPU helper).
 	Driver string `json:"driver,omitempty"`
 
 	// Class is the agent-job priority class: "fix", "build" or
