@@ -6,7 +6,10 @@
 //	                                       job whose driver's engine is down
 //	                                       is skipped (left ready), so the
 //	                                       worker idles through a brain-swap
-//	                                       window (docs/brain-swap.md)
+//	                                       window (docs/brain-swap.md). Photo
+//	                                       jobs are exempt — they run as code
+//	                                       (the jarvis-photo executor), not on
+//	                                       a model engine
 //	jarvis-jobs photo-ready                comma-separated ids of the ready
 //	                                       photo-tagged batch — the set the
 //	                                       agent-run watcher brackets with one
@@ -30,7 +33,10 @@
 //	                   [-class fix|build|background] [-priority N] <id> | show <id>
 //	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet|opus|superagent] [-source S]
 //	                   [-class fix|build|background] [-priority N] [-depends a,b]
-//	                   [-tags a,b] [-kanban-task TASKID]
+//	                   [-tags a,b] [-kanban-task TASKID] [-prompt P] [-followup F]
+//	                   (photo jobs: -prompt is the image prompt stored in the
+//	                   sidecar, implies -tags photo; -followup is the trailing
+//	                   instruction queued as a new job with the image path)
 //	jarvis-jobs nightly            NoBrakes: read the Redis auto_mode flag;
 //	                               if on and today's nightly window is
 //	                               unprocessed, enqueue parked nightly jobs
@@ -75,6 +81,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/kanban"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/nobrakes"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/power"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
@@ -760,6 +767,15 @@ func nextRunnable(store *agentjob.Store) (*agentjob.Job, error) {
 		if err != nil || j == nil {
 			return j, err
 		}
+		// Photo jobs run as code (the jarvis-photo executor), not on a model
+		// engine — they need the art service, not a brain or iGPU /health.
+		// The swap window that pulled them guarantees the 4090 is free, and
+		// the executor stands the art service up itself, so the engine gate
+		// would only block them (it used to gate on the iGPU helper, which
+		// photo work no longer touches).
+		if j.HasTag(agentjob.TagPhoto) {
+			return j, nil
+		}
 		d := effectiveDriver(j)
 		if driverUp(d) {
 			return j, nil
@@ -959,6 +975,8 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	depends := fs.String("depends", "", "comma-separated job ids this job waits on (they must be done first)")
 	tags := fs.String("tags", "", "comma-separated tags (nightly: stored parked until the NoBrakes nightly gate enqueues it)")
 	kanbanTask := fs.String("kanban-task", "", "kanban task id this job was created from (NoBrakes: the task's nightly tag then decides auto-eligibility)")
+	prompt := fs.String("prompt", "", "photo prompt: stored in the job's prompt sidecar, implies -tags photo (the job then runs as the jarvis-photo code executor, no model round)")
+	followup := fs.String("followup", "", "photo follow-up: trailing instruction stored in the job's follow-up sidecar, queued as a new job with the image path once the photo is delivered (implies -tags photo)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -977,6 +995,17 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 			tagList = append(tagList, tg)
 		}
 	}
+	// Photo jobs: -prompt / -followup imply the photo tag (the job then runs
+	// as the jarvis-photo code executor — no model round), and a photo job
+	// is useless without its prompt sidecar.
+	if *prompt != "" || *followup != "" {
+		if !hasTag(tagList, photo.Tag) {
+			tagList = append(tagList, photo.Tag)
+		}
+	}
+	if hasTag(tagList, photo.Tag) && *prompt == "" {
+		return fmt.Errorf("a photo-tagged job needs -prompt (the executor reads it from the prompt sidecar)")
+	}
 	switch *class {
 	case "", agentjob.ClassFix, agentjob.ClassBuild, agentjob.ClassBackground:
 	default:
@@ -990,6 +1019,11 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 		}
 		body = string(b)
 	}
+	// Photo jobs have canonical text: the executor is code and never reads
+	// the body, so document what it does instead of requiring stdin.
+	if hasTag(tagList, photo.Tag) && body == "" {
+		body = photo.StandardInstructions(*id)
+	}
 	// NoBrakes 4/6: a job linked to a kanban task whose nightly tag is set is
 	// a nightly job — tag it so Ingest stores it parked (the nightly gate
 	// then re-resolves eligibility from the board, which stays canonical).
@@ -1000,6 +1034,19 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "jarvis-jobs: add: kanban store: %v — link set, board tag not checked\n", err)
+		}
+	}
+	// Store the photo sidecars BEFORE the job: the job lands ready the
+	// moment Ingest returns, so a run started immediately must already be
+	// able to read them (same order as the chat enqueue path).
+	if *prompt != "" {
+		if err := photo.WritePrompt(agentjob.DataDir(), *id, *prompt); err != nil {
+			return err
+		}
+	}
+	if *followup != "" {
+		if err := photo.WriteFollowup(agentjob.DataDir(), *id, *followup); err != nil {
+			return err
 		}
 	}
 	sp := agentjob.Spec{
