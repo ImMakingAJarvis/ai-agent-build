@@ -88,6 +88,74 @@
   .status-dot.healthy { background: var(--green); }
   .status-dot.unhealthy { background: var(--red); }
 
+  /* Machine panel: loaded model, brain-swap state, VRAM, what's on hold */
+  .machine-section { margin-bottom: 32px; }
+  .machine-swap {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .machine-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+    background: var(--green);
+  }
+  .machine-tone-ok { border-left-color: var(--green); }
+  .machine-tone-ok .machine-dot { background: var(--green); }
+  .machine-tone-warn { border-left-color: var(--purple); }
+  .machine-tone-warn .machine-dot { background: var(--purple); }
+  .machine-tone-bad { border-left-color: var(--red); }
+  .machine-tone-bad .machine-dot { background: var(--red); }
+  .machine-detail { color: var(--muted); font-weight: 400; font-size: 0.8rem; }
+  .machine-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+  }
+  .machine-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+  }
+  .machine-card .name {
+    font-weight: 600;
+    font-size: 0.85rem;
+    margin-bottom: 4px;
+  }
+  .machine-card .model {
+    font-size: 1.15rem;
+    font-weight: 700;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    word-break: break-all;
+  }
+  .machine-card .label {
+    color: var(--muted);
+    font-size: 0.72rem;
+    margin-top: 4px;
+  }
+  .machine-card.machine-down .model { color: var(--red); }
+  .machine-card.machine-swapped .model { color: var(--purple); }
+  .machine-card.machine-idle .model { color: var(--muted); font-weight: 400; }
+  .machine-link { color: var(--blue); text-decoration: none; }
+  .machine-lastswap {
+    color: var(--muted);
+    font-size: 0.75rem;
+    margin-top: 8px;
+  }
+  @media (max-width: 900px) {
+    .machine-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+
   /* Cost summary cards */
   .cost-row {
     display: grid;
@@ -547,6 +615,10 @@
   <p><a href="/logs" style="color:#8cf">Engine status &amp; logs</a></p>
   <div id="status" hx-get="/html/lightweight" hx-trigger="load, every 5s" hx-swap="innerHTML">
     <div class="empty-state">Loading queue status&hellip;</div>
+  </div>
+  <!-- Machine: loaded model, brain-swap state, VRAM, what's on hold. -->
+  <div id="machine-section" hx-get="/html/machine" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    <div class="section"><div class="section-title">Machine</div><div class="empty-state">Loading&hellip;</div></div>
   </div>
   <div id="jobs-section" hx-get="/html/jobs-section" hx-trigger="load, every 15s" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Cost Tracking</div><div class="empty-state">Loading&hellip;</div></div>

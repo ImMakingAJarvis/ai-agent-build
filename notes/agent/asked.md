@@ -74,12 +74,18 @@
 - 2026-11-05T03:43Z requeue all previously failed jobs within the day — scope = failures finished today (local), older failures left alone
 - 2026-11-05T04:37Z Nathan: auto_mode + fullauto buttons on the Discord next-steps question, plus a keep-working-even-if-something-failed mode (job chat-1793831245-3eb6)
 - 2026-11-05T06:07Z Nathan wants GLM 5.3 flash benchmarked alongside the MoE sweep: its own project, cache-amount tests, and a spot in the potential-models registry
+- 2026-11-05T09:28Z Nathan: !full_auto on / !auto_mode on discord commands + buttons next to local/igpu; chatbots must not answer daemon commands, not tell him to run !build/!fix for a mode change, and not queue a job for one themselves
+- 2026-11-05T11:43Z Nathan: when I reply to a message, the bot should take what I'm replying to in with the context (job chat-1793863563-afa2)
+- 2026-11-05T14:57Z Nathan: 'the photo generation seems to be broken' (job chat-1793859813-fc82) — shipped the VRAM-wait fix (PR #164); open decision for him: how to partition the 4090 between the agent brain's KV and the art model (work-slot ctx size / duplicate Docker engine)
+- 2026-11-05T16:33Z [chat-1793847447-ba6c] Nathan asked to 'relist' the bunch of jobs that failed in the last few hours — turned out to be a single connection-refused burst when the brain engine was briefly down (Nov 4 ~22:25 → Nov 5 ~00:01)
+- 2026-11-05T17:15Z Nathan wants to steer a running worker from the job log UI: inject messages into its thought loop (Talk box) and stop its work (Stop work button, park + skip to next in auto/full-auto) — delivered in PR #161, verified live 2026-11-05
 - 2026-11-05T21:53Z Nathan asked what the 'zombie engine' means (queue site, 2026-11-05): explained — docker container Up but on no network, unreachable, while the systemd unit serves the real brain. He wants the worker failsafe (this PR) and will need to pick the brain-deployment reconciliation option.
 - 2026-11-05T22:38Z Nathan asked for a frame document: all discord commands + how the whole system works + every container/db/service and their connections (job chat-1793853777-c10e)
 - 2026-11-06T00:07Z Nathan questioned the bot's 'agent-run is not running' status claim — bot status messages must be truthful
 - 2026-11-06T02:20Z Nathan wants the brain to be able to pause, hand watching to the igpu helper, run photo jobs on the 4090, come back, and resume without re-planning — protocol now lives in tools + CLAUDE.md (job chat-1793860390-eb5b, PR #168)
 - 2026-11-06T03:30Z Nathan wants an image generator queue above all queues except voice and fix — photo generation should almost always take priority
 - 2026-11-06T04:48Z Nathan: audit 8 days of work logs, find where the model repeats the same questions or re-investigates machine state it should already know, and update tools/prompt/references to eliminate the repeated thinking.
+- 2026-11-06T11:14Z Nathan asked how to get Plane board work to the agent: tags? set to ready? what's the holdup — answered in docs/plane-to-queue.md (Ready IS the trigger; no per-task tags; holdup was C1 unmerged + broker-restart gap, both fixed). Also asked (Discord buttons, 3am): start planning the ~35 Backlog epic tasks now / a few / later.
 - 2026-11-06T15:25Z Nathan wanted the queue watcher itself to open/close the brain-swap window for photo work — pull a photo job → unload brain → load photo AI → run → put brain back — instead of the manual swap-out/swap-in job bracket
 - 2026-11-06T23:09Z Nathan: photos need their own priority (below fix, above build/background); !photo should queue + batch rather than fail when VRAM is tight; !photonow / !photoassistnow go on a queue above fix and pause everything (swap out -> generate -> swap back -> brain resumes); sending images to Discord is welcome, not annoying
 - 2026-11-06T23:47Z Nathan wanted the photo queue visible in the dashboard queue UI (it was buried in the build band) and a way to edit the text of queued work (PR #180)
@@ -87,3 +93,4 @@
 - 2026-11-07T03:02Z Nathan: fix all open PRs to make them mergable (job chat-1794017962-5065)
 - 2026-11-07T04:00Z Nathan: image generator tasks must show as in progress on the queue page with access to logs (queue page = JARVIS UI at :8080)
 - 2026-11-07T11:34Z Nathan wanted the historical total tokens processed in Grafana, plus tokens per month and week (job chat-1794019399-8818)
+- 2026-11-08T05:54Z Nathan: photo-tagged jobs must not ask brain/sonnet/igpu — they run on the image generator in the swap window. Follow-up job chat-1794102878-59c7: photo-queue visibility on the :8080 dashboard (loaded model, RAM, on-hold) and a Discord post when a photo finishes.

@@ -35,6 +35,48 @@
 
 {{end}}
 
+{{define "machine-section"}}
+<!-- Machine: what is loaded on the GPU, what is changing (brain-swap),
+     how much VRAM is free, and what is on hold for it. Refreshes every 5 s. -->
+<div class="section machine-section">
+  <div class="section-title">Machine</div>
+  <div class="machine-swap machine-tone-{{ .SwapTone }}">
+    <span class="machine-dot"></span>{{ .Swap }}
+    {{- if .SwapDetail }}<span class="machine-detail"> — {{ .SwapDetail }}</span>{{ end }}
+  </div>
+  <div class="machine-grid">
+    {{- range .Engines }}
+    <div class="machine-card machine-{{ .State }}">
+      <div class="name">{{ .Name }}</div>
+      {{- if eq .State "up" }}
+      <div class="model">{{ .Model }}</div>
+      {{- else if eq .State "idle" }}
+      <div class="model">idle</div>
+      {{- else if eq .State "swapped" }}
+      <div class="model">swapped out</div>
+      {{- else }}
+      <div class="model">down</div>
+      {{- end }}
+      <div class="label">loaded model</div>
+    </div>
+    {{- end }}
+    <div class="machine-card">
+      <div class="name">VRAM (4090)</div>
+      <div class="model">{{ if .VRAM }}{{ divGB .VRAM.FreeMB }} / {{ divGB .VRAM.TotalMB }}{{ else }}—{{ end }}</div>
+      <div class="label">{{ if .VRAM }}free / total GB{{ else }}exporter down{{ end }}</div>
+    </div>
+    <div class="machine-card">
+      <div class="name">On hold</div>
+      <div class="model">{{ .Hold.Ready }} ready{{ if .Hold.Photo }} · {{ .Hold.Photo }} photo{{ end }}{{ if .Hold.Running }} · {{ .Hold.Running }} running{{ end }}{{ if .Hold.Failed }} · {{ .Hold.Failed }} failed{{ end }}</div>
+      <div class="label"><a href="#queue" class="machine-link">queue</a></div>
+    </div>
+  </div>
+  {{- if .LastSwap }}
+  <div class="machine-lastswap">last change: {{ .LastSwap }}</div>
+  {{- end }}
+</div>
+{{end}}
+
 {{define "pending-section"}}
 <!-- Pending Jobs Detail -->
 <div class="section">

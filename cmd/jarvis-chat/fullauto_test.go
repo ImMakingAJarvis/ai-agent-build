@@ -29,7 +29,16 @@ func TestCutFullAuto(t *testing.T) {
 		{"hello !fullauto on", false, false, false}, // must start the message
 		// !automode is a different switch: !fullauto must not claim it.
 		{"!automode on", false, false, false},
+		{"!auto_mode on", false, false, false},
 		// and the reverse: cutAutoMode must not claim !fullauto.
+		// the underscored spelling the owner tends to type
+		{"!full_auto on", true, true, true},
+		{"!full_auto off", false, true, true},
+		{"!full_auto ON", true, true, true}, // case-insensitive
+		{"!full_auto", false, false, true}, // the command, but no argument
+		{"!full_auto maybe", false, false, true},
+		{"!full_auto on extra", false, false, true},
+		{"!full_autox", false, false, false}, // word boundary required
 	}
 	for _, c := range cases {
 		on, valid, isCommand := cutFullAuto(c.in)
@@ -37,8 +46,10 @@ func TestCutFullAuto(t *testing.T) {
 			t.Errorf("cutFullAuto(%q) = on=%v valid=%v isCommand=%v; want on=%v valid=%v isCommand=%v",
 				c.in, on, valid, isCommand, c.on, c.valid, c.isCommand)
 		}
-		if o, v, is := cutAutoMode("!fullauto on"); o || v || is {
-			t.Errorf("cutAutoMode(%q) claimed !fullauto: on=%v valid=%v isCommand=%v", "!fullauto on", o, v, is)
+		for _, cross := range []string{"!fullauto on", "!full_auto on"} {
+			if o, v, is := cutAutoMode(cross); o || v || is {
+				t.Errorf("cutAutoMode(%q) claimed !fullauto: on=%v valid=%v isCommand=%v", cross, o, v, is)
+			}
 		}
 	}
 }
@@ -107,7 +118,8 @@ func TestHandleFullAutoOff(t *testing.T) {
 	addr, mr := miniredisURL(t)
 	mr.Set(nobrakes.FullAutoKey, nobrakes.AutoModeOn) // start "on" so the test proves the clear
 	d := &testDiscord{}
-	handleFullAuto(d, addr, "!fullauto off")
+	// the underscored spelling, end to end
+	handleFullAuto(d, addr, "!full_auto off")
 
 	if got, err := mr.Get(nobrakes.FullAutoKey); err != nil || got != nobrakes.AutoModeOff {
 		t.Fatalf("redis %s = %q, err=%v; want %q", nobrakes.FullAutoKey, got, err, nobrakes.AutoModeOff)
@@ -134,7 +146,7 @@ func TestHandleFullAutoIndependentOfAutoMode(t *testing.T) {
 
 func TestHandleFullAutoBadArgLeavesFlagUntouched(t *testing.T) {
 	addr, mr := miniredisURL(t)
-	for _, in := range []string{"!fullauto", "!fullauto maybe"} {
+	for _, in := range []string{"!fullauto", "!fullauto maybe", "!full_auto", "!full_auto maybe"} {
 		d := &testDiscord{}
 		handleFullAuto(d, addr, in)
 		if msg := d.lastNotify(); !strings.Contains(msg, "Usage") {

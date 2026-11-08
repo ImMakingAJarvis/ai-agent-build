@@ -359,73 +359,84 @@ while :; do
     auto_run=1
     notify "Full auto: running ${job_title} (${job_id}) on ${d}."
   else
-    if [[ -n "$job_id" ]]; then
-      q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
-      choices="Local model,iGPU model,Sonnet,Super agent,Skip,Stop,Full auto,Auto mode,Keep going"
+    # Photo-tagged jobs have no driver choice: the photo check below opens
+    # the swap window and runs the round on the iGPU helper, so "who runs
+    # it?" is a question whose answer changes nothing (the only useful
+    # reply was Skip — the owner can still skip a photo job from the queue).
+    # Dispatch them straight away instead of asking.
+    if [[ -n "$job_id" ]] && is_photo_job "$job_id"; then
+      d=igpu
+      note=""
+      notify "Photo job ${job_title} (${job_id}): opening the swap window; the round runs on the iGPU helper."
     else
-      q="No ready jobs in the queue. Type instructions, or Stop."
-      choices="Stop,Full auto,Auto mode,Keep going"
-    fi
-    if ! answer=$(jarvis-discord ask -choices "$choices" "$msg
+      if [[ -n "$job_id" ]]; then
+        q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
+        choices="Local model,iGPU model,Sonnet,Super agent,Skip,Stop,Full auto,Auto mode,Keep going"
+      else
+        q="No ready jobs in the queue. Type instructions, or Stop."
+        choices="Stop,Full auto,Auto mode,Keep going"
+      fi
+      if ! answer=$(jarvis-discord ask -choices "$choices" "$msg
 
 $q"); then
-      echo "==> couldn't reach Discord; retrying in 5 minutes"
-      sleep 300
-      continue
-    fi
+        echo "==> couldn't reach Discord; retrying in 5 minutes"
+        sleep 300
+        continue
+      fi
 
-    shopt -s nocasematch
-    case "$answer" in
-      stop)    shopt -u nocasematch
-               notify "Stopped. Run agent-run as $(whoami) on $(hostname) to pick it up again."
-               exit 0 ;;
-      skip)    shopt -u nocasematch
-               [[ -n "$job_id" ]] && jarvis-jobs skip "$job_id"
-               msg="Skipped ${job_id:-nothing}."
-               continue ;;
-      sonnet)  d=sonnet; note="" ;;
-      "igpu model"|igpu) d=igpu; note="" ;;
-      "local model"|local) d=local; note="" ;;
-      "super agent"|superagent) d=superagent; note="" ;;
-      "full auto")  shopt -u nocasematch
-               # NoBrakes button: turn the switch on and go back to the top
-               # of the loop — the next iteration re-reads the flag and
-               # runs the next ready job without asking. A set that cannot
-               # reach Redis is reported, never swallowed: the owner must
-               # not believe a flipped switch is on.
-               if jarvis-jobs fullauto on >/dev/null; then
-                 msg="Full auto is on — each ready job runs immediately, at any time of day (stop: !fullauto off)."
-               else
-                 msg="Couldn't turn on full auto — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
-               fi
-               notify "$msg"
-               continue ;;
-      "auto mode")  shopt -u nocasematch
-               if jarvis-jobs automode on >/dev/null; then
-                 msg="Auto mode is on — nightly-tagged jobs auto-enqueue at the top of each loop iteration, once per UTC day (stop: !automode off)."
-               else
-                 msg="Couldn't turn on auto mode — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
-               fi
-               notify "$msg"
-               continue ;;
-      "keep going") shopt -u nocasematch
-               if jarvis-jobs keepgoing on >/dev/null; then
-                 msg="Keep going is on — if an auto job fails, I'll tell you but keep working through the next ready job instead of pausing (stop: !keepgoing off)."
-               else
-                 msg="Couldn't turn on keep going — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
-               fi
-               notify "$msg"
-               continue ;;
-      *)       d=local; note="$answer" ;;
-    esac
-    shopt -u nocasematch
-    # The spec driver is only authoritative in full-auto; when a supervised
-    # dispatch diverges from it, say so — moe-bench-250 was specced for
-    # sonnet but ran on local and stopped its own brain (2026-11-04).
-    if [[ -n "$job_id" ]]; then
-      specd=$(jarvis-jobs show "$job_id" 2>/dev/null | sed -n 's/^driver: //p')
-      if [[ "$specd" =~ ^(local|igpu|sonnet|superagent)$ && "$specd" != "$d" ]]; then
-        notify "Note: ${job_title} is specced for the $specd driver, but this round runs on $d."
+      shopt -s nocasematch
+      case "$answer" in
+        stop)    shopt -u nocasematch
+                 notify "Stopped. Run agent-run as $(whoami) on $(hostname) to pick it up again."
+                 exit 0 ;;
+        skip)    shopt -u nocasematch
+                 [[ -n "$job_id" ]] && jarvis-jobs skip "$job_id"
+                 msg="Skipped ${job_id:-nothing}."
+                 continue ;;
+        sonnet)  d=sonnet; note="" ;;
+        "igpu model"|igpu) d=igpu; note="" ;;
+        "local model"|local) d=local; note="" ;;
+        "super agent"|superagent) d=superagent; note="" ;;
+        "full auto")  shopt -u nocasematch
+                 # NoBrakes button: turn the switch on and go back to the top
+                 # of the loop — the next iteration re-reads the flag and
+                 # runs the next ready job without asking. A set that cannot
+                 # reach Redis is reported, never swallowed: the owner must
+                 # not believe a flipped switch is on.
+                 if jarvis-jobs fullauto on >/dev/null; then
+                   msg="Full auto is on — each ready job runs immediately, at any time of day (stop: !fullauto off)."
+                 else
+                   msg="Couldn't turn on full auto — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
+                 fi
+                 notify "$msg"
+                 continue ;;
+        "auto mode")  shopt -u nocasematch
+                 if jarvis-jobs automode on >/dev/null; then
+                   msg="Auto mode is on — nightly-tagged jobs auto-enqueue at the top of each loop iteration, once per UTC day (stop: !automode off)."
+                 else
+                   msg="Couldn't turn on auto mode — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
+                 fi
+                 notify "$msg"
+                 continue ;;
+        "keep going") shopt -u nocasematch
+                 if jarvis-jobs keepgoing on >/dev/null; then
+                   msg="Keep going is on — if an auto job fails, I'll tell you but keep working through the next ready job instead of pausing (stop: !keepgoing off)."
+                 else
+                   msg="Couldn't turn on keep going — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
+                 fi
+                 notify "$msg"
+                 continue ;;
+        *)       d=local; note="$answer" ;;
+      esac
+      shopt -u nocasematch
+      # The spec driver is only authoritative in full-auto; when a supervised
+      # dispatch diverges from it, say so — moe-bench-250 was specced for
+      # sonnet but ran on local and stopped its own brain (2026-11-04).
+      if [[ -n "$job_id" ]]; then
+        specd=$(jarvis-jobs show "$job_id" 2>/dev/null | sed -n 's/^driver: //p')
+        if [[ "$specd" =~ ^(local|igpu|sonnet|superagent)$ && "$specd" != "$d" ]]; then
+          notify "Note: ${job_title} is specced for the $specd driver, but this round runs on $d."
+        fi
       fi
     fi
   fi

@@ -29,6 +29,14 @@ func TestCutKeepGoing(t *testing.T) {
 		{"!fullauto on", false, false, false},
 		{"!automode on", false, false, false},
 		// and the reverse: the other cutters must not claim !keepgoing.
+		// the underscored spelling the owner tends to type
+		{"!keep_going on", true, true, true},
+		{"!keep_going off", false, true, true},
+		{"!keep_going ON", true, true, true}, // case-insensitive
+		{"!keep_going", false, false, true}, // the command, but no argument
+		{"!keep_going maybe", false, false, true},
+		{"!keep_going on extra", false, false, true},
+		{"!keep_goingx", false, false, false}, // word boundary required
 	}
 	for _, c := range cases {
 		on, valid, isCommand := cutKeepGoing(c.in)
@@ -36,11 +44,13 @@ func TestCutKeepGoing(t *testing.T) {
 			t.Errorf("cutKeepGoing(%q) = on=%v valid=%v isCommand=%v; want on=%v valid=%v isCommand=%v",
 				c.in, on, valid, isCommand, c.on, c.valid, c.isCommand)
 		}
-		if o, v, is := cutFullAuto("!keepgoing on"); o || v || is {
-			t.Errorf("cutFullAuto(%q) claimed !keepgoing: on=%v valid=%v isCommand=%v", "!keepgoing on", o, v, is)
-		}
-		if o, v, is := cutAutoMode("!keepgoing on"); o || v || is {
-			t.Errorf("cutAutoMode(%q) claimed !keepgoing: on=%v valid=%v isCommand=%v", "!keepgoing on", o, v, is)
+		for _, cross := range []string{"!keepgoing on", "!keep_going on"} {
+			if o, v, is := cutFullAuto(cross); o || v || is {
+				t.Errorf("cutFullAuto(%q) claimed !keepgoing: on=%v valid=%v isCommand=%v", cross, o, v, is)
+			}
+			if o, v, is := cutAutoMode(cross); o || v || is {
+				t.Errorf("cutAutoMode(%q) claimed !keepgoing: on=%v valid=%v isCommand=%v", cross, o, v, is)
+			}
 		}
 	}
 }
@@ -66,7 +76,8 @@ func TestHandleKeepGoingOff(t *testing.T) {
 	addr, mr := miniredisURL(t)
 	mr.Set(nobrakes.KeepGoingKey, nobrakes.AutoModeOn) // start "on" so the test proves the clear
 	d := &testDiscord{}
-	handleKeepGoing(d, addr, "!keepgoing off")
+	// the underscored spelling, end to end
+	handleKeepGoing(d, addr, "!keep_going off")
 
 	if got, err := mr.Get(nobrakes.KeepGoingKey); err != nil || got != nobrakes.AutoModeOff {
 		t.Fatalf("redis %s = %q, err=%v; want %q", nobrakes.KeepGoingKey, got, err, nobrakes.AutoModeOff)
@@ -98,7 +109,7 @@ func TestHandleKeepGoingIndependentOfExecutionSwitches(t *testing.T) {
 
 func TestHandleKeepGoingBadArgLeavesFlagUntouched(t *testing.T) {
 	addr, mr := miniredisURL(t)
-	for _, in := range []string{"!keepgoing", "!keepgoing maybe"} {
+	for _, in := range []string{"!keepgoing", "!keepgoing maybe", "!keep_going", "!keep_going maybe"} {
 		d := &testDiscord{}
 		handleKeepGoing(d, addr, in)
 		if msg := d.lastNotify(); !strings.Contains(msg, "Usage") {
