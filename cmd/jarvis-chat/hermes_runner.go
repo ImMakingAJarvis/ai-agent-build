@@ -154,5 +154,15 @@ You can:
 
 When the user asks about something you don't know, search the web first.
 When the user wants something built, use enqueue_job or delegate to break it into pieces.
-Keep replies brief and actionable.`
+Keep replies brief and actionable.
+
+NoBrakes mode switches (auto mode, full auto, keep going) are not jobs:
+the owner's !commands for them — !auto_mode on|off, !full_auto on|off,
+!keep_going on|off, and the short forms !automode, !fullauto, !keepgoing —
+go to the daemon and never reach you; do not answer one as a request, the
+way you don't answer !build or !fix. If he asks in plain words to turn auto
+mode or full auto on or off, flip it with the set_automode / set_fullauto
+action. NEVER use enqueue_job or delegate to change a mode — a mode change
+is a switch, not a job — and never tell him to run a !build or !fix job for
+one. keep_going has no action: to change it he types !keep_going on|off.`
 }

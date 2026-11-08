@@ -21,9 +21,11 @@ bigger than the remainder in every component, so the pipeline runs with
 enable_sequential_cpu_offload(): each submodule streams to the GPU just
 before its forward pass and back to RAM after. Tens of seconds per image
 in exchange for near-zero resident VRAM. One generation runs at a time
-(409 when busy). If the brain grows into what the art model needs at
-inference time, /generate returns 503 with a CUDA OOM message instead of
-crashing.
+(409 when busy). Before generating, /generate waits up to ART_VRAM_WAIT_S
+(default 90 s) for enough free VRAM (ART_MIN_FREE_MB, default 12 GB — the
+DiT burst), because the brain's KV cache usually owns the rest of the GPU
+while a session is active; it only returns 503 with a CUDA OOM message if
+the headroom never appears (or the brain grabs the GPU mid-generation).
 
 Model weights: ART_MODEL_DIR (default /var/lib/jarvis/art/model), populated
 by scripts/install_art.sh. Images: ART_OUT_DIR (default /var/lib/jarvis/art/out).
@@ -49,6 +51,20 @@ OUT_DIR = os.environ.get("ART_OUT_DIR", "/var/lib/jarvis/art/out")
 # (distilled), so guidance_scale=0.
 DEFAULT_STEPS = int(os.environ.get("ART_STEPS", "9"))
 MAX_DIM = int(os.environ.get("ART_MAX_DIM", "1024"))
+
+# --- VRAM backpressure ----------------------------------------------------
+# The brain (llama.cpp) holds most of the 4090's VRAM as KV cache while a
+# session is active, and the pipeline needs a transient burst on top of what
+# is resident: the DiT transformer alone is ~11.5 GB in bf16. Rather than
+# dying with a CUDA OOM the instant the brain is busy, /generate waits for
+# enough free VRAM before starting, so a photo requested while the brain is
+# active succeeds as soon as the brain's slot goes idle instead of erroring.
+# ART_MIN_FREE_MB: free VRAM (MB) required before a generation may start.
+# ART_VRAM_WAIT_S: how long to wait for that headroom before giving up (503).
+# ART_VRAM_POLL_S: how often to re-check while waiting.
+ART_MIN_FREE_MB = int(os.environ.get("ART_MIN_FREE_MB", "12000"))
+ART_VRAM_WAIT_S = float(os.environ.get("ART_VRAM_WAIT_S", "90"))
+ART_VRAM_POLL_S = float(os.environ.get("ART_VRAM_POLL_S", "2.0"))
 
 pipe = None
 _load_error = None
@@ -188,6 +204,52 @@ def gpu_stats():
     return None
 
 
+def free_vram_mb():
+    """Free VRAM on the GPU in MB, or None when CUDA is unavailable."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            free, _total = torch.cuda.mem_get_info()
+            return round(free / 2**20)
+    except Exception:
+        pass
+    return None
+
+
+def wait_for_vram(min_free_mb, timeout_s, poll_s, free_mb_fn=None, clear_cache_fn=None):
+    """Block until at least min_free_mb of VRAM is free, up to timeout_s.
+
+    Polls free_mb_fn (default: the live GPU) every poll_s seconds, calling
+    clear_cache_fn (default: torch.cuda.empty_cache) between polls to release
+    orphaned blocks the brain may have dropped. Returns True when enough VRAM
+    is free — or immediately when there is no GPU to contend over — and False
+    when the timeout expires first. A final free check runs at the deadline
+    so a slot that idles out at the last moment still wins.
+    """
+    if free_mb_fn is None:
+        free_mb_fn = free_vram_mb
+    if clear_cache_fn is None:
+        def clear_cache_fn():
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    deadline = time.time() + timeout_s
+    while True:
+        free = free_mb_fn()
+        if free is None or free >= min_free_mb:
+            return True
+        if time.time() >= deadline:
+            return False
+        clear_cache_fn()
+        time.sleep(poll_s)
+
+
 @app.get("/health")
 def health():
     return {
@@ -197,6 +259,9 @@ def health():
         "error": _load_error,
         "busy": _busy["since"] is not None,
         "gpu": gpu_stats(),
+        "free_vram_mb": free_vram_mb(),
+        "min_free_mb": ART_MIN_FREE_MB,
+        "vram_wait_s": ART_VRAM_WAIT_S,
         "last": _last or None,
     }
 
@@ -274,6 +339,19 @@ def _run(prompt, payload):
     )
     gen = torch.Generator(device="cpu").manual_seed(seed)
 
+    # VRAM backpressure: the brain usually owns most of the GPU. Wait for
+    # enough free VRAM for the DiT burst before starting, so a photo asked
+    # while the brain is busy succeeds as soon as it goes idle.
+    if not wait_for_vram(ART_MIN_FREE_MB, ART_VRAM_WAIT_S, ART_VRAM_POLL_S):
+        free = free_vram_mb()
+        raise HTTPException(
+            503,
+            "not enough free VRAM for a photo: "
+            f"{free if free is not None else '?'} MB free, "
+            f"{ART_MIN_FREE_MB} MB needed (waited {ART_VRAM_WAIT_S:.0f}s "
+            "for the brain to go idle); try again later",
+        )
+
     t0 = time.time()
     try:
         img = pipe(
@@ -285,8 +363,12 @@ def _run(prompt, payload):
             generator=gen,
         ).images[0]
     except torch.OutOfMemoryError:
+        free = free_vram_mb()
         raise HTTPException(
-            503, "CUDA OOM — the brain is using too much VRAM right now; try again later"
+            503,
+            "CUDA OOM mid-generation — the brain took the GPU VRAM while the "
+            f"photo was running ({free if free is not None else '?'} MB free); "
+            "try again later",
         )
     dt = time.time() - t0
 

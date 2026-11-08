@@ -231,6 +231,16 @@ type Server struct {
 	redis        *redis.Client // live job streams (nil = file-tail fallback)
 	plans        *plansState
 
+	// Machine panel (machine.go): the endpoints the panel probes for the
+	// loaded models, VRAM and the photo-window marker.
+	engineURL  string
+	igpuURL    string
+	artURL     string
+	nvidiaURL  string
+	swapLog    string
+	windowPath string
+	httpClient *http.Client
+
 	// Pre-compiled templates (parsed once at startup).
 	tmpl *template.Template
 
@@ -247,12 +257,12 @@ func New() *Server {
 		addr = defaultAddr
 	}
 
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "/home/agent"
+	}
 	historyDir := os.Getenv("JARVIS_DATA_DIR")
 	if historyDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			home = "/home/agent"
-		}
 		historyDir = filepath.Join(home, ".local", "share", "jarvis")
 	}
 	historyPath := filepath.Join(historyDir, "jobs.jsonl")
@@ -260,6 +270,34 @@ func New() *Server {
 	amqpURL := os.Getenv("RABBITMQ_URL")
 	if amqpURL == "" {
 		amqpURL = "amqp://jarvis:jarvis-local@localhost:5672"
+	}
+
+	// Machine panel endpoints (machine.go). In the compose stack the iGPU
+	// helper is a host systemd unit, reached through host-gateway; the
+	// defaults work when the dashboard runs on the host itself.
+	engineURL := os.Getenv("ENGINE_URL")
+	if engineURL == "" {
+		engineURL = "http://127.0.0.1:11434"
+	}
+	igpuURL := os.Getenv("IGPU_URL")
+	if igpuURL == "" {
+		igpuURL = "http://127.0.0.1:11435"
+	}
+	artURL := os.Getenv("ART_URL")
+	if artURL == "" {
+		artURL = "http://127.0.0.1:8120"
+	}
+	nvidiaURL := os.Getenv("NVIDIA_EXPORTER_URL")
+	if nvidiaURL == "" {
+		nvidiaURL = "http://127.0.0.1:3001"
+	}
+	stateDir := os.Getenv("JARVIS_STATE_DIR")
+	if stateDir == "" {
+		stateDir = filepath.Join(home, ".local", "state", "jarvis")
+	}
+	confDir := os.Getenv("JARVIS_CONF")
+	if confDir == "" {
+		confDir = filepath.Join(home, ".config", "jarvis")
 	}
 
 	engineClient := slots.NewClient()
@@ -278,6 +316,7 @@ func New() *Server {
 		"divCost":        DivCost,
 		"slotRuntime":    SlotRuntime,
 		"jobPath":        JobPath,
+		"divGB":          DivGB,
 	}
 	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
@@ -297,6 +336,13 @@ func New() *Server {
 		kanban:       initKanban(historyDir),
 		redis:        redisClient,
 		plans:        initPlans(historyDir),
+		engineURL:    engineURL,
+		igpuURL:      igpuURL,
+		artURL:       artURL,
+		nvidiaURL:    nvidiaURL,
+		swapLog:      filepath.Join(stateDir, "swap.log"),
+		windowPath:   filepath.Join(confDir, "photo-window"),
+		httpClient:   &http.Client{Timeout: probeTimeout},
 	}
 }
 
@@ -371,6 +417,7 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /html/lightweight", s.handleLightweightHTML)
+	mux.HandleFunc("GET /html/machine", s.handleMachineHTML)
 	mux.HandleFunc("GET /html/jobs-section", s.handleJobsSectionHTML)
 	mux.HandleFunc("GET /html/agent-jobs-section", s.handleAgentJobsSectionHTML)
 	mux.HandleFunc("GET /api/state", s.handleState)

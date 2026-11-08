@@ -17,11 +17,14 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/nobrakes"
 )
 
-// cutAutoMode splits an !automode command out of a chat message.
+// cutAutoMode splits an !automode command out of a chat message. Both
+// spellings of the switch are accepted: !automode (the short form the CLI
+// and the checkpoint buttons use) and !auto_mode (the underscored form
+// the owner types).
 //
-//	isCommand is true when the message starts with "!automode" followed by a
-//	word boundary, so "!automodex" is not a command and falls through to the
-//	brain as an ordinary message.
+//	isCommand is true when the message starts with one of the spellings
+//	followed by a word boundary, so "!automodex" is not a command and falls
+//	through to the brain as an ordinary message.
 //
 //	valid is true only when the argument is exactly one token, "on" or "off"
 //	(case-insensitive). A bare "!automode" or a bad argument is still
@@ -29,11 +32,8 @@ import (
 //	handler answers with usage instead of sending it to the brain. on carries
 //	the parsed value and is only meaningful when valid is true.
 func cutAutoMode(content string) (on, valid, isCommand bool) {
-	rest := strings.TrimPrefix(content, "!automode")
-	if rest == content {
-		return false, false, false
-	}
-	if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+	rest, ok := cutCmdPrefix(content, "!automode", "!auto_mode")
+	if !ok {
 		return false, false, false
 	}
 	fields := strings.Fields(rest)
@@ -63,7 +63,7 @@ func handleAutoMode(d sender, addr, content string) {
 	defer cancel()
 
 	if !valid {
-		_ = d.Notify(ctx, "Usage: !automode on   or   !automode off")
+		_ = d.Notify(ctx, "Usage: !auto_mode on   or   !auto_mode off   (the short form !automode works too)")
 		return
 	}
 	if addr == "off" || addr == "none" {

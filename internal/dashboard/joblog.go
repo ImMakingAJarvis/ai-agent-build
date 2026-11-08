@@ -52,6 +52,7 @@ func jobLogFuncs() template.FuncMap {
 		"divCost":        DivCost,
 		"slotRuntime":    SlotRuntime,
 		"jobPath":        JobPath,
+		"divGB":          DivGB,
 	}
 }
 

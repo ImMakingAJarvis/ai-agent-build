@@ -17,11 +17,9 @@
 # Discord — the brain is never stranded off.
 #
 # What this script touches:
-#   brain   systemd unit jarvis-engine (the deployment serving 127.0.0.1:11434;
-#           the same unit the watchdog restarts). The compose `engine`
-#           container (chat's slow secondary brain, ENGINE_URL=engine:11434)
-#           is left alone: chat keeps working through it, and its 3 GB keeps
-#           the art VRAM gate passing (~20 GB free after the unit stops).
+#   brain   docker container jarvis-engine (compose service `engine`, serving
+#           127.0.0.1:11434 and engine:11434 on the compose net; the same
+#           container the watchdog restarts). `out` stops it, `in` starts it.
 #   photos  compose services `art` (Z-Image-Turbo, 8120) and `bench`
 #           (t2i bench, 8121).
 #
@@ -50,7 +48,8 @@ STATE="$HOME/.local/state/jarvis"
 LOG="$STATE/swap.log"
 BRAIN_URL="${SWAP_BRAIN_URL:-http://127.0.0.1:11434}"
 BRAIN_UNIT="${SWAP_BRAIN_UNIT:-jarvis-engine}"
-BRAIN_START_CMD="${SWAP_BRAIN_START_CMD:-sudo systemctl start}"
+BRAIN_START_CMD="${SWAP_BRAIN_START_CMD:-docker start}"
+BRAIN_STOP_CMD="${SWAP_BRAIN_STOP_CMD:-docker stop}"
 ART_URL="http://127.0.0.1:8120"
 BENCH_URL="http://127.0.0.1:8121"
 NOTIFY_CMD="${SWAP_NOTIFY_CMD:-jarvis-discord notify}"
@@ -196,7 +195,7 @@ cmd_status() {
   local free
   free=$(vram_free_mb)
   echo "jarvis-swap status — $(date '+%Y-%m-%d %H:%M:%S %Z')"
-  echo "  brain unit   $(systemctl is-active "$BRAIN_UNIT" 2>/dev/null)  ($BRAIN_URL/health -> $(http_probe "$BRAIN_URL"))"
+  echo "  brain ctr    $(docker inspect -f '{{.State.Status}}' "$BRAIN_UNIT" 2>/dev/null || echo missing)  ($BRAIN_URL/health -> $(http_probe "$BRAIN_URL"))"
   echo "  VRAM         ${free:-?} MB free of $(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1) MB"
   echo "  art (8120)   $(http_probe "$ART_URL")  $(curl -s -m 3 "$ART_URL/health" 2>/dev/null | head -c 120)"
   echo "  bench (8121) $(http_probe "$BENCH_URL")  $(curl -s -m 3 "$BENCH_URL/health" 2>/dev/null | head -c 120)"
@@ -280,15 +279,15 @@ cmd_out() {
     log "[DRY-RUN] would run: jarvis-watchdog maintain $maintain \"photo swap window: $reason\""
   fi
 
-  # 2. Unload the brain (the systemd unit — the deployment serving 11434).
+  # 2. Unload the brain (the docker container serving 11434).
   if [[ "$DRY_RUN" == 0 ]]; then
-    log "stopping brain unit $BRAIN_UNIT ..."
-    sudo systemctl stop "$BRAIN_UNIT" || {
-      log "ERROR: systemctl stop $BRAIN_UNIT failed"
+    log "stopping brain container $BRAIN_UNIT ..."
+    $BRAIN_STOP_CMD "$BRAIN_UNIT" || {
+      log "ERROR: $BRAIN_STOP_CMD $BRAIN_UNIT failed"
       return 1
     }
   else
-    log "[DRY-RUN] would run: sudo systemctl stop $BRAIN_UNIT"
+    log "[DRY-RUN] would run: $BRAIN_STOP_CMD $BRAIN_UNIT"
   fi
 
   # 3. Wait for the VRAM to actually come back (CUDA release is not instant).
@@ -386,7 +385,7 @@ cmd_in() {
 
     # 3. Reload the brain.
     if [[ "$DRY_RUN" == 0 ]]; then
-      log "starting brain unit $BRAIN_UNIT ..."
+      log "starting brain container $BRAIN_UNIT ..."
       $BRAIN_START_CMD "$BRAIN_UNIT" || {
         log "ERROR: could not start $BRAIN_UNIT — the watchdog will keep trying (maintain is off)"
         notify "swap IN FAILED: brain would not start (see $LOG) — the watchdog is retrying"
