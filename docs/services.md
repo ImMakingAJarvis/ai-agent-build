@@ -23,11 +23,12 @@ for rollback.
 | `redis` | Live job streams: the runner XADDs the agent's stream-json output per job (`jarvis:job:<id>`, 20k entries, 24 h TTL after the job ends); the dashboard tails it for the live job view. Also the NoBrakes flag store (`nobrakes:auto_mode`, `nobrakes:nightly_flag` — see `docs/nobrakes/redis.md`) | 6379 (127.0.0.1) | `jarvis-redis` | named volume `redis_data` (AOF) |
 | `worker` | Consumes the raw RabbitMQ job queue (voice/coding/background) | — (metrics 9101 when on) | `jarvis-worker` | agentjob store; started by `docker compose up -d` / `jarvis-stack` |
 | `wake-queue` *(optional)* | Bridges wake-word events into the job pipeline | — | `jarvis-wake-queue` | **not running today** — start with `--profile optional` |
-| `prometheus` | Scrapes everything below, 15 d retention | 9090 | `jarvis-prometheus` | named volume `prometheus_data`; config: `docker/monitoring/prometheus/` |
+| `prometheus` | Scrapes everything below, 180 d retention (long enough for per-month token buckets; the all-time total is carried by the ledger, not retention) | 9090 | `jarvis-prometheus` | named volume `prometheus_data`; config: `docker/monitoring/prometheus/` |
 | `grafana` | Dashboards (provisioned from `docker/monitoring/grafana/provisioning/`) | 3000 | `jarvis-grafana` | named volume `grafana_data` |
 | `node-exporter` | Host CPU/RAM/disk metrics (host rootfs bind-mounted RO) | 9100 | `jarvis-node-exporter` | — |
 | `nvidia-exporter` | GPU metrics (nvidia-smi wrapper, nvidia runtime) | 3001 | `jarvis-nvidia-exporter` | — |
 | `jellyfin` | Reel media server (Jellyfin 12.4, 4090 NVENC transcoding); demo library now, NAS share at `/mnt/jarvis` later. docs/reel/jellyfin-baseline.md | 8096 (LAN) | `jarvis-jellyfin` | config: `/var/lib/jarvis/jellyfin/config`; media ro: `/var/lib/jarvis/jellyfin/demo`; admin creds in `~/.config/jarvis/jellyfin.env` (never committed) |
+| `token-ledger` | Polls the engines' `llamacpp:*` token counters (brain 11434, iGPU 11435), folds restarts into an all-time cumulative and re-exposes it as `jarvis_tokens_total` — feeds the Grafana "Tokens (historical)" row (all-time stat + per-day/week/month buckets) | 9102 (compose network) | `jarvis-token-ledger` | `~/.local/share/jarvis/token-ledger/state.json` |
 
 The full map of every service and its connections — including the host
 units (agent-run, plane-bridge, jarvis-watchdog, the engines) and the
@@ -35,10 +36,6 @@ external boxes (HA, Plane, Discord) — is in docs/system-frame.md.
 
 Not containerized, on purpose:
 
-- **`jarvis-engine` (host unit)** — since 2026-11-05 the *canonical* brain
-  runs as the host unit on 127.0.0.1:11434, while the compose `engine`
-  container sits as a network-less zombie (the watchdog escalates it, never
-  auto-heals it). See docs/system-frame.md §2 and §8.
 - **`agent-run` / `agent-resume`** — the loop that runs the agent itself
   (Claude Code rounds from the job queue). It needs the host user account,
   sudo, the repo working tree and the CLI toolchain; it is also what manages

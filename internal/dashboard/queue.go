@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
@@ -35,6 +36,12 @@ type queueJob struct {
 	Photo        bool     `json:"photo,omitempty"`
 	Instructions string   `json:"instructions,omitempty"` // editable text of the work
 	Prompt       string   `json:"prompt,omitempty"`       // photo job: the sidecar prompt
+	// InFlight is true while the job's round is running (claimed/running).
+	// Only photo-tagged jobs are shown in flight (in the photo band, ahead
+	// of the ready batch): the card is not draggable or editable and the
+	// page's Log link opens the round's live log.
+	InFlight     bool     `json:"in_flight,omitempty"`
+	StartedAt    string   `json:"started_at,omitempty"`
 	DependsOn    []string `json:"depends_on,omitempty"`
 	Blocked      bool     `json:"blocked"`
 	BlockedBy    []string `json:"blocked_by,omitempty"`
@@ -68,9 +75,26 @@ func (s *Server) openAgentJobStore() (*agentjob.Store, error) {
 	return agentjob.Open(filepath.Dir(s.historyPath))
 }
 
+// queueTime re-formats an RFC3339 timestamp from state.json for card
+// display, matching the CreatedAt format; an empty or unparseable value is
+// returned as-is.
+func queueTime(s string) string {
+	if s == "" {
+		return ""
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC().Format("2006-01-02 15:04")
+	}
+	return s
+}
+
 // loadQueue lists the ready jobs in run order and groups them by band. Bands
 // are always present (even empty) and in the current runtime band order. A
 // ready job is marked blocked when one of its dependencies is not done yet.
+// Photo-tagged jobs whose round is running (claimed/running) are shown in
+// flight at the head of the photo band: photo work runs on the iGPU in the
+// brain-swap window, so it is the queue's only in-progress work (the rest is
+// covered by the Agent Jobs panel).
 func (s *Server) loadQueue(st *agentjob.Store) (bands []queueBand, order []string, err error) {
 	jobs, err := st.List()
 	if err != nil {
@@ -86,8 +110,27 @@ func (s *Server) loadQueue(st *agentjob.Store) (bands []queueBand, order []strin
 	}
 
 	byBand := make(map[string][]queueJob, len(order))
-	var photoJobs []queueJob
+	var photoInFlight, photoJobs []queueJob
 	for _, j := range jobs {
+		if (j.Status == agentjob.Claimed || j.Status == agentjob.Running) && j.HasTag(photo.Tag) {
+			qj := queueJob{
+				ID:        j.ID,
+				Title:     j.Title,
+				Class:     agentjob.EffectiveClass(j.Class, j.Source),
+				Priority:  j.Priority,
+				CreatedAt: j.CreatedAt.UTC().Format("2006-01-02 15:04"),
+				Driver:    j.Driver,
+				Status:    j.Status,
+				Photo:     true,
+				InFlight:  true,
+				StartedAt: queueTime(j.StartedAt),
+			}
+			if p, err := photo.ReadPrompt(st.Dir(), j.ID); err == nil {
+				qj.Prompt = p
+			}
+			photoInFlight = append(photoInFlight, qj)
+			continue
+		}
 		if j.Status != agentjob.Ready {
 			continue
 		}
@@ -127,8 +170,9 @@ func (s *Server) loadQueue(st *agentjob.Store) (bands []queueBand, order []strin
 
 	// The photo band comes first and is outside the runtime band order: it
 	// is a display grouping only, so Order (and the run order) is unchanged.
+	// In-flight (running) photo jobs are listed ahead of the ready batch.
 	bands = make([]queueBand, 0, len(order)+1)
-	bands = append(bands, queueBand{Name: PhotoBand, Jobs: photoJobs})
+	bands = append(bands, queueBand{Name: PhotoBand, Jobs: append(append([]queueJob{}, photoInFlight...), photoJobs...)})
 	for _, cls := range order {
 		bands = append(bands, queueBand{Name: cls, Jobs: byBand[cls]})
 	}

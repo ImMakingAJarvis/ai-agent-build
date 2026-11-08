@@ -35,3 +35,9 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["jarvis-engine:11434"]
+
+  # All-time token cumulatives (jarvis_tokens_total), persisted across
+  # engine restarts by the ledger container.
+  - job_name: "token_ledger"
+    static_configs:
+      - targets: ["jarvis-token-ledger:9102"]

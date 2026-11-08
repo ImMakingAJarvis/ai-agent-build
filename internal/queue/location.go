@@ -135,7 +135,19 @@ func (w *LocationWorker) consumeLoop(dels <-chan amqp.Delivery) {
 		}
 		del, ok := <-dels
 		if !ok {
-			return
+			// A closed deliveries channel means the broker connection died
+			// (restart, network drop) — or Stop ran. Without re-subscribing
+			// the worker goes silent and the queue is never consumed again;
+			// undelivered messages stay on the broker either way.
+			if !w.running.Load() {
+				return
+			}
+			if nd := w.resubscribe(); nd != nil {
+				dels = nd
+				continue
+			}
+			time.Sleep(reconnectBackoff)
+			continue
 		}
 		// While paused the delivery stays unacked (see Pause).
 		for w.paused.Load() {
@@ -148,6 +160,50 @@ func (w *LocationWorker) consumeLoop(dels <-chan amqp.Delivery) {
 			log.Printf("location: %s: %v", w.queue, err)
 		}
 	}
+}
+
+// reconnectBackoff is the wait between resubscribe attempts while the
+// broker is still down.
+const reconnectBackoff = 5 * time.Second
+
+// resubscribe re-establishes this worker's channel and subscription after
+// the broker connection died. It returns the new deliveries channel, or nil
+// while the broker is still down (the caller backs off and retries). The
+// pause flag is untouched, so a game-watchdog pause survives a restart.
+func (w *LocationWorker) resubscribe() <-chan amqp.Delivery {
+	if err := w.conn.Reconnect(); err != nil {
+		log.Printf("location: %s: reconnect failed: %v", w.queue, err)
+		return nil
+	}
+	ch, err := w.conn.NewChannel()
+	if err != nil {
+		log.Printf("location: %s: channel after reconnect: %v", w.queue, err)
+		return nil
+	}
+	if _, err := ch.QueueDeclare(w.queue, true, false, false, false, nil); err != nil {
+		ch.Close()
+		log.Printf("location: %s: declare after reconnect: %v", w.queue, err)
+		return nil
+	}
+	if err := ch.QueueBind(w.queue, w.queue+".#", w.conn.Exchange(), true, nil); err != nil {
+		ch.Close()
+		log.Printf("location: %s: bind after reconnect: %v", w.queue, err)
+		return nil
+	}
+	if err := ch.Qos(1, 0, false); err != nil {
+		ch.Close()
+		log.Printf("location: %s: qos after reconnect: %v", w.queue, err)
+		return nil
+	}
+	dels, err := ch.Consume(w.queue, "", false, false, false, false, nil)
+	if err != nil {
+		ch.Close()
+		log.Printf("location: %s: consume after reconnect: %v", w.queue, err)
+		return nil
+	}
+	w.ch = ch
+	log.Printf("location: %s: re-subscribed after reconnect", w.queue)
+	return dels
 }
 
 // handleOne mirrors Consumer.handleOne: decode, run the handler, ack on

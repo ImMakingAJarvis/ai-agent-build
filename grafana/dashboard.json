@@ -1428,7 +1428,7 @@
     },
     {
       "id": 47,
-      "title": "Cumulative Engine Tokens",
+      "title": "Tokens This Engine Run (resets on restart)",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -1478,7 +1478,7 @@
           "legendFormat": "Cached prompt tokens"
         }
       ],
-      "description": "Cumulative token counts since engine start, all clients (prompt tokens exclude cached ones)."
+      "description": "llama.cpp counters for the current engine process only; they re-arm to 0 on every engine restart. Use the Tokens (historical) row below for the all-time total."
     },
     {
       "id": 48,
@@ -1592,6 +1592,335 @@
         }
       ],
       "description": "1 = model loaded, 0 = no model loaded"
+    },
+    {
+      "id": 600,
+      "title": "Tokens (historical)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 338
+      },
+      "collapsed": false,
+      "panels": [],
+      "description": "All-time token totals across engine restarts, accumulated by the token-ledger service (jarvis_tokens_total). Day/week/month buckets come from increase() over the retention window; the all-time total itself lives in the ledger's state file, so it never depends on Prometheus retention."
+    },
+    {
+      "id": 601,
+      "title": "Total tokens processed (all time)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 339
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(jarvis_tokens_total{kind=~\"prompt|generated\"})",
+          "refId": "A"
+        }
+      ],
+      "description": "Prompt + generated tokens across every engine run since the ledger first started. Survives engine restarts (brain swaps, model changes, reboots) and the token-ledger's own restarts."
+    },
+    {
+      "id": 602,
+      "title": "Prompt tokens (all time)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 339
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(jarvis_tokens_total{kind=\"prompt\"})",
+          "refId": "A"
+        }
+      ],
+      "description": "Input/prefill tokens processed, all-time (cached prompt tokens tracked separately)."
+    },
+    {
+      "id": 603,
+      "title": "Generated tokens (all time)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 339
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(jarvis_tokens_total{kind=\"generated\"})",
+          "refId": "A"
+        }
+      ],
+      "description": "Decoded/output tokens produced, all-time."
+    },
+    {
+      "id": 604,
+      "title": "Cumulative Total Over Time",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 343
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(jarvis_tokens_total{kind=~\"prompt|generated\"})",
+          "refId": "A",
+          "legendFormat": "All-time total"
+        }
+      ],
+      "description": "Growth of the all-time total within the visible range (a dip can only mean the ledger's state was lost, not a real decrease)."
+    },
+    {
+      "id": 605,
+      "title": "Tokens per Day",
+      "type": "barchart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 343
+      },
+      "options": {
+        "orientation": "vertical",
+        "stacking": "none",
+        "barRadius": {
+          "mode": "circle"
+        },
+        "barWidth": 0.7,
+        "groupWidth": 0.7,
+        "showValue": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(jarvis_tokens_total{kind=~\"prompt|generated\"}[1d]))",
+          "refId": "A",
+          "interval": "1d",
+          "minInterval": "1d"
+        }
+      ],
+      "description": "Tokens processed per day across the visible range (retention 180d)."
+    },
+    {
+      "id": 606,
+      "title": "Tokens per Week",
+      "type": "barchart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 351
+      },
+      "options": {
+        "orientation": "vertical",
+        "stacking": "none",
+        "barRadius": {
+          "mode": "circle"
+        },
+        "barWidth": 0.7,
+        "groupWidth": 0.7,
+        "showValue": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(jarvis_tokens_total{kind=~\"prompt|generated\"}[1w]))",
+          "refId": "A",
+          "interval": "1w",
+          "minInterval": "1w"
+        }
+      ],
+      "description": "Tokens processed per week across the visible range (retention 180d)."
+    },
+    {
+      "id": 607,
+      "title": "Tokens per Month (30-day buckets)",
+      "type": "barchart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 351
+      },
+      "options": {
+        "orientation": "vertical",
+        "stacking": "none",
+        "barRadius": {
+          "mode": "circle"
+        },
+        "barWidth": 0.7,
+        "groupWidth": 0.7,
+        "showValue": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(jarvis_tokens_total{kind=~\"prompt|generated\"}[30d]))",
+          "refId": "A",
+          "interval": "30d",
+          "minInterval": "30d"
+        }
+      ],
+      "description": "Tokens processed in 30-day buckets across the visible range (retention 180d). PromQL has no calendar-month duration, so buckets are rolling 30-day windows."
     }
   ],
   "refresh": "10s",
@@ -1604,7 +1933,7 @@
     "list": []
   },
   "time": {
-    "from": "now-3h",
+    "from": "now-180d",
     "to": "now"
   },
   "timepicker": {},

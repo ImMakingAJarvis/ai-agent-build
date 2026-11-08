@@ -135,6 +135,15 @@ func (c *Conn) IsClosed() bool {
 	return c.closed
 }
 
+// Dead reports whether the underlying AMQP connection is gone (broker
+// restart, network drop) — as opposed to IsClosed, which only reports a
+// Close we initiated. The publisher watchdog uses this to Reconnect.
+func (c *Conn) Dead() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn == nil || c.conn.IsClosed()
+}
+
 // Publish sends a JSON-encoded Message to the exchange with the given routing key.
 func (c *Conn) Publish(m Message, routingKey string) error {
 	c.mu.Lock()
