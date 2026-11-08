@@ -99,3 +99,4 @@
 - 2026-11-08T19:57Z Nathan: EVB Phase 0 — merge cursor/dashboard-job-logs-5db6 with pagination, sweep stale notes/bench branches into one commit, resolve Reel branches per Gate 1 decisions; he merged PR #204 mid-round (active PR merging)
 - 2026-11-08T21:28Z HomeAI TTS announcements: Nathan confirmed keep (yes-cherry-pick, 2026-11-08, EVB-6)
 - 2026-11-08T22:13Z Nathan resolved the 2026-11-05 zombie-engine deviation: option A — compose container canonical (keep) (2026-11-08, EVB-7; recorded in notes/agent/system.md + PR #205)
+- 2026-11-08T23:50Z EVB-8 build was a pure plan-task (no new Nathan decision). One open item for Nathan to confirm on PR #205: the plan wrote StartedAt/FinishedAt time.Time with no json tags; I added started_at/finished_at for wire-format consistency with the snake_case siblings.
