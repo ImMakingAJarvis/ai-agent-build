@@ -845,10 +845,13 @@ func (s *Server) getPendingQueues() []PendingQueue {
 
 		pq := PendingQueue{Name: qname, Depth: info.Messages}
 
-		// Peek: consume with noAck to read messages without removing them.
-		// Limit to 50 messages per queue to avoid blocking.
+		// Peek: consume without acking to read messages without removing
+		// them — the cancel below requeues whatever was not re-delivered.
+		// (autoAck=true used to drop up to 50 pending jobs per queue on
+		// every render of this view.) Limit to 50 messages per queue to
+		// avoid blocking.
 		if info.Messages > 0 {
-			dels, err := ch.Consume(qname, "", false, true, false, false, nil)
+			dels, err := ch.Consume(qname, "", false, false, false, false, nil)
 			if err == nil {
 				for i := 0; i < info.Messages && i < 50; i++ {
 					if del, ok := <-dels; ok {
