@@ -61,10 +61,19 @@ func (c *Conn) connect() error {
 	return nil
 }
 
-// Reconnect re-establishes the connection and channel. Safe to call concurrently.
+// Reconnect re-establishes the connection and channel if the underlying
+// AMQP connection is dead (broker restart, network drop). A live
+// connection is left in place: closing it would drop the channels other
+// callers hold (the location workers, the publishers), and workers
+// resubscribing after the same drop would each close the connection the
+// previous one just opened — flapping forever with no queue holding a
+// consumer (2026-11-08 09:20). Safe to call concurrently.
 func (c *Conn) Reconnect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.conn != nil && !c.conn.IsClosed() {
+		return nil
+	}
 	c.channel.Close()
 	c.conn.Close()
 	return c.connect()
