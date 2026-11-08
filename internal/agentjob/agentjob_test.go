@@ -200,6 +200,34 @@ func TestDefaultCommandSetsJarvisModel(t *testing.T) {
 	}
 }
 
+// TestDefaultCommandOpusDriver is the acceptance test for the opus driver:
+// the round runs the API claude binary pinned to the opus model (not the
+// local agent-local harness), and the env carries that model. AGENT_OPUS_MODEL
+// pins a specific opus id.
+func TestDefaultCommandOpusDriver(t *testing.T) {
+	t.Setenv("JARVIS_MODEL", "stale-model")
+	t.Setenv("AGENT_OPUS_MODEL", "")
+	if got := ModelFor("opus"); got != "opus" {
+		t.Fatalf("ModelFor(opus) = %q, want opus", got)
+	}
+	cmd := defaultCommand("opus", "do it", "off")
+	if cmd.Args[0] != "claude" {
+		t.Fatalf("opus driver binary = %q, want claude (API, not agent-local)", cmd.Args[0])
+	}
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "--model opus") {
+		t.Errorf("opus driver args lack --model opus: %s", joined)
+	}
+	if !strings.Contains(strings.Join(cmd.Env, "\n"), "JARVIS_MODEL=opus") {
+		t.Error("opus driver env lacks JARVIS_MODEL=opus")
+	}
+	// AGENT_OPUS_MODEL pins a specific model id.
+	t.Setenv("AGENT_OPUS_MODEL", "claude-opus-4-1")
+	if got := ModelFor("opus"); got != "claude-opus-4-1" {
+		t.Errorf("ModelFor(opus) with AGENT_OPUS_MODEL = %q", got)
+	}
+}
+
 func TestModelForIgpu(t *testing.T) {
 	t.Setenv("LOCAL_MODEL", "jarvis-brain")
 	if got := ModelFor("igpu"); got != "jarvis-igpu" {
@@ -549,6 +577,13 @@ func TestSetDriverRewritesSpec(t *testing.T) {
 	// The driver rewrite must not touch the state.
 	if j.Status != Ready {
 		t.Fatalf("status %q, want ready", j.Status)
+	}
+	// opus is a valid driver (a paid API model, like sonnet).
+	if err := s.SetDriver("p1", "opus"); err != nil {
+		t.Fatalf("SetDriver rejected opus: %v", err)
+	}
+	if got, _ := s.Get("p1"); got.Driver != "opus" {
+		t.Fatalf("driver %q, want opus", got.Driver)
 	}
 	if err := s.SetDriver("p1", "nope"); err == nil {
 		t.Fatal("SetDriver accepted an unknown driver")

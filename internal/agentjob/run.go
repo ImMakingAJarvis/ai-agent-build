@@ -29,7 +29,8 @@ type Runner struct {
 	History *queue.History
 	// Command builds the agent command for a driver, full prompt, and reasoning
 	// effort level. The default is agent-local (local, and igpu pointed at the
-	// iGPU engine) or claude --model $AGENT_STAGE2_MODEL (sonnet).
+	// iGPU engine) or claude --model $AGENT_STAGE2_MODEL (sonnet) /
+	// $AGENT_OPUS_MODEL (opus).
 	Command func(driver, prompt, effort string) *exec.Cmd
 	// PRLookup finds a PR URL for a branch when the output has none. The
 	// default asks gh. Return "" if there is none.
@@ -95,6 +96,12 @@ func ModelFor(driver string) string {
 		}
 		return "sonnet"
 	}
+	if driver == "opus" {
+		if m := os.Getenv("AGENT_OPUS_MODEL"); m != "" {
+			return m
+		}
+		return "opus"
+	}
 	if driver == "igpu" {
 		if m := os.Getenv("IGPU_MODEL"); m != "" {
 			return m
@@ -148,7 +155,9 @@ func defaultCommand(driver, prompt, effort string) *exec.Cmd {
 	}
 	bin := "agent-local"
 	args := []string{"--dangerously-skip-permissions"}
-	if driver == "sonnet" {
+	if driver == "sonnet" || driver == "opus" {
+		// The paid API drivers run the claude binary pinned to their model
+		// (sonnet, or opus for the harder rounds the local model can't handle).
 		bin = "claude"
 		args = []string{"--model", ModelFor(driver), "--dangerously-skip-permissions"}
 	}

@@ -84,7 +84,7 @@ type Spec struct {
 	Doc             string    `json:"doc,omitempty"` // path to job doc section
 	Branch          string    `json:"branch,omitempty"`
 	DependsOn       []string  `json:"depends_on,omitempty"`
-	Driver          string    `json:"driver,omitempty"` // local (default) or sonnet
+	Driver          string    `json:"driver,omitempty"` // local (default), sonnet, opus, superagent or igpu
 	Class           string    `json:"class,omitempty"`  // fix, build, background (see Class constants)
 	Priority        int       `json:"priority"`         // higher runs first within the class
 	CreatedAt       time.Time `json:"created_at"`
@@ -347,7 +347,7 @@ func (s *Store) SetDriver(id, driver string) error {
 		return fmt.Errorf("agentjob: bad job id %q", id)
 	}
 	switch driver {
-	case "local", "igpu", "sonnet", "superagent":
+	case "local", "igpu", "sonnet", "opus", "superagent":
 	default:
 		return fmt.Errorf("agentjob: unknown driver %q", driver)
 	}

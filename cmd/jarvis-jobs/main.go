@@ -11,7 +11,7 @@
 //	                                       photo-tagged batch — the set the
 //	                                       agent-run watcher brackets with one
 //	                                       brain-swap window (empty when none)
-//	jarvis-jobs run <id> [-driver local|igpu|sonnet|superagent] [-round N] [-note TEXT]
+//	jarvis-jobs run <id> [-driver local|igpu|sonnet|opus|superagent] [-round N] [-note TEXT]
 //	                   [-auto]             run under the NoBrakes guard:
 //	                                       take the auto-run marker (at most
 //	                                       one concurrent auto job) and exit 3
@@ -26,9 +26,9 @@
 //	jarvis-jobs stop <id>            stop a running job: kill the round
 //	                               and park the job out of the queue — the
 //	                               loop skips to the next work
-//	jarvis-jobs skip <id> | requeue [-driver local|igpu|sonnet|superagent]
+//	jarvis-jobs skip <id> | requeue [-driver local|igpu|sonnet|opus|superagent]
 //	                   [-class fix|build|background] [-priority N] <id> | show <id>
-//	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet|superagent] [-source S]
+//	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet|opus|superagent] [-source S]
 //	                   [-class fix|build|background] [-priority N] [-depends a,b]
 //	                   [-tags a,b] [-kanban-task TASKID]
 //	jarvis-jobs nightly            NoBrakes: read the Redis auto_mode flag;
@@ -141,7 +141,7 @@ func main() {
 		// this line (see `fullauto` above).
 		driver := j.Driver
 		switch driver {
-		case "local", "igpu", "sonnet", "superagent":
+		case "local", "igpu", "sonnet", "opus", "superagent":
 		default:
 			driver = "local"
 		}
@@ -174,7 +174,7 @@ func main() {
 		}
 	case "run":
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
-		driver := fs.String("driver", "local", "local, igpu, sonnet or superagent")
+		driver := fs.String("driver", "local", "local, igpu, sonnet, opus or superagent")
 		round := fs.String("round", "", "round label")
 		note := fs.String("note", "", "typed instructions for this round")
 		effort := fs.String("effort", "",
@@ -785,7 +785,7 @@ func effectiveDriver(j *agentjob.Job) string {
 }
 
 // driverUp probes the local engine a driver runs on. Drivers with no local
-// engine (sonnet, superagent) always count as up.
+// engine (sonnet, opus, superagent) always count as up.
 func driverUp(driver string) bool {
 	var url string
 	switch driver {
@@ -824,14 +824,14 @@ func healthUp(url string) bool {
 // of their band (docs/brain-swap.md).
 func cmdRequeue(store *agentjob.Store, args []string) error {
 	fs := flag.NewFlagSet("requeue", flag.ContinueOnError)
-	driver := fs.String("driver", "", "re-set the job's driver: local, igpu, sonnet or superagent")
+	driver := fs.String("driver", "", "re-set the job's driver: local, igpu, sonnet, opus or superagent")
 	class := fs.String("class", "", "re-set the job's class: fix, build or background")
 	priority := fs.Int("priority", -1, "re-set the job's priority (higher runs first within the class)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("requeue [-driver local|igpu|sonnet|superagent] [-class fix|build|background] [-priority N] <id>")
+		return fmt.Errorf("requeue [-driver local|igpu|sonnet|opus|superagent] [-class fix|build|background] [-priority N] <id>")
 	}
 	id := fs.Arg(0)
 	if *driver != "" {
@@ -950,7 +950,7 @@ func cmdAdd(store *agentjob.Store, args []string, stdin io.Reader) error {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	id := fs.String("id", "", "job id")
 	title := fs.String("title", "", "job title")
-	driver := fs.String("driver", "local", "local, igpu, sonnet or superagent")
+	driver := fs.String("driver", "local", "local, igpu, sonnet, opus or superagent")
 	source := fs.String("source", "", "origin (discord, migrate, …)")
 	class := fs.String("class", agentjob.ClassBuild, "fix, build or background (fix runs before build, build before background)")
 	priority := fs.Int("priority", 0, "higher runs first within the class")
