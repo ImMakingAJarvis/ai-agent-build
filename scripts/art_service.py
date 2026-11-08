@@ -107,9 +107,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="jarvis-art", lifespan=lifespan)
 
-# The gallery: a self-contained page (no external assets) that fetches
-# /images and renders every generated photo with its prompt and timing.
-# It re-fetches every 30 s, so a new photo appears without reloading.
+# The gallery: a small page that fetches /images and renders every
+# generated photo with its prompt and timing. It re-fetches every 30 s, so
+# a new photo appears without reloading. Timestamps render in the VIEWER'S
+# local timezone (moment from a CDN, with a plain-Date fallback when the
+# CDN is unreachable) — never raw UTC, which is not the owner's time.
 GALLERY_PAGE = """<!doctype html>
 <html>
 <head>
@@ -141,7 +143,15 @@ GALLERY_PAGE = """<!doctype html>
 <div id="grid"></div>
 <div id="empty" hidden>No photos yet — ask Jarvis on Discord:
 <code>!photo a photo of ...</code></div>
+<script src="https://cdn.jsdelivr.net/npm/moment@2.30.1/moment.min.js"></script>
 <script>
+// Timestamps: moment in the viewer's local zone (e.g. "2026-11-08 05:36 PST");
+// if the CDN never loaded, fall back to the browser's own local formatting.
+function fmtWhen(iso) {
+  if (!iso) return null;
+  if (window.moment) return moment(iso).local().format('YYYY-MM-DD HH:mm z');
+  return new Date(iso).toLocaleString([], {dateStyle: 'medium', timeStyle: 'short'});
+}
 async function refresh() {
   try {
     const r = await fetch('/images?limit=200');
@@ -163,7 +173,7 @@ async function refresh() {
       p.textContent = it.prompt || '(no prompt saved)';
       const m = document.createElement('div'); m.className = 'm';
       m.textContent = [
-        it.modified ? it.modified.replace('T', ' ').slice(0, 16) + ' UTC' : null,
+        fmtWhen(it.modified),
         it.seed != null ? 'seed ' + it.seed : null,
         it.seconds != null ? it.seconds + 's' : null,
       ].filter(Boolean).join(' \\u00b7 ');
