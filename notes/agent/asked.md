@@ -98,3 +98,4 @@
 - 2026-11-03T19:19Z Nathan: make NoBrakes the highest priority and start working on it next
 - 2026-11-08T19:57Z Nathan: EVB Phase 0 — merge cursor/dashboard-job-logs-5db6 with pagination, sweep stale notes/bench branches into one commit, resolve Reel branches per Gate 1 decisions; he merged PR #204 mid-round (active PR merging)
 - 2026-11-08T21:28Z HomeAI TTS announcements: Nathan confirmed keep (yes-cherry-pick, 2026-11-08, EVB-6)
+- 2026-11-08T22:13Z Nathan resolved the 2026-11-05 zombie-engine deviation: option A — compose container canonical (keep) (2026-11-08, EVB-7; recorded in notes/agent/system.md + PR #205)
