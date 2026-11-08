@@ -596,6 +596,9 @@
   }
   .qedit-title:focus, .qedit-text:focus { outline: none; border-color: var(--blue); }
   .qedit-actions { display: flex; gap: 6px; margin-top: 6px; }
+  .list-meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 10px; }
+  .more-wrap { margin-top: 12px; }
+  .error-state { color: var(--red); text-align: center; padding: 24px 12px; }
   @media (max-width: 640px) {
     body { padding: 12px; }
     .cost-row, .queue-row, .slots-row { grid-template-columns: 1fr 1fr; }
@@ -620,10 +623,10 @@
   <div id="machine-section" hx-get="/html/machine" hx-trigger="load, every 5s" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Machine</div><div class="empty-state">Loading&hellip;</div></div>
   </div>
-  <div id="jobs-section" hx-get="/html/jobs-section" hx-trigger="load, every 15s" hx-swap="innerHTML">
+  <div id="jobs-section" hx-get="/html/jobs-section" hx-trigger="load" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Cost Tracking</div><div class="empty-state">Loading&hellip;</div></div>
   </div>
-  <div id="agent-jobs-section" hx-get="/html/agent-jobs-section" hx-trigger="load, every 15s" hx-swap="innerHTML">
+  <div id="agent-jobs-section" hx-get="/html/agent-jobs-section" hx-trigger="load" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Agent Jobs</div><div class="empty-state">Loading&hellip;</div></div>
   </div>
   <!-- Interactive queue: drag ready jobs to reorder a band or reclassify a job.
@@ -689,8 +692,9 @@
   {{ template "pending-section" . }}
   <div class="section">
     <div class="section-title">Approval Queue</div>
-    <div id="approvals" hx-get="/api/approvals" hx-trigger="load, every 5s" hx-swap="outerHTML"></div>
+    <div id="approvals" hx-get="/api/approvals" hx-trigger="load" hx-swap="outerHTML"></div>
   </div>
+  <div class="refresh-info">Status refreshes every 5s. Lists load a page of 25; older rows stay on disk.</div>
 </div>
 
 </body>

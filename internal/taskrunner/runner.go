@@ -498,10 +498,45 @@ func (r *Runner) ensureEpicWorktree(ctx context.Context, epicBranch, epicWt stri
 		if out, err := gitRun(ctx, r.Repo, "worktree", "add", "-b", epicBranch, epicWt, base); err != nil {
 			return fmt.Errorf("create %s from %s: %v (%s)", epicBranch, base, err, out)
 		}
-	} else if out, err := gitRun(ctx, r.Repo, "worktree", "add", epicWt, epicBranch); err != nil {
-		return fmt.Errorf("attach %s: %v (%s)", epicWt, err, out)
+		return nil
+	}
+	// The epic branch exists. A previous run of this epic (blocked or
+	// crashed) leaves its worktree attached for inspection, and re-runs
+	// of a blocked card are the designed recovery path (Blocked →
+	// Ready → the bridge re-triggers). git worktree add on an existing
+	// path is fatal (exit 128), so keep the worktree that is already on
+	// the right branch instead of failing.
+	if branch, attached, err := worktreeBranchAt(ctx, r.Repo, epicWt); err != nil {
+		return fmt.Errorf("worktree list: %v", err)
+	} else if attached && branch != epicBranch {
+		return fmt.Errorf("attach %s: the path is a worktree of %s, want %s", epicWt, branch, epicBranch)
+	} else if !attached {
+		if out, err := gitRun(ctx, r.Repo, "worktree", "add", epicWt, epicBranch); err != nil {
+			return fmt.Errorf("attach %s: %v (%s)", epicWt, err, out)
+		}
 	}
 	return nil
+}
+
+// worktreeBranchAt reports the branch checked out in the worktree at
+// path (attached=false when path is not a registered worktree).
+func worktreeBranchAt(ctx context.Context, repo, path string) (branch string, attached bool, err error) {
+	out, err := gitRun(ctx, repo, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", false, err
+	}
+	inTarget := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			inTarget = strings.TrimPrefix(line, "worktree ") == path
+			continue
+		}
+		if inTarget && strings.HasPrefix(line, "branch ") {
+			b := strings.TrimPrefix(line, "branch ")
+			return strings.TrimPrefix(b, "refs/heads/"), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // setupTaskWorktree points taskWt at taskBranch. fresh (attempt one, and
@@ -510,9 +545,20 @@ func (r *Runner) ensureEpicWorktree(ctx context.Context, epicBranch, epicWt stri
 // attempt left, so the harness builds on its partial edits.
 func (r *Runner) setupTaskWorktree(ctx context.Context, taskBranch, taskWt, epicBranch string, fresh bool) error {
 	if fresh {
+		// A blocked or crashed run leaves the task worktree registered
+		// and its branch checked out there. RemoveAll drops the
+		// directory but not the registration, so prune before dropping
+		// the branch — branch -D refuses a branch that git still
+		// considers checked out.
+		if _, err := gitRun(ctx, r.Repo, "worktree", "prune"); err != nil {
+			return err
+		}
 		if _, err := os.Stat(taskWt); err == nil {
 			if err := os.RemoveAll(taskWt); err != nil {
 				return fmt.Errorf("remove stale %s: %v", taskWt, err)
+			}
+			if _, err := gitRun(ctx, r.Repo, "worktree", "prune"); err != nil {
+				return err
 			}
 		}
 		if refExists(ctx, r.Repo, "refs/heads/"+taskBranch) {
@@ -520,12 +566,13 @@ func (r *Runner) setupTaskWorktree(ctx context.Context, taskBranch, taskWt, epic
 				return fmt.Errorf("delete stale %s: %v", taskBranch, err)
 			}
 		}
+	} else if _, err := os.Stat(taskWt); err != nil {
+		// A crashed run between attempts (the process died) leaves the
+		// branch without its worktree: prune the stale registration,
+		// then re-attach.
 		if _, err := gitRun(ctx, r.Repo, "worktree", "prune"); err != nil {
 			return err
 		}
-	} else if _, err := os.Stat(taskWt); err != nil {
-		// A crashed run between attempts (the process died) leaves the
-		// branch without its worktree: re-attach it.
 		if out, err := gitRun(ctx, r.Repo, "worktree", "add", taskWt, taskBranch); err != nil {
 			return fmt.Errorf("re-attach %s: %v (%s)", taskWt, err, out)
 		}

@@ -397,6 +397,50 @@ func TestRunBlocksAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+// TestRerunBlockedEpicReusesWorktree: a blocked run leaves the epic
+// worktree attached; the designed recovery path (Blocked → Ready → the
+// bridge re-triggers) must not die on git worktree add over the existing
+// path (fatal, exit 128). The re-run reuses the attached worktree and
+// finishes the card.
+func TestRerunBlockedEpicReusesWorktree(t *testing.T) {
+	board := newFakeBoard()
+	board.add(plane.WorkItem{ID: "epic1", Name: "Add a /health endpoint", State: "s-ready", SequenceID: 2})
+	board.add(plane.WorkItem{
+		ID: "card1", Name: "health endpoint", State: "s-ready", Parent: "epic1", SequenceID: 3,
+		DescriptionHTML: cardHTML("health", "add a /health endpoint", "health.py", "", "test -f health.py", "S", "local-27b"),
+	})
+	harness := &fakeHarness{passAfter: 99, good: "", bad: "bad", file: "health.py"}
+	r := testRunner(t, board, harness, contentChecker{file: "health.py", want: "ok"})
+
+	res, err := runJob(t, r, "card1", "epic1", "model:local-27b")
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if !res.Blocked {
+		t.Fatalf("first run = %+v, want Blocked", res)
+	}
+	if _, err := os.Stat(filepath.Join(r.Repo, ".worktrees", "epic-TST-2")); err != nil {
+		t.Fatalf("epic worktree missing after blocked run: %v", err)
+	}
+
+	// The fix lands, the card goes back to Ready, the bridge re-triggers.
+	harness.passAfter = 1
+	harness.good = "ok"
+	if _, err := board.SetState(context.Background(), "proj1", "card1", "s-ready"); err != nil {
+		t.Fatalf("reset card to Ready: %v", err)
+	}
+	res, err = runJob(t, r, "card1", "epic1", "model:local-27b")
+	if err != nil {
+		t.Fatalf("re-run: %v", err)
+	}
+	if !res.Passed {
+		t.Fatalf("re-run = %+v, want Passed (epic worktree already attached)", res)
+	}
+	if got := board.items["card1"].State; got != "s-done" {
+		t.Errorf("card state = %s, want s-done", got)
+	}
+}
+
 // TestRunWaitsOnDeps: a dep that is not Done → Waiting, one "waiting on"
 // comment, and a second call (the bridge's re-trigger) posts no
 // duplicate.

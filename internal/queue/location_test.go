@@ -236,3 +236,85 @@ func TestLocationWorkers_PausedGPUQueueDoesNotBlockCPU(t *testing.T) {
 	lw.Resume(gpuQ)
 	waitWG(t, &wg, 10*time.Second, "GPU job to run after resume")
 }
+
+// TestLocationWorkers_ResubscribeConverges is the broker-drop regression
+// (2026-11-08 09:20): the AMQP connection dies under three workers that
+// all resubscribe at the same moment. Reconnect must not close a live
+// connection — it would drop the channels the other workers just opened,
+// and each worker's next Reconnect would kill the connection the previous
+// one dialed, so the set flaps forever (one "re-subscribed" per 5 s tick,
+// rotating, no queue stably consumed). All three workers must converge on
+// one stable connection and deliver their held jobs.
+func TestLocationWorkers_ResubscribeConverges(t *testing.T) {
+	conn := liveConn(t)
+	defer conn.Close()
+	// A second connection stands in for plane-bridge: it keeps publishing
+	// to the exchange while the workers' connection is down.
+	pub := liveConn(t)
+	defer pub.Close()
+
+	sfx := fmt.Sprintf("%d", time.Now().UnixNano())
+	queues := []string{"recon.a." + sfx, "recon.b." + sfx, "recon.c." + sfx}
+	for _, q := range queues {
+		defer deleteQueue(t, conn, q)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	handler := func(m Message) error { wg.Done(); return nil }
+
+	lw := NewLocationWorkers(conn, handler, queues...)
+	if err := lw.Start(); err != nil {
+		t.Fatalf("start location workers: %v", err)
+	}
+	defer lw.Stop()
+
+	// Drop the workers' connection out from under them (the 09:20 event),
+	// then queue one job per location. The jobs stay on the broker; the
+	// workers must resubscribe and deliver them.
+	conn.mu.Lock()
+	dead := conn.conn
+	conn.mu.Unlock()
+	dead.Close()
+	for _, q := range queues {
+		if err := pub.Publish(Message{
+			ID: "recon-" + q, Type: "background", Source: "test",
+		}, q); err != nil {
+			t.Fatalf("publish to %s: %v", q, err)
+		}
+	}
+
+	waitWG(t, &wg, 45*time.Second, "all three queues to resubscribe and deliver")
+
+	// Settled: one stable connection, a live consumer on every queue. The
+	// 6 s holdout is longer than the 5 s resubscribe backoff — the old
+	// code redialed on every tick, so a changing connection pointer means
+	// the flap never stopped.
+	conn.mu.Lock()
+	first := conn.conn
+	conn.mu.Unlock()
+	time.Sleep(6 * time.Second)
+	conn.mu.Lock()
+	second := conn.conn
+	conn.mu.Unlock()
+	if first == nil || first.IsClosed() {
+		t.Fatal("connection is dead after resubscribe")
+	}
+	if first != second {
+		t.Error("connection still flapping: redialed within 6 s of settling")
+	}
+	ch, err := conn.NewChannel()
+	if err != nil {
+		t.Fatalf("inspect channel: %v", err)
+	}
+	defer ch.Close()
+	for _, q := range queues {
+		qi, err := ch.QueueInspect(q)
+		if err != nil {
+			t.Fatalf("inspect %s: %v", q, err)
+		}
+		if qi.Consumers != 1 {
+			t.Errorf("%s consumers = %d, want 1 (flapping leaves queues unconsumed)", q, qi.Consumers)
+		}
+	}
+}

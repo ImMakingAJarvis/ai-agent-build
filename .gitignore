@@ -11,6 +11,7 @@
 # Temporary files
 tmp/
 __pycache__/
+*.pyc
 
 # Dashboard binary (build artifact; source in cmd/dashboard)
 /dashboard
