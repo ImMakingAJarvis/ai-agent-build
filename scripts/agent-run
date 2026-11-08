@@ -26,10 +26,12 @@
 #   Photo window: jobs tagged `photo` (jarvis-jobs photo-ready lists them)
 #     need the 4090 without the brain. Before the first one runs the loop
 #     opens a brain-swap window (jarvis-swap out: brain out, art+bench up,
-#     batch flipped to the iGPU helper); when the ready batch drains it
-#     closes it (jarvis-swap in: brain back). The loop only closes windows
-#     it opened itself ($CONF/photo-window marker) — see docs/brain-swap.md
-#     and docs/agent-run.md.
+#     batch flipped to priority 1000); when the ready batch drains it
+#     closes it (jarvis-swap in: brain back). Photo jobs run as code —
+#     the jarvis-photo executor, no model round (not even the iGPU
+#     helper). The loop only closes windows it opened itself
+#     ($CONF/photo-window marker) — see docs/brain-swap.md and
+#     docs/agent-run.md.
 #
 #   agent-run                         first run, or carry on after "Stop"
 #   agent-run --resume REASON [GPU]   after a reboot (called by agent-resume)
@@ -360,14 +362,15 @@ while :; do
     notify "Full auto: running ${job_title} (${job_id}) on ${d}."
   else
     # Photo-tagged jobs have no driver choice: the photo check below opens
-    # the swap window and runs the round on the iGPU helper, so "who runs
-    # it?" is a question whose answer changes nothing (the only useful
-    # reply was Skip — the owner can still skip a photo job from the queue).
-    # Dispatch them straight away instead of asking.
+    # the swap window and runs the job as CODE (the jarvis-photo executor —
+    # no model round, not the iGPU helper), so "who runs it?" is a question
+    # whose answer changes nothing (the only useful reply was Skip — the
+    # owner can still skip a photo job from the queue). Dispatch them
+    # straight away instead of asking.
     if [[ -n "$job_id" ]] && is_photo_job "$job_id"; then
       d=igpu
       note=""
-      notify "Photo job ${job_title} (${job_id}): opening the swap window; the round runs on the iGPU helper."
+      notify "Photo job ${job_title} (${job_id}): opening the swap window; the photo runs as code (jarvis-photo), no model round."
     else
       if [[ -n "$job_id" ]]; then
         q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
@@ -447,11 +450,12 @@ $q"); then
   fi
 
   # Photo window, first run: the pulled job is photo-tagged, so it runs
-  # with the brain out of the 4090 (art+bench hold the VRAM; the round
-  # itself runs on the iGPU helper). Open the window for the whole ready
-  # batch first; if one is already open (the loop's or a manual one),
-  # re-flip the batch so it keeps front-of-band priority and the
-  # maintenance window extends as long as there is work.
+  # with the brain out of the 4090 (art+bench hold the VRAM; the photo
+  # itself runs as code — the jarvis-photo executor, no model round).
+  # Open the window for the whole ready batch first; if one is already
+  # open (the loop's or a manual one), re-flip the batch so it keeps
+  # front-of-band priority and the maintenance window extends as long as
+  # there is work.
   if is_photo_job "$job_id"; then
     ids=$(photo_batch); [[ -n "$ids" ]] || ids="$job_id"
     if swap_window_open; then
@@ -478,7 +482,9 @@ $q"); then
       sleep 60
       continue
     fi
-    d=igpu   # the brain is (or just got) out: the round runs on the helper
+    # The brain is (or just got) out: the photo runs as code (jarvis-photo),
+    # not a model round — the driver label is vestigial for photo jobs.
+    d=igpu
   fi
 
   echo "$d" > "$DRIVER"
