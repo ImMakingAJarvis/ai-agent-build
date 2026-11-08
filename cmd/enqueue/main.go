@@ -4,8 +4,9 @@
 //
 //	enqueue --type=voice --id=test-001 --prompt="Say hello"
 //	enqueue --type=fix --id=test-002 --prompt="Fix the login bug"
-//	enqueue --type=coding --id=test-003 --prompt="Write a Go hello world"
-//	enqueue --type=background --id=test-004 --prompt="Benchmark the model"
+//	enqueue --type=image --id=test-003 --prompt="A red panda in snow"
+//	enqueue --type=coding --id=test-004 --prompt="Write a Go hello world"
+//	enqueue --type=background --id=test-005 --prompt="Benchmark the model"
 package main
 
 import (
@@ -19,7 +20,7 @@ import (
 )
 
 func main() {
-	jobType := flag.String("type", "background", "job type: voice, fix, coding, background")
+	jobType := flag.String("type", "background", "job type: voice, fix, image, coding, background")
 	jobID := flag.String("id", fmt.Sprintf("cli-%d", time.Now().Unix()), "unique job id")
 	prompt := flag.String("prompt", "", "prompt or description for the job")
 	forceAPI := flag.Bool("force-api", false, "force dispatch to Claude API")
@@ -46,10 +47,13 @@ func main() {
 		ReasoningEffort: queue.CanonicalEffort(*effort, *jobType),
 	}
 
-	// Set priority based on type.
+	// Set priority based on type (per-message priority within the queue;
+	// image sits between fix and coding, matching the queue order).
 	switch *jobType {
 	case "voice":
 		msg.Priority = 10
+	case "image":
+		msg.Priority = 9
 	case "fix":
 		msg.Priority = 7
 	case "coding":

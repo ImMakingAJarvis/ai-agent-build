@@ -33,6 +33,15 @@
       }
     },
     {
+      "name": "image",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-max-priority": 10
+      }
+    },
+    {
       "name": "coding",
       "vhost": "/",
       "durable": true,
@@ -88,6 +97,14 @@
       "destination": "voice",
       "destination_type": "queue",
       "routing_key": "voice.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "image",
+      "destination_type": "queue",
+      "routing_key": "image.#",
       "arguments": {}
     },
     {
