@@ -760,30 +760,40 @@ func TestCutPhotoCmd(t *testing.T) {
 	cases := []struct {
 		in   string
 		mode string
+		size string
 		want string
 		ok   bool
 	}{
-		{"!photo a red panda in snow", "", "a red panda in snow", true},
-		{"!photo    spaced out  ", "", "spaced out", true},
-		{"!photo", "", "", true},
-		{"!photoassist a red panda", "assist", "a red panda", true},
-		{"!photoassist", "assist", "", true},
-		{"!photocheck a red panda", "check", "a red panda", true},
-		{"!photocheck", "check", "", true},
-		{"!photonow a red panda", "now", "a red panda", true},
-		{"!photonow", "now", "", true},
-		{"!photoassistnow a red panda", "assistnow", "a red panda", true},
-		{"!photoassistnow", "assistnow", "", true},
-		{"!photograph a sunset", "", "", false},
-		{"!photochecker a sunset", "", "", false},
-		{"hello !photo x", "", "", false},
-		{"!build something", "", "", false},
+		{"!photo a red panda in snow", "", "", "a red panda in snow", true},
+		{"!photo    spaced out  ", "", "", "spaced out", true},
+		{"!photo", "", "", "", true},
+		{"!photo 16x9 a red panda", "", "16x9", "a red panda", true},
+		{"!photo 16:9 a red panda", "", "16:9", "a red panda", true},
+		{"!photo 1024x576 a red panda", "", "1024x576", "a red panda", true},
+		{"!photo 9x16", "", "9x16", "", true},
+		{"!photoassist 16x9 a red panda", "assist", "16x9", "a red panda", true},
+		{"!photocheck 9x16 a red panda", "check", "9x16", "a red panda", true},
+		{"!photonow 21x9 a red panda", "now", "21x9", "a red panda", true},
+		{"!photoassist a red panda", "assist", "", "a red panda", true},
+		{"!photoassist", "assist", "", "", true},
+		{"!photocheck a red panda", "check", "", "a red panda", true},
+		{"!photocheck", "check", "", "", true},
+		{"!photonow a red panda", "now", "", "a red panda", true},
+		{"!photonow", "now", "", "", true},
+		{"!photoassistnow a red panda", "assistnow", "", "a red panda", true},
+		{"!photoassistnow", "assistnow", "", "", true},
+		{"!photo 1024 a red panda", "", "", "1024 a red panda", true}, // bare number is not a size
+		{"!photo 16x99999 a red panda", "", "", "16x99999 a red panda", true}, // >4 digits is not a size
+		{"!photograph a sunset", "", "", "", false},
+		{"!photochecker a sunset", "", "", "", false},
+		{"hello !photo x", "", "", "", false},
+		{"!build something", "", "", "", false},
 	}
 	for _, c := range cases {
-		mode, got, ok := cutPhotoCmd(c.in)
-		if ok != c.ok || (ok && (got != c.want || mode != c.mode)) {
-			t.Errorf("cutPhotoCmd(%q) = %q, %q, %v; want mode %q, prompt %q, ok %v",
-				c.in, mode, got, ok, c.mode, c.want, c.ok)
+		mode, size, got, ok := cutPhotoCmd(c.in)
+		if ok != c.ok || (ok && (got != c.want || mode != c.mode || size != c.size)) {
+			t.Errorf("cutPhotoCmd(%q) = %q, %q, %q, %v; want mode %q, size %q, prompt %q, ok %v",
+				c.in, mode, size, got, ok, c.mode, c.size, c.want, c.ok)
 		}
 	}
 }
@@ -800,7 +810,7 @@ func TestHandlePhotoEnqueues(t *testing.T) {
 	d := &testDiscord{}
 	brain := &fakePhotoBrain{replies: []string{expanded}, healthy: true}
 	in := chat.Incoming{ChannelID: "chan1", MessageID: "msg1"}
-	handlePhoto(d, photoTestService(t, brain, srv.URL), in, t.TempDir(), "", "a red panda in fresh snow")
+	handlePhoto(d, photoTestService(t, brain, srv.URL), in, t.TempDir(), "", "", "a red panda in fresh snow")
 
 	// The plain flavor queues: it sends no image synchronously and never
 	// touches the art service — generation is deferred to the swap window.
@@ -853,7 +863,7 @@ func TestHandlePhotoEnqueuesRawWhenBrainDown(t *testing.T) {
 
 	d := &testDiscord{}
 	brain := &fakePhotoBrain{replies: []string{"MUST NOT BE USED"}, healthy: false}
-	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, t.TempDir(), "", "a red panda")
+	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, t.TempDir(), "", "", "a red panda")
 
 	// Brain down: the raw words are stored (no expansion), no image is sent,
 	// and the queued note says the thinking mind was unavailable.
@@ -879,6 +889,36 @@ func TestHandlePhotoEnqueuesRawWhenBrainDown(t *testing.T) {
 	}
 }
 
+func TestHandlePhotoEnqueuesSize(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("JARVIS_DATA_DIR", dataDir)
+	expanded := "A photo of a wide mountain valley at sunrise, 24mm."
+	srv := fakeArtServer(t, http.StatusOK,
+		`{"path":"/x.png","width":1024,"height":576,"seed":42,"steps":9,"seconds":1}`, nil)
+	defer srv.Close()
+
+	d := &testDiscord{}
+	brain := &fakePhotoBrain{replies: []string{expanded}, healthy: true}
+	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, t.TempDir(), "", "16x9", "a wide mountain valley")
+
+	// The size token rides along with the job: stored in the .size sidecar
+	// (the swap-window round reads it) and mentioned in the queued reply.
+	store, _ := agentjob.Open(dataDir)
+	jobs, _ := store.List()
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %d, want 1", len(jobs))
+	}
+	if got, err := photo.ReadSize(dataDir, jobs[0].ID); err != nil || got != "16x9" {
+		t.Errorf("size sidecar = %q (err %v), want 16x9", got, err)
+	}
+	if !strings.Contains(jobs[0].Title, "16x9") {
+		t.Errorf("title = %q, want the size in it", jobs[0].Title)
+	}
+	if got := d.lastNotify(); !strings.Contains(got, "your 16x9 photo") {
+		t.Errorf("queued reply = %q, want it to mention the size", got)
+	}
+}
+
 func TestHandlePhotoAssistEnqueues(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("JARVIS_DATA_DIR", dataDir)
@@ -889,7 +929,7 @@ func TestHandlePhotoAssistEnqueues(t *testing.T) {
 
 	d := &testDiscord{}
 	brain := &fakePhotoBrain{replies: []string{expanded}, healthy: true}
-	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, t.TempDir(), "assist", "red panda in snow")
+	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, t.TempDir(), "assist", "", "red panda in snow")
 
 	// Assist posts the expanded prompt as a chat message (so the owner can
 	// read and reuse it), then queues. Two messages, no synchronous image.
@@ -929,7 +969,7 @@ func TestHandlePhotoCheckIterates(t *testing.T) {
 
 	d := &testDiscord{}
 	brain := &fakePhotoBrain{replies: []string{p1, p2}, healthy: true}
-	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, t.TempDir(), "check", "red panda in snow")
+	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, t.TempDir(), "check", "", "red panda in snow")
 
 	ph, ok := d.lastPhoto()
 	if !ok {
@@ -958,7 +998,7 @@ func TestHandlePhotoCheckSinglePassWhenUnchanged(t *testing.T) {
 
 	d := &testDiscord{}
 	brain := &fakePhotoBrain{replies: []string{p, p}, healthy: true} // critique finds nothing to fix
-	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, t.TempDir(), "check", "red panda in snow")
+	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, t.TempDir(), "check", "", "red panda in snow")
 
 	if len(prompts) != 1 {
 		t.Errorf("expected 1 generation, got %d: %v", len(prompts), prompts)
@@ -975,7 +1015,7 @@ func TestHandlePhotoCheckSinglePassWhenUnchanged(t *testing.T) {
 func TestHandlePhotoEmptyPrompt(t *testing.T) {
 	d := &testDiscord{}
 	brain := &fakePhotoBrain{healthy: true}
-	handlePhoto(d, photoTestService(t, brain, "http://127.0.0.1:1"), chat.Incoming{}, t.TempDir(), "assist", "   ")
+	handlePhoto(d, photoTestService(t, brain, "http://127.0.0.1:1"), chat.Incoming{}, t.TempDir(), "assist", "", "   ")
 	if got := d.lastNotify(); !strings.Contains(got, "Need a prompt after !photoassist") {
 		t.Errorf("empty prompt reply = %q", got)
 	}
@@ -991,7 +1031,7 @@ func TestHandlePhotoNowPreempts(t *testing.T) {
 
 	d := &testDiscord{}
 	brain := &fakePhotoBrain{replies: []string{"expanded"}, healthy: true}
-	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, confDir, "now", "a red panda")
+	handlePhoto(d, photoTestService(t, brain, srv.URL), chat.Incoming{}, confDir, "now", "16x9", "a red panda")
 
 	// The "now" flavor interrupts the running round so the top-priority
 	// photo runs next: the restart-signal is written and the job is queued at

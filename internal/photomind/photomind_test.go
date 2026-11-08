@@ -35,11 +35,13 @@ func (f *fakeBrain) Healthcheck() bool { return f.healthy }
 // fakeGen is a scripted generator that records the prompts it receives.
 type fakeGen struct {
 	prompts []string
+	sizes   []string
 	err     error
 }
 
-func (f *fakeGen) Generate(ctx context.Context, prompt string) (*art.Image, error) {
+func (f *fakeGen) Generate(ctx context.Context, prompt, size string) (*art.Image, error) {
 	f.prompts = append(f.prompts, prompt)
+	f.sizes = append(f.sizes, size)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -85,7 +87,7 @@ func TestAssistSendsRequestToBrain(t *testing.T) {
 	brain := &fakeBrain{replies: []string{"A photo of a red panda in fresh snow, dawn light."}}
 	svc := New(brain, "jarvis-brain", &fakeGen{})
 
-	got, err := svc.Assist(context.Background(), "red panda in snow")
+	got, err := svc.Assist(context.Background(), "red panda in snow", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +112,7 @@ func TestGenerateAssistedUsesExpandedPrompt(t *testing.T) {
 	gen := &fakeGen{}
 	svc := New(brain, "jarvis-brain", gen)
 
-	img, used, err := svc.GenerateAssisted(context.Background(), "red panda in snow")
+	img, used, err := svc.GenerateAssisted(context.Background(), "red panda in snow", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +134,7 @@ func TestCheckIteratesTwice(t *testing.T) {
 	gen := &fakeGen{}
 	svc := New(brain, "jarvis-brain", gen)
 
-	res, err := svc.Check(context.Background(), "red panda in snow")
+	res, err := svc.Check(context.Background(), "red panda in snow", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +160,7 @@ func TestCheckSkipsSecondPassWhenUnchanged(t *testing.T) {
 	gen := &fakeGen{}
 	svc := New(brain, "jarvis-brain", gen)
 
-	res, err := svc.Check(context.Background(), "red panda in snow")
+	res, err := svc.Check(context.Background(), "red panda in snow", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +182,7 @@ func TestCheckSecondGenerationFailsReturnsFirstImage(t *testing.T) {
 	// Let the first generation succeed, fail the second.
 	svc.Art = &secondGenFail{inner: gen, failAfter: 1, err: errors.New("art busy")}
 
-	res, err := svc.Check(context.Background(), "red panda in snow")
+	res, err := svc.Check(context.Background(), "red panda in snow", "")
 	if err == nil {
 		t.Fatal("expected an error from the second pass")
 	}
@@ -197,19 +199,19 @@ type secondGenFail struct {
 	n         int
 }
 
-func (s *secondGenFail) Generate(ctx context.Context, prompt string) (*art.Image, error) {
+func (s *secondGenFail) Generate(ctx context.Context, prompt, size string) (*art.Image, error) {
 	s.n++
 	if s.n > s.failAfter {
 		return nil, s.err
 	}
-	return s.inner.Generate(ctx, prompt)
+	return s.inner.Generate(ctx, prompt, size)
 }
 
 func TestCheckFirstGenerationFails(t *testing.T) {
 	brain := &fakeBrain{replies: []string{"A photo of a red panda."}}
 	svc := New(brain, "jarvis-brain", &fakeGen{err: errors.New("art down")})
 
-	res, err := svc.Check(context.Background(), "red panda")
+	res, err := svc.Check(context.Background(), "red panda", "")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -235,4 +237,82 @@ type staticBrain struct{}
 
 func (staticBrain) Chat(model string, msgs []models.ChatMessage) (string, error) {
 	return "A photo of something.", nil
+}
+
+func TestShapeFor(t *testing.T) {
+	cases := []struct {
+		size          string
+		wantFrameSub  string
+		wantPhotosSub string
+	}{
+		{"16x9", "landscape", "landscape"},
+		{"16:9", "landscape", "landscape"},
+		{"1024x576", "landscape", "landscape"},
+		{"9x16", "portrait", "portrait"},
+		{"1x1", "square", "square"},
+		{"1024x1024", "square", "square"},
+		{"", "square 1024x1024", "square 1024x1024"},
+		{"nonsense", "square 1024x1024", "square 1024x1024"},
+	}
+	for _, c := range cases {
+		frame, photos := shapeFor(c.size)
+		if !strings.Contains(frame, c.wantFrameSub) {
+			t.Errorf("shapeFor(%q) frame = %q, want it to contain %q", c.size, frame, c.wantFrameSub)
+		}
+		if !strings.Contains(photos, c.wantPhotosSub) {
+			t.Errorf("shapeFor(%q) photos = %q, want it to contain %q", c.size, photos, c.wantPhotosSub)
+		}
+	}
+}
+
+func TestAssistSystemMentionsShape(t *testing.T) {
+	brain := &fakeBrain{replies: []string{"A photo of a red panda.", "A photo of a red panda."}}
+	svc := New(brain, "jarvis-brain", &fakeGen{})
+
+	if _, err := svc.Assist(context.Background(), "red panda", "16x9"); err != nil {
+		t.Fatal(err)
+	}
+	if sys := brain.calls[0][0].Content; !strings.Contains(sys, "16:9 landscape photo") {
+		t.Errorf("assist system prompt = %q, want the 16:9 landscape frame", sys)
+	}
+
+	if _, err := svc.Assist(context.Background(), "red panda", ""); err != nil {
+		t.Fatal(err)
+	}
+	if sys := brain.calls[1][0].Content; !strings.Contains(sys, "square 1024x1024") {
+		t.Errorf("default assist system prompt = %q, want the square frame", sys)
+	}
+}
+
+func TestGenerateAssistedPassesSize(t *testing.T) {
+	brain := &fakeBrain{replies: []string{"A photo of a red panda in fresh snow."}}
+	gen := &fakeGen{}
+	svc := New(brain, "jarvis-brain", gen)
+
+	if _, _, err := svc.GenerateAssisted(context.Background(), "red panda", "9x16"); err != nil {
+		t.Fatal(err)
+	}
+	if len(gen.sizes) != 1 || gen.sizes[0] != "9x16" {
+		t.Errorf("generator sizes = %v, want [9x16]", gen.sizes)
+	}
+}
+
+func TestCheckPassesSizeToEveryPass(t *testing.T) {
+	brain := &fakeBrain{replies: []string{
+		"A photo of a red panda.",
+		"A photo of a red panda in fresh snow, dawn light.",
+	}}
+	gen := &fakeGen{}
+	svc := New(brain, "jarvis-brain", gen)
+
+	if _, err := svc.Check(context.Background(), "red panda", "21x9"); err != nil {
+		t.Fatal(err)
+	}
+	if len(gen.sizes) != 2 || gen.sizes[0] != "21x9" || gen.sizes[1] != "21x9" {
+		t.Errorf("generator sizes = %v, want [21x9 21x9]", gen.sizes)
+	}
+	// The critique prompt should know the frame is landscape.
+	if sys := brain.calls[1][0].Content; !strings.Contains(sys, "21:9 landscape photos") {
+		t.Errorf("check system prompt = %q, want the 21:9 landscape frame", sys)
+	}
 }
