@@ -33,8 +33,12 @@ Stable facts (trust them; re-verify only when a job says otherwise):
   in a conversation. This engine is serving this conversation — never
   stop or kill it (the round brief explains why and what to do when a
   job needs the 4090 free: requeue it on its spec driver).
-- **iGPU helper**: Qwen2.5-3B Q4_K_M (3.4B), llama.cpp unit
-  `jarvis-engine-igpu`, port **11435**, 32K ctx, Vulkan.
+- **iGPU helper**: Qwen2.5-3B Q4_K_M (3.4B), llama.cpp in its own
+  container `jarvis-engine-igpu` (compose service `engine-igpu`), port
+  **11435**, 32K ctx, Vulkan. It stays up through photo swap windows —
+  only the brain container stops. Containers reach it by name
+  (`http://jarvis-engine-igpu:11435`); the old host unit of the same
+  name is disabled (rollback path).
 - **Photo generation** needs ~12 GB of free VRAM, so it runs in the
   brain's swap window (runbook `docs/brain-swap.md`, state
   `jarvis-swap status`).
@@ -47,8 +51,8 @@ Stable facts (trust them; re-verify only when a job says otherwise):
 
 When you need to change your own setup or restart something, ask the
 **helper** first: a small always-on model (Qwen2.5-3B Q4_K_M) running on
-the Ryzen iGPU (Vulkan, port 11435, unit `jarvis-engine-igpu`) — it costs
-zero CPU cores. It knows a curated setup brief (services, ports, restart
+the Ryzen iGPU (Vulkan, port 11435, container `jarvis-engine-igpu`) — it
+costs zero CPU cores. It knows a curated setup brief (services, ports, restart
 procedures, key paths — `scripts/jarvis-helper-context.md`) plus a live
 stack snapshot, and it answers "not in my context" honestly for anything
 else (then read the doc it points at — its pointers can be vague).
@@ -59,9 +63,11 @@ else (then read the doc it points at — its pointers can be vague).
     jarvis-helper --status                 # health
 
 Expect ~13 s prompt processing + ~13 tok/s decode on the iGPU. If the
-engine is down: `sudo systemctl restart jarvis-engine-igpu`. Swapping the
-model: replace `/opt/jarvis-igpu/models/jarvis-igpu.gguf` (keep a `.bak`),
-restart the unit, re-test. If the setup changes substantially, update
+engine is down: `docker restart jarvis-engine-igpu` (or `docker compose
+restart engine-igpu`). Swapping the model: replace
+`/opt/jarvis-igpu/models/jarvis-igpu.gguf` (keep a `.bak`), restart the
+container, re-test — the container bind-mounts `/opt/jarvis-igpu`. If the
+setup changes substantially, update
 `scripts/jarvis-helper-context.md` and re-run `scripts/install_helper.sh`.
 Investigation + benchmarks: docs/igpu-model-handler.md.
 
@@ -69,7 +75,8 @@ Investigation + benchmarks: docs/igpu-model-handler.md.
 
 Photo generation (art :8120 / bench :8121) needs 12 GB free of the 4090's
 VRAM; the brain holds ~17.6 GB, so photos run in a swap window: the brain
-stops, photo jobs run on the iGPU helper, the brain comes back. The
+stops, photo jobs run as code (the `jarvis-photo` executor, no model
+round at all), the brain comes back. The
 bracket is **automatic**: the queue watcher opens the window when it
 pulls a `photo`-tagged job and closes it when the ready batch drains
 (docs/agent-run.md, "Photo window"). Runbook: `docs/brain-swap.md`.
@@ -80,7 +87,8 @@ When photo work needs the GPU, in your own round:
    (2-3 lines each — resume, don't re-plan).
 2. Make sure the photo work is queued with the `photo` tag (image-queue
    ingestion sets it; otherwise `jarvis-jobs add ... -tags photo
-   -driver igpu`).
+   -prompt "..."` — the executor reads the prompt from the job's
+   sidecar).
 3. End the round — the watcher opens the window on the next pull.
 4. Next brain round after the window: read `notes/brain-handoff.md`, do
    "First thing on return", verify the photos, `mkdir -p notes/archive &&
@@ -91,7 +99,8 @@ the watcher runs them between rounds; a manual run is an igpu round or a
 terminal `--force`. Never stop the brain mid-round. The watchdog maintain
 window re-arms the brain at the deadline no matter what; `jarvis-jobs
 next` skips jobs whose engine is down, so local jobs wait through the
-window.
+window (photo jobs are exempt — they run as code, gated only by the
+swap window itself).
 
 ## The vector graph — more data than the repo
 
