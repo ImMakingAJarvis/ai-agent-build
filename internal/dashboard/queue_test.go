@@ -431,6 +431,83 @@ func TestQueuePhotoBand(t *testing.T) {
 	}
 }
 
+// TestQueuePhotoInFlight covers in-flight photo jobs: a claimed/running
+// photo-tagged job appears at the head of the photo band (marked in_flight,
+// with the round's started time) ahead of the ready batch, and stays out of
+// the class bands, the reorder, and the edit. A running non-photo job is not
+// in the queue at all (the Agent Jobs panel covers it).
+func TestQueuePhotoInFlight(t *testing.T) {
+	s := newTestServer(t)
+	ingestPhotoJob(t, "p-run", agentjob.ClassBuild, 999, "a red fox in a snowstorm")
+	ingestPhotoJob(t, "p-wait", agentjob.ClassFix, 1000, "a lighthouse at dawn")
+	ingestAgentJob(t, "b1", agentjob.ClassBuild, 5, nil)
+	ingestAgentJob(t, "n1", agentjob.ClassBuild, 9, nil)
+	st, err := agentjob.Open(agentjob.DataDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetStatus("p-run", agentjob.State{Status: agentjob.Running, RanWith: "igpu", StartedAt: "2026-11-06T03:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetStatus("n1", agentjob.State{Status: agentjob.Claimed, RanWith: "local", StartedAt: "2026-11-06T03:00:01Z"}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := getQueue(t, s)
+	// The in-flight photo job leads the photo band, ahead of the ready batch.
+	if got := bandIDs(r, PhotoBand); strings.Join(got, ",") != "p-run,p-wait" {
+		t.Fatalf("photo band = %v, want [p-run p-wait] (in flight first)", got)
+	}
+	var prun *queueJob
+	for i := range r.Bands[0].Jobs {
+		if r.Bands[0].Jobs[i].ID == "p-run" {
+			prun = &r.Bands[0].Jobs[i]
+		}
+	}
+	if prun == nil || !prun.InFlight || !prun.Photo {
+		t.Fatalf("p-run not flagged in flight: %+v", r.Bands[0].Jobs)
+	}
+	if prun.StartedAt != "2026-11-06 03:00" {
+		t.Errorf("p-run started_at = %q, want 2026-11-06 03:00", prun.StartedAt)
+	}
+	if prun.Prompt != "a red fox in a snowstorm" {
+		t.Errorf("p-run prompt = %q, want the sidecar prompt", prun.Prompt)
+	}
+	// The running non-photo job is not in the queue at all.
+	for _, b := range r.Bands {
+		for _, j := range b.Jobs {
+			if j.ID == "n1" {
+				t.Fatalf("running non-photo job n1 shown in band %q: %+v", b.Name, b.Jobs)
+			}
+		}
+	}
+	// The ready build job is unaffected.
+	if got := bandIDs(r, agentjob.ClassBuild); strings.Join(got, ",") != "b1" {
+		t.Fatalf("build band = %v, want [b1]", got)
+	}
+
+	// Reorder refuses the in-flight job; omitting it (as the UI does) is fine.
+	if w, _ := postReorder(t, s, map[string][]string{
+		agentjob.ClassBuild: {"b1", "p-run"},
+		agentjob.ClassFix:   {"p-wait"},
+	}); w.Code != http.StatusConflict {
+		t.Fatalf("reorder listing in-flight p-run: status %d, want %d", w.Code, http.StatusConflict)
+	}
+	w, r := postReorder(t, s, map[string][]string{
+		agentjob.ClassBuild: {"b1"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("reorder omitting in-flight photo job: %d %s", w.Code, w.Body.String())
+	}
+	if got := bandIDs(r, PhotoBand); strings.Join(got, ",") != "p-run,p-wait" {
+		t.Fatalf("photo band after reorder = %v, want [p-run p-wait]", got)
+	}
+	// Edit refuses the in-flight job.
+	if w, _ := postEdit(t, s, "p-run", "x", "y"); w.Code != http.StatusConflict {
+		t.Fatalf("edit in-flight p-run: status %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
 // TestQueueReorderWithPhotoJobs covers the reorder contract with photo jobs
 // present: they are exempt from the exactly-once rule (the client may omit
 // them), and a photo job listed under a class band is reclassified like any

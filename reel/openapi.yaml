@@ -1,0 +1,171 @@
+openapi: "3.0.3"
+info:
+  title: Reel API
+  version: 0.1.0
+  description: >
+    Reel is a self-hosted media server. v0.1 covers health, libraries and
+    items. The spec is the contract: server and app changes start as a spec
+    change, reviewed first.
+paths:
+  /health:
+    get:
+      tags: [meta]
+      operationId: health
+      summary: Liveness
+      responses:
+        "200":
+          description: Server is up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /api/v1/libraries:
+    get:
+      tags: [libraries]
+      operationId: listLibraries
+      summary: List libraries
+      responses:
+        "200":
+          description: Libraries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Library"
+    post:
+      tags: [libraries]
+      operationId: createLibrary
+      summary: Create a library
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LibraryIn"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Library"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /api/v1/libraries/{id}:
+    get:
+      tags: [libraries]
+      operationId: getLibrary
+      summary: Get a library
+      parameters:
+        - $ref: "#/components/parameters/IntID"
+      responses:
+        "200":
+          description: Library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Library"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/items:
+    get:
+      tags: [items]
+      operationId: listItems
+      summary: List items with filters
+      parameters:
+        - name: library_id
+          in: query
+          schema: {type: integer}
+        - name: type
+          in: query
+          schema: {type: string, enum: [movie, season, episode]}
+        - name: query
+          in: query
+          description: Case-insensitive title match
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1}
+      responses:
+        "200":
+          description: Items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Item"
+  /api/v1/items/{id}:
+    get:
+      tags: [items]
+      operationId: getItem
+      summary: Get an item
+      parameters:
+        - $ref: "#/components/parameters/IntID"
+      responses:
+        "200":
+          description: Item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  parameters:
+    IntID:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer}
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, enum: [ok]}
+        version: {type: string}
+    LibraryIn:
+      type: object
+      required: [name, path]
+      properties:
+        name: {type: string, minLength: 1}
+        path: {type: string, minLength: 1}
+        type: {type: string, enum: [movies, shows], default: movies}
+    Library:
+      type: object
+      required: [id, name, path, type]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        path: {type: string}
+        type: {type: string, enum: [movies, shows]}
+    Item:
+      type: object
+      required: [id, library_id, type, title]
+      properties:
+        id: {type: integer}
+        library_id: {type: integer}
+        type: {type: string, enum: [movie, season, episode]}
+        title: {type: string}
+        path: {type: string}
+        parent_id: {type: integer, nullable: true}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
