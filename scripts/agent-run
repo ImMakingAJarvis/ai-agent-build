@@ -555,6 +555,13 @@ $q"); then
   fi
 
   rm -f "$CONF/current-job"
+  # Announce job completion via Home Assistant TTS if the switch is on
+  # and the owner is home. jarvis-homeai handles switch + presence checks.
+  if [[ $status -eq 0 ]] && command -v jarvis-homeai >/dev/null 2>&1; then
+    announce_msg="I have finished working on $job_title"
+    jarvis-homeai announce "$announce_msg" &
+    # Run in background so it does not block the checkpoint question.
+  fi
   # A !restart during the run re-queued the job for a fresh conversation.
   if [[ "$job_status" == "ready" ]]; then
     msg="!restart: ${job_id} is back in the queue — it runs next in a fresh conversation."
