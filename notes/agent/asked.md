@@ -98,3 +98,4 @@
 - 2026-11-08T11:42Z [chat-1794106018-34cb] Nathan: prevent notes/docs PR merge conflicts — asked whether the same non-code file is written in most PRs and if I can stop (2026-11-08, job chat-1794106018-34cb)
 - 2026-11-08T12:27Z Nathan: replying to a worker's Discord message must be ignored by the chatbot (never schedule a job), read+used by the worker, and acknowledged with a thumbs-up
 - 2026-11-08T13:24Z Nathan: the igpu should have its own container and its own port, the worker should know the igpu container is different and how to reach it, and the igpu should stay alive almost the whole time — photo swap windows stop only the brain (job chat-1794122808-9116)
+- 2026-11-08T13:50Z Nathan: the image gallery was showing a localhost address — fix it to the IP; standing rules: all links accessible by computers on the network (no localhost), all dates/times use moment, and show the correct timezone (job chat-1794123627-6324)
