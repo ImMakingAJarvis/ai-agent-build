@@ -26,6 +26,29 @@ enqueue --type=coding --effort=low --prompt="…"
 enqueue --type=voice --effort=off --prompt="…"   # voice default is already off
 ```
 
+## Image queue (photo generation)
+
+The `image` queue sits between `fix` and `coding` in the worker's
+priority order — **voice > fix > image > coding > background**
+(job `chat-1793929405-6103`). Image jobs almost always take priority:
+they wait only behind voice and fix.
+
+Publish to it with any `image.*` routing key (e.g. `image.default`):
+
+```
+enqueue --type=image --id=img-1 --prompt="a red panda in snow"
+```
+
+The worker never runs image jobs as text jobs — it ingests every message
+on the queue as an agent job for the photo pipeline (docs/art-model.md,
+docs/brain-swap.md), so the generation runs as an agent round in the
+brain-swap window. Messages missing fields get the photo defaults: the
+prompt as title/instructions, class `fix`, priority `100` (unless the
+message sets one), driver `igpu`, and the `photo` tag — the marker the
+queue watcher uses to bracket the batch with a brain-swap window
+(scripts/agent-run, docs/agent-run.md). `kind: "agent"` image messages
+keep their own fields, with the same defaults for anything left empty.
+
 ## Power cost (local jobs)
 
 While a local agent job runs, `jarvis-jobs` samples GPU power draw
