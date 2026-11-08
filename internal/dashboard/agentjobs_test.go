@@ -11,7 +11,7 @@ import (
 
 func parseTemplates(t *testing.T) (*template.Template, error) {
 	t.Helper()
-	funcs := template.FuncMap{"statusClass": StatusClass, "formatDuration": FormatDuration, "formatCost": FormatCost, "formatKwh": FormatKwh, "divCost": DivCost, "slotRuntime": SlotRuntime, "jobPath": JobPath}
+	funcs := template.FuncMap{"statusClass": StatusClass, "formatDuration": FormatDuration, "formatCost": FormatCost, "formatKwh": FormatKwh, "divCost": DivCost, "slotRuntime": SlotRuntime, "jobPath": JobPath, "divGB": DivGB}
 	return template.New("").Funcs(funcs).ParseFS(templatesFS, "templates/*.html")
 }
 

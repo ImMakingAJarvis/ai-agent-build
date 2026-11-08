@@ -260,10 +260,18 @@ services:
       HOME: /home/agent
       JARVIS_CONF: /home/agent/.config/jarvis
       ENGINE_URL: http://engine:11434
+      # Machine panel (GET /html/machine): the iGPU helper is a host
+      # systemd unit (host loopback 11435 via host-gateway), art and the
+      # nvidia exporter are compose services.
+      IGPU_URL: http://host.docker.internal:11435
+      ART_URL: http://art:8120
+      NVIDIA_EXPORTER_URL: http://nvidia-exporter:3001
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       # Live job streams (see the redis service above); unset means the
       # dashboard falls back to tailing transcript files.
       JARVIS_REDIS: redis://redis:6379
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /home/agent/.config/jarvis:/home/agent/.config/jarvis
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
