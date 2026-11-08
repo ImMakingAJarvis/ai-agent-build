@@ -61,6 +61,17 @@ involved):
 The full reference — daemon commands, plain-language (Hermes) actions,
 checkpoint buttons, access levels — is in docs/system-frame.md §3.
 
+## Replying to a worker message
+
+When a bot message (a job notification, a photo, …) is on screen and you use
+Discord's **Reply** on it, the reply goes to the worker, not the chat:
+`jarvis-chat` ignores it entirely (no chat answer, no job is scheduled from
+it), drops it in the agent's inbox — the running round picks it up via the
+owner-message hook, an idle agent at its next round start, with the bot
+message quoted for context — and puts a 👍 on your message so you know the
+worker read it. Replies to *your own* messages, and to `jarvis-discord ask`
+questions (buttons / ✅), behave as before.
+
   The same switches work in plain language through the brain ("turn on
   full auto") — `set_automode` / `set_fullauto`, never via a queued job.
 

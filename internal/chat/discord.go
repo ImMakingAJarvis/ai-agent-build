@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -70,6 +71,12 @@ type Incoming struct {
 	// ReplyAuthor is the username of the author of the replied-to message.
 	// Empty when unknown.
 	ReplyAuthor string
+	// ReplyToBot is true when the owner Discord-replied to a message sent
+	// by a bot — that is, to a message the worker sent. Such a reply is
+	// for the worker (the agent inbox), not for the chat: onMessage routes
+	// it there before any hook or signal file sees it, so a chat handler
+	// can never classify it or schedule a job from it.
+	ReplyToBot bool
 }
 
 // waiter is one open question.
@@ -219,16 +226,55 @@ func (d *Discord) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 		s.MessageReactionAdd(m.ChannelID, m.ID, "✅")
 		return
 	}
+
+	inc := Incoming{ChannelID: m.ChannelID, MessageID: m.ID, Content: m.Content}
+	d.attachReply(s, m, &inc)
+
+	// A Discord reply to a message a bot sent is a reply to the worker:
+	// it is for the agent, not the chat. Route it to the agent inbox and
+	// thumb it up, and keep it away from the signal file and every
+	// message hook, so no chat handler can answer it or schedule a job
+	// from it.
+	if inc.ReplyToBot {
+		d.handleWorkerReply(s, m, &inc)
+		return
+	}
+
 	// No pending waiter: if signal file is configured, write the user's
 	// message there so the agent-run loop can pause the current job.
-	if d.cfg.SignalFile != "" && target == nil {
+	if d.cfg.SignalFile != "" {
 		os.WriteFile(d.cfg.SignalFile, []byte(m.Content), 0o644)
 	}
-	if d.messageHook != nil && target == nil {
-		inc := Incoming{ChannelID: m.ChannelID, MessageID: m.ID, Content: m.Content}
-		d.attachReply(s, m, &inc)
+	if d.messageHook != nil {
 		d.messageHook(inc)
 	}
+}
+
+// handleWorkerReply routes an owner message that Discord-replies to a bot
+// (worker) message to the agent inbox and acknowledges it with a 👍
+// reaction, so the owner knows the worker got it. The worker — not the
+// chat — reads it: the running round picks it up via the owner-message
+// hook (scripts/owner-message-hook.sh), an idle agent at the next round's
+// start. The replied-to message's content is included so a fresh round
+// knows what the reply refers to. The reaction is added only when the
+// inbox write succeeded: a 👍 means the worker will read it.
+func (d *Discord) handleWorkerReply(s *discordgo.Session, m *discordgo.MessageCreate, inc *Incoming) {
+	if _, err := inbox.Send(workerReplyText(*inc)); err != nil {
+		// The message is lost; the owner can resend. Nothing to react to.
+		return
+	}
+	s.MessageReactionAdd(m.ChannelID, m.ID, "👍")
+}
+
+// workerReplyText is the inbox text for a reply to a worker message: the
+// owner's words, with the worker message being replied to quoted above so
+// the round that reads it has the full exchange.
+func workerReplyText(inc Incoming) string {
+	if strings.TrimSpace(inc.ReplyTo) == "" {
+		return inc.Content
+	}
+	return "You are replying to a message from the worker:\n" +
+		inc.ReplyTo + "\n\n" + inc.Content
 }
 
 // attachReply fetches the message m Discord-replies to (when m carries a
@@ -250,11 +296,21 @@ func (d *Discord) attachReply(s *discordgo.Session, m *discordgo.MessageCreate, 
 	applyReply(refMsg, inc)
 }
 
-// applyReply records the content and author of the replied-to message on
-// inc. It is a no-op when the message has no textual content (for example a
-// pure attachment or embed), so the handler only ever gets real context.
+// applyReply records the content, author and bot-ness of the replied-to
+// message on inc. ReplyToBot is set whenever the author is a bot, even
+// when the message has no textual content (a reply to a bot's pure
+// attachment still counts as a reply to the worker). The ReplyTo /
+// ReplyAuthor fields are left empty when the message has no textual
+// content (for example a pure attachment or embed), so the handler only
+// ever gets real context.
 func applyReply(refMsg *discordgo.Message, inc *Incoming) {
-	if refMsg == nil || strings.TrimSpace(refMsg.Content) == "" {
+	if refMsg == nil {
+		return
+	}
+	if refMsg.Author != nil && refMsg.Author.Bot {
+		inc.ReplyToBot = true
+	}
+	if strings.TrimSpace(refMsg.Content) == "" {
 		return
 	}
 	inc.ReplyTo = refMsg.Content
