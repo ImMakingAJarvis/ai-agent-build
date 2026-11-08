@@ -1,7 +1,12 @@
 // jarvis-jobs is how the agent-run loop works with queued agent jobs.
 //
 //	jarvis-jobs list [status]              all jobs, or only one status (e.g. failed)
-//	jarvis-jobs next                       print "<id>\t<title>"; exit 1 if none ready
+//	jarvis-jobs next                       print "<id>\t<title>" of the next
+//	                                       ready job whose engine is up; a
+//	                                       job whose driver's engine is down
+//	                                       is skipped (left ready), so the
+//	                                       worker idles through a brain-swap
+//	                                       window (docs/brain-swap.md)
 //	jarvis-jobs photo-ready                comma-separated ids of the ready
 //	                                       photo-tagged batch — the set the
 //	                                       agent-run watcher brackets with one
@@ -21,7 +26,8 @@
 //	jarvis-jobs stop <id>            stop a running job: kill the round
 //	                               and park the job out of the queue — the
 //	                               loop skips to the next work
-//	jarvis-jobs skip <id> | requeue <id> | show <id>
+//	jarvis-jobs skip <id> | requeue [-driver local|igpu|sonnet|superagent]
+//	                   [-class fix|build|background] [-priority N] <id> | show <id>
 //	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet|superagent] [-source S]
 //	                   [-class fix|build|background] [-priority N] [-depends a,b]
 //	                   [-tags a,b] [-kanban-task TASKID]
@@ -58,6 +64,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,7 +103,7 @@ func main() {
 			die("%v", err)
 		}
 	case "next":
-		j, err := store.Next()
+		j, err := nextRunnable(store)
 		if err != nil {
 			die("%v", err)
 		}
@@ -154,15 +161,15 @@ func main() {
 		if err := stopJob(store, args[0]); err != nil {
 			die("%v", err)
 		}
-	case "skip", "requeue":
+	case "skip":
 		if len(args) != 1 {
-			die("%s <id>", cmd)
+			die("skip <id>")
 		}
-		st := agentjob.State{Status: agentjob.Ready}
-		if cmd == "skip" {
-			st = agentjob.State{Status: agentjob.Skipped}
+		if err := store.SetStatus(args[0], agentjob.State{Status: agentjob.Skipped}); err != nil {
+			die("%v", err)
 		}
-		if err := store.SetStatus(args[0], st); err != nil {
+	case "requeue":
+		if err := cmdRequeue(store, args); err != nil {
 			die("%v", err)
 		}
 	case "run":
@@ -737,6 +744,123 @@ func confDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".config", "jarvis")
+}
+
+// nextRunnable returns the next ready job whose driver can actually run
+// right now: the engine the driver runs on must answer /health, otherwise
+// the job is skipped (left ready) and the next one is tried. This is what
+// lets the worker idle-poll through a brain-swap photo window
+// (docs/brain-swap.md) instead of burning local rounds on a brain that is
+// deliberately off, and what stops it from doing the same while the
+// watchdog is restarting a crashed brain.
+func nextRunnable(store *agentjob.Store) (*agentjob.Job, error) {
+	exclude := map[string]bool{}
+	for {
+		j, err := store.NextExcluding(exclude)
+		if err != nil || j == nil {
+			return j, err
+		}
+		d := effectiveDriver(j)
+		if driverUp(d) {
+			return j, nil
+		}
+		fmt.Fprintf(os.Stderr, "jarvis-jobs: skipping %s — driver %s engine is down (it stays ready)\n", j.ID, d)
+		exclude[j.ID] = true
+	}
+}
+
+// effectiveDriver is the driver scripts/agent-run would run this job on:
+// the job's own spec driver when it names one, else the last round's driver
+// ($JARVIS_CONF/driver), else local.
+func effectiveDriver(j *agentjob.Job) string {
+	if j.Driver != "" {
+		return j.Driver
+	}
+	if b, err := os.ReadFile(filepath.Join(confDir(), "driver")); err == nil {
+		if d := strings.TrimSpace(string(b)); d != "" {
+			return d
+		}
+	}
+	return "local"
+}
+
+// driverUp probes the local engine a driver runs on. Drivers with no local
+// engine (sonnet, superagent) always count as up.
+func driverUp(driver string) bool {
+	var url string
+	switch driver {
+	case "local":
+		url = envOr("JARVIS_BRAIN_URL", "http://127.0.0.1:11434")
+	case "igpu":
+		url = envOr("JARVIS_IGPU_URL", "http://127.0.0.1:11435")
+	default:
+		return true
+	}
+	return healthUp(url + "/health")
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// healthUp is true when the endpoint answers 200. A 503 (server up but the
+// model still loading) counts as down: a round started now would fail.
+func healthUp(url string) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// cmdRequeue puts a job back in the queue (status ready), optionally
+// re-setting its driver, class and priority. The brain-swap window uses it
+// to flip queued photo jobs to the iGPU driver and push them to the front
+// of their band (docs/brain-swap.md).
+func cmdRequeue(store *agentjob.Store, args []string) error {
+	fs := flag.NewFlagSet("requeue", flag.ContinueOnError)
+	driver := fs.String("driver", "", "re-set the job's driver: local, igpu, sonnet or superagent")
+	class := fs.String("class", "", "re-set the job's class: fix, build or background")
+	priority := fs.Int("priority", -1, "re-set the job's priority (higher runs first within the class)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("requeue [-driver local|igpu|sonnet|superagent] [-class fix|build|background] [-priority N] <id>")
+	}
+	id := fs.Arg(0)
+	if *driver != "" {
+		if err := store.SetDriver(id, *driver); err != nil {
+			return err
+		}
+	}
+	if *class != "" || *priority >= 0 {
+		switch *class {
+		case "", agentjob.ClassFix, agentjob.ClassBuild, agentjob.ClassBackground:
+		default:
+			return fmt.Errorf("bad class %q (fix, build or background)", *class)
+		}
+		j, err := store.Get(id)
+		if err != nil {
+			return err
+		}
+		c, p := *class, *priority
+		if c == "" {
+			c = j.Class
+		}
+		if p < 0 {
+			p = j.Priority
+		}
+		if err := store.SetOrder(id, c, p); err != nil {
+			return err
+		}
+	}
+	return store.SetStatus(id, agentjob.State{Status: agentjob.Ready})
 }
 
 // stopJob stops a running job: it writes the stop-signal file the runner's

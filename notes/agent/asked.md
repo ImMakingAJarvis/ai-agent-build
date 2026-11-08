@@ -78,6 +78,11 @@
 - 2026-11-05T16:33Z [chat-1793847447-ba6c] Nathan asked to 'relist' the bunch of jobs that failed in the last few hours — turned out to be a single connection-refused burst when the brain engine was briefly down (Nov 4 ~22:25 → Nov 5 ~00:01)
 - 2026-11-05T17:15Z Nathan wants to steer a running worker from the job log UI: inject messages into its thought loop (Talk box) and stop its work (Stop work button, park + skip to next in auto/full-auto) — delivered in PR #161, verified live 2026-11-05
 - 2026-11-06T00:07Z Nathan questioned the bot's 'agent-run is not running' status claim — bot status messages must be truthful
+- 2026-11-06T02:20Z Nathan wants the brain to be able to pause, hand watching to the igpu helper, run photo jobs on the 4090, come back, and resume without re-planning — protocol now lives in tools + CLAUDE.md (job chat-1793860390-eb5b, PR #168)
 - 2026-11-06T04:48Z Nathan: audit 8 days of work logs, find where the model repeats the same questions or re-investigates machine state it should already know, and update tools/prompt/references to eliminate the repeated thinking.
 - 2026-11-06T23:09Z Nathan: photos need their own priority (below fix, above build/background); !photo should queue + batch rather than fail when VRAM is tight; !photonow / !photoassistnow go on a queue above fix and pause everything (swap out -> generate -> swap back -> brain resumes); sending images to Discord is welcome, not annoying
+- 2026-11-06T23:47Z Nathan wanted the photo queue visible in the dashboard queue UI (it was buried in the build band) and a way to edit the text of queued work (PR #180)
 - 2026-11-07T01:00Z Nathan: !photonow/!photo images were not being posted to Discord (root causes: un-restarted watcher + failed rounds marked done); also asked for a link on the queue dashboard to the page with all generated images.
+- 2026-11-07T03:02Z Nathan: fix all open PRs to make them mergable (job chat-1794017962-5065)
+- 2026-11-07T04:00Z Nathan: image generator tasks must show as in progress on the queue page with access to logs (queue page = JARVIS UI at :8080)
+- 2026-11-07T11:34Z Nathan wanted the historical total tokens processed in Grafana, plus tokens per month and week (job chat-1794019399-8818)
