@@ -277,8 +277,8 @@ func main() {
 				// !photo / !photoassist / !photocheck generate a photo
 				// with the local art model (prompt expanded by the
 				// thinking mind) and send it back as an attachment.
-				if mode, prompt, ok := cutPhotoCmd(content); ok {
-					handlePhoto(d, photoSvc, in, confDir, mode, prompt)
+				if mode, size, prompt, ok := cutPhotoCmd(content); ok {
+					handlePhoto(d, photoSvc, in, confDir, mode, size, prompt)
 					return
 				}
 
@@ -565,7 +565,7 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, mem *mem
 // runs next (it is queued at the top of the fix band). "check" keeps its
 // synchronous draft→generate→critique loop, which needs the brain resident
 // and therefore cannot run in the swap window.
-func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDir, mode, prompt string) {
+func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDir, mode, size, prompt string) {
 	prompt = strings.TrimSpace(prompt)
 	cmdName := "!photo"
 	now := false
@@ -584,14 +584,14 @@ func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDi
 	if prompt == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		_ = d.Notify(ctx, "Need a prompt after "+cmdName+" — e.g. "+cmdName+" a photo of a red panda in fresh snow")
+		_ = d.Notify(ctx, "Need a prompt after "+cmdName+" — e.g. "+cmdName+" a photo of a red panda in fresh snow (optionally with a size first, "+cmdName+" 16x9 a red panda in fresh snow)")
 		return
 	}
 
 	// "check" needs the brain resident (it critiques after each draft), so it
 	// stays synchronous — the queued swap-window flow does not provide that.
 	if mode == "check" {
-		runPhotoCheck(d, svc, prompt)
+		runPhotoCheck(d, svc, prompt, size)
 		return
 	}
 
@@ -604,7 +604,7 @@ func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDi
 	note := ""
 	if !svc.Healthy() {
 		note = "thinking mind is down — I used your words as-is"
-	} else if p, err := assistPrompt(svc, prompt); err == nil {
+	} else if p, err := assistPrompt(svc, prompt, size); err == nil {
 		usedPrompt = p
 	} else {
 		note = "the thinking mind was down — I used your words as-is"
@@ -617,7 +617,7 @@ func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDi
 		cancel()
 	}
 
-	id, err := enqueuePhotoJob(in, prompt, usedPrompt, now)
+	id, err := enqueuePhotoJob(in, prompt, usedPrompt, size, now)
 	if err != nil {
 		log.Printf("jarvis-chat: photo enqueue: %v", err)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -633,7 +633,11 @@ func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDi
 		preemptRound(confDir)
 		_ = d.Notify(ctx, "Now! I've queued your photo at the very top ("+id+"). I'll pause the current job, generate it in the brain-swap window, send it to your DM, then pick the paused work back up.")
 	} else {
-		msg := "Queued your photo as " + id + ". It'll run in the brain-swap window — after any running fix work, ahead of ordinary build work — and I'll send it to your DM as soon as it's generated."
+		what := "your photo"
+		if size != "" {
+			what = "your " + size + " photo"
+		}
+		msg := "Queued " + what + " as " + id + ". It'll run in the brain-swap window — after any running fix work, ahead of ordinary build work — and I'll send it to your DM as soon as it's generated."
 		if note != "" {
 			msg = note + ". " + msg
 		}
@@ -645,17 +649,17 @@ func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDi
 // assistPrompt asks the thinking mind to expand a casual photo request into a
 // detailed image prompt. It is isolated so handlePhoto can fall back to the
 // owner's raw words on any brain hiccup.
-func assistPrompt(svc *photomind.Service, request string) (string, error) {
+func assistPrompt(svc *photomind.Service, request, size string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	return svc.Assist(ctx, request)
+	return svc.Assist(ctx, request, size)
 }
 
 // runPhotoCheck is the synchronous !photocheck loop: draft → generate →
 // critique → improve → generate. It needs the brain resident (for the
 // critique) and the 4090 free (for generation), so it stays synchronous
 // rather than queued.
-func runPhotoCheck(d photoSender, svc *photomind.Service, prompt string) {
+func runPhotoCheck(d photoSender, svc *photomind.Service, prompt, size string) {
 	typingCtx, typingCancel := context.WithCancel(context.Background())
 	defer typingCancel()
 	go typingLoop(typingCtx, d)
@@ -670,7 +674,7 @@ func runPhotoCheck(d photoSender, svc *photomind.Service, prompt string) {
 		err        error
 	)
 	var res *photomind.CheckResult
-	res, err = svc.Check(genCtx, prompt)
+	res, err = svc.Check(genCtx, prompt, size)
 	if res != nil {
 		img, usedPrompt = res.Image, res.Prompt
 		if len(res.Drafts) > 1 {
@@ -741,7 +745,11 @@ func photoCaption(img *art.Image, usedPrompt, note string) string {
 // "now" for !photonow and "assistnow" for !photoassistnow (the top-priority
 // variants). The longer commands are tried first so a prefix never
 // mis-matches (e.g. !photoassistnow is not cut as !photoassist).
-func cutPhotoCmd(content string) (mode, prompt string, ok bool) {
+//
+// An optional size token may follow the command — "!photo 16x9 a red
+// panda" — and is consumed as the requested frame (the service default,
+// square 1024x1024, when absent).
+func cutPhotoCmd(content string) (mode, size, prompt string, ok bool) {
 	for _, c := range []struct {
 		cmd  string
 		mode string
@@ -759,9 +767,23 @@ func cutPhotoCmd(content string) (mode, prompt string, ok bool) {
 		if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
 			continue
 		}
-		return c.mode, strings.TrimSpace(rest), true
+		rest = strings.TrimSpace(rest)
+		// The first word is a size token ("16x9", "1024x576", "16:9")
+		// when it parses as one; otherwise the whole rest is the prompt.
+		// A bare size token with no prompt ("!photo 9x16") counts too —
+		// handlePhoto asks for a prompt then.
+		if i := strings.IndexAny(rest, " \t"); i >= 0 {
+			if _, _, isSize := art.ParseSize(rest[:i]); isSize {
+				size = rest[:i]
+				rest = strings.TrimSpace(rest[i+1:])
+			}
+		} else if _, _, isSize := art.ParseSize(rest); isSize {
+			size = rest
+			rest = ""
+		}
+		return c.mode, size, rest, true
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 // photoErrorMessage turns a generation failure into something the owner

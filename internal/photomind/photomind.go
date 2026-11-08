@@ -24,7 +24,7 @@ type Chat interface {
 
 // Gen is the image generator. *art.Client satisfies it.
 type Gen interface {
-	Generate(ctx context.Context, prompt string) (*art.Image, error)
+	Generate(ctx context.Context, prompt, size string) (*art.Image, error)
 }
 
 // Service wires a brain and a generator together.
@@ -51,9 +51,10 @@ func (s *Service) Healthy() bool {
 }
 
 // assistSystem is the prompt that turns a casual request into an image
-// prompt. scripts/jarvis-art (the "enhance" subcommand) keeps a copy of
-// this text for the CLI; keep the two in sync.
-const assistSystem = `You write prompts for Z-Image-Turbo, a text-to-image model that renders a square 1024x1024 photo.
+// prompt. %s is the frame the model renders (see shapeFor).
+// scripts/jarvis-art (the "enhance" subcommand) keeps a copy of this text
+// for the CLI (always the square default); keep the two in sync.
+const assistSystem = `You write prompts for Z-Image-Turbo, a text-to-image model that renders %s.
 The user's message is a short, casual photo request. Turn it into one rich, concrete prompt the model can follow:
 - keep the user's core subject and intent exactly;
 - add specific visual detail: setting, time of day, natural lighting and atmosphere, composition (shot type, angle), camera or lens style, color palette, mood;
@@ -64,19 +65,40 @@ Reply with the prompt only: no quotes, no labels, no preamble, one paragraph, un
 
 // checkSystem is the prompt that makes the mind critique its own prompt
 // (it cannot see the image, so it judges the prompt against the
-// request). Keep in sync with scripts/jarvis-art where useful.
-const checkSystem = `You are reviewing a prompt you wrote for a text-to-image model (Z-Image-Turbo, square 1024x1024 photos). The image was generated, but you cannot see it, so you judge the prompt itself.
+// request). %s is the frame the model renders (see shapeFor). Keep in
+// sync with scripts/jarvis-art where useful.
+const checkSystem = `You are reviewing a prompt you wrote for a text-to-image model (Z-Image-Turbo, %s). The image was generated, but you cannot see it, so you judge the prompt itself.
 Given the user's original request and the prompt that was used, ask:
 - what of the request is missing, vague, or at risk of being misread by the model?
 - which concrete visual detail (lighting, composition, subject detail, mood) could be sharpened?
 Keep everything that was right and produce the improved prompt.
 Reply with the improved prompt only: no quotes, no labels, no preamble, one paragraph, under 120 words.`
 
+// shapeFor describes the frame a size token produces, for the thinking
+// mind's system prompts. The token is the owner's raw size (e.g. "16x9",
+// "9x16"); empty means the service default.
+func shapeFor(size string) (frame, photos string) {
+	if w, h, ok := art.ParseSize(size); ok {
+		ratio := fmt.Sprintf("%d:%d", w, h)
+		switch {
+		case w > h:
+			return fmt.Sprintf("a %s landscape photo (wide frame)", ratio), fmt.Sprintf("%s landscape photos", ratio)
+		case w < h:
+			return fmt.Sprintf("a %s portrait photo (tall frame)", ratio), fmt.Sprintf("%s portrait photos", ratio)
+		default:
+			return "a square photo", "square photos"
+		}
+	}
+	return "a square 1024x1024 photo", "square 1024x1024 photos"
+}
+
 // Assist turns a casual photo request into a detailed image prompt by
-// asking the thinking mind to expand it.
-func (s *Service) Assist(ctx context.Context, request string) (string, error) {
+// asking the thinking mind to expand it. size is the requested frame
+// ("16x9", ...); empty means the service default (square).
+func (s *Service) Assist(ctx context.Context, request, size string) (string, error) {
+	frame, _ := shapeFor(size)
 	out, err := s.Brain.Chat(s.Model, []models.ChatMessage{
-		{Role: "system", Content: assistSystem},
+		{Role: "system", Content: fmt.Sprintf(assistSystem, frame)},
 		{Role: "user", Content: request},
 	})
 	if err != nil {
@@ -92,12 +114,12 @@ func (s *Service) Assist(ctx context.Context, request string) (string, error) {
 // GenerateAssisted runs Assist and then generates the photo with the
 // resulting prompt. It returns the image and the prompt actually sent
 // to the art service.
-func (s *Service) GenerateAssisted(ctx context.Context, request string) (*art.Image, string, error) {
-	p, err := s.Assist(ctx, request)
+func (s *Service) GenerateAssisted(ctx context.Context, request, size string) (*art.Image, string, error) {
+	p, err := s.Assist(ctx, request, size)
 	if err != nil {
 		return nil, "", err
 	}
-	img, err := s.Art.Generate(ctx, p)
+	img, err := s.Art.Generate(ctx, p, size)
 	if err != nil {
 		return nil, p, err
 	}
@@ -117,25 +139,25 @@ type CheckResult struct {
 // second generation is spent. If a later pass fails after an image
 // already exists, that image is returned together with the error so the
 // caller can still show the owner something.
-func (s *Service) Check(ctx context.Context, request string) (*CheckResult, error) {
-	p1, err := s.Assist(ctx, request)
+func (s *Service) Check(ctx context.Context, request, size string) (*CheckResult, error) {
+	p1, err := s.Assist(ctx, request, size)
 	if err != nil {
 		return nil, err
 	}
-	img1, err := s.Art.Generate(ctx, p1)
+	img1, err := s.Art.Generate(ctx, p1, size)
 	if err != nil {
 		return nil, err
 	}
 	res := &CheckResult{Image: img1, Prompt: p1, Drafts: []string{p1}}
 
-	p2, err := s.Critique(ctx, request, p1)
+	p2, err := s.Critique(ctx, request, p1, size)
 	if err != nil {
 		return res, err // the first image still exists
 	}
 	if p2 == p1 {
 		return res, nil // the mind saw nothing to fix
 	}
-	img2, err := s.Art.Generate(ctx, p2)
+	img2, err := s.Art.Generate(ctx, p2, size)
 	if err != nil {
 		return res, err // the first image still exists
 	}
@@ -146,10 +168,11 @@ func (s *Service) Check(ctx context.Context, request string) (*CheckResult, erro
 
 // Critique asks the thinking mind to judge a prompt against the
 // original request and return an improved one.
-func (s *Service) Critique(ctx context.Context, request, prompt string) (string, error) {
+func (s *Service) Critique(ctx context.Context, request, prompt, size string) (string, error) {
+	_, photos := shapeFor(size)
 	user := "Original request:\n" + request + "\n\nPrompt used:\n" + prompt
 	out, err := s.Brain.Chat(s.Model, []models.ChatMessage{
-		{Role: "system", Content: checkSystem},
+		{Role: "system", Content: fmt.Sprintf(checkSystem, photos)},
 		{Role: "user", Content: user},
 	})
 	if err != nil {
