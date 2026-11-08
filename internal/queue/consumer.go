@@ -1,9 +1,11 @@
-// Package queue provides an AMQP consumer that reads from the voice, fix, coding, and background queues.
+// Package queue provides an AMQP consumer that reads from the voice, fix,
+// image, coding, and background queues.
 package queue
 
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync/atomic"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -76,7 +78,7 @@ func (c *Consumer) Start() error {
 		go c.consumeLoop(q, c.deliveries[q])
 	}
 
-	log.Printf("consumer: listening on %s, %s, %s, %s", AllQueues[0], AllQueues[1], AllQueues[2], AllQueues[3])
+	log.Printf("consumer: listening on %s", strings.Join(AllQueues, ", "))
 	return nil
 }
 
@@ -89,6 +91,11 @@ func (c *Consumer) Start() error {
 func queueDeclareArgs(name string) amqp.Table {
 	switch name {
 	case VoiceQueue:
+		return amqp.Table{"x-max-priority": int64(10)}
+	case ImageQueue:
+		// 10: the image queue is a priority queue like voice — publishers
+		// order pending generations (e.g. a requested avatar ahead of
+		// batched bench prompts) within the queue.
 		return amqp.Table{"x-max-priority": int64(10)}
 	case CodingQueue:
 		return amqp.Table{"x-max-priority": int64(5)}

@@ -20,7 +20,7 @@ const DefaultEffort = EffortMedium
 // Message is the canonical job shape published to and consumed from RabbitMQ.
 type Message struct {
 	ID        string            `json:"id"`
-	Type      string            `json:"type"`       // voice, fix, coding, background
+	Type      string            `json:"type"`       // voice, fix, image, coding, background
 	Priority  int               `json:"priority"`   // higher wins within a queue
 	Payload   map[string]string `json:"payload"`    // free-form key/value for the job
 	CreatedAt time.Time         `json:"created_at"`
@@ -70,12 +70,15 @@ const KindAgent = "agent"
 const (
 	VoiceQueue      = "voice"
 	FixQueue        = "fix"
+	ImageQueue      = "image"
 	CodingQueue     = "coding"
 	BackgroundQueue = "background"
 )
 
-// AllQueues lists the queues in priority order (highest first).
-var AllQueues = []string{VoiceQueue, FixQueue, CodingQueue, BackgroundQueue}
+// AllQueues lists the queues in priority order (highest first). Image
+// (photo generation) sits above coding and background — it almost always
+// takes priority, waiting only behind voice and fix.
+var AllQueues = []string{VoiceQueue, FixQueue, ImageQueue, CodingQueue, BackgroundQueue}
 
 // PlanEpicPriority is the AMQP priority of plan_epic jobs published to the
 // background queue (B1): the maximum the background queue accepts
@@ -92,6 +95,8 @@ func QueueForType(jobType string) string {
 		return VoiceQueue
 	case "fix":
 		return FixQueue
+	case "image":
+		return ImageQueue
 	case "coding":
 		return CodingQueue
 	default:
