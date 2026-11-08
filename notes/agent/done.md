@@ -127,3 +127,4 @@
 - 2026-11-08T05:54Z [chat-1794102293-f513] Photo fix: igpu driver env no longer clobbered by JARVIS_JOB_ID tagging (jarvis-jobs) + agent-run stops asking who runs photo jobs; probe round verified jarvis-igpu end-to-end (PR #191)
 - 2026-11-08T07:18Z [chat-1794102878-59c7] Dashboard Machine panel on :8080 — loaded model per engine, brain-swap state + last change, VRAM free/total, on-hold queue (photo batch/ready/running/failed); /html/machine, 5s refresh, 2s-timeout probes (PR #192)
 - 2026-11-08T11:25Z [chat-1794102904-04a7] opus is now a job driver (claude --model opus, like sonnet) for the rounds the local model can't close; AGENT_OPUS_MODEL pins the model; new stage3-opus brief (PR #194)
+- 2026-11-08T11:32Z [chat-1794103295-92e6] PR conflict sweep: no open/unmerged PRs existed, nothing to fix; 16 unmerged remote branches are squash-merge leftovers (PR #195 notes)
