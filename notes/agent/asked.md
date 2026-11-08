@@ -96,3 +96,4 @@
 - 2026-11-08T05:54Z Nathan: photo-tagged jobs must not ask brain/sonnet/igpu — they run on the image generator in the swap window. Follow-up job chat-1794102878-59c7: photo-queue visibility on the :8080 dashboard (loaded model, RAM, on-hold) and a Discord post when a photo finishes.
 - 2026-11-08T07:18Z Nathan wants photo-swap insight on :8080 (loaded model, changes in flight, RAM, on hold) and photos posted to Discord when they finish — visibility fixed in PR #192; delivery path re-verified; live test = the 4 queued photos in the next swap window
 - 2026-11-03T19:19Z Nathan: make NoBrakes the highest priority and start working on it next
+- 2026-11-08T23:06Z Nathan: the image generator only did 1024x1024 — he wants landscape 16x9 (and by extension other shapes/sizes) (2026-11-08).
