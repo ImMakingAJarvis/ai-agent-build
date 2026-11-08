@@ -116,3 +116,4 @@
 - 2026-11-07T04:00Z [chat-1794018010-ac43] Queue page (:8080) shows in-flight photo jobs + Log links on every card (PR #186) (PR #186)
 - 2026-11-07T11:34Z [chat-1794019399-8818] Grafana: historical all-time token totals + per-day/week/month buckets (token-ledger service, PR #187)
 - 2026-11-08T02:41Z [chat-1794016094-a2ac] Fixed all 8 open PRs with merge conflicts (job chat-1794016094-a2ac): #163 #164 #165 #166 #174 #175 union-merged in worktrees (notes/docs files only, count-verified); #176/#169 Nathan merged mid-round; all six verified MERGEABLE. Notes PR #189.
+- 2026-11-08T04:30Z [chat-1794091523-cf6f] All 8 open PRs MERGEABLE: merged origin/main into 6 conflicting branches (#174 #166 #164 #163 #162), notes-only conflicts resolved keeping both sides chronologically (job chat-1794091523-cf6f)
