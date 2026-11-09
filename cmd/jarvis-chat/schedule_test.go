@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -238,7 +239,7 @@ func TestEnqueuePhotoJob(t *testing.T) {
 
 	in := chat.Incoming{ChannelID: "chan1", MessageID: "msg1"}
 	expanded := "A photo of a red panda in fresh snow, soft light."
-	id, err := enqueuePhotoJob(in, "a red panda", expanded, "", false)
+	id, err := enqueuePhotoJob(in, "a red panda", expanded, "", false, nil)
 	if err != nil {
 		t.Fatalf("enqueuePhotoJob: %v", err)
 	}
@@ -281,7 +282,7 @@ func TestEnqueuePhotoJobNow(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", dir)
 
 	in := chat.Incoming{ChannelID: "chan1", MessageID: "msg1"}
-	id, err := enqueuePhotoJob(in, "sunset", "a sunset", "", true)
+	id, err := enqueuePhotoJob(in, "sunset", "a sunset", "", true, nil)
 	if err != nil {
 		t.Fatalf("enqueuePhotoJob: %v", err)
 	}
@@ -304,7 +305,24 @@ func TestEnqueuePhotoJobNow(t *testing.T) {
 func TestEnqueuePhotoJobRejectsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("JARVIS_DATA_DIR", dir)
-	if _, err := enqueuePhotoJob(chat.Incoming{}, "sunset", "   ", "", false); err == nil {
+	if _, err := enqueuePhotoJob(chat.Incoming{}, "sunset", "   ", "", false, nil); err == nil {
 		t.Fatal("expected error for empty prompt")
+	}
+}
+
+func TestEnqueuePhotoJobWritesRef(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JARVIS_DATA_DIR", dir)
+
+	in := chat.Incoming{ChannelID: "chan1", MessageID: "msg1"}
+	ref := []byte{0x89, 'P', 'N', 'G', 1, 2, 3}
+	id, err := enqueuePhotoJob(in, "me at the beach", "a photo of the owner at the beach", "", false, ref)
+	if err != nil {
+		t.Fatalf("enqueuePhotoJob: %v", err)
+	}
+	// The reference bytes must be stored to the sidecar so the iGPU round
+	// can stage it and generate with the reference model.
+	if got, err := os.ReadFile(photo.RefPath(dir, id)); err != nil || !bytes.Equal(got, ref) {
+		t.Fatalf("ref sidecar = %v (err %v), want the uploaded bytes", got, err)
 	}
 }

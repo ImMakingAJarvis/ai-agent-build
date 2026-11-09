@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -72,10 +73,63 @@ func NewWithURL(base string) *Client {
 // the service default (square 1024x1024). An image takes tens of seconds
 // on the 4090; give the context a few minutes.
 func (c *Client) Generate(ctx context.Context, prompt, size string) (*Image, error) {
-	reqBody := map[string]string{"prompt": prompt}
+	reqBody := map[string]any{"prompt": prompt}
 	if size != "" {
 		reqBody["size"] = size
 	}
+	return c.post(ctx, reqBody)
+}
+
+// GenerateRef runs one reference-anchored photo generation: the image keeps
+// the subject (a real person) shown in the reference image(s) while the
+// prompt describes the new scene. The reference image(s) must already be
+// staged in the art service's refs directory; refs are their file names there
+// (the service loads them by name). size is as for Generate. This routes to
+// the reference-capable model (FLUX.2 [klein]), not the plain text-to-image
+// one, and can take longer: the first call after a restart also loads the
+// model.
+func (c *Client) GenerateRef(ctx context.Context, prompt, size string, refs []string) (*Image, error) {
+	reqBody := map[string]any{"prompt": prompt, "model": "klein"}
+	if size != "" {
+		reqBody["size"] = size
+	}
+	if len(refs) > 0 {
+		reqBody["refs"] = refs
+	}
+	return c.post(ctx, reqBody)
+}
+
+// FetchRef downloads a staged reference image by name (GET /refs/<name>).
+// The dashboard uses it to pull an image the gallery uploaded so it can be
+// stored as the job's reference sidecar.
+func (c *Client) FetchRef(ctx context.Context, name string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/refs/"+url.PathEscape(name), nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &ErrUnavailable{Detail: "cannot reach the art service: " + err.Error()}
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		return nil, &ErrUnavailable{Detail: fmt.Sprintf("art service error %d: %s", res.StatusCode, strings.TrimSpace(string(b)))}
+	}
+	// A reference photo is at most a few MB; cap generously.
+	b, err := io.ReadAll(io.LimitReader(res.Body, 32<<20))
+	if err != nil {
+		return nil, &ErrUnavailable{Detail: "read reference: " + err.Error()}
+	}
+	return b, nil
+}
+
+// post sends one /generate body and decodes the resulting image, sharing the
+// status handling with Generate.
+func (c *Client) post(ctx context.Context, reqBody map[string]any) (*Image, error) {
 	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/generate", bytes.NewReader(body))
 	if err != nil {

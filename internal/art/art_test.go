@@ -1,6 +1,7 @@
 package art
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -161,5 +162,85 @@ func TestParseSize(t *testing.T) {
 		if ok != c.ok || (ok && (w != c.w || h != c.h)) {
 			t.Errorf("ParseSize(%q) = %d, %d, %v; want %d, %d, %v", c.in, w, h, ok, c.w, c.h, c.ok)
 		}
+	}
+}
+
+func TestGenerateRefSendsModelAndRefs(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"path":"/out/x.png","width":1024,"height":1024,"seed":7,"steps":4,"seconds":40}`))
+	}))
+	defer srv.Close()
+
+	img, err := NewWithURL(srv.URL).GenerateRef(context.Background(), "me at the beach", "16x9", []string{"ref-chat-1-ab-1.png"})
+	if err != nil {
+		t.Fatalf("GenerateRef: %v", err)
+	}
+	if img.Seed != 7 {
+		t.Errorf("unexpected image: %+v", img)
+	}
+	// A reference must route to the reference-capable model, with the
+	// staged name passed through.
+	if gotBody["model"] != "klein" {
+		t.Errorf("body model = %v, want klein", gotBody["model"])
+	}
+	refs, _ := gotBody["refs"].([]any)
+	if len(refs) != 1 || refs[0] != "ref-chat-1-ab-1.png" {
+		t.Errorf("body refs = %v", gotBody["refs"])
+	}
+	if gotBody["size"] != "16x9" {
+		t.Errorf("body size = %v", gotBody["size"])
+	}
+}
+
+func TestGenerateRefNoRefsOmitsRefsKey(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"path":"/out/x.png","width":1024,"height":1024,"seed":7,"steps":4,"seconds":40}`))
+	}))
+	defer srv.Close()
+
+	if _, err := NewWithURL(srv.URL).GenerateRef(context.Background(), "a red panda", "", nil); err != nil {
+		t.Fatalf("GenerateRef: %v", err)
+	}
+	if _, has := gotBody["refs"]; has {
+		t.Errorf("no refs should be sent: %v", gotBody)
+	}
+}
+
+func TestFetchRef(t *testing.T) {
+	want := []byte{0x89, 'P', 'N', 'G', 1, 2, 3}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/refs/ref-chat-1-ab-1.png" || r.Method != http.MethodGet {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(want)
+	}))
+	defer srv.Close()
+
+	got, err := NewWithURL(srv.URL).FetchRef(context.Background(), "ref-chat-1-ab-1.png")
+	if err != nil {
+		t.Fatalf("FetchRef: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestFetchRefMissing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no such ref", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if _, err := NewWithURL(srv.URL).FetchRef(context.Background(), "nope.png"); err == nil {
+		t.Fatal("expected error for missing ref")
 	}
 }
