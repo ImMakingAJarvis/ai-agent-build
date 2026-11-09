@@ -176,6 +176,23 @@ func TestParseDeadline(t *testing.T) {
 	}
 }
 
+// TestValidCapabilityName pins `submit`'s capability guard (EVB-17): a
+// dotted path is the convention, but the cap.echo test worker is single-word
+// and the Phase-2 gate submits to it, so a single word must pass. Malformed
+// input (empty, spaces, uppercase, stray characters) is still rejected.
+func TestValidCapabilityName(t *testing.T) {
+	for _, ok := range []string{"echo", "image.generate", "audio.transcribe", "llm.small", "cap2.run"} {
+		if !validCapabilityName(ok) {
+			t.Errorf("validCapabilityName(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "image. generate", "IMAGE.generate", "image.gen-erate", "image..generate"} {
+		if validCapabilityName(bad) {
+			t.Errorf("validCapabilityName(%q) = true, want false", bad)
+		}
+	}
+}
+
 // TestSubmitPublishesEnvelopeV2 is a live test (RabbitMQ on RABBITMQ_URL,
 // default localhost:5672): `submit`'s message must arrive on cap.<cap>
 // with the v2 JSON fields AND the mirrored AMQP properties (correlation_id,
