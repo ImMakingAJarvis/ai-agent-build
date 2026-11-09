@@ -1,26 +1,43 @@
 #!/usr/bin/env python3
-"""jarvis-art — local photo generation service (Z-Image-Turbo, 6B).
+"""jarvis-art — local photo generation service.
 
-Serves the art model behind a small HTTP API so the rest of the stack
+Two models:
+  * Z-Image-Turbo (6B) — the plain text-to-image model, always loaded.
+  * FLUX.2 [klein] 4B  — the reference-capable model: given one or more
+    reference images it keeps their subject (a real person) while
+    generating the prompt's scene around it. Lazy-loaded on the first
+    reference generation (it is a 23 GB model), so a plain photo never
+    pays for it.
+
+Serves the models behind a small HTTP API so the rest of the stack
 (chat, Discord daemon, dashboard) can ask for photos:
 
-  GET  /          -> the gallery: a page showing every generated image
-  GET  /health    -> status, model, GPU memory, last generation
+  GET  /          -> the gallery: every generated image, plus a form to
+                     send a photo (prompt + size + uploaded reference)
+  GET  /health    -> status, models, GPU memory, last generation
   GET  /images    -> generated images, newest first (?limit=N), each with
                      name, prompt, seed and timing (from the sidecar .json
                      written next to each PNG)
-  GET  /img/N.png -> the image file itself (basename only, no traversal)
+  GET  /img/N.png -> a generated image file (basename only, no traversal)
   POST /generate  -> {"prompt": ..., "seed"?: int,
                       "size"?: "1024x1024" | "16x9" | "16:9",
-                      "steps"?: int}
+                      "steps"?: int,
+                      "model"?: "zimage" | "klein",
+                      "refs"?: ["name.png", ...]}
                      saves a PNG under ART_OUT_DIR and returns its path
                      plus timing. size is either explicit pixels (WxH,
                      each dim capped at ART_MAX_DIM) or an aspect ratio
                      (small numbers like 16x9: the long side is scaled to
                      ART_MAX_DIM and both sides rounded to a multiple of
-                     16, the VAE patch). Generations take tens of
-                     seconds; clients should allow a few minutes for the
-                     request.
+                     16, the VAE patch). refs are file names staged in the
+                     refs directory (see /upload, /refs); any refs route
+                     the generation to the klein model. Generations take
+                     tens of seconds (minutes on klein's first load);
+                     clients should allow a few minutes for the request.
+  POST /upload    -> raw image bytes (png/jpeg/webp) -> staged as a
+                     reference under ART_REFS_DIR; returns {"name": ...}
+  GET  /refs/N    -> a staged reference image (basename only, no
+                     traversal)
 
 The brain (llama.cpp) owns ~20 GB of the 4090's 24.5 GB and the model is
 bigger than the remainder in every component, so the pipeline runs with
@@ -33,8 +50,14 @@ DiT burst), because the brain's KV cache usually owns the rest of the GPU
 while a session is active; it only returns 503 with a CUDA OOM message if
 the headroom never appears (or the brain grabs the GPU mid-generation).
 
-Model weights: ART_MODEL_DIR (default /var/lib/jarvis/art/model), populated
-by scripts/install_art.sh. Images: ART_OUT_DIR (default /var/lib/jarvis/art/out).
+Model weights: ART_MODEL_DIR (default /var/lib/jarvis/art/model) for
+Z-Image, ART_KLEIN_DIR (default /var/lib/jarvis/art/models/flux2-klein-4b)
+for FLUX.2 [klein], both populated by scripts/install_art.sh /
+scripts/install_klein.sh. Images: ART_OUT_DIR (default
+/var/lib/jarvis/art/out). References: ART_REFS_DIR (default
+/var/lib/jarvis/art/refs) — the jarvis-photo executor also stages job
+references here (it runs on the host, which bind-mounts this directory
+into the container).
 """
 
 import json
@@ -47,15 +70,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8120"))
 MODEL_DIR = os.environ.get("ART_MODEL_DIR", "/var/lib/jarvis/art/model")
 OUT_DIR = os.environ.get("ART_OUT_DIR", "/var/lib/jarvis/art/out")
+# FLUX.2 [klein] 4B: the reference-capable model (subject-preserving
+# editing + text-to-image in one pipeline). Lazy-loaded on first use.
+KLEIN_DIR = os.environ.get(
+    "ART_KLEIN_DIR", "/var/lib/jarvis/art/models/flux2-klein-4b"
+)
+# Staged reference images (uploads + per-job refs the executor drops in).
+REFS_DIR = os.environ.get("ART_REFS_DIR", "/var/lib/jarvis/art/refs")
+# A reference photo is a few MB; cap uploads at Discord's 25 MB.
+MAX_REF_BYTES = int(os.environ.get("ART_MAX_REF_MB", "25")) << 20
 # Z-Image-Turbo: 9 steps = 8 DiT forwards per the model card; guidance-free
 # (distilled), so guidance_scale=0.
 DEFAULT_STEPS = int(os.environ.get("ART_STEPS", "9"))
+# FLUX.2 [klein]: rectified-flow DiT — the model card runs 4B at 4 steps,
+# guidance 1.0.
+KLEIN_STEPS = int(os.environ.get("ART_KLEIN_STEPS", "4"))
+KLEIN_GUIDANCE = float(os.environ.get("ART_KLEIN_GUIDANCE", "1.0"))
 MAX_DIM = int(os.environ.get("ART_MAX_DIM", "1024"))
 
 # A size spec: "1024x1024" (explicit pixels) or "16x9" / "16:9" (aspect).
@@ -105,6 +141,13 @@ ART_VRAM_POLL_S = float(os.environ.get("ART_VRAM_POLL_S", "2.0"))
 
 pipe = None
 _load_error = None
+# FLUX.2 [klein]: lazy — loaded only when a reference generation asks for
+# it. A separate load lock: the first reference photo loads it while the
+# generation lock is already held, and a second concurrent request must
+# wait for the load, not start a parallel from_pretrained.
+klein_pipe = None
+klein_load_error = None
+klein_load_lock = threading.Lock()
 _lock = threading.Lock()  # one generation at a time
 _busy = {"since": None}
 _last = {}
@@ -125,6 +168,41 @@ def load_pipeline():
     pipe = DiffusionPipeline.from_pretrained(MODEL_DIR, torch_dtype=torch.bfloat16)
     pipe.enable_sequential_cpu_offload()
     print(f"art: pipeline loaded in {time.time() - t0:.0f}s", flush=True)
+
+
+def get_klein():
+    """Return the loaded FLUX.2 [klein] pipeline, loading it on first use.
+
+    Raises RuntimeError with a readable message when the weights are
+    missing (install_klein.sh) or the load fails, so /generate can turn it
+    into a 503. Photo work runs in the brain-swap window (the 4090 is
+    free), so the transformer can use plain model CPU offload: only the
+    active submodule is on the GPU at a time.
+    """
+    global klein_pipe, klein_load_error
+    if klein_pipe is not None:
+        return klein_pipe
+    with klein_load_lock:
+        if klein_pipe is not None:
+            return klein_pipe
+        import torch
+        from diffusers import Flux2KleinPipeline
+
+        if not (Path(KLEIN_DIR) / "model_index.json").exists():
+            klein_load_error = (
+                f"klein weights not found in {KLEIN_DIR} — run "
+                "scripts/install_klein.sh"
+            )
+            raise RuntimeError(klein_load_error)
+        t0 = time.time()
+        klein_pipe = Flux2KleinPipeline.from_pretrained(
+            KLEIN_DIR, torch_dtype=torch.bfloat16
+        )
+        klein_pipe.enable_model_cpu_offload()
+        print(
+            f"art: klein pipeline loaded in {time.time() - t0:.0f}s", flush=True
+        )
+        return klein_pipe
 
 
 @asynccontextmanager
@@ -171,14 +249,117 @@ GALLERY_PAGE = """<!doctype html>
             -webkit-box-orient: vertical; overflow: hidden; }
   .cap .m { color: #8b93a7; font-size: 12px; margin-top: 4px; }
   #empty { padding: 48px; text-align: center; color: #8b93a7; }
+  #form { margin: 16px 22px 0; padding: 14px 16px; background: #171a21;
+          border: 1px solid #262a33; border-radius: 10px;
+          display: grid; gap: 10px; }
+  #form label { color: #8b93a7; font-size: 12px; }
+  #prompt { width: 100%; box-sizing: border-box; background: #0f1115;
+            color: #e6e8ee; border: 1px solid #262a33; border-radius: 8px;
+            padding: 8px 10px; font: inherit; resize: vertical; }
+  #form .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  #size { background: #0f1115; color: #e6e8ee; border: 1px solid #262a33;
+          border-radius: 8px; padding: 7px 10px; font: inherit; width: 220px; }
+  #file { font-size: 13px; color: #8b93a7; }
+  #form button { background: #2b6cb0; color: #fff; border: 0; border-radius: 8px;
+                 padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  #form button:disabled { opacity: 0.5; cursor: default; }
+  #status { color: #8b93a7; font-size: 13px; }
 </style>
 </head>
 <body>
 <header><h1>jarvis-art</h1><span id="count"></span></header>
+<section id="form">
+  <div>
+    <label for="prompt">Photo</label>
+    <textarea id="prompt" rows="2" placeholder="Describe the photo — or write a few words and hit Assist to expand them"></textarea>
+  </div>
+  <div class="row">
+    <input id="size" placeholder="size (optional, e.g. 16x9)" />
+    <label class="file">reference: <input id="file" type="file" accept="image/png,image/jpeg,image/webp"></label>
+    <span style="flex: 1"></span>
+    <button id="assist" title="Expand the prompt with the thinking mind">Assist</button>
+    <button id="send" title="Queue the photo job — the result arrives in your Discord DM">Send</button>
+  </div>
+  <div class="row"><span id="status"></span></div>
+</section>
 <div id="grid"></div>
-<div id="empty" hidden>No photos yet — ask Jarvis on Discord:
+<div id="empty" hidden>No photos yet — send one above, or ask Jarvis on Discord:
 <code>!photo a photo of ...</code></div>
 <script>
+const DASH = location.protocol + '//' + location.hostname + ':8080';
+const $ = id => document.getElementById(id);
+let busy = false;
+function setBusy(b) { busy = b; $('assist').disabled = b; $('send').disabled = b; }
+function say(msg) { $('status').textContent = msg; }
+
+// Two-stage prompt: the dashboard expands the basic request with the
+// thinking mind (same pipeline as !photoassist) and the result replaces
+// the textarea, for review before Send.
+async function assist() {
+  if (busy) return;
+  const request = $('prompt').value.trim();
+  if (!request) { say('write a few words first'); return; }
+  setBusy(true);
+  say('thinking…');
+  try {
+    const r = await fetch(DASH + '/api/photo/assist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request, size: $('size').value.trim() }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { say(d.error || d.detail || ('assist failed: ' + r.status)); return; }
+    $('prompt').value = d.prompt;
+    say(d.note || 'prompt expanded — hit Send when it looks right');
+  } catch (e) {
+    say('assist failed: ' + e);
+  }
+  setBusy(false);
+}
+
+// Queue the photo: an uploaded reference is staged on the art service
+// first (POST /upload, same origin), then the dashboard queues the
+// photo-tagged job with it as the reference (the result keeps the
+// subject from the photo).
+async function send() {
+  if (busy) return;
+  const prompt = $('prompt').value.trim();
+  if (!prompt) { say('write a prompt first'); return; }
+  setBusy(true);
+  try {
+    let ref = '';
+    const file = $('file').files[0];
+    if (file) {
+      say('uploading reference…');
+      const r = await fetch('/upload', {
+        method: 'POST',
+        headers: file.type ? { 'Content-Type': file.type } : {},
+        body: file,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { say(d.detail || d.error || ('upload failed: ' + r.status)); return; }
+      ref = d.name;
+    }
+    say('queuing photo…');
+    const r = await fetch(DASH + '/api/photo/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, size: $('size').value.trim(), ref }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { say(d.error || d.detail || ('queue failed: ' + r.status)); return; }
+    say('queued ' + d.id + ' — it runs in the next photo window; the result lands in your Discord DM');
+    $('prompt').value = '';
+    $('size').value = '';
+    $('file').value = '';
+  } catch (e) {
+    say('queue failed: ' + e);
+  }
+  setBusy(false);
+}
+$('assist').onclick = assist;
+$('send').onclick = send;
+
 async function refresh() {
   try {
     const r = await fetch('/images?limit=200');
@@ -254,6 +435,18 @@ def free_vram_mb():
     return None
 
 
+def _vram_oom(what):
+    """503 for a CUDA OOM mid-generation: the brain took the GPU VRAM
+    while the generation was running."""
+    free = free_vram_mb()
+    return HTTPException(
+        503,
+        "CUDA OOM mid-generation — the brain took the GPU VRAM while the "
+        f"{what} was running ({free if free is not None else '?'} MB free); "
+        "try again later",
+    )
+
+
 def wait_for_vram(min_free_mb, timeout_s, poll_s, free_mb_fn=None, clear_cache_fn=None):
     """Block until at least min_free_mb of VRAM is free, up to timeout_s.
 
@@ -294,6 +487,10 @@ def health():
         "model": "z-image-turbo",
         "loaded": pipe is not None,
         "error": _load_error,
+        # Reference model: weights on disk, pipeline loaded (lazy).
+        "klein_weights": (Path(KLEIN_DIR) / "model_index.json").exists(),
+        "klein_loaded": klein_pipe is not None,
+        "klein_error": klein_load_error,
         "busy": _busy["since"] is not None,
         "gpu": gpu_stats(),
         "free_vram_mb": free_vram_mb(),
@@ -350,21 +547,103 @@ def generate(payload: dict):
         raise HTTPException(400, "prompt required")
     if pipe is None:
         raise HTTPException(503, _load_error or "model not loaded")
+    model, refs = _pick_model(payload)
+    if model == "klein":
+        # Validate the refs now (before taking the lock) so a bad name is a
+        # fast 400, not a 10-minute load + 400.
+        _stage_check(refs)
     if not _lock.acquire(blocking=False):
         raise HTTPException(409, "a generation is already running")
     _busy["since"] = time.time()
     try:
-        return _run(prompt, payload)
+        return _run(prompt, payload, model, refs)
     finally:
         _lock.release()
         _busy["since"] = None
 
 
-def _run(prompt, payload):
+def _pick_model(payload):
+    """Resolve (model, refs) from a /generate payload.
+
+    refs imply the reference-capable model (klein): an uploaded photo is
+    meaningless to plain text-to-image. An explicit "zimage" with refs is
+    still routed to klein (the refs win — the caller attached a photo for a
+    reason); an unknown model name is a 400.
+    """
+    model = (payload.get("model") or "zimage").strip().lower()
+    if model not in ("zimage", "klein"):
+        raise HTTPException(400, "model must be 'zimage' or 'klein'")
+    refs = [str(r) for r in (payload.get("refs") or [])]
+    if refs:
+        model = "klein"
+    return model, refs
+
+
+# Reference names are staged files: alnum plus dot/dash/underscore, one
+# extension, no separators or dot-dot (same rule as /img names).
+_REF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|webp)")
+
+
+def _stage_check(refs):
+    """Resolve ref names to files in REFS_DIR; 400 on any bad/missing name."""
+    for name in refs:
+        if not _REF_NAME.fullmatch(name):
+            raise HTTPException(400, f"bad ref name {name!r}")
+        p = (Path(REFS_DIR) / name).resolve()
+        if p.parent != Path(REFS_DIR).resolve() or not p.is_file():
+            raise HTTPException(400, f"no such reference: {name}")
+
+
+@app.post("/upload")
+async def upload(request: Request):
+    """Stage one uploaded image as a reference and return its name.
+
+    Raw image bytes (png/jpeg/webp) in the body — the gallery form's file
+    input posts it directly. The name is generated here, so a re-upload
+    never clobbers a staged job reference.
+    """
+    import uuid
+
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
+    ext = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+    }.get(ctype, ".png")
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, "empty upload")
+    if len(body) > MAX_REF_BYTES:
+        raise HTTPException(
+            413, f"upload exceeds {MAX_REF_BYTES >> 20} MB"
+        )
+    Path(REFS_DIR).mkdir(parents=True, exist_ok=True)
+    name = f"upload-{int(time.time())}-{uuid.uuid4().hex[:6]}{ext}"
+    (Path(REFS_DIR) / name).write_bytes(body)
+    return {"name": name}
+
+
+@app.get("/refs/{name}")
+def ref_file(name: str):
+    """Serve one staged reference image (basename only, no traversal)."""
+    if not _REF_NAME.fullmatch(name):
+        raise HTTPException(404, "not found")
+    p = (Path(REFS_DIR) / name).resolve()
+    if p.parent != Path(REFS_DIR).resolve() or not p.is_file():
+        raise HTTPException(404, "not found")
+    media = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".webp": "image/webp"}.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(p, media_type=media)
+
+
+def _run(prompt, payload, model, refs):
     import torch
 
     w, h = resolve_size(payload.get("size") or "1024x1024")
-    steps = int(payload.get("steps") or DEFAULT_STEPS)
+    if model == "klein":
+        steps = int(payload.get("steps") or KLEIN_STEPS)
+    else:
+        steps = int(payload.get("steps") or DEFAULT_STEPS)
     seed = (
         int(payload["seed"])
         if payload.get("seed") is not None
@@ -386,23 +665,43 @@ def _run(prompt, payload):
         )
 
     t0 = time.time()
-    try:
-        img = pipe(
-            prompt,
-            width=w,
-            height=h,
-            num_inference_steps=steps,
-            guidance_scale=0.0,
-            generator=gen,
-        ).images[0]
-    except torch.OutOfMemoryError:
-        free = free_vram_mb()
-        raise HTTPException(
-            503,
-            "CUDA OOM mid-generation — the brain took the GPU VRAM while the "
-            f"photo was running ({free if free is not None else '?'} MB free); "
-            "try again later",
-        )
+    if model == "klein":
+        # Reference generation: klein's pipeline takes the reference
+        # image(s) as the first argument — a single PIL image or a list —
+        # and keeps their subject while rendering the prompt's scene.
+        try:
+            klein = get_klein()
+        except RuntimeError as e:
+            raise HTTPException(503, str(e))
+        from PIL import Image as PILImage
+
+        ref_paths = [(Path(REFS_DIR) / r) for r in refs]
+        ref_images = [PILImage.open(p).convert("RGB") for p in ref_paths]
+        image = ref_images if ref_images else None
+        try:
+            img = klein(
+                image=image,
+                prompt=prompt,
+                width=w,
+                height=h,
+                num_inference_steps=steps,
+                guidance_scale=KLEIN_GUIDANCE,
+                generator=gen,
+            ).images[0]
+        except torch.OutOfMemoryError:
+            raise _vram_oom("photo")
+    else:
+        try:
+            img = pipe(
+                prompt,
+                width=w,
+                height=h,
+                num_inference_steps=steps,
+                guidance_scale=0.0,
+                generator=gen,
+            ).images[0]
+        except torch.OutOfMemoryError:
+            raise _vram_oom("photo")
     dt = time.time() - t0
 
     out = Path(OUT_DIR) / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{seed}.png"

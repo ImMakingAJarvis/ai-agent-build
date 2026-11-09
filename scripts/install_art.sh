@@ -14,7 +14,7 @@ DATA=/var/lib/jarvis/art
 # diffusers pipeline (no model_index.json).
 MODEL_REPO="${ART_MODEL_REPO:-Tongyi-MAI/Z-Image-Turbo}"
 
-mkdir -p "$DATA/model" "$DATA/out"
+mkdir -p "$DATA/model" "$DATA/out" "$DATA/refs"
 if [[ ! -d "$DEPLOY" ]]; then
   sudo mkdir -p "$DEPLOY" && sudo chown agent:agent "$DEPLOY"
 fi
