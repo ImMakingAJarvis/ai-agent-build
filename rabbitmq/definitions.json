@@ -20,6 +20,24 @@
       "auto_delete": false,
       "internal": false,
       "arguments": {}
+    },
+    {
+      "name": "events",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "jarvis.dlx",
+      "vhost": "/",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
     }
   ],
   "queues": [
@@ -31,6 +49,13 @@
       "arguments": {
         "x-max-priority": 10
       }
+    },
+    {
+      "name": "fix",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
     },
     {
       "name": "image",
@@ -79,6 +104,13 @@
       "durable": true,
       "auto_delete": false,
       "arguments": {}
+    },
+    {
+      "name": "dead",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
     }
   ],
   "permissions": [
@@ -97,6 +129,14 @@
       "destination": "voice",
       "destination_type": "queue",
       "routing_key": "voice.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "fix",
+      "destination_type": "queue",
+      "routing_key": "fix.#",
       "arguments": {}
     },
     {
@@ -145,6 +185,14 @@
       "destination": "jobs.igpu",
       "destination_type": "queue",
       "routing_key": "jobs.igpu.#",
+      "arguments": {}
+    },
+    {
+      "source": "jarvis.dlx",
+      "vhost": "/",
+      "destination": "dead",
+      "destination_type": "queue",
+      "routing_key": "",
       "arguments": {}
     }
   ]

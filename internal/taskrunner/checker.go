@@ -61,7 +61,14 @@ func runShell(ctx context.Context, dir string, timeout time.Duration, script str
 func runCmd(ctx context.Context, dir string, timeout time.Duration, args ...string) (bool, string) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	out, err := exec.CommandContext(cctx, args[0], args[1:]...).CombinedOutput()
+	cmd := exec.CommandContext(cctx, args[0], args[1:]...)
+	// The check must run in the task worktree. The service's own cwd is
+	// "/" (no WorkingDirectory in the unit), so without this every check
+	// probed the wrong tree: the acceptance file test failed and the
+	// go build/vet gate died with "directory prefix / does not contain
+	// main module" for every card in a Go repo (2026-11-08, TST-5).
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
 	if cctx.Err() == context.DeadlineExceeded {
 		return false, fmt.Sprintf("%s: timed out after %s\n%s", strings.Join(args, " "), timeout, string(out))
 	}
