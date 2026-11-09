@@ -154,6 +154,10 @@ func splitAgentJobs(jobs []agentjob.Job) (inProgress, waiting []agentjob.Job, wa
 			inProgress = append(inProgress, j)
 		case "ready", "pending", "":
 			waiting = append(waiting, j)
+		case agentjob.Waiting:
+			// Parked on external work: it waits on results, not its turn —
+			// keep it out of the finished bucket.
+			waiting = append(waiting, j)
 		default:
 			finished = append(finished, j)
 		}
@@ -347,6 +351,7 @@ func New() *Server {
 		"formatCost":     FormatCost,
 		"formatKwh":      FormatKwh,
 		"divCost":        DivCost,
+		"waitStatus":     waitStatus,
 		"slotRuntime":    SlotRuntime,
 		"jobPath":        JobPath,
 		"divGB":          DivGB,
@@ -458,6 +463,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
 	mux.HandleFunc("GET /api/queues", s.handleQueues)
 	mux.HandleFunc("GET /api/pending", s.handlePending)
+	mux.HandleFunc("GET /api/dead-letters", s.handleDeadLetters)
+	mux.HandleFunc("POST /api/dead-letters/{id}/requeue", s.handleDeadLetterRequeue)
+	mux.HandleFunc("POST /api/dead-letters/{id}/drop", s.handleDeadLetterDrop)
 	mux.HandleFunc("GET /api/approvals", s.handleApprovals)
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
 	mux.HandleFunc("POST /api/owner-message", s.handleOwnerMessage)
@@ -1382,6 +1390,54 @@ func StatusClass(status string) string {
 		return "status-denied"
 	default:
 		return ""
+	}
+}
+
+// WaitStatusText renders the status cell of a waiting job:
+// "waiting on <corr, ...> (<age>)" — what the round is parked on and how
+// long it has been (State.WaitingSince). A wait with no correlation ids
+// (a manual-wake yield) shows just the age. Other statuses pass through.
+// Age buckets: "45s", "12m", "2h3m", "2d2h"; an unknown since is "(?)".
+func WaitStatusText(j agentjob.Job, now time.Time) string {
+	if j.Status != agentjob.Waiting {
+		return j.Status
+	}
+	age := humanAge(j.WaitingSince, now)
+	if len(j.WaitOn) == 0 {
+		return "waiting (" + age + ")"
+	}
+	return "waiting on " + strings.Join(j.WaitOn, ", ") + " (" + age + ")"
+}
+
+// waitStatus wraps WaitStatusText for templates (now = time.Now()).
+func waitStatus(j agentjob.Job) string {
+	return WaitStatusText(j, time.Now())
+}
+
+// humanAge renders a wait age as a short string: "45s", "12m", "2h3m",
+// "2d2h". An empty or unparseable since renders as "?" rather than breaking
+// the row.
+func humanAge(since string, now time.Time) string {
+	if since == "" {
+		return "?"
+	}
+	t, err := time.Parse(time.RFC3339, since)
+	if err != nil {
+		return "?"
+	}
+	d := now.Sub(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
 	}
 }
 

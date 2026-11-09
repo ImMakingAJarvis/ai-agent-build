@@ -574,15 +574,18 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 		}
 		pr = lookup(j.Branch)
 	}
-	now := time.Now().UTC()
-	j.FinishedAt = now.Format(time.RFC3339)
-	if st, err := time.Parse(time.RFC3339, j.StartedAt); err == nil {
-		j.Duration = now.Sub(st).Round(time.Second).String()
-	}
-	j.PRURL, j.Summary, j.PID = pr, Summary(streamResultText(out)), 0
 	// If signalWatcher already paused or restarted the job, don't
 	// overwrite its status with the kill's error.
 	cur, _ := r.Store.Get(id)
+	yielded := cur.Status == Waiting
+	now := time.Now().UTC()
+	if !yielded {
+		j.FinishedAt = now.Format(time.RFC3339)
+		if st, err := time.Parse(time.RFC3339, j.StartedAt); err == nil {
+			j.Duration = now.Sub(st).Round(time.Second).String()
+		}
+	}
+	j.PRURL, j.Summary, j.PID = pr, Summary(streamResultText(out)), 0
 	restarted := false
 	switch {
 	case cur.Status == Paused:
@@ -594,6 +597,11 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 		// !restart: the watcher already put the job back in the queue.
 		j.Status = Ready
 		restarted = true
+	case yielded:
+		// The round yielded (Store.Yield): it ended on purpose and the job
+		// stays waiting for its results — not done, not failed, and it has
+		// no FinishedAt (it is not finished).
+		j.Status = Waiting
 	case runErr != nil:
 		j.Status, j.Error = Failed, runErr.Error()
 	default:

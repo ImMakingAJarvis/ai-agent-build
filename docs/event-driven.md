@@ -1,10 +1,58 @@
-# Event-driven work: flow queues
+# Event-driven work: queues and flow
 
-The worker queues (voice/fix/coding/background, jobs.gpu/cpu/igpu) move
-*jobs* from the scheduler to a model. **Flow queues** (`flow.<name>`) are the
-event-driven channel between models *across rounds*: one round publishes a
-job to a flow queue, finishes; another model does the work and publishes the
-result back; the first model's next round consumes it and continues.
+The worker queues (voice/fix/image/coding/background, jobs.gpu/cpu/igpu)
+move *jobs* from the scheduler to a model. **Flow queues** (`flow.<name>`)
+are the event-driven channel between models *across rounds*: one round
+publishes a job to a flow queue, finishes; another model does the work and
+publishes the result back; the first model's next round consumes it and
+continues. [Queues](#queues) is the full topology in one place.
+
+## Queues
+
+Everything lives on vhost `/`: three durable exchanges and nine queue
+families. Every queue is durable; the only transient queues are the
+temporary auto-delete ones the CLI creates to `tail` an exchange.
+
+| Queue | Purpose | Owner — declares / consumes | Priority | DLX |
+|---|---|---|---|---|
+| `tasks` (topic) | the job exchange — every queue below binds it under `<name>.#` and receives at `<name>.default` | `definitions.json` + every `queue.Conn` (idempotent) | — | — |
+| `voice` | voice conversations; must always get an answer (invariant 6) | worker (`internal/queue.Consumer`) | 10 | — |
+| `fix` | hot-fix jobs; the scheduler drains it right after voice | worker | — | — |
+| `image` | photo generation requests; the worker re-ingests them as `photo`-tagged agent jobs, so the swap window runs them as code (`docs/brain-swap.md`) | worker | 10 | — |
+| `coding` | coding jobs to the model | worker | 5 | — |
+| `background` | everything else; `plan_epic` jobs ride here at priority 10 (`PlanEpicPriority`) so plans queue ahead of the rest | worker | 10 | — |
+| `jobs.gpu` / `jobs.cpu` / `jobs.igpu` | execution jobs placed by `internal/placement` from free VRAM/RAM | task-runner (LocationWorkers); publishers: plane-bridge (board `run_task` jobs) and the worker's LocationPublisher | — | — |
+| `flow.<name>` | event-driven handoff between models across rounds (The pattern below); created on demand, one per flow | the round that created it — read with `jarvis-mq peek` / `consume` | — | `jarvis.dlx` |
+| `cap.<capability>` | request channel for a capability — v2 messages, e.g. `cap.image.generate`; created on demand; the result goes to the request's `reply_to`, not here | the capability's worker (capworker SDK, EVB-19, Phase 3 — nothing consumes these yet) | — | `jarvis.dlx` |
+| `dead` | dead letters from `flow.*`/`cap.*`: rejected (nack without requeue after the `MaxAttempts` budget) or expired (TTL), each carrying an `x-death` header (reason, queue, count, time) | nobody consumes it — the dashboard's Dead Letters section reads it and offers requeue / drop | — | — |
+| `events` (topic) | lifecycle events: `job.<capability>.<started\|progress\|done\|failed>`, `agent.<job-id>.<yielded\|woken\|resumed>`, `window.<opened\|closed>`, `lease.<granted\|released\|denied>` | publishers: worker (the jobs it runs), task-runner (`job.run_task.*`), agent-run (`agent.*`); declared by `definitions.json` + `EventPublisher` | — | — |
+| `jarvis.dlx` (fanout) | the dead-letter exchange — fanout, so every dead letter lands on its single bound queue, `dead` | `EnsureDLX` (called from every `flow.*`/`cap.*` declare and dead-letter operation) | — | — |
+
+Notes:
+
+- **Worker queues** (`voice` … `background`) are declared, bound and
+  consumed by the worker's consumer (prefetch 1, manual ack). They are in
+  `definitions.json` so a broker restart re-creates them before the worker
+  comes back; the worker's own declares are the same args, so the two
+  coexist (a redeclare with different args would 406). Priority is the
+  `x-max-priority` queue argument — within a queue, AMQP delivers
+  higher-priority messages first. `fix` has none: it is a plain durable
+  queue (EVB-11 added it to `definitions.json`; the worker has always
+  declared it at runtime).
+- **Location queues** (`jobs.*`) are in `definitions.json` and consumed by
+  the task-runner; the game-pause gate pauses/resumes `jobs.gpu`.
+- **`flow.*` and `cap.*` are never in `definitions.json`** — every round
+  can spawn its own, so they are created on demand (declare + bind before
+  publish) and deleted by hand. They alone carry the DLX argument
+  (`x-dead-letter-exchange=jarvis.dlx`); the worker- and location-owned
+  queues do not — a message the worker nacks there is dropped and logged,
+  and the dead-letter guarantee (invariant 9) covers `flow.*` and `cap.*`.
+- **`dead` is a mailbox, not a queue**: read get-style so listing never
+  destroys a dead letter (`ListDead`), `RequeueDead` republishes to the
+  queue named in `x-death` (recreated if it is gone), `DropDead` discards.
+- **Events are fire-and-forget and never the source of truth** — a lost
+  event is acceptable, so publishing one never blocks or fails the
+  emitting job.
 
 ## The pattern
 
@@ -41,6 +89,69 @@ result back; the first model's next round consumes it and continues.
   agent-job id when it ingests `kind=agent`). `jarvis-mq` defaults to
   `mq-<unix>-<6 random hex>`; the superagent tool uses `sa-<unix>-<suffix>`.
   Never reuse a fixed id.
+- **Nothing disappears silently** (EVB-10): every `flow.*`/`cap.*` queue is
+  declared with `x-dead-letter-exchange=jarvis.dlx`, so the broker itself
+  routes a message to the durable `dead` queue when a consumer rejects it
+  (nack without requeue — the delivery budget is `MaxAttempts`, the count
+  rides in the `x-attempts` header) or when a per-message TTL expires.
+  Each dead letter carries an `x-death` header (reason, original queue,
+  time); the dashboard's Dead Letters section lists them and can requeue
+  one back to its original queue (recreated if it is gone) or drop it.
+  A message is either processed, dead-lettered with a reason, or requeued.
+
+## Capability envelope (v2)
+
+The v2 envelope (plan §3.3) is how a round or worker *requests a capability*
+from another model and *receives its result*. Every field is `omitempty`, so a
+v1 message still encodes byte-for-byte, and a v2 field that is unset stays out
+of both the JSON and the AMQP properties.
+
+- `capability` — dotted name of the work (`image.generate`, `voice.tts`, …);
+  the worker for that capability picks the job up.
+- `correlation_id` — the request's unique id; the result is keyed by it.
+  **Mirrored onto the native AMQP `correlation_id` property** so the broker's
+  logs, the CLI, and a Python worker see the same value the JSON body carries.
+- `reply_to` — the queue (or flow) the result is published to. **Mirrored
+  onto the native AMQP `reply_to` property.**
+- `wake_job` / `parent_job` — the job to wake when the result lands / the job
+  this one is part of.
+- `input` (map) / `input_refs` (paths) — the request's arguments and any input
+  files, **by path, never by bytes**.
+- `out_dir` — where the worker writes its artifacts.
+- `location` — `gpu` | `igpu` | `cpu` | `remote:<host>`.
+- `resources` — `{vram_mb, ram_mb}` the request expects to need.
+- `deadline` — when the request expires.
+- `attempt` — which delivery this is (0 for the first).
+- `v` — the envelope schema version, `2`.
+
+The **result** is a small separate message (`queue.Result`) published to
+`reply_to`, keyed by `correlation_id`:
+
+- `status` — `ok` | `error` | `timeout` | `cancelled`.
+- `artifacts` — **paths, never bytes** (results by reference, plan invariant 7).
+  A result points at files on disk instead of carrying the bytes, so it stays
+  small and any consumer can pull the actual bytes when it needs them.
+- `summary`, `data` — a human line and structured extras.
+- `worker`, `model` — who did the work.
+- `started_at` / `finished_at`, `error`.
+
+### Idempotency by correlation_id
+
+A request may be delivered more than once (redelivery, requeue, a worker that
+crashed after starting). Handlers are idempotent by **`correlation_id`** using
+a done-marker file in the request's `out_dir`:
+
+    <out_dir>/.done-<correlation_id>
+
+- Before doing the work, a handler checks whether
+  `<out_dir>/.done-<corr>` already exists; if it does, the work counts as
+  already done (a re-delivery) and the handler skips re-doing it.
+- After finishing (success **or** a terminal error), the handler writes the
+  marker, so any later redelivery is a no-op.
+
+`queue.DoneMarker(outDir, corr)` returns that path so every handler computes
+it identically. The capworker SDK (EVB-19) implements the check-then-write;
+this task fixes only the convention and the path helper.
 
 ## CLI
 
@@ -56,11 +167,26 @@ result back; the first model's next round consumes it and continues.
     jarvis-mq purge flow.avatar           # drop the messages, keep the queue
     jarvis-mq delete flow.avatar          # drop the queue too
 
-Guards: publishing to a queue that is neither `flow.*` nor a known queue is
-refused (the topic exchange would silently drop it), as is `delete` of a
-worker-owned queue (voice, fix, coding, background, jobs.*, image).
+Capability requests (envelope v2) publish to a `cap.<capability>` queue,
+which is created on demand. Any v2 field marks the message v2 (`"v": 2`);
+unset fields stay out of the JSON and the AMQP properties:
+
+    jarvis-mq publish cap.image.generate --capability image.generate \
+        --correlation abc123 --reply-to flow.job-42 \
+        --wake-job job-42 --input-ref ~/.local/share/jarvis/artifacts/job-42/prompt.txt \
+        --out-dir ~/.local/share/jarvis/artifacts/job-42/ \
+        --location igpu --deadline 2026-11-08T18:00:00Z
+    jarvis-mq tail events 'job.#'         # watch lifecycle events on a temp queue
+
+v2 flags: `--capability`, `--correlation`, `--reply-to`, `--wake-job`,
+`--parent-job`, `--location`, `--out-dir`, `--input-ref` (repeatable).
 `--driver/--class/--effort` map onto the agent-job fields so a published
 `kind=agent` message carries its routing.
+
+Guards: publishing to a queue that is neither `flow.*`, `cap.*` nor a known
+queue is refused (the topic exchange would silently drop it), as is `delete`
+of a worker-owned queue (voice, fix, coding, background, jobs.*, image) or
+of a capability queue (`cap.*`).
 
 ## In-process (superagent)
 
@@ -70,8 +196,22 @@ running agent can hand work to another model mid-run without shelling out.
 
 ## Code
 
+- `internal/queue/message.go` — the `Message` struct (v1 + v2 envelope fields),
+  `Resources`, the `Result` type, the result-status constants, and
+  `DoneMarker` (the idempotency marker path).
+- `internal/queue/encoding.go` — `encodeMessage`/`DecodeMessage`,
+  `EncodeResult`/`DecodeResult`, and `newPublishing` (builds the AMQP
+  envelope and mirrors `correlation_id`/`reply_to` onto the properties).
 - `internal/queue/flow.go` — `FlowQueueName`, `IsFlowQueue`,
   `EnsureFlowQueue`, `PublishFlow` (confirm-mode, waits for the broker ack),
   `PopFlow`, `PeekFlow`, `PurgeFlow`, `DeleteFlow`.
+- `internal/queue/cap.go` — `CapQueueName`, `IsCapQueue`, `EnsureCapQueue`
+  (on-demand declare + bind, DLX args — the request side of the v2
+  envelope).
+- `internal/queue/events.go` — the `events` exchange: `Event`, the
+  `JobEvent`/`AgentEvent`/`WindowEvent`/`LeaseEvent` builders, and the
+  fire-and-forget `EventPublisher`.
+- `internal/queue/dlx.go` — `EnsureDLX`, the `dead` queue, the
+  `x-attempts` delivery budget, and `ListDead`/`RequeueDead`/`DropDead`.
 - `cmd/jarvis-mq/main.go` — the CLI above.
 - `internal/superagent/tools.go` — `runMQ`, the in-process tool.

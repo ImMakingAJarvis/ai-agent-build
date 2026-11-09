@@ -106,6 +106,25 @@ func run(log *slog.Logger) error {
 	defer conn.Close()
 	log.Info("connected to rabbitmq")
 
+	// Lifecycle events (plan §3.4): job.run_task.* for the cards this
+	// service drives. Fire-and-forget — a failed event is logged, never
+	// fatal to the run.
+	events, err := queue.NewEventPublisher(conn, "task-runner")
+	if err != nil {
+		log.Warn("events publisher unavailable (events disabled)", "err", err)
+		events = nil
+	} else {
+		defer events.Close()
+	}
+	emitEvent := func(e queue.Event) {
+		if events == nil {
+			return
+		}
+		if err := events.Publish(ctx, e); err != nil {
+			log.Warn("publish event", "key", e.RoutingKey(), "err", err)
+		}
+	}
+
 	// Placement at run time: live memory readings plus the box locations
 	// detected at boot (the runner re-decides, so a bridge placement made
 	// under different VRAM pressure is not binding).
@@ -155,11 +174,14 @@ func run(log *slog.Logger) error {
 			// and requeueing would loop forever.
 			log.Error("run_task message rejected", "job", msg.ID, "err", err)
 			settle(msg, agentjob.State{Status: agentjob.Failed, Error: err.Error(), FinishedAt: now()})
+			emitEvent(queue.JobEventWith(msg, "run_task", "failed", map[string]any{"error": err.Error()}))
 			return nil
 		}
 		log.Info("run_task picked up", "job", msg.ID, "item", job.Item.ID,
 			"name", job.Item.Name, "model", job.ModelID())
 		settle(msg, agentjob.State{Status: agentjob.Running, PID: os.Getpid(), StartedAt: now()})
+		emitEvent(queue.JobEventWith(msg, "run_task", "started",
+			map[string]any{"item": job.Item.ID, "model": job.ModelID(), "lane": msg.Type}))
 
 		res, err := runner.Run(ctx, job)
 		switch {
@@ -169,25 +191,32 @@ func run(log *slog.Logger) error {
 			// catch-up re-triggers it (terminal entry + card state).
 			log.Error("run_task failed", "job", msg.ID, "err", err)
 			settle(msg, agentjob.State{Status: agentjob.Failed, Error: err.Error(), FinishedAt: now()})
+			emitEvent(queue.JobEventWith(msg, "run_task", "failed", map[string]any{"error": err.Error()}))
 		case res.Waiting:
 			// Deps not done (or cloud, not wired yet): the card stays
 			// Ready; skipped is the terminal "settled without a verdict"
 			// state, so the bridge's next catch-up re-triggers the job.
 			log.Info("run_task waiting", "job", msg.ID, "why", res.Summary)
 			settle(msg, agentjob.State{Status: agentjob.Skipped, Summary: res.Summary, FinishedAt: now()})
+			emitEvent(queue.JobEventWith(msg, "run_task", "progress", map[string]any{"waiting": res.Summary}))
 		case res.Blocked:
 			log.Info("run_task blocked", "job", msg.ID, "why", res.Summary)
 			settle(msg, agentjob.State{
 				Status: agentjob.Done, Summary: "blocked: " + res.Summary,
 				Error: res.Error, FinishedAt: now(),
 			})
+			emitEvent(queue.JobEventWith(msg, "run_task", "failed",
+				map[string]any{"blocked": true, "reason": res.Summary}))
 		case res.Passed:
 			log.Info("run_task done", "job", msg.ID, "summary", res.Summary)
 			settle(msg, agentjob.State{Status: agentjob.Done, Summary: res.Summary, FinishedAt: now()})
+			emitEvent(queue.JobEventWith(msg, "run_task", "done", map[string]any{"summary": res.Summary}))
 		default:
 			log.Error("run_task ended without a result", "job", msg.ID)
 			settle(msg, agentjob.State{Status: agentjob.Failed,
 				Error: "run ended without a result", FinishedAt: now()})
+			emitEvent(queue.JobEventWith(msg, "run_task", "failed",
+				map[string]any{"error": "run ended without a result"}))
 		}
 		return nil
 	}

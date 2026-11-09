@@ -37,7 +37,7 @@
 {{define "agent-job-row"}}
 <tr>
   <td title="{{ .ID }}">{{ .ID }} — {{ .Title }}</td>
-  <td>{{ .Status }}</td>
+  <td>{{ waitStatus . }}</td>
   <td>{{ if .RanWith }}{{ .RanWith }}{{ else }}{{ .Spec.Driver }}{{ end }}</td>
   <td class="cost-cell">{{ if .Kwh }}⚡ {{ formatKwh .Kwh }} &middot; {{ formatCost .PowerCost }}{{ else }}-{{ end }}</td>
   <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>

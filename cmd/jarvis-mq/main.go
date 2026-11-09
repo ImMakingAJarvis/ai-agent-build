@@ -18,6 +18,9 @@
 //	jarvis-mq queues
 //	jarvis-mq purge flow.avatar              # drop the messages, keep the queue
 //	jarvis-mq delete flow.avatar             # drop the queue too
+//	jarvis-mq event job.photo.started --source worker
+//	jarvis-mq tail events                    # follow all lifecycle events
+//	jarvis-mq tail events 'job.#' -n 5       # stop after five job.* events
 package main
 
 import (
@@ -33,11 +36,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
@@ -63,6 +69,10 @@ func main() {
 		err = runPurge(os.Args[2:])
 	case "delete":
 		err = runDelete(os.Args[2:])
+	case "event":
+		err = runEvent(os.Args[2:])
+	case "tail":
+		err = runTail(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -78,13 +88,22 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `jarvis-mq — RabbitMQ publish/consume for event-driven work (docs/event-driven.md)
 
-  publish <queue> [flags]   publish one message (flow.<name> queues are created on demand)
+  publish <queue> [flags]   publish one message (flow.<name> and cap.<cap> queues are created on demand)
   consume <queue> [-n N]    pop up to N messages (default 1), acking them
   peek <queue> [-n N]       show up to N messages without removing them
   depth <queue>             number of ready messages
   queues                    list all queues with their depths
   purge <queue>             remove all messages, keep the queue
   delete <queue>            delete the queue
+  event <routing-key> [flags]  publish one lifecycle event to the events exchange
+  tail <exchange> [pattern]   follow lifecycle events (pattern default "#")
+
+event flags:
+  --source S                source tag (default jarvis-mq)
+  --job-id J                job id (defaults to the agent.<job-id> subject)
+  --data k=v                event data key (repeatable)
+tail flags:
+  -n N                      stop after N events (0 = follow until Ctrl-C)
 
 publish flags:
   --kind agent              agent job (ingested into the job store by the worker)
@@ -101,8 +120,25 @@ publish flags:
   --effort E                reasoning effort (off, low, medium, high, xhigh, max)
   --priority N              AMQP priority (ignored on non-priority queues)
   --source S                source tag (default jarvis-mq)
+  --capability C            capability requested (image.generate, ...) — envelope v2
+  --correlation C           correlation id tying the request to its result — v2
+  --reply-to Q              queue (or flow) the result is published to — v2
+  --wake-job J              agentjob id to wake when the result lands — v2
+  --parent-job J            id of the job that submitted this one — v2
+  --location L              pin the work to a device (gpu | igpu | cpu | remote:<host>) — v2
+  --out-dir D               where the worker writes its artifacts — v2
+  --input-ref P             input file or dir the worker reads, by path — v2, repeatable
 `)
 	os.Exit(2)
+}
+
+// stringListFlag collects repeatable string flags (e.g. --input-ref).
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return strings.Join(*s, ", ") }
+func (s *stringListFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
 }
 
 // payloadFlag collects repeatable --payload k=v pairs.
@@ -170,6 +206,18 @@ func runPublish(args []string) error {
 	effort := fs.String("effort", "", "reasoning effort")
 	priority := fs.Int("priority", 1, "AMQP priority")
 	source := fs.String("source", "jarvis-mq", "source tag")
+	// Envelope v2 (plan §3.3): capability request fields. Setting any of
+	// them marks the message v2 (v=2); an unset field stays out of the JSON
+	// and the AMQP properties (omitempty).
+	capability := fs.String("capability", "", "capability requested (image.generate, ...) — makes the message v2")
+	correlation := fs.String("correlation", "", "correlation id tying the request to its result — v2")
+	replyTo := fs.String("reply-to", "", "queue (or flow) the result is published to — v2")
+	wakeJob := fs.String("wake-job", "", "agentjob id to wake when the result lands — v2")
+	parentJob := fs.String("parent-job", "", "id of the job that submitted this one — v2")
+	location := fs.String("location", "", "pin the work to a device: gpu | igpu | cpu | remote:<host> — v2")
+	outDir := fs.String("out-dir", "", "where the worker writes its artifacts — v2")
+	inputRefs := &stringListFlag{}
+	fs.Var(inputRefs, "input-ref", "input file or dir the worker reads, by path — v2, repeatable")
 	q, err := takeQueue(fs, args)
 	if err != nil {
 		return err
@@ -200,11 +248,43 @@ func runPublish(args []string) error {
 	if *effort != "" {
 		m.ReasoningEffort = *effort
 	}
+	// Envelope v2: set the request fields and mark the envelope v2. Any v2
+	// field makes the message a capability request (plan §3.3).
+	if *capability != "" {
+		m.Capability = *capability
+	}
+	if *correlation != "" {
+		m.CorrelationID = *correlation
+	}
+	if *replyTo != "" {
+		m.ReplyTo = *replyTo
+	}
+	if *wakeJob != "" {
+		m.WakeJob = *wakeJob
+	}
+	if *parentJob != "" {
+		m.ParentJob = *parentJob
+	}
+	if *location != "" {
+		m.Location = *location
+	}
+	if *outDir != "" {
+		m.OutDir = *outDir
+	}
+	if len(*inputRefs) > 0 {
+		m.InputRefs = *inputRefs
+	}
+	if m.Capability != "" || m.CorrelationID != "" || m.ReplyTo != "" || m.WakeJob != "" ||
+		m.ParentJob != "" || m.Location != "" || m.OutDir != "" || len(m.InputRefs) > 0 {
+		m.SchemaVersion = 2
+	}
 	// A message must carry something its consumer will read: the job text
-	// (--instructions), a legacy prompt, context left for a later round, or
-	// --payload entries (a result message is often payload-only).
-	if m.Instructions == "" && m.Payload["prompt"] == "" && m.Payload["context"] == "" && len(m.Payload) == 0 {
-		return fmt.Errorf("give the message something: --prompt, --instructions, --context, or --payload")
+	// (--instructions), a legacy prompt, context left for a later round,
+	// --payload entries (a result message is often payload-only), or a v2
+	// capability field (the request's arguments ride on Input/InputRefs).
+	if m.Instructions == "" && m.Payload["prompt"] == "" && m.Payload["context"] == "" &&
+		len(m.Payload) == 0 && m.SchemaVersion == 0 {
+		return fmt.Errorf("give the message something: --prompt, --instructions, --context, --payload, or a --capability field")
 	}
 
 	conn, err := newConn()
@@ -213,15 +293,26 @@ func runPublish(args []string) error {
 	}
 	defer conn.Close()
 
-	// Flow queues are created on demand; known queues (voice, fix, ... and
-	// jobs.*) already exist and are published to with the standard routing
-	// key. A message to an unknown non-flow queue would be dropped by the
-	// topic exchange (unbound routing key), so refuse it.
+	// Flow and capability queues are created on demand (both carry the
+	// dead-letter args, EVB-10); known queues (voice, fix, ... and jobs.*)
+	// already exist and are published to with the standard routing key. A
+	// message to an unknown non-flow queue would be dropped by the topic
+	// exchange (unbound routing key), so refuse it.
 	if queue.IsFlowQueue(q) {
 		if err := conn.PublishFlow(context.Background(), q, m); err != nil {
 			return err
 		}
 		fmt.Printf("published %s → %s (flow queue created on demand)\n", m.ID, q)
+		return nil
+	}
+	if queue.IsCapQueue(q) {
+		if err := conn.EnsureCapQueue(q); err != nil {
+			return err
+		}
+		if err := conn.Publish(m, q+".default"); err != nil {
+			return err
+		}
+		fmt.Printf("published %s → %s (capability queue created on demand)\n", m.ID, q)
 		return nil
 	}
 	for _, wq := range workerOwnedQueues {
@@ -233,7 +324,7 @@ func runPublish(args []string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("queue %q is not a flow queue (flow.*) or a known queue; the exchange would drop it", q)
+	return fmt.Errorf("queue %q is not a flow queue (flow.*), a capability queue (cap.*), or a known queue; the exchange would drop it", q)
 }
 
 func runConsume(args []string) error {
@@ -437,6 +528,12 @@ func runDelete(args []string) error {
 			return fmt.Errorf("refusing to delete worker-owned queue %q", q)
 		}
 	}
+	if queue.IsCapQueue(q) {
+		// Capability queues hold in-flight requests for a capability worker
+		// (capworker SDK, EVB-19) — same reason worker-owned queues are
+		// protected: deleting one loses a delivery.
+		return fmt.Errorf("refusing to delete capability queue %q", q)
+	}
 	conn, err := newConn()
 	if err != nil {
 		return err
@@ -447,4 +544,151 @@ func runDelete(args []string) error {
 	}
 	fmt.Printf("deleted %s\n", q)
 	return nil
+}
+
+// runEvent publishes one lifecycle event to the events exchange
+// (plan §3.4). The routing key is the first argument, so
+// "jarvis-mq event agent.plan-x.resumed --source agent-run" reads like
+// the key family it publishes.
+func runEvent(args []string) error {
+	fs := flag.NewFlagSet("event", flag.ExitOnError)
+	source := fs.String("source", "jarvis-mq", "source tag")
+	jobID := fs.String("job-id", "", "job id (defaults to the agent.<job-id> subject)")
+	data := &payloadFlag{}
+	fs.Var(data, "data", "event data key (repeatable)")
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("the routing key is the first argument: jarvis-mq event <routing-key> [flags]")
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected extra argument %q", fs.Arg(0))
+	}
+	kind, subject, state, err := queue.ParseEventRoutingKey(args[0])
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case queue.JobKind, queue.AgentKind, queue.WindowKind, queue.LeaseKind:
+	default:
+		return fmt.Errorf("unknown event kind %q (want job, agent, window or lease)", kind)
+	}
+	e := queue.Event{Kind: kind, Subject: subject, State: state, Source: *source}
+	if *jobID != "" {
+		e.JobID = *jobID
+	} else if kind == queue.AgentKind {
+		e.JobID = subject
+	}
+	if len(*data) > 0 {
+		e.Data = make(map[string]any, len(*data))
+		for k, v := range *data {
+			e.Data[k] = v
+		}
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	p, err := queue.NewEventPublisher(conn, *source)
+	if err != nil {
+		return err
+	}
+	defer p.Close()
+	if err := p.Publish(context.Background(), e); err != nil {
+		return err
+	}
+	fmt.Printf("event published: %s (source=%s)\n", e.RoutingKey(), e.Source)
+	return nil
+}
+
+// runTail follows lifecycle events: a temporary auto-delete queue bound
+// to the exchange with the pattern, one line per event. With -n N it
+// stops after N events (the Phase 1 gate's "events visible" check); with
+// -n 0 it follows until Ctrl-C.
+func runTail(args []string) error {
+	fs := flag.NewFlagSet("tail", flag.ExitOnError)
+	n := fs.Int("n", 0, "stop after N events (0 = follow until Ctrl-C)")
+	// Two positionals (exchange, pattern) before the flags, same
+	// convention as takeQueue — split at the first flag.
+	pos, flgs := args, []string(nil)
+	for i, a := range args {
+		if strings.HasPrefix(a, "-") {
+			pos, flgs = args[:i], args[i:]
+			break
+		}
+	}
+	if err := fs.Parse(flgs); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || len(pos) < 1 || len(pos) > 2 {
+		return fmt.Errorf("usage: jarvis-mq tail <exchange> [pattern] [-n N]")
+	}
+	exchange := pos[0]
+	pattern := "#"
+	if len(pos) == 2 {
+		pattern = pos[1]
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	ch, err := conn.NewChannel()
+	if err != nil {
+		return err
+	}
+	defer ch.Close()
+	// Declare the exchange too: it is durable (definitions.json), but a
+	// tail run on a broker that restarted before any publisher booted
+	// would otherwise fail the bind.
+	if err := ch.ExchangeDeclare(exchange, "topic", true, false, false, false, nil); err != nil {
+		return fmt.Errorf("declare exchange %s: %w", exchange, err)
+	}
+	b := make([]byte, 3)
+	rand.Read(b)
+	name := "jarvis-mq.tail." + strconv.FormatInt(time.Now().Unix(), 10) + "-" + hex.EncodeToString(b)
+	if _, err := ch.QueueDeclare(name, false, true, false, false, nil); err != nil {
+		return err
+	}
+	if err := ch.QueueBind(name, pattern, exchange, false, nil); err != nil {
+		return fmt.Errorf("bind %s: %w", name, err)
+	}
+	dels, err := ch.Consume(name, "", false, true, false, false, nil)
+	if err != nil {
+		return err
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	count := 0
+	for {
+		select {
+		case <-sig:
+			fmt.Fprintf(os.Stderr, "%d event(s) seen\n", count)
+			return nil
+		case d, ok := <-dels:
+			if !ok {
+				return nil
+			}
+			printEvent(d)
+			count++
+			if *n > 0 && count >= *n {
+				return nil
+			}
+		}
+	}
+}
+
+func printEvent(d amqp.Delivery) {
+	e, err := queue.DecodeEvent(d.Body)
+	if err != nil {
+		fmt.Printf("=== %s (not a queue.Event: %v)\n%s\n", d.RoutingKey, err, string(d.Body))
+		return
+	}
+	fmt.Printf("=== %s (source=%s", d.RoutingKey, e.Source)
+	if e.JobID != "" {
+		fmt.Printf(" job=%s", e.JobID)
+	}
+	fmt.Printf(" at=%s)\n%s\n", e.At.UTC().Format(time.RFC3339), string(d.Body))
 }

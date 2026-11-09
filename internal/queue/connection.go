@@ -159,18 +159,12 @@ func (c *Conn) Publish(m Message, routingKey string) error {
 	ch := c.channel
 	c.mu.Unlock()
 
-	body, err := encodeMessage(m)
+	pub, err := newPublishing(m, uint8(m.Priority))
 	if err != nil {
 		return fmt.Errorf("encode job %s: %w", m.ID, err)
 	}
 
-	return ch.PublishWithContext(context.Background(), c.exchange, routingKey, false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		Body:         body,
-		Priority:     uint8(m.Priority),
-		DeliveryMode: amqp.Persistent,
-		Timestamp:    m.CreatedAt,
-	})
+	return ch.PublishWithContext(context.Background(), c.exchange, routingKey, false, false, pub)
 }
 
 // WaitForReady blocks until the connection is open and the channel is usable.

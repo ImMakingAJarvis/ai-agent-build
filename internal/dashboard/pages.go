@@ -69,14 +69,17 @@ func rankAgentStatus(status string) int {
 		return 0
 	case agentjob.Claimed:
 		return 1
-	case agentjob.Ready:
+	case agentjob.Waiting:
+		// In flight, parked on external work — above the not-yet-started.
 		return 2
-	case agentjob.Paused:
+	case agentjob.Ready:
 		return 3
-	case agentjob.Failed:
+	case agentjob.Paused:
 		return 4
-	default:
+	case agentjob.Failed:
 		return 5
+	default:
+		return 6
 	}
 }
 

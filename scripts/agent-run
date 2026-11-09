@@ -199,7 +199,12 @@ if (( resume )); then
   # owner-message hook injects queue-site messages into this round too.
   resume_p="$(resume_prompt "carry on with what you were doing, following the same rules as before.")"
   if [[ -f "$CONF/current-job" ]]; then
-    JARVIS_JOB_ID="$(cat "$CONF/current-job")" run_claude "$m" 1 "$resume_p"; status=$?
+    # The rebooted round is a queued job: it resumes now — an agent.<job-id>.resumed
+    # lifecycle event (plan §3.4). Fire-and-forget: a failed event must not
+    # stop the resume.
+    jid="$(cat "$CONF/current-job")"
+    jarvis-mq event "agent.$jid.resumed" --source agent-run --job-id "$jid" --data reason=reboot || true
+    JARVIS_JOB_ID="$jid" run_claude "$m" 1 "$resume_p"; status=$?
   else
     run_claude "$m" 1 "$resume_p"; status=$?
   fi
@@ -555,6 +560,13 @@ $q"); then
   fi
 
   rm -f "$CONF/current-job"
+  # Announce job completion via Home Assistant TTS if the switch is on
+  # and the owner is home. jarvis-homeai handles switch + presence checks.
+  if [[ $status -eq 0 ]] && command -v jarvis-homeai >/dev/null 2>&1; then
+    announce_msg="I have finished working on $job_title"
+    jarvis-homeai announce "$announce_msg" &
+    # Run in background so it does not block the checkpoint question.
+  fi
   # A !restart during the run re-queued the job for a fresh conversation.
   if [[ "$job_status" == "ready" ]]; then
     msg="!restart: ${job_id} is back in the queue — it runs next in a fresh conversation."
