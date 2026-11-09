@@ -27,7 +27,7 @@ alongside the current brain).
 
 | Handler | Model | Where | Speed (measured) | Role |
 |---|---|---|---|---|
-| `jarvis-engine-igpu` | Qwen2.5-3B Q4_K_M (2 GB) | iGPU Vulkan1, port 11435 | 13.55 tg / 116.7 pp tok/s | always-on helper, zero CPU cost |
+| `jarvis-engine-igpu` | Qwen2.5-3B Q4_K_M (2 GB) | iGPU Vulkan (container `jarvis-engine-igpu`; `-dev Vulkan0` in-container, `Vulkan1` on the host), port 11435 | 13.55 tg / 116.7 pp tok/s | always-on helper, zero CPU cost |
 | `jarvis-engine` (brain) | qwen3.8 27B Q4_K_M (16 GB) | 4090, port 11434 | ~48–103 tg tok/s | the agent itself |
 | CPU | — | 7800X3D, 16 threads, 128 GB RAM | 22.94 tg tok/s (3B) | currently unused for models |
 

@@ -17,10 +17,12 @@ Assistant box (**111.1.2.200**) and Plane (**111.1.2.222:8088**).
    ▲      DMs,        │  !build/!fix/!photo/!automode… (daemon commands)     │
    │      buttons     │  plain language → brain (Hermes actions)             │
    │                  ▼                                                      │
-   │        ┌─ brain: llama.cpp "jarvis-brain" 127.0.0.1:11434 (host unit) ─┼─┐
-   │        │   (qwen3.8, 128k ctx, 2 slots, ~22 GB VRAM)                    │ │
-   │        └─ iGPU helper: Qwen2.5-3B 0.0.0.0:11435 (jarvis-helper,         │ │
-   │            chat/voice fallback while a job is running)                  │ │
+   │        ┌─ brain: llama.cpp "jarvis-brain" 127.0.0.1:11434               ─┼─┐
+   │        │   (qwen3.8, 128k ctx, 2 slots, ~22 GB VRAM; container          │ │
+   │        │    jarvis-engine)                                              │ │
+   │        └─ iGPU helper: Qwen2.5-3B 127.0.0.1:11435 (container            │ │
+   │            jarvis-engine-igpu; jarvis-helper, chat/voice fallback       │ │
+   │            while a job is running; stays up through swap windows)       │ │
    │                                                                         ▼ │
    │   agent-run (host systemd — "the agent" = Claude Code rounds) ◄── jarvis-jobs next
    │   pulls jobs ─────────────────────────────────────────────► agentjob store
@@ -69,6 +71,8 @@ Layers, top to bottom:
 
 | Model | Where | Serves | Notes |
 |---|---|---|---|
+| **jarvis-brain** — qwen3.8 GGUF, 128k ctx, 2 parallel slots, q4_0 KV | llama.cpp on the 4090, **127.0.0.1:11434** (docker container `jarvis-engine`) | the agent's rounds, chat, voice, Hermes classification, `jarvis-discord ask` reasoning | ~22 GB VRAM resident; slots saved under `/var/lib/jarvis/slots`. Binary/model/templates pinned at `/opt/jarvis-engine` |
+| **jarvis-igpu** — Qwen2.5-3B Q4_K_M, Vulkan on the Ryzen iGPU, 32k ctx | llama.cpp, **127.0.0.1:11435** (docker container `jarvis-engine-igpu`, compose service `engine-igpu`) | `jarvis-helper` CLI (setup questions, self-restart), **worker-busy fallback** for chat/voice LLM calls, `igpu` driver rounds | costs zero CPU cores; containers reach it by container name on the compose network (`http://jarvis-engine-igpu:11435`), the host via the published port. Own container + port, `restart: unless-stopped` — stays up through photo swap windows. Model: `/opt/jarvis-igpu/models/jarvis-igpu.gguf` |
 | **jarvis-brain** — qwen3.8 GGUF, 128k ctx, 2 parallel slots, q4_0 KV | llama.cpp on the 4090, **127.0.0.1:11434** (compose container `jarvis-engine` — the only brain deployment; host unit removed 2026-11-06, PR #184) | the agent's rounds, chat, voice, Hermes classification, `jarvis-discord ask` reasoning | ~22 GB VRAM resident; slots saved under `/var/lib/jarvis/slots`. Binary/model/templates pinned at `/opt/jarvis-engine` |
 | **jarvis-igpu** — Qwen2.5-3B Q4_K_M, Vulkan on the Ryzen iGPU, 32k ctx | llama.cpp, **0.0.0.0:11435** (compose container `jarvis-engine-igpu`; old host unit disabled) | `jarvis-helper` CLI (setup questions, self-restart), **worker-busy fallback** for chat/voice LLM calls, `igpu` driver rounds | costs zero CPU cores; containers reach it by name (`jarvis-engine-igpu:11435`) or via `host.docker.internal:11435`. Model: `/opt/jarvis-igpu/models/jarvis-igpu.gguf` |
 | **MoE bench engine** | unit `jarvis-moe-engine` (**disabled**) | VRAM-sweep benchmark rounds | started per-sweep by the benchmark driver |
@@ -233,11 +237,12 @@ safe (missing/corrupt value reads as off).
 | Service (container) | What it does | Host port | Talks to | Talked to by |
 |---|---|---|---|---|
 | `engine` (`jarvis-engine`) | brain llama-server (see §2) + `/metrics` for Prometheus | 127.0.0.1:11434 (in compose; see §8 deviation) | n/a (mounts `/opt/jarvis-engine`, CUDA libs, slots) | chat, voice, ha, worker via `engine:11434` (intended); Prometheus `llama_engine` job |
-| `chat` (`jarvis-chat`) | Discord bot daemon (§3) | — (Discord WSS) | brain (intended `engine:11434`), iGPU fallback :11435, memory :8101, art :8120, Redis (NoBrakes flags), agentjob store (mounted) | Nathan's DMs; writes `notes/conversations/discord-*.md` |
-| `voice` (`jarvis-voice`) | voice pipeline: `/voice`, `/chat`, `/stt`, `/tts` (faster-whisper small → brain → edge-tts), tool loop (`schedule_job`, `search_jobs`), browser mic UI + mobile PWA at `/app` | 8100 (LAN, HTTP), 8443 (LAN, HTTPS) | brain `engine:11434` (intended), iGPU fallback :11435, memory :8101, agentjob store (ro, busy signal), `jarvis-jobs` CLI | HA `jarvis_voice` integration + HA satellites (wake+STT POST); LAN browsers/phones |
+| `engine-igpu` (`jarvis-engine-igpu`) | iGPU helper llama-server (see §2) + `/metrics`; own container + port, `restart: unless-stopped` — photo swap windows stop `engine` only | 127.0.0.1:11435 | n/a (bind-mounts `/opt/jarvis-igpu` ro — the pinned Vulkan binary + model — and `/dev/dri`; no NVIDIA ICD, so the iGPU is its only Vulkan device) | chat, voice, dashboard, token-ledger via `engine-igpu:11435`; the worker routes the registry's 11435 endpoint here (`IGPU_URL`); the host via the published port (`jarvis-helper`, `igpu` driver rounds, watchdog) |
+| `chat` (`jarvis-chat`) | Discord bot daemon (§3) | — (Discord WSS) | brain (intended `engine:11434`), iGPU fallback `engine-igpu:11435`, memory :8101, art :8120, Redis (NoBrakes flags), agentjob store (mounted) | Nathan's DMs; writes `notes/conversations/discord-*.md` |
+| `voice` (`jarvis-voice`) | voice pipeline: `/voice`, `/chat`, `/stt`, `/tts` (faster-whisper small → brain → edge-tts), tool loop (`schedule_job`, `search_jobs`), browser mic UI + mobile PWA at `/app` | 8100 (LAN, HTTP), 8443 (LAN, HTTPS) | brain `engine:11434` (intended), iGPU fallback `engine-igpu:11435`, memory :8101, agentjob store (ro, busy signal), `jarvis-jobs` CLI | HA `jarvis_voice` integration + HA satellites (wake+STT POST); LAN browsers/phones |
 | `dashboard` (`jarvis-dashboard`) | web dashboard: agent jobs, live job streams (tail via Redis), kanban API (`/api/kanban/*`), Stop work / Talk box, PWA | 8080 (LAN) | agentjob store (mounted), Redis streams, brain `engine:11434` (intended), RabbitMQ (env) | humans, the agent's CLIs |
 | `ha` (`jarvis-ha`) | publishes Jarvis headline sensors to the HA box every 30 s via MQTT auto-discovery (queue depths, current job, loaded model, API spend, power/energy, GPU temp/power) | — (MQTT out) | RabbitMQ MQTT :1883, agentjob store, RabbitMQ management (queue depths), `engine:11434` (intended, model), `nvidia-smi` | HA box MQTT integration (entities under device *Jarvis Agent*) |
-| `worker` (`jarvis-worker`) | consumes RabbitMQ raw queues (§4.2); model routing, plan jobs (B2), job history, HA notifications, stream watcher (pauses GPU queue + stops engine while a Sunshine/Steam stream is active) | 9101 (container-only metrics) | RabbitMQ :5672, brain `engine:11434` (intended), model registry `/config/models.yaml`, Plane (plan delivery), HA | `enqueue` CLI, `wake-queue` (optional), Prometheus |
+| `worker` (`jarvis-worker`) | consumes RabbitMQ raw queues (§4.2); model routing, plan jobs (B2), job history, HA notifications, stream watcher (pauses GPU queue + stops engine while a Sunshine/Steam stream is active) | 9101 (container-only metrics) | RabbitMQ :5672, brain `engine:11434` (intended), iGPU `engine-igpu:11435` (`IGPU_URL` — the registry's 11435 endpoint is routed there, not collapsed into the brain), model registry `/config/models.yaml`, Plane (plan delivery), HA | `enqueue` CLI, `wake-queue` (optional), Prometheus |
 | `rabbitmq` (`jarvis-rabbitmq`) | AMQP broker + MQTT plugin + Prometheus metrics | 5672, 15672, 15692 (loopback), 1883 (LAN) | volume `rabbitmq_data` | worker, chat, dashboard, ha (all in-stack); HA box (MQTT subscribe); Prometheus |
 | `redis` (`jarvis-redis`) | live job streams (`jarvis:job:<id>`, 20k entries, 24 h TTL) + NoBrakes flag store | 6379 (loopback) | volume `redis_data` (AOF, 256 MB noeviction) | chat (flags), dashboard (streams), the agent's CLIs (`$JARVIS_REDIS`) |
 | `memory` (`jarvis-memory`) | vector search over work logs, job history, queue, pending jobs, repo docs (SQLite + all-MiniLM-L6-v2 ONNX): `/search`, `/stats`, `/health` | 127.0.0.1:8101 | `~/.local/share/jarvis/memory/memory.db` (mounted) | chat, voice, the agent (`jarvis-notes add` pushes here immediately) |
@@ -255,6 +260,8 @@ safe (missing/corrupt value reads as off).
 
 | Unit | What it does |
 |---|---|
+| `jarvis-engine.service` | removed 2026-11-06 (PR #184) — the brain is the compose container `jarvis-engine` (§2). |
+| `jarvis-engine-igpu.service` | the iGPU helper — **disabled legacy, rollback path only**; the running helper is the compose container `jarvis-engine-igpu` (§2). Enabling it while the container runs collides on 11435. |
 | `jarvis-engine-igpu.service` | **disabled** (rollback path) — the iGPU helper is the compose container `jarvis-engine-igpu` (§5.1), 0.0.0.0:11435. The old `jarvis-engine.service` (the brain) was removed 2026-11-06 (PR #184); the brain is the compose container only. |
 | `agent-run.service` | the agent loop (§4.3). `Restart=on-failure` (exit 0 stays stopped), inhibited by `touch /var/lib/jarvis/agent-run.disabled`. |
 | `agent-resume.service` | resumes a round after a reboot, on the same driver (`~/.config/jarvis/driver`). |
@@ -262,6 +269,7 @@ safe (missing/corrupt value reads as off).
 | `jarvis-watchdog.service` | the failsafe (§7): probes brain :11434, iGPU :11435, engine/rabbitmq/worker containers, agent-run `failed` state, every 60 s; restarts what is dead (≤3 restarts/component/hour, then Discord escalation); tails `~/.local/state/jarvis/agent.log` for round deaths carrying the ECONNREFUSED signature; `jarvis-watchdog maintain <dur>` opens a TTL window that suppresses brain restarts (bench jobs **must** call it before stopping the engine); `maintain off` / `status` to inspect. |
 | `plane-bridge.service` | receives Plane webhooks (HMAC-verified, :8102) and turns board changes into agent jobs (§4.1); catch-up sync on every start; event log `~/.local/share/jarvis/plane-bridge/events.jsonl`. |
 | `ollama.service` | disabled (superseded). |
+| `jarvis-{chat,voice,ha,memory,moe-engine,….service}` | the **pre-2026-10-27 native units, kept for rollback** (all disabled — the engines run as compose containers too). Never run a container and its native unit at once (chat would double-reply and double-enqueue). |
 | `jarvis-{chat,voice,ha,memory,moe-engine,….service}` | the **pre-2026-10-27 native units, kept for rollback** (all disabled — the engines are compose containers, §5.1). Never run a container and its native unit at once (chat would double-reply and double-enqueue). |
 
 ### 5.3 CLIs (run on demand, not services)

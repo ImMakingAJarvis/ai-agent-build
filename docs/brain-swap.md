@@ -26,11 +26,16 @@ swap` is that something; the watchdog's maintenance mode is the failsafe.
   the old host `jarvis-engine` systemd unit was removed 2026-11-06 (PR
   #184), so every brain stop/start in scripts and runbooks goes through
   `docker stop|start jarvis-engine` — never `systemctl`.
-- **iGPU helper** = Qwen2.5-3B on `127.0.0.1:11435` (unit
-  `jarvis-engine-igpu`). Jobs with `driver: igpu` in their spec run on
-  it — `scripts/agent-run` reads the driver from the job spec (32K
-  context). Chat already falls back to it when the brain is down
-  (`FALLBACK_ENGINE_URL=http://host.docker.internal:11435`).
+- **iGPU helper** = Qwen2.5-3B on `127.0.0.1:11435` (compose service
+  `engine-igpu`, container `jarvis-engine-igpu`) — its own container,
+  its own port, `restart: unless-stopped`, and **swap windows never
+  touch it** (only the brain container stops). Jobs with `driver: igpu`
+  in their spec run on it — `scripts/agent-run` reads the driver from
+  the job spec (32K context). Containers reach it by name
+  (`http://jarvis-engine-igpu:11435`); chat falls back to it when the
+  brain is down (`FALLBACK_ENGINE_URL`). The old host unit
+  `jarvis-engine-igpu.service` is disabled and kept as the rollback
+  path.
 - **Watchdog maintenance mode** = `jarvis-watchdog maintain <dur>
   [reason]` (45s|30m|2h|seconds). While unexpired, brain restarts are
   skipped; **at expiry the brain is re-armed even if the whole window

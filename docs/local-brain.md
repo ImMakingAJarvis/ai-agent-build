@@ -31,7 +31,7 @@ agent-local                    # interactive
 ## The igpu driver (rounds on the small iGPU model)
 
 `agent-run` can run a stage-3 round on the 3B helper on the Ryzen iGPU
-(`jarvis-engine-igpu`, port 11435, see docs/igpu-model-handler.md)
+(container `jarvis-engine-igpu`, port 11435, see docs/igpu-model-handler.md)
 instead of the 27B brain or the API. Pick **"IGPU model"** in the round
 checkpoint, or run a job directly:
 
@@ -52,7 +52,8 @@ response must never overflow the 32K window). `agent-local` honours
 pre-set values over `~/.config/jarvis/local.env`. Overrides:
 `IGPU_MODEL` (model name), `IGPU_URL` (engine URL — e.g. to point at a
 bigger deep-helper engine later), `IGPU_CONTEXT_TOKENS` (keep in sync
-with the unit's `--ctx-size`).
+with the container's `--ctx-size`, docker-compose.yml service
+`engine-igpu`).
 
 Expectations for the small model: mechanical jobs work well
 (`jarvis-helper --status` for its health); deep design work should

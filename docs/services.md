@@ -11,12 +11,13 @@ for rollback.
 | Service | What it does | Port (host) | Container | State |
 |---|---|---|---|---|
 | `engine` | The brain: llama.cpp `llama-server` serving the qwen3.8 "jarvis-brain" GGUF, 128k ctx, quantized KV cache, 2 parallel slots | 11434 (127.0.0.1) | `jarvis-engine` (nvidia runtime) | model + templates: `/opt/jarvis-engine`; slots: `/var/lib/jarvis/slots` |
+| `engine-igpu` | The always-on helper model: Vulkan llama.cpp on the Ryzen iGPU (Qwen2.5-3B Q4_K_M, 32k ctx) — chat/voice worker-busy fallback, `igpu` driver rounds, `jarvis-helper` CLI target. Stays up through photo swap windows (only the brain container stops); the iGPU is the container's only Vulkan device (no NVIDIA ICD) | 11435 (127.0.0.1) | `jarvis-engine-igpu` | binary + model bind-mounted from `/opt/jarvis-igpu` (ro); `/dev/dri` for the iGPU; deploy: `scripts/install_helper.sh` |
 | `art` | Photo generation: Z-Image-Turbo 6B (diffusers, sequential CPU offload) plus FLUX.2 [klein] 4B as the lazy-loaded reference model (a photo attached to a `!photo` / gallery upload keeps its subject); `jarvis-art generate "..."`; Discord `!photo <prompt>` sends the result back as an attachment; photo gallery site at `http://111.1.2.27:8120` with a send form (prompt + size + reference upload + Assist) | 8120 (all interfaces — the gallery is meant to be opened from the LAN) | `jarvis-art` (nvidia runtime) | code: `/opt/jarvis-art` (pinned deploy point); models: `/var/lib/jarvis/art/model`, `/var/lib/jarvis/art/models/flux2-klein-4b`; images: `/var/lib/jarvis/art/out`; refs: `/var/lib/jarvis/art/refs` |
 | `bench` | T2I model benchmark (picking the next art model): candidate models × fixed prompt set, blind swipe voting, per-model metrics; skeleton only for now (no generation yet), API at `/health` + `/api/status` | 8121 (127.0.0.1) | `jarvis-bench` (nvidia runtime, reuses the `jarvis/art:local` image) | code: `/opt/jarvis-bench` (pinned deploy point, `scripts/install_bench.sh`); db: `~/.local/share/jarvis/bench/bench.db`; images/weights: `/var/lib/jarvis/bench/{imgs,models}`; kill switch: `touch /var/lib/jarvis/bench.disabled` (idles, API 503, self re-enables on rm) |
 | `chat` | Discord bot: replies to owner DMs using the local brain; bridges voice wake events to jobs. While the worker is deep in a job (a job state is `running`), classify/chat LLM calls route to the small iGPU helper model (`FALLBACK_ENGINE_URL`) so replies don't queue behind the brain | — (Discord WS) | `jarvis-chat` | `.config/jarvis` (driver, prompts, `discord.env`), `.local/share/jarvis` (agentjob store — the worker-busy signal) |
 | `dashboard` | Web dashboard: agent jobs, work queue, system state, PWA | 8080 | `jarvis-dashboard` | job store via `.local/share/jarvis` |
 | `ha` | Publishes Jarvis headline sensors to the Home Assistant box via MQTT (auto-discovery) | — (MQTT out) | `jarvis-ha` | job store + `.config/jarvis/ha.env` |
-| `voice` | Voice pipeline: wake word → STT (faster-whisper small) → brain (GLaDOS persona) → TTS (edge-tts); the `jarvis_voice` HA integration POSTs here. While the worker is deep in a job (a job state is `running`), conversation LLM calls route to the small iGPU helper model (`FALLBACK_OLLAMA_URL`, host 11435 via host-gateway) so voice stays responsive; falls back to the brain if that engine is down. The model picker can force either model | 8100 (LAN, plain HTTP), 8443 (LAN, HTTPS — browser mic UI) | `jarvis-voice` | code: `/opt/jarvis-voice` (pinned deploy point); whisper model: `~/.cache/huggingface`; TLS cert: `~/.config/jarvis/tls`; job store (read-only — the worker-busy signal) |
+| `voice` | Voice pipeline: wake word → STT (faster-whisper small) → brain (GLaDOS persona) → TTS (edge-tts); the `jarvis_voice` HA integration POSTs here. While the worker is deep in a job (a job state is `running`), conversation LLM calls route to the small iGPU helper model (`FALLBACK_OLLAMA_URL`, the `engine-igpu` container on the compose network) so voice stays responsive; falls back to the brain if that engine is down. The model picker can force either model | 8100 (LAN, plain HTTP), 8443 (LAN, HTTPS — browser mic UI) | `jarvis-voice` | code: `/opt/jarvis-voice` (pinned deploy point); whisper model: `~/.cache/huggingface`; TLS cert: `~/.config/jarvis/tls`; job store (read-only — the worker-busy signal) |
 | `memory` | Vector search over work logs/jobs (SQLite + all-MiniLM-L6-v2 ONNX); the agent searches it before grepping | 8101 (127.0.0.1) | `jarvis-memory` | `~/.local/share/jarvis/memory` (db + model) |
 | `memory-reindex` | Re-scans all sources every 15 min (was `jarvis-memory-reindex.timer`) | — | `jarvis-memory-reindex` | same as `memory` |
 | `rabbitmq` | Message broker: AMQP + MQTT (port 1883, LAN-facing for HA) + Prometheus metrics | 5672, 15672, 15692 (127.0.0.1), 1883 (LAN) | `jarvis-rabbitmq` (predates this PR) | named volume `ai-agent-build_rabbitmq_data`; config: `rabbitmq/` |
@@ -41,14 +42,10 @@ Not containerized, on purpose:
   sudo, the repo working tree and the CLI toolchain; it is also what manages
   the stack, so it stays a host systemd unit (runs as `agent`,
   `Restart=on-failure`, inhibited by `touch /var/lib/jarvis/agent-run.disabled`).
-- **`jarvis-engine-igpu`** — the always-on helper model: Vulkan llama.cpp
-  on the Ryzen iGPU (Qwen2.5-3B Q4_K_M, port 11435). It binds 0.0.0.0 (not
-  loopback) so the voice/chat containers can reach it via
-  `host.docker.internal` as the worker-busy fallback — the model carries no
-  secrets, so LAN visibility is acceptable. The agent
-  queries it via the `jarvis-helper` CLI for setup-change and self-restart
-  questions; it costs no CPU cores (docs/igpu-model-handler.md). Model:
-  `/opt/jarvis-igpu/models/jarvis-igpu.gguf`; deploy: `scripts/install_helper.sh`.
+- **`jarvis-engine-igpu` (the unit)** — disabled legacy, kept as the
+  rollback path for the `engine-igpu` compose container (the always-on
+  helper model, now containerized — see the table above). Re-enabling the
+  unit while the container runs would collide on port 11435.
 - **`ollama`** — installed but disabled (the engine container superseded it, and both want port 11434). Left as a host option, not part of the stack.
 - **CLIs** (`jarvis-jobs`, `jarvis-discord`, `enqueue`, `jarvis-reply`,
   `jarvis-migrate`, `agent-local`, `agent-run`) — not services; run on demand.

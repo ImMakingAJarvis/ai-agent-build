@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # install_igpu_engine: build a Vulkan llama.cpp for the Ryzen iGPU and
-# install the jarvis-engine-igpu service (disabled by default).
+# install the jarvis-engine-igpu unit (disabled — the default runtime is
+# the docker-compose container `engine-igpu`, which bind-mounts this
+# build from /opt/jarvis-igpu).
 #
-#   install_igpu_engine.sh              build + install (service stays disabled)
+#   install_igpu_engine.sh              build + install (unit stays disabled)
 #   install_igpu_engine.sh --build-only just the build, no systemd/group changes
 #
 # Result:
 #   /opt/jarvis-igpu/bin/llama-server   Vulkan build (sees both GPUs)
 #   /opt/jarvis-igpu/bin/llama-bench    benchmark tool
-#   /etc/systemd/system/jarvis-engine-igpu.service  (disabled)
+#   /etc/systemd/system/jarvis-engine-igpu.service  (disabled; rollback path)
 #
 # The iGPU is device Vulkan1 on this machine; the unit pins -dev Vulkan1.
+# In the container there is no NVIDIA Vulkan ICD, so the iGPU is the only
+# device and the compose command pins -dev Vulkan0 instead.
 # See docs/igpu-model-handler.md for the investigation this came from.
 set -euo pipefail
 
@@ -71,10 +75,12 @@ log "Ensuring agent is in video/render groups ..."
 sudo usermod -aG video,render agent
 
 ########################################
-# 4. Service (disabled; enable with: sudo systemctl enable --now jarvis-engine-igpu)
+# 4. Unit (disabled — the container is the default runtime; the unit is
+#    the rollback path, enable with: sudo systemctl enable --now jarvis-engine-igpu)
 ########################################
 sudo install -m 644 systemd/jarvis-engine-igpu.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl disable jarvis-engine-igpu 2>/dev/null || true
-log "Service installed but DISABLED. Model: put a GGUF at /opt/jarvis-igpu/models/jarvis-igpu.gguf, then:"
-log "  sudo systemctl enable --now jarvis-engine-igpu"
+log "Unit installed but DISABLED (rollback path). Model: put a GGUF at /opt/jarvis-igpu/models/jarvis-igpu.gguf, then run the container:"
+log "  docker compose -p ai-agent-build -f docker-compose.yml up -d engine-igpu"
+log "  (or scripts/install_helper.sh, which also deploys the jarvis-helper CLI)"

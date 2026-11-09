@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/boardnote"
 )
 
 // defaultWaitUntil is the wait deadline a yield gets when --wait-until is
@@ -187,6 +188,39 @@ func cmdYield(store *agentjob.Store, args []string) error {
 	}
 	fmt.Printf("yielded: %s — waiting on %s until %s (deadline %s)\n",
 		id, strings.Join(corrs, ", "), c.WaitUntil, agentjob.WaitRemaining(j, time.Now()))
+	// Board-mapped jobs say they are waiting on their Plane card (plan §3.5,
+	// invariant 10: every cross-model hop is visible). Best-effort — a post
+	// failure is logged inside boardnote, never an error here: the yield
+	// itself is authoritative.
+	boardnote.PostYield(j, content[agentjob.SectionFlight], content[agentjob.SectionNext])
+	return nil
+}
+
+// cmdMarkRunning puts a ready job straight into the running state without
+// launching a round. The real loop does ready → claimed (Store.Claim) →
+// running inside Runner.Run, but a scripted stand-in round — the Phase 2
+// wait/wake gate (plan task 17) — needs a job in the running state so it can
+// yield, and it must not actually start a round (on this box the local driver
+// is the brain itself). It refuses any state other than ready so a done,
+// failed or waiting job cannot be resurrected by a typo.
+func cmdMarkRunning(store *agentjob.Store, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: jarvis-jobs mark-running <id>")
+	}
+	id := args[0]
+	j, err := store.Get(id)
+	if err != nil {
+		return err
+	}
+	if j.Status != agentjob.Ready {
+		return fmt.Errorf("job %s is %s, not ready — mark-running is for a fresh stand-in round", id, j.Status)
+	}
+	j.State.Status = agentjob.Running
+	j.State.StartedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := store.SetStatus(id, j.State); err != nil {
+		return err
+	}
+	fmt.Printf("marked running: %s\n", id)
 	return nil
 }
 
@@ -292,5 +326,13 @@ func cmdWake(store *agentjob.Store, args []string) error {
 	for _, c := range corrs {
 		fmt.Printf("  %s -> %s\n", c, rec.Results[c])
 	}
+	// Board-mapped jobs say they are back on their Plane card (plan §3.5,
+	// invariant 10). Best-effort, like the yield comment: the wake is
+	// authoritative, the comment is the overlay.
+	missing := 0
+	if miss, merr := store.MissingResults(id); merr == nil {
+		missing = len(miss)
+	}
+	boardnote.PostWake(j, rec, missing)
 	return nil
 }

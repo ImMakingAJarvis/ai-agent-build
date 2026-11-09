@@ -6,10 +6,16 @@ chip serve as another model handler, alongside the 4090 engine?
 **Status (2026-10-28, job chat-1793124710-b1cf): adopted.** The iGPU now
 runs the always-on **helper model** — Qwen2.5-3B Q4_K_M
 (`qwen2.5-3b-instruct-q4_k_m.gguf` from `Qwen/Qwen2.5-3B-Instruct-GGUF`)
-serving OpenAI-compatible chat on 11435 via
-`jarvis-engine-igpu.service` (enabled, `Restart=always`), queried through
+serving OpenAI-compatible chat on 11435, queried through
 the `jarvis-helper` CLI (setup brief in
-`scripts/jarvis-helper-context.md`). Measured on the 3B model:
+`scripts/jarvis-helper-context.md`). Since 2026-11-08 (job
+chat-1794122808-9116) it runs in its own compose container
+`jarvis-engine-igpu` (service `engine-igpu`, own port 11435,
+`restart: unless-stopped` — photo swap windows stop only the brain
+container); the `jarvis-engine-igpu.service` unit is disabled and kept
+as the rollback path. Inside the container the iGPU is the only Vulkan
+device (no NVIDIA ICD), so the command pins `-dev Vulkan0` (host units
+pin `Vulkan1`). Measured on the 3B model:
 pp512 ≈ 115 tok/s, tg64 ≈ 13.2 tok/s on Vulkan1 (llama-bench, 2026-10-28).
 Full CPU comparison (2026-10-29, job chat-1793248851-31c8): the CPU is
 **1.69× faster at decode** (22.9 vs 13.55 tok/s) but the **iGPU is ~2.2×
@@ -131,15 +137,19 @@ Adopted as the always-on helper (see the status note at the top):
 
 1. `scripts/install_igpu_engine.sh` — builds the Vulkan llama.cpp to
    `/opt/jarvis-igpu/bin` (agent-owned), adds group access, installs
-   `systemd/jarvis-engine-igpu.service` (disabled by default).
+   `systemd/jarvis-engine-igpu.service` (disabled; rollback path — the
+   default runtime is the compose container).
 2. The helper GGUF lives at `/opt/jarvis-igpu/models/jarvis-igpu.gguf`
-   (3B-class Q4_K_M is the sweet spot on this iGPU), then
-   `sudo systemctl enable --now jarvis-engine-igpu`.
+   (3B-class Q4_K_M is the sweet spot on this iGPU), then run the
+   container: `docker compose -p ai-agent-build -f docker-compose.yml
+   up -d engine-igpu` (or `scripts/install_helper.sh`, which also
+   deploys the CLI + context).
 3. It serves OpenAI-compatible chat on **port 11435** (port 11434 stays
    the brain). `internal/models.Client` already takes a base URL via
    `OLLAMA_URL`; a second `Client` pointed at 11435 is all the code
-   side needs for an auxiliary model. `scripts/install_helper.sh`
-   deploys the `jarvis-helper` CLI + context and enables the unit.
+   side needs for an auxiliary model. Containers address it as
+   `http://jarvis-engine-igpu:11435`; the host uses the published
+   127.0.0.1 port.
 
 Sensible uses, in order of worth: (a) none by default; (b) a
 background/batch model (summarization of long transcripts) where CPU

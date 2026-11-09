@@ -21,6 +21,15 @@
 //	jarvis-mq event job.photo.started --source worker
 //	jarvis-mq tail events                    # follow all lifecycle events
 //	jarvis-mq tail events 'job.#' -n 5       # stop after five job.* events
+//
+// Capability loop (plan §3.5, task EVB-15):
+//
+//	jarvis-mq listen flow.plan-x --wake plan-x --timeout 2h
+//	jarvis-mq submit image.generate --reply-to flow.plan-x --corr plan-x-img-1 \
+//	    --input prompt="a lighthouse at dusk" --out-dir ~/.local/share/jarvis/artifacts/plan-x/
+//	jarvis-mq listeners
+//	jarvis-mq results flow.plan-x          # consume + pretty-print Results (acks)
+//	jarvis-mq unlisten flow.plan-x
 package main
 
 import (
@@ -37,14 +46,18 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/switchboard"
 )
 
 func main() {
@@ -73,6 +86,18 @@ func main() {
 		err = runEvent(os.Args[2:])
 	case "tail":
 		err = runTail(os.Args[2:])
+	case "listen":
+		err = runListen(os.Args[2:])
+	case "unlisten":
+		err = runUnlisten(os.Args[2:])
+	case "listeners":
+		err = runListeners(os.Args[2:])
+	case "submit":
+		err = runSubmit(os.Args[2:])
+	case "results":
+		err = runResults(os.Args[2:])
+	case "caps":
+		err = runCaps(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -97,6 +122,36 @@ func usage() {
   delete <queue>            delete the queue
   event <routing-key> [flags]  publish one lifecycle event to the events exchange
   tail <exchange> [pattern]   follow lifecycle events (pattern default "#")
+  listen <queue> [flags]      attach a switchboard listener (wake a job, forward, or notify)
+  unlisten <queue> [flags]    remove the queue's listeners (--corr to narrow)
+  listeners                   list all listeners (queue, action, target, timeout)
+  submit <capability> [flags] publish an envelope-v2 request to cap.<capability>
+  results <queue> [-n N]      consume and pretty-print Result messages (acks them)
+  caps                        the capability catalog (stub: lands in task EVB-19)
+
+listen flags:
+  --wake JOB                wake agentjob JOB when a message lands (default action)
+  --forward Q               instead: republish the message to Q and ack it
+  --notify TEXT             instead: send TEXT as a Discord notification and ack
+  --timeout D               give up after D (default 0 = never; e.g. 2h)
+  --corr C                  only a message with this correlation id triggers
+unlisten flags:
+  --corr C                  only remove listeners filtered on this correlation id
+submit flags:
+  --reply-to Q              queue (or flow) the Result is published to (flow.<job-id>)
+  --corr C                  correlation id tying the request to its result
+  --input k=v               capability argument (repeatable; JSON-typed: 512, true, [..])
+  --input-ref P             input file or dir the worker reads, by path (repeatable)
+  --out-dir D               where the worker writes its artifacts
+  --location L              pin to a device: gpu | igpu | cpu | remote:<host>
+  --vram-mb N               VRAM hint for the resource broker
+  --ram-mb N                RAM hint for the resource broker
+  --deadline T              give up after T (RFC3339 or a duration like 2h from now)
+  --wake-job J              agentjob id a worker may wake directly if the switchboard is down
+  --parent-job J            id of the job that submitted this one
+results flags:
+  -n N                      max messages to pop (default 100: drain what has arrived)
+  --json                    raw JSON bodies, one per line
 
 event flags:
   --source S                source tag (default jarvis-mq)
@@ -691,4 +746,545 @@ func printEvent(d amqp.Delivery) {
 		fmt.Printf(" job=%s", e.JobID)
 	}
 	fmt.Printf(" at=%s)\n%s\n", e.At.UTC().Format(time.RFC3339), string(d.Body))
+}
+
+// --- the capability loop (plan §3.5, task EVB-15) ------------------------
+//
+// listen / unlisten / listeners drive the switchboard's listener store
+// (internal/switchboard, EVB-14): JSON files under
+// ~/.local/share/jarvis/listeners/ — the interface the switchboard chose
+// (it exposes /metrics only, no control HTTP). submit publishes an
+// envelope-v2 request to cap.<capability>; consumer priorities do the
+// placement, so there is no router here. results consumes the Result
+// messages a worker leaves on the reply queue for the resuming round.
+
+// listenersDir is where the switchboard keeps its listeners: $LISTENERS_DIR
+// or <agentjob data dir>/listeners — the same defaults cmd/switchboard
+// boots with, so the CLI and the service always agree.
+func listenersDir() string {
+	if d := os.Getenv("LISTENERS_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join(agentjob.DataDir(), "listeners")
+}
+
+// listenerID builds a unique listener id (it is a file name in the store):
+// the watched queue, the corr filter when set, and a time+random suffix so
+// two listens on the same queue never collide.
+func listenerID(queue, corr string) string {
+	id := "lsn-" + queue
+	if corr != "" {
+		id += "-" + corr
+	}
+	b := make([]byte, 3)
+	rand.Read(b)
+	return id + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + "-" + hex.EncodeToString(b)
+}
+
+// attachListener validates, builds, and stores one listener. action is one
+// of switchboard.ActionWake/ActionForward/ActionNotify; JobID, TargetQueue
+// and Text follow the action. The store's Create runs the same validation
+// the service runs (wake needs a job, forward a target).
+func attachListener(st *switchboard.Store, queue, action, jobID, targetQueue, text, corr string, timeout time.Duration) (switchboard.Listener, error) {
+	l := switchboard.Listener{
+		ID:          listenerID(queue, corr),
+		Queue:       queue,
+		Action:      action,
+		JobID:       jobID,
+		TargetQueue: targetQueue,
+		Text:        text,
+		CorrFilter:  corr,
+		Timeout:     timeout,
+	}
+	if err := st.Create(l); err != nil {
+		return switchboard.Listener{}, err
+	}
+	return l, nil
+}
+
+// detachListeners removes the listeners on queue (narrowed to corr when
+// given) and returns how many were removed. Removing none is not an error:
+// the switchboard treats a missing listener as already gone, and so does
+// unlisten.
+func detachListeners(st *switchboard.Store, queue, corr string) (int, error) {
+	all, err := st.List()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, l := range all {
+		if l.Queue != queue || (corr != "" && l.CorrFilter != corr) {
+			continue
+		}
+		if err := st.Remove(l.ID); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// runListen attaches a switchboard listener on a queue (plan §3.2 step 2):
+// when a message lands, wake the job (the default), forward it to another
+// queue, or send a Discord notification. Flow and capability queues are
+// declared on demand so the switchboard's first peek finds them; a listener
+// may also watch a queue a worker declares (nothing to declare then).
+func runListen(args []string) error {
+	fs := flag.NewFlagSet("listen", flag.ExitOnError)
+	wake := fs.String("wake", "", "wake this agentjob when a message lands (default action)")
+	forward := fs.String("forward", "", "instead: republish the message to this queue and ack it")
+	notify := fs.String("notify", "", "instead: send this Discord notification and ack the message")
+	timeout := fs.Duration("timeout", 0, "give up after this long (0 = never)")
+	corr := fs.String("corr", "", "only a message with this correlation id triggers the listener")
+	q, err := takeQueue(fs, args)
+	if err != nil {
+		return err
+	}
+	// Exactly one action: wake, forward, or notify.
+	actions := 0
+	for _, s := range []string{*wake, *forward, *notify} {
+		if s != "" {
+			actions++
+		}
+	}
+	if actions != 1 {
+		return fmt.Errorf("listen: give exactly one of --wake JOB, --forward QUEUE, --notify TEXT")
+	}
+	action := switchboard.ActionWake
+	switch {
+	case *forward != "":
+		action = switchboard.ActionForward
+	case *notify != "":
+		action = switchboard.ActionNotify
+	}
+	st, err := newListenerStore()
+	if err != nil {
+		return err
+	}
+	l, err := attachListener(st, q, action, *wake, *forward, *notify, *corr, *timeout)
+	if err != nil {
+		return err
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	switch {
+	case queue.IsFlowQueue(q):
+		if err := conn.EnsureFlowQueue(q); err != nil {
+			return err
+		}
+	case queue.IsCapQueue(q):
+		if err := conn.EnsureCapQueue(q); err != nil {
+			return err
+		}
+	}
+	var target string
+	switch action {
+	case switchboard.ActionWake:
+		target = "wake " + *wake
+	case switchboard.ActionForward:
+		target = "forward → " + *forward
+	case switchboard.ActionNotify:
+		target = "notify"
+	}
+	to := "never"
+	if *timeout > 0 {
+		to = timeout.String()
+	}
+	fmt.Printf("listening on %s: %s (corr=%s timeout=%s id=%s)\n", q, target, orDash(*corr), to, l.ID)
+	return nil
+}
+
+// newListenerStore opens the switchboard listener store (the JSON file
+// store under listenersDir).
+func newListenerStore() (*switchboard.Store, error) {
+	return switchboard.OpenStore(listenersDir())
+}
+
+// runUnlisten removes the listeners on a queue (plan §3.2 step 12): --corr
+// narrows to the listeners filtered on that correlation id, without it the
+// whole queue goes quiet.
+func runUnlisten(args []string) error {
+	fs := flag.NewFlagSet("unlisten", flag.ExitOnError)
+	corr := fs.String("corr", "", "only remove listeners filtered on this correlation id")
+	q, err := takeQueue(fs, args)
+	if err != nil {
+		return err
+	}
+	st, err := newListenerStore()
+	if err != nil {
+		return err
+	}
+	n, err := detachListeners(st, q, *corr)
+	if err != nil {
+		return err
+	}
+	suffix := ""
+	if *corr != "" {
+		suffix = fmt.Sprintf(" (corr=%s)", *corr)
+	}
+	if n == 0 {
+		fmt.Printf("no listener on %s%s\n", q, suffix)
+		return nil
+	}
+	fmt.Printf("removed %d listener(s) on %s%s\n", n, q, suffix)
+	return nil
+}
+
+// runListeners lists every stored listener with what it does — the
+// "who is waiting on what" view of the event loop.
+func runListeners(args []string) error {
+	fs := flag.NewFlagSet("listeners", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: jarvis-mq listeners")
+	}
+	st, err := newListenerStore()
+	if err != nil {
+		return err
+	}
+	all, err := st.List()
+	if err != nil {
+		return err
+	}
+	if len(all) == 0 {
+		fmt.Println("no listeners")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "QUEUE\tACTION\tTARGET\tCORR\tTIMEOUT\tCREATED\tID")
+	for _, l := range all {
+		target := l.JobID
+		switch l.Action {
+		case switchboard.ActionForward:
+			target = "→ " + l.TargetQueue
+		case switchboard.ActionNotify:
+			target = l.Text
+		}
+		to := "-"
+		if l.Timeout > 0 {
+			to = l.Timeout.String()
+		}
+		fmt.Fprintln(w, strings.Join([]string{
+			l.Queue, l.Action, target, orDash(l.CorrFilter), to,
+			l.CreatedAt.UTC().Format("2006-01-02 15:04:05"), l.ID,
+		}, "\t"))
+	}
+	return w.Flush()
+}
+
+// inputFlag collects repeatable --input k=v pairs. The value is
+// JSON-typed where it parses (512 → number, true → bool, [1,2] → list);
+// anything that is not JSON stays a plain string — so prompt=a lighthouse
+// and prompt="a lighthouse" both land as strings, and width=1024 as a number.
+type inputFlag map[string]any
+
+func (i *inputFlag) String() string { return "k=v" }
+func (i *inputFlag) Set(v string) error {
+	k, val, ok := strings.Cut(v, "=")
+	if !ok || k == "" {
+		return fmt.Errorf("--input needs k=v, got %q", v)
+	}
+	var typed any
+	if err := json.Unmarshal([]byte(val), &typed); err != nil {
+		typed = val // not JSON: a plain string
+	}
+	(*i)[k] = typed
+	return nil
+}
+
+// parseDeadline parses --deadline: an absolute RFC3339 time, or a duration
+// taken from now ("2h").
+func parseDeadline(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return time.Now().UTC().Add(d), nil
+	}
+	return time.Time{}, fmt.Errorf("parse %q as RFC3339 or a duration from now (2h)", s)
+}
+
+// submitParams is everything `submit` takes from the command line, so the
+// envelope build is testable without a broker.
+type submitParams struct {
+	capability string
+	id         string
+	replyTo    string
+	corr       string
+	input      map[string]any
+	inputRefs  []string
+	outDir     string
+	location   string
+	wakeJob    string
+	parentJob  string
+	vramMB     int
+	ramMB      int
+	deadline   *time.Time
+}
+
+// buildSubmitMessage builds the envelope-v2 capability request (plan §3.3).
+// Every v2 field is set from the params and the envelope is marked v2;
+// CorrelationID and ReplyTo are also mirrored onto the AMQP properties at
+// publish time by queue.newPublishing.
+func buildSubmitMessage(p submitParams) (queue.Message, error) {
+	if p.capability == "" {
+		return queue.Message{}, fmt.Errorf("submit: a capability is required (e.g. image.generate)")
+	}
+	if p.replyTo == "" {
+		return queue.Message{}, fmt.Errorf("submit: --reply-to is required (the queue the Result lands on, flow.<job-id>)")
+	}
+	if p.corr == "" {
+		return queue.Message{}, fmt.Errorf("submit: --corr is required (ties the request to its Result; handlers are idempotent by it)")
+	}
+	m := queue.Message{
+		ID:            p.id,
+		Type:          "capability",
+		CreatedAt:     time.Now().UTC(),
+		Source:        "jarvis-mq",
+		Payload:       map[string]string{},
+		SchemaVersion: 2,
+		Capability:    p.capability,
+		ReplyTo:       p.replyTo,
+		CorrelationID: p.corr,
+		Input:         p.input,
+		InputRefs:     p.inputRefs,
+		OutDir:        p.outDir,
+		Location:      p.location,
+		WakeJob:       p.wakeJob,
+		ParentJob:     p.parentJob,
+		Deadline:      p.deadline,
+	}
+	if p.vramMB > 0 || p.ramMB > 0 {
+		m.Resources = &queue.Resources{VRAMMB: p.vramMB, RAMMB: p.ramMB}
+	}
+	return m, nil
+}
+
+// validCapabilityName reports whether s is acceptable as a `submit`
+// capability. The convention is a dotted path (image.generate,
+// audio.transcribe); a single word is allowed too, because the cap.echo test
+// worker (EVB-17) is single-word and the Phase-2 gate submits to it.
+// Segments are lowercase alphanumeric. A message to a capability with no
+// worker simply waits on its durable queue until the request's deadline, so a
+// misspelling degrades to the designed timeout path rather than being dropped
+// at submit time.
+func validCapabilityName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, seg := range strings.Split(s, ".") {
+		if !isCapSegment(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+func isCapSegment(seg string) bool {
+	if seg == "" {
+		return false
+	}
+	for _, r := range seg {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// runSubmit publishes an envelope-v2 request to cap.<capability> (plan
+// §3.2 step 3). Consumer priorities do the placement — the message goes to
+// the queue and the broker delivers it to the best free worker; there is no
+// router here.
+func runSubmit(args []string) error {
+	fs := flag.NewFlagSet("submit", flag.ExitOnError)
+	replyTo := fs.String("reply-to", "", "queue the Result is published to (flow.<job-id>)")
+	corr := fs.String("corr", "", "correlation id tying the request to its result")
+	input := &inputFlag{}
+	fs.Var(input, "input", "capability argument k=v (repeatable, JSON-typed)")
+	inputRefs := &stringListFlag{}
+	fs.Var(inputRefs, "input-ref", "input file or dir the worker reads, by path (repeatable)")
+	outDir := fs.String("out-dir", "", "where the worker writes its artifacts")
+	location := fs.String("location", "", "pin to a device: gpu | igpu | cpu | remote:<host>")
+	vramMB := fs.Int("vram-mb", 0, "VRAM hint in MB for the resource broker")
+	ramMB := fs.Int("ram-mb", 0, "RAM hint in MB for the resource broker")
+	deadline := fs.String("deadline", "", "give up after this (RFC3339 or a duration from now)")
+	wakeJob := fs.String("wake-job", "", "agentjob id a worker may wake directly if the switchboard is down")
+	parentJob := fs.String("parent-job", "", "id of the job that submitted this one")
+	id := fs.String("id", defaultID(), "message id (unique per publish)")
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("the capability is the first argument: jarvis-mq submit <capability> [flags]")
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected extra argument %q", fs.Arg(0))
+	}
+	capability := args[0]
+	if !validCapabilityName(capability) {
+		return fmt.Errorf("capability %q is not valid: a dotted path (image.generate) or a single word (echo), lowercase alphanumeric segments", capability)
+	}
+	var dl *time.Time
+	if *deadline != "" {
+		t, err := parseDeadline(*deadline)
+		if err != nil {
+			return err
+		}
+		dl = &t
+	}
+	m, err := buildSubmitMessage(submitParams{
+		capability: capability, id: *id, replyTo: *replyTo, corr: *corr,
+		input: *input, inputRefs: *inputRefs, outDir: *outDir,
+		location: *location, wakeJob: *wakeJob, parentJob: *parentJob,
+		vramMB: *vramMB, ramMB: *ramMB, deadline: dl,
+	})
+	if err != nil {
+		return err
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	qname := queue.CapQueueName(capability)
+	if err := conn.EnsureCapQueue(qname); err != nil {
+		return err
+	}
+	if err := conn.Publish(m, qname+".default"); err != nil {
+		return err
+	}
+	fmt.Printf("published %s → %s (corr=%s reply-to=%s)\n", m.ID, qname, m.CorrelationID, m.ReplyTo)
+	return nil
+}
+
+// runResults consumes the Result messages a worker left on a reply queue
+// and pretty-prints them for the resuming round (plan §3.2 step 11) —
+// acking them, since the round that reads them owns them. A message that
+// is not a Result is printed in the plain message format rather than
+// swallowed.
+func runResults(args []string) error {
+	fs := flag.NewFlagSet("results", flag.ExitOnError)
+	n := fs.Int("n", 100, "max messages to pop (default 100: drain what has arrived)")
+	asJSON := fs.Bool("json", false, "raw JSON bodies, one per line")
+	q, err := takeQueue(fs, args)
+	if err != nil {
+		return err
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	ch, err := conn.NewChannel()
+	if err != nil {
+		return err
+	}
+	defer ch.Close()
+	count := 0
+	for count < *n {
+		del, ok, err := ch.Get(q, true)
+		if err != nil {
+			return fmt.Errorf("results %s: get: %w", q, err)
+		}
+		if !ok {
+			break // queue empty
+		}
+		count++
+		if *asJSON {
+			fmt.Println(string(del.Body))
+			continue
+		}
+		res, rerr := queue.DecodeResult(del.Body)
+		if rerr == nil && res.Status != "" {
+			printResult(res)
+			continue
+		}
+		m, merr := queue.DecodeMessage(del.Body)
+		if merr != nil {
+			fmt.Printf("=== %s (undecodable, acked)\n%s\n", q, string(del.Body))
+			continue
+		}
+		if err := printMessages([]queue.Message{m}, false); err != nil {
+			return err
+		}
+	}
+	if count == 0 {
+		fmt.Printf("%s: no results\n", q)
+	}
+	return nil
+}
+
+// printResult pretty-prints one Result (plan §3.3): the summary the brain
+// reads first, then artifacts (references, never bytes), the small
+// structured data, and the error when the status is not ok.
+func printResult(r queue.Result) {
+	fmt.Printf("=== result (corr=%s capability=%s status=%s)\n", r.CorrelationID, r.Capability, r.Status)
+	if r.Worker != "" {
+		fmt.Printf("    worker:   %s\n", r.Worker)
+	}
+	if r.Model != "" {
+		fmt.Printf("    model:    %s\n", r.Model)
+	}
+	if !r.StartedAt.IsZero() {
+		line := "    started:  " + r.StartedAt.UTC().Format(time.RFC3339)
+		if !r.FinishedAt.IsZero() {
+			line += fmt.Sprintf("  →  %s (%s)", r.FinishedAt.UTC().Format(time.RFC3339), r.FinishedAt.Sub(r.StartedAt).Round(time.Second))
+		}
+		fmt.Println(line)
+	}
+	if r.Summary != "" {
+		fmt.Printf("    summary:  %s\n", r.Summary)
+	}
+	if len(r.Artifacts) > 0 {
+		fmt.Println("    artifacts:")
+		for _, a := range r.Artifacts {
+			fmt.Printf("      %s\n", a)
+		}
+	}
+	if len(r.Data) > 0 {
+		fmt.Println("    data:")
+		for _, k := range sortedKeysAny(r.Data) {
+			fmt.Printf("      %s: %v\n", k, r.Data[k])
+		}
+	}
+	if r.Error != "" {
+		fmt.Printf("    error:    %s\n", r.Error)
+	}
+}
+
+func sortedKeysAny(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// runCaps is a stub: the capability catalog (config/capabilities.yaml —
+// workers, models, memory, needs-brain-out per capability) lands in task
+// EVB-19 with the capworker SDK.
+func runCaps(args []string) error {
+	fs := flag.NewFlagSet("caps", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: jarvis-mq caps")
+	}
+	fmt.Println("capability catalog: lands in task EVB-19 (config/capabilities.yaml)")
+	return nil
 }

@@ -132,7 +132,8 @@ func igpuURL() string {
 
 // igpuContextTokens is the iGPU engine's context size (its --ctx-size),
 // which caps the Claude Code context window for an iGPU round. Keep it in
-// sync with the jarvis-engine-igpu unit (systemd/jarvis-engine-igpu.service).
+// sync with the jarvis-engine-igpu container (docker-compose.yml, service
+// engine-igpu).
 func igpuContextTokens() string {
 	if v := os.Getenv("IGPU_CONTEXT_TOKENS"); v != "" {
 		return v
@@ -256,8 +257,78 @@ func (r *Runner) stackStatus() string {
 	return defaultStackStatus()
 }
 
+// continuationBlock renders the resume context for a woken round (plan
+// §3.5, EVB-16): the job's continuation.md — what it was doing, what is in
+// flight, the exact next step, written by the yielding round — plus the
+// results that arrived on its reply queue while it waited. Every cross-model
+// hop is visible: the woken round is handed what it was doing and what came
+// back, clearly marked, before the job's original instructions. It returns
+// "" when the job has no continuation.md (it never yielded) — an ordinary
+// round is prompt-identical to before.
+func (r *Runner) continuationBlock(j Job) string {
+	if r.Store == nil {
+		return ""
+	}
+	md, err := os.ReadFile(r.Store.ContinuationMDPath(j.ID))
+	if err != nil {
+		return ""
+	}
+	// Correlation ids to report on: the spec's WaitOn (Yield keeps it in
+	// step), falling back to the continuation's twin.
+	waitOn := j.WaitOn
+	if len(waitOn) == 0 {
+		if c, cerr := r.Store.ReadContinuation(j.ID); cerr == nil && c != nil {
+			waitOn = c.WaitOn
+		}
+	}
+	// Result refs, in priority order: the wake record (the wake that produced
+	// this round), the results sidecar (a result that raced the wake, or a
+	// re-yield chain), then the continuation's refs.
+	refs := map[string]string{}
+	rec, werr := r.Store.ReadWake(j.ID)
+	for corr, ref := range rec.Results {
+		refs[corr] = ref
+	}
+	if res, rerr := r.Store.RecordedResults(j.ID); rerr == nil {
+		for corr, rr := range res {
+			if _, ok := refs[corr]; !ok {
+				refs[corr] = rr.Ref
+			}
+		}
+	}
+	if c, cerr := r.Store.ReadContinuation(j.ID); cerr == nil && c != nil {
+		for corr, ref := range c.ResultRefs {
+			if _, ok := refs[corr]; !ok {
+				refs[corr] = ref
+			}
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("\n=== CONTINUATION — you yielded earlier; this round resumes the job, it does not start it ===\n")
+	b.WriteString(strings.TrimSpace(string(md)))
+	b.WriteString("\n")
+	if len(waitOn) > 0 {
+		b.WriteString("\nRESULTS — what came back while the job waited:\n")
+		for _, corr := range waitOn {
+			if ref, ok := refs[corr]; ok {
+				fmt.Fprintf(&b, "- %s: %s\n", corr, ref)
+			} else {
+				fmt.Fprintf(&b, "- %s: (not arrived yet)\n", corr)
+			}
+		}
+		if werr == nil && rec.Reason == WakeTimeout {
+			b.WriteString("\nWARNING: the wait deadline passed before every result arrived — the results above may be PARTIAL. Check which corrs are still missing before acting on them.\n")
+		}
+		fmt.Fprintf(&b, "Full result messages (payloads, artifacts, errors): jarvis-mq results %s\n", queue.FlowQueueName(j.ID))
+	}
+	b.WriteString("=== END CONTINUATION ===\n")
+	return b.String()
+}
+
 // Prompt is the stage-3 rules, the machine snapshot, and the job text
-// (plus any typed note).
+// (plus any typed note). A woken round additionally gets its continuation
+// (continuationBlock) between the branch line and the instructions.
 func (r *Runner) Prompt(j Job, driver, note string) string {
 	var b strings.Builder
 	b.WriteString(r.brief(driver))
@@ -267,6 +338,9 @@ func (r *Runner) Prompt(j Job, driver, note string) string {
 	fmt.Fprintf(&b, "\n=== YOUR JOB THIS ROUND: %s — %s ===\n", j.ID, j.Title)
 	if j.Branch != "" {
 		fmt.Fprintf(&b, "Branch: %s\n", j.Branch)
+	}
+	if cont := r.continuationBlock(j); cont != "" {
+		b.WriteString(cont)
 	}
 	b.WriteString(j.Instructions)
 	if note != "" {
@@ -429,7 +503,12 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	if base == nil {
 		base = os.Environ()
 	}
-	cmd.Env = append(stripEnv(base, "JARVIS_JOB_ID"), "JARVIS_JOB_ID="+id)
+	// Plus the round's reply queue (plan §3.5): results for this job's
+	// correlation ids land on flow.<id>, and `jarvis-mq results flow.<id>`
+	// is how a woken round reads them in full.
+	base = stripEnv(base, "JARVIS_JOB_ID")
+	base = stripEnv(base, "JARVIS_REPLY_QUEUE")
+	cmd.Env = append(base, "JARVIS_JOB_ID="+id, "JARVIS_REPLY_QUEUE="+queue.FlowQueueName(id))
 	var buf bytes.Buffer
 	var w io.Writer = &buf
 	if r.Tee != nil {
