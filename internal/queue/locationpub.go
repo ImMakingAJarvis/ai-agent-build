@@ -60,19 +60,14 @@ func (p *LocationPublisher) publish(ctx context.Context, q string, m Message) er
 	}
 	confirms := make(chan amqp.Confirmation, 1)
 	ch.NotifyPublish(confirms)
-	body, err := encodeMessage(m)
+	pub, err := newPublishing(m, 0)
 	if err != nil {
 		return fmt.Errorf("location publish: encode job %s: %w", m.ID, err)
 	}
 	// Routing key is the queue name itself: the q".#" topic binding
 	// matches it, and the location queues carry no priority, so no wire
 	// priority is set either.
-	if err := ch.PublishWithContext(ctx, p.conn.Exchange(), q, false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		Body:         body,
-		DeliveryMode: amqp.Persistent,
-		Timestamp:    m.CreatedAt,
-	}); err != nil {
+	if err := ch.PublishWithContext(ctx, p.conn.Exchange(), q, false, false, pub); err != nil {
 		return fmt.Errorf("location publish: %s: %w", q, err)
 	}
 	// AMQP publishes are async: wait for the broker's confirm so a nil

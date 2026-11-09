@@ -427,22 +427,24 @@ cmd_handoff() {
   queue=$(jarvis-jobs list 2>/dev/null | grep -vE '^(done|skipped|failed)' | head -25)
   {
     cat <<EOF
-# Brain handoff — $ts
+# Brain handoff — $ts (current window only)
 
-<!-- Written by the brain before a swap window (docs/brain-swap.md). The
-     next brain round reads this first, continues, then moves it to
-     notes/archive/. Keep it short: what was in flight, the exact next step. -->
+<!-- Written by the brain before a swap window (docs/brain-swap.md). This
+     file is the pointer for THE CURRENT WINDOW ONLY: which jobs are in it
+     and the first step on return. The durable record per job is its
+     continuation — jobs/<id>/continuation.md, written by \`jarvis-jobs yield\`
+     before the job parked — which outlives the window. The next brain round
+     reads this file first, does "First thing on return", verifies, then moves
+     this file to notes/archive/; the continuations stay in the job store. -->
 
-## In flight
-- (what I was working on, and where exactly I stopped)
+## Window
+- window: $(jarvis-watchdog maintain status 2>/dev/null | sed 's/maintenance active: //')
+
+## Jobs in this window
+- (job id): continue from jobs/<id>/continuation.md
 
 ## First thing on return
 - (the exact next step — one or two lines, no re-planning needed)
-
-## Photo window
-- window: $(jarvis-watchdog maintain status 2>/dev/null | sed 's/maintenance active: //')
-- photo jobs: (ids flipped to igpu)
-- results check: (which images / bench run to verify)
 
 ## Verify on return
 - [ ] jarvis-swap status: brain healthy, no maintenance window

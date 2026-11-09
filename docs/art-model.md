@@ -7,9 +7,9 @@
 ## What runs
 
 - **Model:** Z-Image-Turbo — 6B text-to-image DiT (Tongyi-MAI), 8-step
-  turbo distillation (guidance-free), 1024×1024. Weights: the official
-  `Tongyi-MAI/Z-Image-Turbo` pipeline repo (32.9 GB F32 on disk, ~13 GB
-  resident when loaded in bf16).
+  turbo distillation (guidance-free), trained at 1024×1024. Weights: the
+  official `Tongyi-MAI/Z-Image-Turbo` pipeline repo (32.9 GB F32 on disk,
+  ~13 GB resident when loaded in bf16).
 - **Serving:** `scripts/art_service.py` — a small FastAPI app in the
   `jarvis/art:local` container (python 3.12 + torch cu128 + diffusers),
   same pinned-deploy-point pattern as voice (`/opt/jarvis-art`).
@@ -33,7 +33,11 @@ curl -s -X POST 127.0.0.1:8120/generate \
 ```
 
 `POST /generate` fields: `prompt` (required), `seed` (int), `size`
-(`"WxH"`, each dim capped at 1024), `steps` (default 9 = 8 DiT forwards).
+(`"WxH"` pixels, each dim capped at 1024 — or an aspect ratio, written
+with small numbers like `"16x9"` / `"16:9"` / `"9x16"`: the long side is
+scaled to 1024 and both sides rounded to a multiple of 16, the VAE patch,
+so `16x9` → 1024×576, `4x3` → 1024×768, `21x9` → 1024×432), `steps`
+(default 9 = 8 DiT forwards). A bad `size` is a 400.
 Generations take tens of seconds — allow a few minutes for the HTTP
 request.
 
@@ -80,6 +84,14 @@ Discord commands:
 - `!photo <text>` — the mind expands the prompt, the image is
   generated, and the caption shows the (truncated) prompt that was
   actually used.
+- **Sizes:** any of the commands may start with a size token —
+  `!photo 16x9 <text>` — to request a non-square frame: `WxH` pixels
+  (each dim ≤ 1024) or an aspect ratio (`16x9`, `9x16`, `4x3`, `21x9`,
+  `16:9`, ...; the long side becomes 1024 and both sides land on the
+  VAE's 16-pixel grid). The token rides to the generation as a
+  `*.size` sidecar next to the prompt, and the thinking mind is told
+  the frame it is writing for, so it composes for the shape. Without a
+  token the default square 1024×1024 applies.
 - `!photoassist <text>` — same, but the mind's full prompt is also
   sent as a chat message first, so it can be read, reused, or refined
   by giving the mind more context.

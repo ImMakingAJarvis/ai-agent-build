@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """jarvis-art — generate photos with the local art model (jarvis-art service).
 
-  jarvis-art generate "a photo of ..." [--seed N] [--size 1024x1024] [--mind]
+  jarvis-art generate "a photo of ..." [--seed N] [--size 1024x1024|16x9] [--mind]
   jarvis-art enhance "a red panda in snow"
   jarvis-art list
 
@@ -109,7 +109,10 @@ def main():
     g = sub.add_parser("generate", help="generate a photo; prints the saved path")
     g.add_argument("prompt")
     g.add_argument("--seed", type=int, default=None, help="reproduce a result")
-    g.add_argument("--size", default=None, help="WxH, e.g. 1024x1024 (max 1024)")
+    g.add_argument("--size", default=None,
+                   help="WxH pixels (1024x576, each dim max 1024) or an "
+                        "aspect ratio like 16x9 / 16:9 (long side scaled "
+                        "to 1024)")
     g.add_argument("--mind", action="store_true",
                    help="expand the request through the thinking mind first")
     e = sub.add_parser("enhance", help="print the thinking mind's prompt; no image")

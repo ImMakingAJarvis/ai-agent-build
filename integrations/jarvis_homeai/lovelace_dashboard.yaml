@@ -1,0 +1,208 @@
+# Jarvis HomeAI Dashboard
+#
+# Lovelace dashboard configuration for monitoring the Jarvis AI agent system.
+#
+# To install:
+# 1. Copy this file to your HA config directory as:
+#    ~/.homeassistant/dashboards/jarvis_homeai.yaml
+# 2. Add to configuration.yaml:
+#    lovelace:
+#      dashboards:
+#        jarvis_homeai:
+#          title: "Jarvis AI"
+#          icon: "mdi:robot"
+#          mode: yaml
+#          filename: jarvis_homeai.yaml
+#
+# Or import via the UI: Settings → Dashboards → Three dots → Edit in YAML mode.
+
+title: Jarvis AI
+icon: mdi:robot
+views:
+  - title: Overview
+    icon: mdi:view-dashboard
+    cards:
+      # === Status Row ===
+      - type: entities
+        title: System Status
+        state_color: true
+        entities:
+          - entity: sensor.jarvis_engine_status
+            name: Engine
+          - entity: sensor.jarvis_worker_status
+            name: Worker
+          - entity: sensor.jarvis_chat_status
+            name: Chat Bot
+          - entity: sensor.jarvis_loaded_model
+            name: Loaded Model
+          - entity: sensor.jarvis_current_job
+            name: Current Job
+
+      # === Controls ===
+      - type: entities
+        title: Controls
+        entities:
+          - entity: input_boolean.job_announce
+            name: Job Voice Announcements
+
+      # === GPU Metrics ===
+      - type: vertical-stack
+        cards:
+          - type: entities
+            title: GPU Status
+            entities:
+              - entity: sensor.jarvis_gpu_temperature
+                name: Temperature
+              - entity: sensor.jarvis_gpu_utilization
+                name: GPU Utilization
+              - entity: sensor.jarvis_gpu_power_draw
+                name: Power Draw
+
+          - type: gauge
+            entity: sensor.jarvis_gpu_temperature
+            name: GPU Temperature
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 85
+            unit: "°C"
+            needle: true
+
+          - type: gauge
+            entity: sensor.jarvis_gpu_utilization
+            name: GPU Utilization
+            min: 0
+            max: 100
+            unit: "%"
+            severity:
+              green: 0
+              yellow: 60
+              red: 90
+
+      # === VRAM Usage ===
+      - type: vertical-stack
+        cards:
+          - type: entities
+            title: Memory
+            entities:
+              - entity: sensor.jarvis_gpu_memory_used
+                name: VRAM Used
+              - entity: sensor.jarvis_gpu_memory_total
+                name: VRAM Total
+
+          - type: gauge
+            entity: sensor.jarvis_gpu_memory_used
+            name: VRAM Usage
+            unit: "MiB"
+            min: 0
+            max: 24576
+            severity:
+              green: 0
+              yellow: 16384
+              red: 22000
+
+      # === Job Statistics ===
+      - type: entities
+        title: Job Statistics
+        entities:
+          - entity: sensor.jarvis_jobs_completed
+            name: Jobs Completed
+          - entity: sensor.jarvis_jobs_failed
+            name: Jobs Failed
+          - entity: sensor.jarvis_requests_total
+            name: Total Requests
+
+  - title: GPU
+    icon: mdi:memory
+    cards:
+      # === GPU Gauges ===
+      - type: vertical-stack
+        cards:
+          - type: gauge
+            entity: sensor.jarvis_gpu_temperature
+            name: GPU Temperature
+            min: 0
+            max: 100
+            unit: "°C"
+            severity:
+              green: 0
+              yellow: 70
+              red: 85
+            segments:
+              - from: 0
+                to: 50
+                color: "#4caf50"
+              - from: 50
+                to: 70
+                color: "#ff9800"
+              - from: 70
+                to: 100
+                color: "#f44336"
+
+          - type: gauge
+            entity: sensor.jarvis_gpu_utilization
+            name: GPU Utilization
+            min: 0
+            max: 100
+            unit: "%"
+
+          - type: gauge
+            entity: sensor.jarvis_gpu_power_draw
+            name: Power Draw
+            min: 0
+            max: 450
+            unit: "W"
+
+      # === VRAM ===
+      - type: gauge
+        entity: sensor.jarvis_gpu_memory_used
+        name: VRAM Used
+        unit: "MiB"
+        min: 0
+        max: 24576
+        severity:
+          green: 0
+          yellow: 16384
+          red: 22000
+
+      # === History Graph ===
+      - type: histogram
+        entity: sensor.jarvis_gpu_temperature
+        name: Temperature Distribution
+        min: 0
+        max: 100
+        steps: 10
+
+      - type: histogram
+        entity: sensor.jarvis_gpu_utilization
+        name: Utilization Distribution
+        min: 0
+        max: 100
+        steps: 10
+
+  - title: Jobs
+    icon: mdi:clipboard-list
+    cards:
+      # === Job Stats ===
+      - type: entities
+        title: Job Statistics
+        entities:
+          - entity: sensor.jarvis_jobs_completed
+            name: Completed
+          - entity: sensor.jarvis_jobs_failed
+            name: Failed
+          - entity: sensor.jarvis_requests_total
+            name: Total Requests
+          - entity: sensor.jarvis_current_job
+            name: Current Job
+
+      # === Job History Graph ===
+      - type: statistics-graph
+        entities:
+          - sensor.jarvis_gpu_utilization
+          - sensor.jarvis_gpu_temperature
+        y_axis: secondary
+        log_scale: false
+        days_to_show: 1
