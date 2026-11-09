@@ -13,9 +13,10 @@ import (
 
 // TestFlowAndCapQueuesDeclareWithDLXArgs is a live test (RabbitMQ on
 // RABBITMQ_URL, default localhost:5672): every cap.*/flow.* queue must be
-// declared with the dead-letter args, so a rejected message has somewhere
-// to go. Skips when the broker is unreachable, so `go test ./...` stays
-// green off this machine.
+// declared with the dead-letter args (so a rejected message has somewhere
+// to go), and cap queues additionally carry x-max-priority 10. Skips when
+// the broker is unreachable, so `go test ./...` stays green off this
+// machine.
 func TestFlowAndCapQueuesDeclareWithDLXArgs(t *testing.T) {
 	c, err := NewConn()
 	if err != nil {
@@ -33,22 +34,31 @@ func TestFlowAndCapQueuesDeclareWithDLXArgs(t *testing.T) {
 	}
 	defer c.deleteBoth(t, flowName, capName)
 
-	for _, name := range []string{flowName, capName} {
+	// Flow queues carry the DLX args; cap queues carry the DLX args plus
+	// x-max-priority (plan §3.4), so each is redeclared with its own shape.
+	cases := []struct {
+		name string
+		args amqp.Table
+	}{
+		{flowName, dlxArgs()},
+		{capName, capQueueArgs()},
+	}
+	for _, tc := range cases {
 		// A redeclare with identical args must be a no-op success...
 		ch, err := c.NewChannel()
 		if err != nil {
 			t.Fatalf("channel: %v", err)
 		}
-		if _, err := ch.QueueDeclare(name, true, false, false, false, dlxArgs()); err != nil {
-			t.Errorf("%s: redeclare with dlxArgs failed: %v", name, err)
+		if _, err := ch.QueueDeclare(tc.name, true, false, false, false, tc.args); err != nil {
+			t.Errorf("%s: redeclare with own args failed: %v", tc.name, err)
 		}
 		// ...and one with no args must 406 — proof the queue carries the
 		// dead-letter args (AMQP 0-9-1 exposes no way to read them back).
 		// The 406 closes the channel (AMQP semantics), so each name gets
 		// its own.
 		var amqpErr *amqp.Error
-		if _, err := ch.QueueDeclare(name, true, false, false, false, nil); !errors.As(err, &amqpErr) || amqpErr.Code != amqp.PreconditionFailed {
-			t.Errorf("%s: redeclare with nil args = %v, want PRECONDITION_FAILED (406)", name, err)
+		if _, err := ch.QueueDeclare(tc.name, true, false, false, false, nil); !errors.As(err, &amqpErr) || amqpErr.Code != amqp.PreconditionFailed {
+			t.Errorf("%s: redeclare with nil args = %v, want PRECONDITION_FAILED (406)", tc.name, err)
 		}
 		ch.Close()
 	}
