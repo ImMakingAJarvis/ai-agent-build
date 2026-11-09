@@ -23,7 +23,7 @@ temporary auto-delete ones the CLI creates to `tail` an exchange.
 | `background` | everything else; `plan_epic` jobs ride here at priority 10 (`PlanEpicPriority`) so plans queue ahead of the rest | worker | 10 | — |
 | `jobs.gpu` / `jobs.cpu` / `jobs.igpu` | execution jobs placed by `internal/placement` from free VRAM/RAM | task-runner (LocationWorkers); publishers: plane-bridge (board `run_task` jobs) and the worker's LocationPublisher | — | — |
 | `flow.<name>` | event-driven handoff between models across rounds (The pattern below); created on demand, one per flow | the round that created it — read with `jarvis-mq peek` / `consume` | — | `jarvis.dlx` |
-| `cap.<capability>` | request channel for a capability — v2 messages, e.g. `cap.image.generate`; created on demand; the result goes to the request's `reply_to`, not here | the capability's worker (capworker SDK, EVB-19, Phase 3 — nothing consumes these yet) | — | `jarvis.dlx` |
+| `cap.<capability>` | request channel for a capability — v2 messages, e.g. `cap.image.generate`; created on demand; the result goes to the request's `reply_to`, not here | the capability's worker (capworker SDK; `cap-echo` consumes `cap.echo`, the Phase 2 gate's test worker) | 10 | `jarvis.dlx` |
 | `dead` | dead letters from `flow.*`/`cap.*`: rejected (nack without requeue after the `MaxAttempts` budget) or expired (TTL), each carrying an `x-death` header (reason, queue, count, time) | nobody consumes it — the dashboard's Dead Letters section reads it and offers requeue / drop | — | — |
 | `events` (topic) | lifecycle events: `job.<capability>.<started\|progress\|done\|failed>`, `agent.<job-id>.<yielded\|woken\|resumed>`, `window.<opened\|closed>`, `lease.<granted\|released\|denied>` | publishers: worker (the jobs it runs), task-runner (`job.run_task.*`), agent-run (`agent.*`); declared by `definitions.json` + `EventPublisher` | — | — |
 | `jarvis.dlx` (fanout) | the dead-letter exchange — fanout, so every dead letter lands on its single bound queue, `dead` | `EnsureDLX` (called from every `flow.*`/`cap.*` declare and dead-letter operation) | — | — |
@@ -95,8 +95,8 @@ written first.
   the scaffold stays on disk to be filled in and retried.
 - **`jarvis-jobs waiting`** — the waiting jobs: id, title, what it waits
   on, age, deadline. Prints nothing when none wait.
-- **`jarvis-jobs wake <id>`** — the manual wake (the automatic one lands
-  with the switchboard, plan task 14). It asks `Store.Wake`, which honours
+- **`jarvis-jobs wake <id>`** — the manual wake (the automatic one is the
+  switchboard, plan task 14). It asks `Store.Wake`, which honours
   the same gate both paths share: the job wakes — back to `ready`,
   priority bumped above the ready peers — when every `--wait-on` result
   has been recorded or the deadline has passed; otherwise it stays
@@ -189,8 +189,54 @@ a done-marker file in the request's `out_dir`:
   marker, so any later redelivery is a no-op.
 
 `queue.DoneMarker(outDir, corr)` returns that path so every handler computes
-it identically. The capworker SDK (EVB-19) implements the check-then-write;
-this task fixes only the convention and the path helper.
+it identically. The capworker SDK (`internal/capworker`, the seed of the
+full EVB-19 SDK) implements the check-then-write — see
+[Cap workers](#cap-workers-and-the-phase-2-gate) below.
+
+## Cap workers and the Phase 2 gate
+
+The **capworker SDK** (`internal/capworker/capworker.go`) is the minimal
+consumer a capability worker is built from: it declares its `cap.<cap>`
+queue durable with `x-max-priority` 10 and the DLX, consumes with
+prefetch 1 and manual ack, and hands each message to a `Handler`. The
+reply is published to the request's `reply_to` in **confirm mode before
+the ack** — the ack lands only after the broker has confirmed the result
+(invariant 3: nothing is lost). A redelivery of an already-done
+`correlation_id` (the done-marker exists) skips the work and republishes
+the stored result; a request whose deadline passed before pickup is
+answered with a `timeout` Result. A dropped connection is re-established
+with 1 s → 30 s backoff, so a broker restart mid-message costs at most
+one redelivery. `cmd/cap-echo` is the test worker on top of the SDK: the
+`cap.echo` capability sleeps `ECHO_DELAY` (30 s on the box) and writes a
+small artifact file to the request's `out_dir` — the stand-in for a slow
+capability.
+
+The **Phase 2 gate** (`scripts/e2e-cap-echo.sh`, plan task 17) proves the
+whole wait/wake loop on the live box with a scripted stand-in round —
+`jarvis-jobs mark-running` puts a fresh job running without launching a
+round (the local driver is the brain itself, and the plan sanctions the
+stand-in), then `jarvis-mq submit` + `listen` + `jarvis-jobs yield`.
+Four scenarios:
+
+- **S1** — submit, yield, the echo replies, the switchboard wakes the job
+  (the wake lands milliseconds after the artifact, against a 5 s bar).
+- **S2** — kill the switchboard mid-wait: the result lands on the durable
+  flow queue while it is down, and the restart wakes the job (durable
+  result + listener store survive).
+- **S3** — restart the broker mid-wait: the durable cap message is
+  re-consumed after reconnect and still wakes.
+- **S4** — submit to a capability with **no worker** and a short
+  `--wait-until`: the switchboard's deadline check wakes the job with
+  reason `timeout`.
+
+The gate uses fresh `gate-<epoch>-sN` job ids / flow queues / artifact
+dirs under the data root, cleans them up, exits non-zero on any failure,
+and restores the switchboard's restart policy on the way out. Its first
+run (2026-11-09) caught a real bug: while the broker was down,
+`queue.Conn.Reconnect` ran on consecutive ticks — the first attempt's
+failed Dial left the connection nil, and the second attempt's
+close-of-the-old-connection SIGSEGV'd the switchboard. `Reconnect` and
+`Close` now tolerate a nil conn/channel.
 
 ## CLI
 
@@ -289,4 +335,10 @@ running agent can hand work to another model mid-run without shelling out.
   `WaitAge`/`WaitRemaining` renderers.
 - `internal/agentjob/wait.go` — the waiting state machine (EVB-12):
   `Store.Yield`, `Store.Wake`, `Store.RecordResult`.
-- `cmd/jarvis-jobs/yield.go` — `jarvis-jobs yield`, `waiting`, `wake`.
+- `cmd/jarvis-jobs/yield.go` — `jarvis-jobs yield`, `waiting`, `wake`,
+  and `mark-running` (the stand-in-round primitive the Phase 2 gate uses).
+- `internal/capworker/capworker.go` — the capworker SDK: queue ensure,
+  prefetch-1 consume, the done-marker idempotency, the deadline-before-
+  pickup `timeout`, and the confirm-mode result-before-ack.
+- `cmd/cap-echo/main.go` — the `cap.echo` test worker on top of the SDK.
+- `scripts/e2e-cap-echo.sh` — the Phase 2 wait/wake gate (S1–S4).
