@@ -204,7 +204,9 @@ if (( resume )); then
     # stop the resume.
     jid="$(cat "$CONF/current-job")"
     jarvis-mq event "agent.$jid.resumed" --source agent-run --job-id "$jid" --data reason=reboot || true
-    JARVIS_JOB_ID="$jid" run_claude "$m" 1 "$resume_p"; status=$?
+    # Same round env as jarvis-jobs run: the job id and its reply queue
+    # (results for the job's corrs land on flow.<id>, plan §3.5).
+    JARVIS_JOB_ID="$jid" JARVIS_REPLY_QUEUE="flow.$jid" run_claude "$m" 1 "$resume_p"; status=$?
   else
     run_claude "$m" 1 "$resume_p"; status=$?
   fi
