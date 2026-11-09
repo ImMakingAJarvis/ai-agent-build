@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
@@ -59,8 +60,9 @@ func run(args []string) int {
 	}
 
 	// A few minutes: the art service waits up to ~90s for free VRAM, then an
-	// image takes tens of seconds.
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	// image takes tens of seconds; a reference generation can take longer
+	// (the first call after a restart also loads the FLUX.2 [klein] model).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	img, err := makePhoto(ctx, dataDir, id, prompt)
 	if err != nil {
@@ -88,12 +90,52 @@ func run(args []string) int {
 // makePhoto reads the job's size token (if any) and generates the image on
 // the art service. The size sidecar is optional: jobs queued before sizes
 // existed have none, and the service default (square 1024x1024) applies.
+//
+// A reference sidecar (the owner's photo, pasted with the prompt) routes the
+// generation to the reference-capable model: the photo is staged in the art
+// service's refs directory first, and the service loads it by name so the
+// result keeps the subject from the photo.
 func makePhoto(ctx context.Context, dataDir, id, prompt string) (*art.Image, error) {
+	client := art.New()
 	size, err := photo.ReadSize(dataDir, id)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read size: %w", err)
 	}
-	return art.New().Generate(ctx, prompt, size)
+	if ref, err := photo.RefFile(dataDir, id); err == nil {
+		name, err := stageRef(ref)
+		if err != nil {
+			return nil, err
+		}
+		return client.GenerateRef(ctx, prompt, size, []string{name})
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("reference sidecar: %w", err)
+	}
+	return client.Generate(ctx, prompt, size)
+}
+
+// stageRef copies a job's reference sidecar into the art service's refs
+// directory (bind-mounted into the art container) and returns the file name
+// the service loads it by. The name carries the job id and a timestamp so a
+// re-run stages a fresh copy instead of reusing a stale one.
+func stageRef(refPath string) (string, error) {
+	b, err := os.ReadFile(refPath)
+	if err != nil {
+		return "", fmt.Errorf("read reference: %w", err)
+	}
+	dir := os.Getenv("ART_REFS_DIR")
+	if dir == "" {
+		dir = "/var/lib/jarvis/art/refs"
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	// The sidecar is <data>/photos/<id>.png; reuse the job id in the name.
+	id := strings.TrimSuffix(filepath.Base(refPath), ".png")
+	name := fmt.Sprintf("ref-%s-%d.png", id, time.Now().Unix())
+	if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // deliver sends the image to the owner's Discord DM via jarvis-discord, which
