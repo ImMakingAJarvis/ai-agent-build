@@ -133,6 +133,11 @@
 - 2026-11-08T12:26Z [chat-1794120504-40ab] Discord reply-to-worker routing: bot-message replies go to the agent inbox (quoted context) + 👍 reaction, chatbot ignores them (PR #198)
 - 2026-11-08T13:24Z [chat-1794122808-9116] iGPU helper engine moved from the host systemd unit into its own compose container jarvis-engine-igpu (service engine-igpu, port 11435, restart: unless-stopped); worker routes its 11435 endpoint to the container via IGPU_URL (mapEngineEndpoint, cmd/worker); consumers on in-network addresses; watchdog/stack-status/helper scripts + docs updated; old unit disabled as rollback (PR #199)
 - 2026-11-08T13:50Z [chat-1794123627-6324] Gallery link fix: owner-facing gallery URL defaults to the LAN IP http://111.1.2.27:8120 (was 127.0.0.1 for host-side callers + dashboard); art gallery timestamps now render in the viewer's local timezone via moment (CDN + fallback); deployed jarvis-photo + /opt/jarvis-art + dashboard, live :8080 link verified (PR #200)
+<<<<<<< HEAD
+- 2026-11-08T15:02Z [chat-1794124122-d693] Photo jobs run as code: jarvis-photo executor (start art, wait for load, generate, DM, gallery, queue follow-up) — no model round at all; all enqueue paths write the prompt sidecar; jarvis-jobs add -tags photo requires -prompt (PR #201)
+- 2026-11-08T16:00Z [chat-1794120390-5db0] scripts/blue_square.py — small blue square on the screen (GTK4/PyGObject) (PR #202)
+- 2026-11-08T16:44Z [plan-plan-event-driven-brain-1794016330] Broke PLAN-event-driven-brain.md into 38 queued jobs plan-plan-event-driven-brain-1794016330-1..38 (Phases 0-7 chain; Plane epic EVB; kanban epic 5e4cd00b + 38 tasks; shared branch phase-event-driven-brain)
+=======
 - 2026-11-08T16:54Z [plan-plan-event-driven-brain-1794016330-1] EVB-1: notes/** merge=union (.gitattributes) + *.pyc gitignore; test-merge loop 20/23 clean, no notes/ conflicts (PR #204)
 - 2026-11-08T17:15Z [plan-plan-event-driven-brain-1794016330-2] EVB-2 (board EVB-3): verified phase-photo-window already merged to main (PR #175); jarvis-swap install path added to install_agent_run.sh (PR #204)
 - 2026-11-08T18:36Z [plan-plan-event-driven-brain-1794016330-3] EVB-3: verified phase-work-board-plane already merged to main (PR #173, no re-merge); the run_task e2e (card TST-5) found+fixed+deployed 3 task-runner loop bugs (ShellChecker cmd.Dir, epic worktree reuse on blocked re-run, worktree prune before branch -D) with regression tests; e2e card Done (commit 0b0309f -> epics/TST-4) (PR #204)
@@ -152,3 +157,4 @@
 - 2026-11-09T09:20Z EVB-16 (plan task 16, board EVB-17): resumed rounds carry continuation.md + results in the prompt, JARVIS_JOB_ID/JARVIS_REPLY_QUEUE round env, yield/wake Plane comments via internal/boardnote (PR #211)
 - 2026-11-09T11:47Z [plan-plan-event-driven-brain-1794016330-17] EVB-17: cap.echo test worker + minimal capworker SDK + Phase 2 wait/wake gate — 4/4 PASS live (nil-conn reconnect panic caught by the gate's first run, fixed in-PR) (PR #213)
 - 2026-11-09T11:55Z [chat-1794220886-a989] Gallery URLs use the LAN IP (http://111.1.2.27:8120) on every owner-facing emitter: chat !photo DM (compose env, already deployed), jarvis-photo photo-DM caption + dashboard Gallery button (code default, PR #200 open/mergeable, awaits merge)
+>>>>>>> origin/main
