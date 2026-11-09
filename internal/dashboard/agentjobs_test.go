@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 )
@@ -70,6 +71,40 @@ func TestAgentJobsSectionPaginates(t *testing.T) {
 		if !strings.Contains(out, w) {
 			t.Errorf("section lacks %q", w)
 		}
+	}
+}
+
+// TestAgentJobsSectionWaitingRow: a waiting job renders as "waiting on
+// <corrs> (<age>)" instead of the bare status, and a ready job next to it
+// keeps its plain status.
+func TestAgentJobsSectionWaitingRow(t *testing.T) {
+	tmpl, err := template.New("agent-jobs-section").Funcs(jobLogFuncs()).ParseFS(templatesFS, "templates/*.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := AgentJobsPage{
+		Items: []agentjob.Job{
+			{
+				Spec:  agentjob.Spec{ID: "w0", Title: "Make photo", WaitOn: []string{"J-img-1", "J-img-2"}, Driver: "local"},
+				State: agentjob.State{Status: agentjob.Waiting, RanWith: "jarvis-brain", WaitingSince: time.Now().UTC().Format(time.RFC3339)},
+			},
+			{
+				Spec:  agentjob.Spec{ID: "r0", Title: "Next up", Driver: "local"},
+				State: agentjob.State{Status: agentjob.Ready},
+			},
+		},
+		ListPage: ListPage{Total: 2, Shown: 2},
+	}
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "agent-jobs-section", page); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "waiting on J-img-1, J-img-2 (") {
+		t.Errorf("waiting row lacks the wait-on text: %s", out)
+	}
+	if !strings.Contains(out, ">ready<") {
+		t.Errorf("ready row lost its plain status: %s", out)
 	}
 }
 

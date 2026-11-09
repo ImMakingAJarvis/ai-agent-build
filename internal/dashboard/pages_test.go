@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 )
 
 func TestWindow(t *testing.T) {
@@ -74,6 +77,37 @@ func TestApprovalsArePaged(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/html/approvals?offset=25", nil))
 	if n := strings.Count(rec.Body.String(), `class="approval-card"`); n != listPageSize {
 		t.Fatalf("page 2 cards=%d", n)
+	}
+}
+
+// TestWaitStatusText: a waiting row shows what it waits on plus its age;
+// other statuses pass through unchanged.
+func TestWaitStatusText(t *testing.T) {
+	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	mk := func(status string, since string, waitOn ...string) agentjob.Job {
+		j := agentjob.Job{}
+		j.Status = status
+		j.WaitingSince = since
+		j.WaitOn = waitOn
+		return j
+	}
+	cases := []struct {
+		name string
+		job  agentjob.Job
+		want string
+	}{
+		{"two corrs", mk(agentjob.Waiting, "2026-11-08T11:48:00Z", "J-img-1", "J-img-2"), "waiting on J-img-1, J-img-2 (12m)"},
+		{"no corrs", mk(agentjob.Waiting, "2026-11-08T11:59:15Z"), "waiting (45s)"},
+		{"hours", mk(agentjob.Waiting, "2026-11-08T09:57:00Z", "J-img-1"), "waiting on J-img-1 (2h3m)"},
+		{"days", mk(agentjob.Waiting, "2026-11-06T10:00:00Z", "J-img-1"), "waiting on J-img-1 (2d2h)"},
+		{"missing since", mk(agentjob.Waiting, "", "J-img-1"), "waiting on J-img-1 (?)"},
+		{"running passes through", mk("running", "", "J-img-1"), "running"},
+		{"ready passes through", mk("ready", ""), "ready"},
+	}
+	for _, c := range cases {
+		if got := WaitStatusText(c.job, now); got != c.want {
+			t.Errorf("%s: WaitStatusText = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 
