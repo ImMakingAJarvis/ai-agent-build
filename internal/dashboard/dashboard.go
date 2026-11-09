@@ -499,6 +499,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/kanban/subtasks", s.kanban.apiListSubTasks)
 	mux.HandleFunc("GET /api/kanban/models", s.kanban.apiListModels)
 	mux.HandleFunc("GET /api/nobrakes/audit", s.handleNobrakesAudit)
+
+	// Photo pipeline for the gallery page (the art service's page, on its
+	// own origin): expand a basic prompt with the thinking mind, and queue
+	// a photo job (with an optional uploaded reference image).
+	mux.HandleFunc("POST /api/photo/assist", s.handlePhotoAssist)
+	mux.HandleFunc("POST /api/photo/jobs", s.handlePhotoJobs)
+	mux.HandleFunc("OPTIONS /api/photo/assist", s.handlePhotoAssist)
+	mux.HandleFunc("OPTIONS /api/photo/jobs", s.handlePhotoJobs)
 	return mux
 }
 
