@@ -196,6 +196,34 @@ func cmdYield(store *agentjob.Store, args []string) error {
 	return nil
 }
 
+// cmdMarkRunning puts a ready job straight into the running state without
+// launching a round. The real loop does ready → claimed (Store.Claim) →
+// running inside Runner.Run, but a scripted stand-in round — the Phase 2
+// wait/wake gate (plan task 17) — needs a job in the running state so it can
+// yield, and it must not actually start a round (on this box the local driver
+// is the brain itself). It refuses any state other than ready so a done,
+// failed or waiting job cannot be resurrected by a typo.
+func cmdMarkRunning(store *agentjob.Store, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: jarvis-jobs mark-running <id>")
+	}
+	id := args[0]
+	j, err := store.Get(id)
+	if err != nil {
+		return err
+	}
+	if j.Status != agentjob.Ready {
+		return fmt.Errorf("job %s is %s, not ready — mark-running is for a fresh stand-in round", id, j.Status)
+	}
+	j.State.Status = agentjob.Running
+	j.State.StartedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := store.SetStatus(id, j.State); err != nil {
+		return err
+	}
+	fmt.Printf("marked running: %s\n", id)
+	return nil
+}
+
 // parseWaitUntil accepts a duration relative to now ("2h", "45m") or an
 // RFC3339 timestamp. Store.Yield enforces that the result is in the future
 // (invariant 2).

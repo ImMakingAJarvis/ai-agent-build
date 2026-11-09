@@ -240,3 +240,36 @@ func TestYieldWakeUsage(t *testing.T) {
 		t.Error("wake without an id: want a usage error")
 	}
 }
+
+// TestMarkRunning is the stand-in-round primitive behind the Phase 2
+// wait/wake gate: a ready job goes straight to running (so a script can
+// yield it without launching a round), and any non-ready state is refused.
+func TestMarkRunning(t *testing.T) {
+	s, err := agentjob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedJobs(t, s, "mr1", agentjob.Ready)
+	if err := cmdMarkRunning(s, []string{"mr1"}); err != nil {
+		t.Fatalf("mark-running ready job: %v", err)
+	}
+	j, _ := s.Get("mr1")
+	if j.Status != agentjob.Running {
+		t.Fatalf("status = %q, want running", j.Status)
+	}
+	if j.StartedAt == "" {
+		t.Errorf("started_at not stamped")
+	}
+	// Not ready any more: a second mark is refused (no resurrecting a
+	// running/finished job by typo).
+	if err := cmdMarkRunning(s, []string{"mr1"}); err == nil {
+		t.Error("mark-running a running job: want a refusal")
+	}
+	seedJobs(t, s, "mr2", agentjob.Done)
+	if err := cmdMarkRunning(s, []string{"mr2"}); err == nil {
+		t.Error("mark-running a done job: want a refusal")
+	}
+	if err := cmdMarkRunning(s, nil); err == nil {
+		t.Error("mark-running without an id: want a usage error")
+	}
+}
