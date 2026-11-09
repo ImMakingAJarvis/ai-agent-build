@@ -88,7 +88,7 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `jarvis-mq — RabbitMQ publish/consume for event-driven work (docs/event-driven.md)
 
-  publish <queue> [flags]   publish one message (flow.<name> queues are created on demand)
+  publish <queue> [flags]   publish one message (flow.<name> and cap.<cap> queues are created on demand)
   consume <queue> [-n N]    pop up to N messages (default 1), acking them
   peek <queue> [-n N]       show up to N messages without removing them
   depth <queue>             number of ready messages
@@ -120,8 +120,25 @@ publish flags:
   --effort E                reasoning effort (off, low, medium, high, xhigh, max)
   --priority N              AMQP priority (ignored on non-priority queues)
   --source S                source tag (default jarvis-mq)
+  --capability C            capability requested (image.generate, ...) — envelope v2
+  --correlation C           correlation id tying the request to its result — v2
+  --reply-to Q              queue (or flow) the result is published to — v2
+  --wake-job J              agentjob id to wake when the result lands — v2
+  --parent-job J            id of the job that submitted this one — v2
+  --location L              pin the work to a device (gpu | igpu | cpu | remote:<host>) — v2
+  --out-dir D               where the worker writes its artifacts — v2
+  --input-ref P             input file or dir the worker reads, by path — v2, repeatable
 `)
 	os.Exit(2)
+}
+
+// stringListFlag collects repeatable string flags (e.g. --input-ref).
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return strings.Join(*s, ", ") }
+func (s *stringListFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
 }
 
 // payloadFlag collects repeatable --payload k=v pairs.
@@ -189,6 +206,18 @@ func runPublish(args []string) error {
 	effort := fs.String("effort", "", "reasoning effort")
 	priority := fs.Int("priority", 1, "AMQP priority")
 	source := fs.String("source", "jarvis-mq", "source tag")
+	// Envelope v2 (plan §3.3): capability request fields. Setting any of
+	// them marks the message v2 (v=2); an unset field stays out of the JSON
+	// and the AMQP properties (omitempty).
+	capability := fs.String("capability", "", "capability requested (image.generate, ...) — makes the message v2")
+	correlation := fs.String("correlation", "", "correlation id tying the request to its result — v2")
+	replyTo := fs.String("reply-to", "", "queue (or flow) the result is published to — v2")
+	wakeJob := fs.String("wake-job", "", "agentjob id to wake when the result lands — v2")
+	parentJob := fs.String("parent-job", "", "id of the job that submitted this one — v2")
+	location := fs.String("location", "", "pin the work to a device: gpu | igpu | cpu | remote:<host> — v2")
+	outDir := fs.String("out-dir", "", "where the worker writes its artifacts — v2")
+	inputRefs := &stringListFlag{}
+	fs.Var(inputRefs, "input-ref", "input file or dir the worker reads, by path — v2, repeatable")
 	q, err := takeQueue(fs, args)
 	if err != nil {
 		return err
@@ -219,11 +248,43 @@ func runPublish(args []string) error {
 	if *effort != "" {
 		m.ReasoningEffort = *effort
 	}
+	// Envelope v2: set the request fields and mark the envelope v2. Any v2
+	// field makes the message a capability request (plan §3.3).
+	if *capability != "" {
+		m.Capability = *capability
+	}
+	if *correlation != "" {
+		m.CorrelationID = *correlation
+	}
+	if *replyTo != "" {
+		m.ReplyTo = *replyTo
+	}
+	if *wakeJob != "" {
+		m.WakeJob = *wakeJob
+	}
+	if *parentJob != "" {
+		m.ParentJob = *parentJob
+	}
+	if *location != "" {
+		m.Location = *location
+	}
+	if *outDir != "" {
+		m.OutDir = *outDir
+	}
+	if len(*inputRefs) > 0 {
+		m.InputRefs = *inputRefs
+	}
+	if m.Capability != "" || m.CorrelationID != "" || m.ReplyTo != "" || m.WakeJob != "" ||
+		m.ParentJob != "" || m.Location != "" || m.OutDir != "" || len(m.InputRefs) > 0 {
+		m.SchemaVersion = 2
+	}
 	// A message must carry something its consumer will read: the job text
-	// (--instructions), a legacy prompt, context left for a later round, or
-	// --payload entries (a result message is often payload-only).
-	if m.Instructions == "" && m.Payload["prompt"] == "" && m.Payload["context"] == "" && len(m.Payload) == 0 {
-		return fmt.Errorf("give the message something: --prompt, --instructions, --context, or --payload")
+	// (--instructions), a legacy prompt, context left for a later round,
+	// --payload entries (a result message is often payload-only), or a v2
+	// capability field (the request's arguments ride on Input/InputRefs).
+	if m.Instructions == "" && m.Payload["prompt"] == "" && m.Payload["context"] == "" &&
+		len(m.Payload) == 0 && m.SchemaVersion == 0 {
+		return fmt.Errorf("give the message something: --prompt, --instructions, --context, --payload, or a --capability field")
 	}
 
 	conn, err := newConn()
@@ -232,15 +293,26 @@ func runPublish(args []string) error {
 	}
 	defer conn.Close()
 
-	// Flow queues are created on demand; known queues (voice, fix, ... and
-	// jobs.*) already exist and are published to with the standard routing
-	// key. A message to an unknown non-flow queue would be dropped by the
-	// topic exchange (unbound routing key), so refuse it.
+	// Flow and capability queues are created on demand (both carry the
+	// dead-letter args, EVB-10); known queues (voice, fix, ... and jobs.*)
+	// already exist and are published to with the standard routing key. A
+	// message to an unknown non-flow queue would be dropped by the topic
+	// exchange (unbound routing key), so refuse it.
 	if queue.IsFlowQueue(q) {
 		if err := conn.PublishFlow(context.Background(), q, m); err != nil {
 			return err
 		}
 		fmt.Printf("published %s → %s (flow queue created on demand)\n", m.ID, q)
+		return nil
+	}
+	if queue.IsCapQueue(q) {
+		if err := conn.EnsureCapQueue(q); err != nil {
+			return err
+		}
+		if err := conn.Publish(m, q+".default"); err != nil {
+			return err
+		}
+		fmt.Printf("published %s → %s (capability queue created on demand)\n", m.ID, q)
 		return nil
 	}
 	for _, wq := range workerOwnedQueues {
@@ -252,7 +324,7 @@ func runPublish(args []string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("queue %q is not a flow queue (flow.*) or a known queue; the exchange would drop it", q)
+	return fmt.Errorf("queue %q is not a flow queue (flow.*), a capability queue (cap.*), or a known queue; the exchange would drop it", q)
 }
 
 func runConsume(args []string) error {
@@ -455,6 +527,12 @@ func runDelete(args []string) error {
 		if q == wq {
 			return fmt.Errorf("refusing to delete worker-owned queue %q", q)
 		}
+	}
+	if queue.IsCapQueue(q) {
+		// Capability queues hold in-flight requests for a capability worker
+		// (capworker SDK, EVB-19) — same reason worker-owned queues are
+		// protected: deleting one loses a delivery.
+		return fmt.Errorf("refusing to delete capability queue %q", q)
 	}
 	conn, err := newConn()
 	if err != nil {
