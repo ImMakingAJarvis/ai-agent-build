@@ -200,11 +200,12 @@ const (
 )
 
 // enqueuePhotoJob stores a queued photo: the brain-expanded prompt goes to a
-// sidecar file (the iGPU round reads it via jarvis-photo), and the job
-// itself is tagged photo so the swap-window watcher brackets it. size is
-// the requested frame ("16x9", ...) — stored to its own sidecar file — or
-// "" for the service default (square). now=true places the job at the top
-// of the fix band instead of the top of the build band.
+// sidecar file (the jarvis-photo code executor reads it), and the job
+// itself is tagged photo so the swap-window watcher brackets it and the
+// runner executes it without a model round. size is the requested frame
+// ("16x9", ...) — stored to its own sidecar file — or "" for the service
+// default (square). now=true places the job at the top of the fix band
+// instead of the top of the build band.
 func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool) (id string, err error) {
 	if strings.TrimSpace(usedPrompt) == "" {
 		return "", fmt.Errorf("empty prompt")
@@ -243,15 +244,11 @@ func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool) (
 	return id, err
 }
 
-// photoJobInstructions is what the iGPU round reads for a photo job: run the
-// executor, which generates the photo on the art service (the 4090 is free
-// during the brain-swap window) and delivers the finished image to the
-// owner's Discord DM.
+// photoJobInstructions is the canonical text of a photo job (shared with
+// jarvis-jobs add). Photo work runs as code — the jarvis-photo executor,
+// no model round — so the text only documents what the executor does.
 func photoJobInstructions(id string) string {
-	return "This is a queued photo job. Do exactly one thing and nothing else:\n\n" +
-		"    jarvis-photo make --job " + id + "\n\n" +
-		"It reads the job's prompt, generates the photo on the art service (the brain is swapped out, so the 4090 is free) and sends the finished image to the owner's Discord DM.\n\n" +
-		"When it prints 'sent' and exits 0 you are done — reply: photo sent. If it exits non-zero, reply with the error it printed and nothing else."
+	return photo.StandardInstructions(id)
 }
 
 // photoTitle builds a photo job's title: the trimmed raw prompt, with the

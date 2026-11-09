@@ -25,13 +25,20 @@ var prRe = regexp.MustCompile(`https://github\.com/[\w.-]+/[\w.-]+/pull/\d+`)
 
 // Runner runs claimed jobs and records the result.
 type Runner struct {
-	Store *Store
+	Store   *Store
 	History *queue.History
 	// Command builds the agent command for a driver, full prompt, and reasoning
 	// effort level. The default is agent-local (local, and igpu pointed at the
 	// iGPU engine) or claude --model $AGENT_STAGE2_MODEL (sonnet) /
 	// $AGENT_OPUS_MODEL (opus).
 	Command func(driver, prompt, effort string) *exec.Cmd
+	// PhotoCommand builds the executor for a photo-tagged job — a photo job
+	// runs as plain code, with NO model round (no brain, no iGPU helper).
+	// The default is `jarvis-photo make --job <id>`, which is
+	// self-sufficient: it starts the art service if it is down, waits for
+	// the model to load, generates, delivers the image to Discord, marks the
+	// job sent, and queues the job's optional follow-up.
+	PhotoCommand func(jobID string) *exec.Cmd
 	// PRLookup finds a PR URL for a branch when the output has none. The
 	// default asks gh. Return "" if there is none.
 	PRLookup func(branch string) string
@@ -443,6 +450,8 @@ func (r *Runner) restoreSlot(jobID string) error {
 
 // Run claims job id, runs it on driver and records the outcome in the store
 // and in jobs.jsonl. A nil error means the agent command exited 0.
+// Photo-tagged jobs skip the model round entirely and run through the code
+// executor instead (runPhoto).
 func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, error) {
 	if driver == "" {
 		driver = "local"
@@ -463,6 +472,13 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 		pickup = defaultDiscordPickup
 	}
 	pickup(j)
+	// A photo-tagged job needs no model round at all (not the brain, not the
+	// iGPU helper): the executor is self-sufficient code. The driver argument
+	// is irrelevant to it — the swap window that pulled the job guarantees
+	// the 4090 is free, and the executor stands up the art service itself.
+	if j.HasTag(photo.Tag) {
+		return r.runPhoto(ctx, j)
+	}
 	j.Model = ModelFor(driver)
 	j.State.Model = j.Model
 	j.Status = Running
@@ -549,6 +565,92 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	return r.finish(j, rec, buf.String(), runErr, wh)
 }
 
+// defaultPhotoCommand is the code executor for a photo job.
+func defaultPhotoCommand(jobID string) *exec.Cmd {
+	cmd := exec.Command("jarvis-photo", "make", "--job", jobID)
+	cmd.Env = os.Environ()
+	return cmd
+}
+
+// runPhoto runs a photo-tagged job through the code executor: no prompt
+// building, no engine slot, no model. The executor's output is the
+// transcript (and the Redis stream); its exit code and the delivery marker
+// decide the outcome exactly like a model round's (finish() below applies
+// the photo marker check — a done run without <id>.sent is a failure).
+func (r *Runner) runPhoto(ctx context.Context, j Job) (Job, error) {
+	id := j.ID
+	j.Model = "jarvis-photo"
+	j.State.Model = j.Model
+	j.State.RanWith = "photo"
+	j.Status = Running
+	j.StartedAt = time.Now().UTC().Format(time.RFC3339)
+	r.Store.SetStatus(id, j.State)
+
+	// Sample GPU power for the whole run (nil disables it).
+	var stopPower func() float64
+	if r.Power != nil {
+		stopPower = r.Power(r.Store.JobDir(id))
+	}
+
+	var rec *queue.JobRecord
+	if r.History != nil {
+		rec = r.History.Start(queue.Message{ID: id, Type: queue.KindAgent, Source: "agent-run"}, j.Model, false, queue.BackgroundQueue)
+		rec.Kind, rec.Title, rec.Driver = queue.KindAgent, j.Title, "photo"
+	}
+
+	cmdf := r.PhotoCommand
+	if cmdf == nil {
+		cmdf = defaultPhotoCommand
+	}
+	cmd := cmdf(id)
+	// Tag the session so any tooling watching the round knows which job is
+	// running (mirrors Run's JARVIS_JOB_ID tag).
+	base := cmd.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	cmd.Env = append(stripEnv(base, "JARVIS_JOB_ID"), "JARVIS_JOB_ID="+id)
+	var buf bytes.Buffer
+	var w io.Writer = &buf
+	if r.Tee != nil {
+		w = io.MultiWriter(&buf, r.Tee)
+	}
+	// Stream the same bytes into transcript.txt so a running job has a log.
+	if tf, err := os.OpenFile(filepath.Join(r.Store.JobDir(id), "transcript.txt"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+		defer tf.Close()
+		w = io.MultiWriter(w, tf)
+	}
+	// Live stream: publish each output line to the job's Redis stream so
+	// the dashboard can show the executor's progress as it happens.
+	if addr := StreamAddr(); addr != "off" && addr != "none" {
+		if pub := NewStreamPublisher(addr, id); pub != nil {
+			defer pub.Close()
+			w = io.MultiWriter(w, pub)
+		}
+	}
+	cmd.Stdout, cmd.Stderr = w, w
+
+	if err := cmd.Start(); err != nil {
+		return j, err
+	}
+	// Stop/restart signals work on photo runs too: the owner can kill a
+	// slow generation from the dashboard, and !restart re-runs it. (The
+	// pause signal has no slot semantics here, but the watcher treats a
+	// photo run like any other.)
+	if r.SignalFile != "" || r.RestartSignalFile != "" || r.StopSignalFile != "" {
+		go r.signalWatcher(id, cmd)
+	}
+	runErr := cmd.Wait()
+	if ctx.Err() != nil && runErr == nil {
+		runErr = ctx.Err()
+	}
+	var wh float64
+	if stopPower != nil {
+		wh = stopPower()
+	}
+	return r.finish(j, rec, buf.String(), runErr, wh)
+}
+
 // signalWatcher polls SignalFile, RestartSignalFile and StopSignalFile
 // every second. A restart signal (a "!restart" DM) kills the running command
 // and re-queues the job for a fresh run. A stop signal (the dashboard's Stop
@@ -604,7 +706,7 @@ func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 			// finish() reads the status after Wait returns, and a job that
 			// is already Failed would refuse the Pause and show up as
 			// failed instead of paused.
-			_ = r.saveSlot(id)  // best-effort; don't fail if engine is down
+			_ = r.saveSlot(id) // best-effort; don't fail if engine is down
 			if err := r.Store.Pause(id); err == nil && cmd.Process != nil {
 				cmd.Process.Kill()
 			}
@@ -686,17 +788,17 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 	default:
 		j.Status, j.Error = Done, ""
 	}
-	// Photo jobs: the iGPU round wraps `jarvis-photo make`, which exits 0
-	// only when the image was generated AND delivered — but the agent (the
-	// small iGPU model) ends the round with 0 even when the command failed.
-	// So a photo round that ends done without the delivery marker is a
-	// failure, not a done job: the image was never sent, and the job must
-	// stay re-queueable instead of being silently lost.
+	// Photo jobs: the code executor (jarvis-photo) exits 0 only when the
+	// image was generated AND delivered — and the marker is what makes that
+	// guarantee checkable after the fact. So a photo run that ends done
+	// without the delivery marker is a failure, not a done job: the image
+	// was never sent, and the job must stay re-queueable instead of being
+	// silently lost.
 	photoFailed := false
 	if j.Status == Done && j.HasTag(photo.Tag) {
 		if _, err := os.Stat(photo.SentPath(r.Store.Dir(), id)); err != nil {
-			j.Status, j.Error = Failed, "photo round ended but no delivery marker (" +
-				filepath.Base(photo.SentPath(r.Store.Dir(), id)) + "): the image was not sent — re-queue to retry"
+			j.Status, j.Error = Failed, "photo round ended but no delivery marker ("+
+				filepath.Base(photo.SentPath(r.Store.Dir(), id))+"): the image was not sent — re-queue to retry"
 			photoFailed = true
 		}
 	}
@@ -725,6 +827,13 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 		} else {
 			r.History.Complete(rec)
 		}
+	}
+	// A photo run that ended without its delivery marker is a failure even
+	// though the executor exited 0: the marker IS the proof the image was
+	// sent, and callers decide the round's outcome from the returned error
+	// (the agent-run loop would otherwise notify a done that never happened).
+	if photoFailed {
+		return j, errors.New(j.Error)
 	}
 	return j, runErr
 }

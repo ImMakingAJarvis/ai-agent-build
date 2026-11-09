@@ -35,7 +35,16 @@ swap` is that something; the watchdog's maintenance mode is the failsafe.
   (`http://jarvis-engine-igpu:11435`); chat falls back to it when the
   brain is down (`FALLBACK_ENGINE_URL`). The old host unit
   `jarvis-engine-igpu.service` is disabled and kept as the rollback
-  path.
+  path. **Photo jobs no longer run on it**: they run as code (the
+  `jarvis-photo` executor, no model round at all), and their
+  `driver: igpu` spec is vestigial band bookkeeping.
+- **Photo executor** = `jarvis-photo make --job <id>` (`cmd/jarvis-photo`),
+  run by the agentjob Runner for photo-tagged jobs (no model round). It
+  is self-sufficient: it starts the art service if it is down, waits for
+  the model to load, generates (the PNG is saved to disk and in the
+  gallery at the same time), delivers to Discord, and queues the job's
+  optional follow-up (`photos/<id>.followup`) as a new job with the
+  image path.
 - **Watchdog maintenance mode** = `jarvis-watchdog maintain <dur>
   [reason]` (45s|30m|2h|seconds). While unexpired, brain restarts are
   skipped; **at expiry the brain is re-armed even if the whole window
@@ -67,7 +76,8 @@ part is now only:
    pointing at its continuation) and "First thing on return" (one or two
    lines; do NOT re-plan — the point is to resume, not restart thinking).
 3. Make sure the photo work is queued (image-queue ingestion, or
-   `jarvis-jobs add` with `-tags photo -driver igpu`).
+   `jarvis-jobs add` with `-tags photo -prompt "..."` — the prompt is
+   stored in the job's prompt sidecar that the executor reads).
 4. End the round. The watcher opens the window on the next pull.
 
 Then the loop carries it (no brain required):
@@ -76,10 +86,12 @@ Then the loop carries it (no brain required):
    FIRST, stops the brain container, waits for the VRAM to clear,
    `docker compose up -d art bench` (no-ops if already up), waits for
    the art model to load, then flips the whole ready batch to `igpu`
-   at priority 1000 and notifies Discord.
-6. The photo jobs run one by one on the iGPU helper while the brain is
-   off (expected — that is the whole point). Each pull re-flips the
-   batch, so photo jobs that arrive mid-window are picked up too.
+   at priority 1000 (band bookkeeping — the driver label is vestigial
+   for photo jobs, which run as code) and notifies Discord.
+6. The photo jobs run one by one as code (the `jarvis-photo` executor —
+   no model round, not even the iGPU helper) while the brain is off
+   (expected — that is the whole point). Each pull re-flips the batch,
+   so photo jobs that arrive mid-window are picked up too.
 7. When the batch drains, the loop runs `jarvis-swap in`: closes the
    window, stops art+bench, starts the brain container, waits up to 15 min
    for `/health`, runs the API check (a real completion must come back,
@@ -114,8 +126,13 @@ end. A manual window with no photo jobs is left to the owner.
   next photo pull opens a fresh window. (Manual bracket: the swap-in
   job is stranded — `jarvis-jobs skip <swap-in id>`, then a fresh
   window.)
-- **The iGPU helper dies mid-window**: the igpu round fails →
-  autopause → the deadline re-arms the brain. Same recovery.
+- **The photo run fails** (art service down or the model never loads
+  within the executor's wait): the job fails → autopause → the batch
+  drains and the deadline re-arms the brain. Same recovery as a failed
+  photo job.
+- **The iGPU helper dies mid-window** (manual bracket only: the
+  swap-out/swap-in jobs are real igpu model rounds): the igpu round
+  fails → autopause → the deadline re-arms the brain. Same recovery.
 - **A local job is queued mid-window**: `jarvis-jobs next` skips it
   (brain down); it runs after the window. Nothing to do.
 - **The window expires before the photos finish**: the watchdog re-arms

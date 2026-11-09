@@ -36,16 +36,17 @@ swap window instead of the old manual bracket (two extra igpu jobs):
 - **Before the first photo job runs** the loop calls
   `jarvis-swap out --jobs <batch> --force`: watchdog maintenance window
   first (the brain re-arms at the deadline), brain unit stopped,
-  art+bench up, and every ready photo job flipped to the iGPU helper at
-  priority 1000. The pulled job then runs on the **igpu** driver
-  regardless of its spec driver.
+  art+bench up, and every ready photo job flipped to priority 1000 (the
+  `igpu` driver label is vestigial for photo jobs). The pulled job then
+  runs as **code** — the `jarvis-photo` executor, no model round (not
+  even the iGPU helper), regardless of its spec driver.
 - **`jarvis-jobs photo-ready`** lists the batch (ready + tagged, in run
   order; empty output = drained). The tag is set by image-queue
   ingestion or `jarvis-jobs add -tags photo`.
 - **Re-flip:** `out` is idempotent — while the window is open, each
   photo pull re-flips the batch, so photo jobs that arrive mid-window
-  get the iGPU driver and the maintenance window extends as long as
-  there is work.
+  join the priority-1000 batch and the maintenance window extends as
+  long as there is work.
 - **When the batch drains** (no ready photo jobs) the loop calls
   `jarvis-swap in` at the top of the next iteration: window closed,
   art+bench stopped, brain reloaded and API-checked.
