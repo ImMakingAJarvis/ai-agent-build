@@ -77,6 +77,12 @@ type Incoming struct {
 	// it there before any hook or signal file sees it, so a chat handler
 	// can never classify it or schedule a job from it.
 	ReplyToBot bool
+	// AttachmentURL is the URL of the first image attachment on the DM
+	// (png, jpeg or webp), empty when the message carries none. The chat
+	// handler downloads it and uses it as the photo reference for a
+	// !photo / !photoassist — the owner's way of "paste a photo with the
+	// prompt".
+	AttachmentURL string
 }
 
 // waiter is one open question.
@@ -229,6 +235,7 @@ func (d *Discord) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	inc := Incoming{ChannelID: m.ChannelID, MessageID: m.ID, Content: m.Content}
 	d.attachReply(s, m, &inc)
+	attachFirstImage(m, &inc)
 
 	// A Discord reply to a message a bot sent is a reply to the worker:
 	// it is for the agent, not the chat. Route it to the agent inbox and
@@ -316,6 +323,22 @@ func applyReply(refMsg *discordgo.Message, inc *Incoming) {
 	inc.ReplyTo = refMsg.Content
 	if refMsg.Author != nil {
 		inc.ReplyAuthor = refMsg.Author.Username
+	}
+}
+
+// attachFirstImage records the first image attachment's URL on inc, so the
+// chat handler can download it as a photo reference. Non-image attachments
+// (pdfs, audio, ...) are ignored: a !photo reference must be an image.
+func attachFirstImage(m *discordgo.MessageCreate, inc *Incoming) {
+	for _, a := range m.Attachments {
+		if a == nil || a.URL == "" {
+			continue
+		}
+		switch a.ContentType {
+		case "image/png", "image/jpeg", "image/webp":
+			inc.AttachmentURL = a.URL
+			return
+		}
 	}
 }
 

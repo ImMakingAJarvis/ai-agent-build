@@ -203,9 +203,12 @@ const (
 // sidecar file (the iGPU round reads it via jarvis-photo), and the job
 // itself is tagged photo so the swap-window watcher brackets it. size is
 // the requested frame ("16x9", ...) — stored to its own sidecar file — or
-// "" for the service default (square). now=true places the job at the top
-// of the fix band instead of the top of the build band.
-func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool) (id string, err error) {
+// "" for the service default (square). refBytes is the photo of the subject
+// the image should keep (a pasted/uploaded image); when non-empty it is
+// stored to the reference sidecar and the round generates with the
+// reference-capable model. now=true places the job at the top of the fix
+// band instead of the top of the build band.
+func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool, refBytes []byte) (id string, err error) {
 	if strings.TrimSpace(usedPrompt) == "" {
 		return "", fmt.Errorf("empty prompt")
 	}
@@ -224,6 +227,11 @@ func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool) (
 			return "", err
 		}
 	}
+	if len(refBytes) > 0 {
+		if err := photo.WriteRefBytes(dataDir, id, refBytes); err != nil {
+			return "", err
+		}
+	}
 	class, prio := agentjob.ClassBuild, photoJobPriority
 	if now {
 		class, prio = agentjob.ClassFix, photoNowJobPriority
@@ -231,7 +239,7 @@ func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool) (
 	_, err = store.Ingest(agentjob.Spec{
 		ID:               id,
 		Title:            "photo: " + photoTitle(raw, size),
-		Instructions:     photoJobInstructions(id),
+		Instructions:     photo.JobInstructions(id),
 		Driver:           "igpu",
 		Class:            class,
 		Priority:         prio,
@@ -241,17 +249,6 @@ func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool) (
 		Tags:             []string{photo.Tag},
 	})
 	return id, err
-}
-
-// photoJobInstructions is what the iGPU round reads for a photo job: run the
-// executor, which generates the photo on the art service (the 4090 is free
-// during the brain-swap window) and delivers the finished image to the
-// owner's Discord DM.
-func photoJobInstructions(id string) string {
-	return "This is a queued photo job. Do exactly one thing and nothing else:\n\n" +
-		"    jarvis-photo make --job " + id + "\n\n" +
-		"It reads the job's prompt, generates the photo on the art service (the brain is swapped out, so the 4090 is free) and sends the finished image to the owner's Discord DM.\n\n" +
-		"When it prints 'sent' and exits 0 you are done — reply: photo sent. If it exits non-zero, reply with the error it printed and nothing else."
 }
 
 // photoTitle builds a photo job's title: the trimmed raw prompt, with the
