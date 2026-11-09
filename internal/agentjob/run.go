@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
@@ -388,6 +389,100 @@ func streamResultText(out string) string {
 	return out
 }
 
+// streamSessionID returns the Claude Code session id of a round whose
+// output is a stream-json transcript — the final result event's id,
+// falling back to the first system/init id. "" when the transcript
+// carries no session id (the command died before init, or it is not a
+// stream-json transcript at all).
+func streamSessionID(out string) string {
+	var initSID string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var ev map[string]any
+		if json.Unmarshal([]byte(line), &ev) != nil {
+			continue
+		}
+		sid, _ := ev["session_id"].(string)
+		if sid == "" {
+			continue
+		}
+		switch ev["type"] {
+		case "system":
+			if initSID == "" {
+				initSID = sid
+			}
+		case "result":
+			return sid
+		}
+	}
+	return initSID
+}
+
+// recordSessionID stores the yielding round's Claude Code session id in
+// the job's continuation.json (plan tasks 16/18): a future resume can
+// re-attach the round's conversation with --resume <sid>. The RMW takes
+// the job lock (the one Claim uses) so it does not race the switchboard's
+// own continuation updates; a lost write only costs one result ref, which
+// RecordResult re-adds and which results.json holds authoritatively.
+func (r *Runner) recordSessionID(id, sid string) {
+	lock, err := os.OpenFile(filepath.Join(r.Store.JobDir(id), "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	c, err := r.Store.ReadContinuation(id)
+	if err != nil || c.SessionID == sid {
+		return
+	}
+	c.SessionID = sid
+	_ = r.Store.WriteContinuation(c)
+}
+
+// claudeSessionFile is the on-disk transcript of a Claude Code session:
+// $HOME/.claude/projects/<cwd, non-alphanumerics → "-">/<sid>.jsonl — the
+// same layout the claude binary uses, for the same working directory the
+// round ran in. "" when HOME is unknown.
+func claudeSessionFile(cwd, sid string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	slug := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '-'
+	}, cwd)
+	return filepath.Join(home, ".claude", "projects", slug, sid+".jsonl")
+}
+
+// resumeSessionID returns the session id a woken job's round should
+// re-attach with --resume, or "" for the ordinary fresh round: the
+// continuation must record a session id (finish records it when a round
+// yields, plan tasks 16/18) and the session file must still be on disk.
+// The experiment behind the flag: docs/benchmarks/resume-vs-continuation.md.
+func (r *Runner) resumeSessionID(id string) string {
+	c, err := r.Store.ReadContinuation(id)
+	if err != nil || c.SessionID == "" {
+		return ""
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Stat(claudeSessionFile(cwd, c.SessionID)); err != nil {
+		return ""
+	}
+	return c.SessionID
+}
+
 // stripEnv returns env without any entries for key, so appending a fresh
 // value below can never leave a duplicate behind.
 func stripEnv(env []string, key string) []string {
@@ -509,6 +604,17 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 		cmdf = defaultCommand
 	}
 	cmd := cmdf(driver, prompt, effort)
+	// A woken round re-attaches the session that yielded (EVB-18,
+	// docs/benchmarks/resume-vs-continuation.md): the measured win is
+	// 71-76% fewer fresh input tokens per round at equal correctness.
+	// Only Claude Code drivers re-attach (superagent takes a plain goal);
+	// a missing session id or session file falls back to the fresh round,
+	// which is what every round did before this.
+	if driver != "superagent" {
+		if sid := r.resumeSessionID(id); sid != "" {
+			cmd.Args = append(cmd.Args[:1], append([]string{"--resume", sid}, cmd.Args[1:]...)...)
+		}
+	}
 	// Tag the session so the owner-message hook (scripts/owner-message-hook.sh)
 	// knows this is the job's own session and may drain the message inbox;
 	// any other claude session in this repo leaves the inbox alone. cmdf may
@@ -759,6 +865,14 @@ func (r *Runner) finish(j Job, rec *queue.JobRecord, out string, runErr error, w
 	// overwrite its status with the kill's error.
 	cur, _ := r.Store.Get(id)
 	yielded := cur.Status == Waiting
+	// A round that yielded leaves its session id in continuation.json so a
+	// resume can re-attach it (plan tasks 16/18 — the EVB-18 experiment
+	// measures whether a re-attached session is worth it).
+	if yielded {
+		if sid := streamSessionID(out); sid != "" {
+			r.recordSessionID(id, sid)
+		}
+	}
 	now := time.Now().UTC()
 	if !yielded {
 		j.FinishedAt = now.Format(time.RFC3339)

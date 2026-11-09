@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -183,5 +184,124 @@ func TestRunRoundEnv(t *testing.T) {
 	}
 	if qN != 1 {
 		t.Errorf("JARVIS_REPLY_QUEUE=flow.e1 present %d times, want 1", qN)
+	}
+}
+
+func TestStreamSessionID(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain output", "hello world\nfinal answer\n", ""},
+		{"init only", `{"type":"system","subtype":"init","session_id":"s-init"}`, "s-init"},
+		{"init and result", `{"type":"system","subtype":"init","session_id":"s-init"}
+{"type":"assistant","message":{"content":[]}}
+{"type":"result","subtype":"success","session_id":"s-res","result":"done"}`, "s-res"},
+		{"result without sid falls back to init", `{"type":"system","subtype":"init","session_id":"s-init"}
+{"type":"result","subtype":"error_max_turns"}`, "s-init"},
+		{"garbage lines skipped", `not json
+{"type":"system","subtype":"init","session_id":"s-init"}
+{broken`, "s-init"},
+	}
+	for _, tc := range cases {
+		if got := streamSessionID(tc.out); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestRecordSessionID: a yielding round leaves its Claude Code session id
+// in continuation.json (plan tasks 16/18) so a resume can re-attach it.
+func TestRecordSessionID(t *testing.T) {
+	s := newStore(t)
+	parkJob(t, s, "w1")
+	if err := s.WriteContinuation(&Continuation{JobID: "w1", WaitOn: []string{"w1-img-1"}, At: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Store: s}
+	r.recordSessionID("w1", "sess-123")
+	c, err := s.ReadContinuation("w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SessionID != "sess-123" {
+		t.Errorf("session id %q, want sess-123", c.SessionID)
+	}
+	// A second record with the same id is a no-op; a different one replaces it.
+	r.recordSessionID("w1", "sess-123")
+	r.recordSessionID("w1", "sess-456")
+	c, _ = s.ReadContinuation("w1")
+	if c.SessionID != "sess-456" {
+		t.Errorf("session id %q, want sess-456", c.SessionID)
+	}
+	// No continuation (a round that never yielded): silently a no-op.
+	ingest(t, s, Spec{ID: "w2", Title: "w", Instructions: "x", Priority: 5, CreatedAt: time.Now().UTC()})
+	r.recordSessionID("w2", "sess-789")
+	if _, err := s.ReadContinuation("w2"); !os.IsNotExist(err) {
+		t.Errorf("ReadContinuation(w2) err %v, want ErrNotExist", err)
+	}
+}
+
+// TestResumeSessionID: a woken round re-attaches its yielding session only
+// when the continuation records a session id AND the session file is still
+// on disk; anything less is the ordinary fresh round (EVB-18).
+func TestResumeSessionID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	s := newStore(t)
+	parkJob(t, s, "w1")
+	if err := s.WriteContinuation(&Continuation{JobID: "w1", WaitOn: []string{"w1-img-1", "w1-img-2"}, At: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Store: s}
+	ingest(t, s, Spec{ID: "w2", Title: "w", Instructions: "x", Priority: 5, CreatedAt: time.Now().UTC()})
+
+	// Never yielded (no continuation): fresh round.
+	if got := r.resumeSessionID("w2"); got != "" {
+		t.Errorf("w2: resumeSessionID %q, want empty", got)
+	}
+	// Yielded, but the session id was never recorded: fresh round.
+	if got := r.resumeSessionID("w1"); got != "" {
+		t.Errorf("w1 no-sid: got %q, want empty", got)
+	}
+	// Session id recorded, but the session file is gone: fresh round.
+	sid := "sess-123"
+	c, err := s.ReadContinuation("w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SessionID = sid
+	if err := s.WriteContinuation(c); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.resumeSessionID("w1"); got != "" {
+		t.Errorf("w1 no-file: got %q, want empty", got)
+	}
+	// Session file present: resume.
+	sf := claudeSessionFile(cwd, sid)
+	if err := os.MkdirAll(filepath.Dir(sf), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sf, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.resumeSessionID("w1"); got != sid {
+		t.Errorf("w1: resumeSessionID %q, want %q", got, sid)
+	}
+}
+
+// TestClaudeSessionFile: the session transcript lives under
+// $HOME/.claude/projects/<slug>/<sid>.jsonl, the slug being the working
+// directory with every non-alphanumeric replaced by "-".
+func TestClaudeSessionFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, ".claude", "projects", "-home-agent-ai-agent-build", "abc.jsonl")
+	if got := claudeSessionFile("/home/agent/ai-agent-build", "abc"); got != want {
+		t.Errorf("claudeSessionFile = %q, want %q", got, want)
 	}
 }
