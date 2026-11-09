@@ -222,6 +222,34 @@ v2 flags: `--capability`, `--correlation`, `--reply-to`, `--wake-job`,
 `--driver/--class/--effort` map onto the agent-job fields so a published
 `kind=agent` message carries its routing.
 
+The capability loop (plan §3.5): park the round on a flow queue, submit
+requests to a capability queue, read the results back. Listeners live in
+the switchboard's JSON store (one file per listener), so `listen`/`unlisten`
+/`listeners` work even while the switchboard service is down:
+
+    jarvis-mq listen flow.job-42 --wake job-42 --timeout 2h   # wake the job
+        # or: --forward <queue> (copy to another queue)
+        # or: --notify "text"  (Discord message to Nathan)
+    jarvis-mq unlisten flow.job-42 [--corr <id>]   # drop its listener(s)
+    jarvis-mq listeners                             # table of all listeners
+
+`listen` declares the queue if it does not exist (flow.* / cap.* by name
+prefix). `submit` publishes an envelope-v2 request to `cap.<capability>`
+— consumer priorities do the placement, there is no router:
+
+    jarvis-mq submit image.generate --reply-to flow.job-42 \
+        --corr job-42-img --input prompt="a lighthouse at dusk" \
+        --input-ref /tmp/ref.png --out-dir ~/.local/share/jarvis/artifacts/job-42/ \
+        --location gpu --vram-mb 12000 --ram-mb 2048 --deadline 2h
+
+`--input k=v` JSON-types the value (512 → number, true → bool, else the
+string typed); `--deadline` is RFC3339 or a duration from now. `results`
+consumes and pretty-prints `Result` messages from the reply queue (acks
+them; `-n N` to cap, `--json` for the raw bodies):
+
+    jarvis-mq results flow.job-42
+    jarvis-mq caps    # capability catalog — lands in task EVB-19
+
 Guards: publishing to a queue that is neither `flow.*`, `cap.*` nor a known
 queue is refused (the topic exchange would silently drop it), as is `delete`
 of a worker-owned queue (voice, fix, coding, background, jobs.*, image) or
