@@ -144,6 +144,75 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
 
 {{end}}
 
+{{define "dead-section"}}
+<!-- Dead Letters: rejected/expired messages that nowhere else can go
+     (EVB-10). Nothing disappears silently — every one is listed here
+     with its reason until it is requeued or dropped on purpose. -->
+<div class="section">
+  <div class="section-title">
+    Dead Letters
+    <button class="btn" id="dead-refresh-btn" onclick="refreshDead()">Refresh</button>
+  </div>
+  <div id="dead-content">
+    <div class="empty-state">Click Refresh to load dead letters from the dead queue.</div>
+  </div>
+</div>
+
+<script>
+async function refreshDead() {
+  const container = document.getElementById('dead-content');
+  const btn = document.getElementById('dead-refresh-btn');
+  container.innerHTML = '<div class="empty-state">Loading&hellip;</div>';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/dead-letters');
+    if (!resp.ok) {
+      container.innerHTML = '<div class="error-state">Failed to load: ' + resp.status + '</div>';
+      btn.disabled = false;
+      return;
+    }
+    const data = await resp.json();
+    if (!data || data.length === 0) {
+      container.innerHTML = '<div class="empty-state">No dead letters — nothing has been rejected.</div>';
+      btn.disabled = false;
+      return;
+    }
+    let html = '';
+    for (const dl of data) {
+      html += '<div class="pending-row">';
+      html += '<div><span class="pending-id">' + esc(dl.queue) + '</span>';
+      html += '<span class="pending-meta"> &middot; ' + esc(dl.routing_key) + '</span></div>';
+      html += '<div class="pending-meta">reason=' + esc(dl.reason);
+      if (dl.count > 1) html += ' &middot; dead-lettered ' + dl.count + 'x';
+      if (dl.dead_at) html += ' &middot; ' + esc(dl.dead_at);
+      html += ' &middot; ' + dl.size + ' bytes</div>';
+      if (dl.preview) html += '<div class="pending-prompt" title="' + esc(dl.preview) + '">' + esc(dl.preview) + '</div>';
+      html += '<div class="pending-meta">';
+      html += '<button class="btn" onclick="deadAction(\'' + esc(dl.id) + '\', \'requeue\')">Requeue</button> ';
+      html += '<button class="btn" onclick="deadAction(\'' + esc(dl.id) + '\', \'drop\')">Drop</button>';
+      html += '</div></div>';
+    }
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = '<div class="error-state">Error: ' + esc(e.message) + '</div>';
+  }
+  btn.disabled = false;
+}
+async function deadAction(id, action) {
+  const btns = document.querySelectorAll('#dead-content .btn');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const resp = await fetch('/api/dead-letters/' + encodeURIComponent(id) + '/' + action, {method: 'POST'});
+    if (!resp.ok) alert('Failed: ' + resp.status + ' ' + (await resp.text()));
+  } catch (e) {
+    alert('Failed: ' + e.message);
+  }
+  refreshDead();
+}
+</script>
+
+{{end}}
+
 {{define "queue-section"}}
 <!-- Interactive queue: photo-tagged jobs sit in the display-only photo band
      (first, not a drag target); the rest are grouped into the three class

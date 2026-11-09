@@ -690,6 +690,7 @@
     </div>
   </div>
   {{ template "pending-section" . }}
+  {{ template "dead-section" . }}
   <div class="section">
     <div class="section-title">Approval Queue</div>
     <div id="approvals" hx-get="/api/approvals" hx-trigger="load" hx-swap="outerHTML"></div>
