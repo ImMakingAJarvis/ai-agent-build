@@ -98,3 +98,46 @@ func MarkSent(dataDir, id string) error {
 func ClearSent(dataDir, id string) error {
 	return os.Remove(SentPath(dataDir, id))
 }
+
+// RefPath is the file holding a photo job's reference image (the raw bytes
+// of the photo of the subject the generated image should keep), next to the
+// prompt: <data>/photos/<id>.png. A reference means the job must generate
+// with the reference-capable model (FLUX.2 [klein]) rather than the plain
+// text-to-image one.
+func RefPath(dataDir, id string) string {
+	return filepath.Join(dataDir, PromptSubdir, id+".png")
+}
+
+// WriteRefBytes stores a photo job's reference image (the image bytes)
+// alongside its prompt, creating the photos directory.
+func WriteRefBytes(dataDir, id string, b []byte) error {
+	p := RefPath(dataDir, id)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, b, 0o644)
+}
+
+// RefFile returns the path to a photo job's reference image. It returns
+// os.ErrNotExist when the job carries no reference (the common case: a plain
+// text-to-image photo), which callers treat as "no reference".
+func RefFile(dataDir, id string) (string, error) {
+	p := RefPath(dataDir, id)
+	if _, err := os.Stat(p); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// JobInstructions is what the iGPU round reads for a photo job: run the
+// executor, which generates the photo on the art service (the 4090 is free
+// during the brain-swap window) and delivers the finished image to the
+// owner's Discord DM. It lives here (not in the chat daemon) so every
+// enqueue path — Discord, the dashboard, a manual jarvis-jobs add — writes
+// the same instructions for the round.
+func JobInstructions(id string) string {
+	return "This is a queued photo job. Do exactly one thing and nothing else:\n\n" +
+		"    jarvis-photo make --job " + id + "\n\n" +
+		"It reads the job's prompt, generates the photo on the art service (the brain is swapped out, so the 4090 is free) and sends the finished image to the owner's Discord DM.\n\n" +
+		"When it prints 'sent' and exits 0 you are done — reply: photo sent. If it exits non-zero, reply with the error it printed and nothing else."
+}
