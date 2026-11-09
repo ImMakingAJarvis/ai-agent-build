@@ -1,0 +1,2 @@
+# Append-only notes logs merge with union: every side's entries survive.
+notes/** merge=union

@@ -8,6 +8,7 @@ Web UI for queue and job history. systemd unit, same shape as `jarvis-chat` and 
 - URL: **http://111.1.2.57:8080/** (or http://localhost:8080 on the box)
 - Polls `GET /html/dashboard` as HTML. `/api/state` stays JSON. The old :8081 shim is not needed for this build.
 - Each Agent Job and Recent Job row has a **Log** link to `/jobs/<id>`: the worker's thoughts, tool calls, and outcomes, live while the job runs (see Live view below) and from that job's `transcript.txt` (or `output.txt` / `jobs.jsonl` summary if that is all that exists) afterwards. Empty jobs say “No log for this job.” Missing IDs 404. Traces stay in the existing job store; the dashboard does not keep a second copy.
+- Unbounded lists (approvals, agent jobs, recent jobs) first-paint **25 rows** and load more on demand. Older denied jobs stay in `jobs.jsonl`; the UI does not delete them.
 
 ## Live view (worker thoughts, real time)
 

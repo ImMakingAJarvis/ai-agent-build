@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -53,6 +54,26 @@ func run() error {
 	}
 	defer conn.Close()
 	log.Printf("worker: connected to RabbitMQ")
+
+	// Lifecycle events (plan §3.4): job.* for the jobs this worker
+	// processes itself. Fire-and-forget — a failed event is logged, never
+	// fatal to the job, and a missing publisher (broker down at boot)
+	// just disables events.
+	events, err := queue.NewEventPublisher(conn, "worker")
+	if err != nil {
+		log.Printf("worker: events publisher unavailable: %v (events disabled)", err)
+		events = nil
+	} else {
+		defer events.Close()
+	}
+	emitEvent := func(e queue.Event) {
+		if events == nil {
+			return
+		}
+		if err := events.Publish(context.Background(), e); err != nil {
+			log.Printf("worker: event %s: %v", e.RoutingKey(), err)
+		}
+	}
 
 	// Engine client for local model routing (Ollama or llama.cpp).
 	ollama := models.NewClient()
@@ -245,12 +266,14 @@ func run() error {
 		rec := history.Start(msg, job.ModelID, local, msg.Type)
 		log.Printf("worker: plan job %s → model %s (local=%v, effort=%s)",
 			msg.ID, job.ModelID, local, job.Effort)
+		emitEvent(queue.JobEvent(msg, "started", map[string]any{"model": job.ModelID}))
 
 		jobStart := time.Now()
 		res, err := planHandler.Run(context.Background(), job)
 		if err != nil {
 			log.Printf("worker: plan job %s failed: %v", msg.ID, err)
 			history.Fail(rec, err)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": err.Error()}))
 			ntf.OnFail(rec, err)
 			jobMetrics.ObserveFailed(msg.Type, job.ModelID)
 			resolvePlanJobStore(jobStore, msg, job.ModelID, "", err.Error())
@@ -268,6 +291,7 @@ func run() error {
 			derr := fmt.Errorf("plan delivery unavailable (no board credentials)")
 			log.Printf("worker: plan job %s: %v", msg.ID, derr)
 			history.Fail(rec, derr)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": derr.Error()}))
 			ntf.OnFail(rec, derr)
 			jobMetrics.ObserveFailed(msg.Type, job.ModelID)
 			resolvePlanJobStore(jobStore, msg, job.ModelID, "", derr.Error())
@@ -277,6 +301,7 @@ func run() error {
 		if derr != nil {
 			log.Printf("worker: plan job %s: delivery failed: %v", msg.ID, derr)
 			history.Fail(rec, derr)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": derr.Error()}))
 			ntf.OnFail(rec, derr)
 			jobMetrics.ObserveFailed(msg.Type, job.ModelID)
 			resolvePlanJobStore(jobStore, msg, job.ModelID, "", derr.Error())
@@ -287,6 +312,7 @@ func run() error {
 
 		rec.Summary = agentjob.Summary(res.Plan)
 		history.Complete(rec)
+		emitEvent(queue.JobEvent(msg, "done", nil))
 		jobMetrics.ObserveCompleted(msg.Type, job.ModelID, time.Since(jobStart).Seconds())
 		ntf.OnComplete(rec)
 		resolvePlanJobStore(jobStore, msg, job.ModelID, res.Plan, "")
@@ -390,6 +416,8 @@ func run() error {
 				rec.InputTokens = costEst.InputTokens
 				rec.OutputTokens = costEst.OutputTokens
 				history.Denied(rec, costEst.TotalCost)
+				emitEvent(queue.JobEvent(msg, "failed",
+					map[string]any{"reason": "approval denied", "estimated_cost": costEst.TotalCost}))
 				ntf.OnDenied(rec, costEst.TotalCost)
 				jobMetrics.ObserveDenied(msg.Type, modelName, costEst.TotalCost)
 				return queue.ErrApprovalDenied
@@ -403,6 +431,7 @@ func run() error {
 			rec.InputTokens = costEst.InputTokens
 			rec.OutputTokens = costEst.OutputTokens
 		}
+		emitEvent(queue.JobEvent(msg, "started", map[string]any{"model": modelName}))
 		sched.JobStarted(msg.Type)
 		defer sched.JobFinished(msg.Type)
 
@@ -412,6 +441,7 @@ func run() error {
 			err := fmt.Errorf("API dispatch not implemented (model %s)", modelName)
 			log.Printf("worker: job %s failed: %v", msg.ID, err)
 			history.Fail(rec, err)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": err.Error()}))
 			ntf.OnFail(rec, err)
 			jobMetrics.ObserveFailed(msg.Type, modelName)
 			return nil // recorded as failed; ack so it is not redelivered
@@ -424,6 +454,7 @@ func run() error {
 		resp, err := ollama.Generate(modelName, prompt)
 		if err != nil {
 			history.Fail(rec, err)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": err.Error()}))
 			jobMetrics.ObserveFailed(msg.Type, modelName)
 			return fmt.Errorf("generate: %w", err)
 		}
@@ -437,6 +468,7 @@ func run() error {
 		}
 		rec.Summary = agentjob.Summary(out)
 		history.Complete(rec)
+		emitEvent(queue.JobEvent(msg, "done", nil))
 		jobMetrics.ObserveCompleted(msg.Type, modelName, time.Since(jobStart).Seconds())
 		ntf.OnComplete(rec)
 		return nil
@@ -481,10 +513,12 @@ func run() error {
 // engines, and the B3 planning pipeline (the Plan/Decompose/Review prompts
 // plus the task JSON schema, prompts/).
 //
-// When the worker runs beside the engine (docker compose), the registry's
-// host-local endpoints (localhost:11434) are not reachable from the
-// container, so ENGINE_URL / OLLAMA_URL take precedence over them — the
-// same convention as models.NewClient.
+// When the worker runs beside the engines (docker compose), the
+// registry's host-local endpoints (localhost:11434) are not reachable
+// from the container, so ENGINE_URL / OLLAMA_URL / IGPU_URL take
+// precedence over them — the same convention as models.NewClient. The
+// iGPU helper is a different container from the brain, on its own port
+// (see mapEngineEndpoint).
 func newPlanHandler() (*planworker.Handler, error) {
 	regPath := os.Getenv("WORKER_MODELS_FILE")
 	if regPath == "" {
@@ -497,6 +531,13 @@ func newPlanHandler() (*planworker.Handler, error) {
 	engineBase := os.Getenv("ENGINE_URL")
 	if engineBase == "" {
 		engineBase = os.Getenv("OLLAMA_URL")
+	}
+	// The iGPU helper is its own container (jarvis-engine-igpu), reached
+	// by name on the compose network; IGPU_URL overrides that for hosts
+	// where the worker runs outside compose.
+	igpuBase := os.Getenv("IGPU_URL")
+	if igpuBase == "" {
+		igpuBase = defaultIGPUURL
 	}
 	engines := map[string]planworker.Engine{}
 	var mu sync.Mutex
@@ -518,10 +559,7 @@ func newPlanHandler() (*planworker.Handler, error) {
 	return &planworker.Handler{
 		Models: reg,
 		Engines: func(endpoint string) planworker.Engine {
-			base := endpoint
-			if engineBase != "" {
-				base = engineBase
-			}
+			base := mapEngineEndpoint(endpoint, engineBase, igpuBase)
 			mu.Lock()
 			defer mu.Unlock()
 			if e, ok := engines[base]; ok {
@@ -535,6 +573,36 @@ func newPlanHandler() (*planworker.Handler, error) {
 		Planner:  pipe,
 		FrontEnd: frontEnd,
 	}, nil
+}
+
+// defaultIGPUURL is where the worker reaches the iGPU helper container
+// from inside the compose network.
+const defaultIGPUURL = "http://jarvis-engine-igpu:11435"
+
+// mapEngineEndpoint maps a model-registry endpoint to the engine base
+// URL the worker actually calls. The worker runs beside the engines
+// (docker compose), where the registry's host-local endpoints
+// (localhost:11434) are not reachable, so the engine env vars take
+// precedence over them. The iGPU helper is a different container from
+// the brain — its own container, its own port — so its endpoint is
+// routed to IGPU_URL instead of being collapsed into the brain:
+//
+//	:11434 → the brain   (ENGINE_URL / OLLAMA_URL)
+//	:11435 → the iGPU    (IGPU_URL)
+//	other ports → the brain, as before
+// (the MoE ft serve on :11436 keeps the brain's address)
+//
+// With engineBase empty (the worker runs on the host) the endpoint is
+// passed through unchanged — localhost:11435 is then the host-published
+// port of the same container.
+func mapEngineEndpoint(endpoint, engineBase, igpuURL string) string {
+	if engineBase == "" {
+		return endpoint
+	}
+	if u, err := url.Parse(endpoint); err == nil && u.Port() == "11435" {
+		return igpuURL
+	}
+	return engineBase
 }
 
 // resolvePlanJobStore settles a plan job's agentjob store entry so the

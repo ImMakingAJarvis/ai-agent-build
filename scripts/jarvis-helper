@@ -3,9 +3,10 @@
 # jarvis-helper — ask the always-on helper model about this setup.
 #
 # The helper is a small instruct model (Qwen2.5-3B Q4_K_M) served by
-# llama.cpp on the Ryzen iGPU (Vulkan), port 11435, systemd unit
-# jarvis-engine-igpu. It costs zero CPU cores (weights stream from RAM)
-# and runs in parallel with the brain on the 4090.
+# llama.cpp on the Ryzen iGPU (Vulkan), port 11435, in the always-on
+# compose container jarvis-engine-igpu (service engine-igpu). It costs
+# zero CPU cores (weights stream from RAM) and runs in parallel with
+# the brain on the 4090.
 #
 # Use it when you need to change your own setup or restart something:
 # "which service owns port 8100?", "how do I restart the voice pipeline?",
@@ -24,8 +25,9 @@
 # JARVIS_HELPER_MODEL (jarvis-igpu), JARVIS_HELPER_CONTEXT (context file),
 # JARVIS_HELPER_TIMEOUT (curl seconds, default 300).
 #
-# If the engine is down: sudo systemctl restart jarvis-engine-igpu
-# (journalctl -u jarvis-engine-igpu for why it died).
+# If the engine is down: docker compose -p ai-agent-build -f
+# docker-compose.yml restart engine-igpu (docker logs jarvis-engine-igpu
+# for why it died). The old systemd unit jarvis-engine-igpu is disabled.
 
 set -uo pipefail
 
@@ -51,13 +53,14 @@ usage() {
 # status
 ########################################
 status() {
-  local svc="jarvis-engine-igpu"
-  printf 'service: %s (%s)\n' "$MODEL" "$(systemctl is-active "$svc" 2>/dev/null)"
+  local state
+  state=$(docker inspect -f '{{.State.Status}}' jarvis-engine-igpu 2>/dev/null || echo missing)
+  printf 'engine:  container jarvis-engine-igpu (%s)\n' "$state"
   local h
   if h=$(curl -s --max-time 5 "http://127.0.0.1:11435/health"); then
     printf 'health:  %s\n' "$h"
   else
-    printf 'health:  DOWN — sudo systemctl restart %s (journalctl -u %s)\n' "$svc" "$svc"
+    printf 'health:  DOWN — docker compose -p ai-agent-build -f docker-compose.yml restart engine-igpu (docker logs jarvis-engine-igpu)\n'
   fi
   local f=/opt/jarvis-igpu/models/jarvis-igpu.gguf
   if [[ -f "$f" ]]; then
@@ -127,7 +130,7 @@ post_chat() {
   t0=$(date +%s.%N)
   resp=$(curl -sS --max-time "$TIMEOUT" -X POST "$URL" \
     -H 'Content-Type: application/json' -d "$body") || {
-    die "engine request failed (is jarvis-engine-igpu up? sudo systemctl status jarvis-engine-igpu)"; }
+    die "engine request failed (is the jarvis-engine-igpu container up? docker ps --filter name=jarvis-engine-igpu)"; }
   t1=$(date +%s.%N)
   if ! jq -e '.choices[0].message.content' <<<"$resp" >/dev/null 2>&1; then
     printf '%s\n' "$resp" | head -c 400 >&2

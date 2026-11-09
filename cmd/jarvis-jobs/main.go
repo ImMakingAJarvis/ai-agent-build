@@ -31,6 +31,25 @@
 //	                               loop skips to the next work
 //	jarvis-jobs skip <id> | requeue [-driver local|igpu|sonnet|opus|superagent]
 //	                   [-class fix|build|background] [-priority N] <id> | show <id>
+//	jarvis-jobs mark-running <id>    stand-in round: put a ready job straight
+//	                                  into running without launching a round
+//	                                  (so a script can yield it — the Phase 2
+//	                                  wait/wake gate); refuses any other state
+//	jarvis-jobs yield <id> --wait-on corr[,corr...] --note TEXT
+//	                   [--in-flight TEXT] [--next TEXT] [--results TEXT]
+//	                   [--gotchas TEXT] [--wait-until 2h|RFC3339]
+//	                   park a running job waiting on its results: writes the
+//	                   job's continuation (jobs/<id>/continuation.md + .json,
+//	                   the durable per-job record a woken round reads first)
+//	                   and flips it to waiting — refuses an empty "In flight"
+//	                   or "Next steps" section (invariant 8)
+//	jarvis-jobs waiting            list the waiting jobs: id, title, what it
+//	                               waits on, how long, and its deadline
+//	jarvis-jobs wake <id>          manual wake: wake a waiting job back to
+//	                               ready (priority bumped) when its results
+//	                               are all in or its deadline has passed;
+//	                               otherwise it stays waiting and says what
+//	                               is still missing
 //	jarvis-jobs add -id ID -title T [-driver local|igpu|sonnet|opus|superagent] [-source S]
 //	                   [-class fix|build|background] [-priority N] [-depends a,b]
 //	                   [-tags a,b] [-kanban-task TASKID] [-prompt P] [-followup F]
@@ -93,7 +112,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|photo-ready|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue")
+		die("usage: jarvis-jobs list [status]|next|photo-ready|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue|mark-running|yield|waiting|wake")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -177,6 +196,22 @@ func main() {
 		}
 	case "requeue":
 		if err := cmdRequeue(store, args); err != nil {
+			die("%v", err)
+		}
+	case "mark-running":
+		if err := cmdMarkRunning(store, args); err != nil {
+			die("%v", err)
+		}
+	case "yield":
+		if err := cmdYield(store, args); err != nil {
+			die("%v", err)
+		}
+	case "waiting":
+		if err := cmdWaiting(store, os.Stdout); err != nil {
+			die("%v", err)
+		}
+	case "wake":
+		if err := cmdWake(store, args); err != nil {
 			die("%v", err)
 		}
 	case "run":
@@ -953,7 +988,8 @@ func cmdList(store *agentjob.Store, args []string, w io.Writer) error {
 	}
 	var parts []string
 	for _, st := range []string{agentjob.Ready, agentjob.Parked, agentjob.Claimed,
-		agentjob.Running, agentjob.Paused, agentjob.Done, agentjob.Failed, agentjob.Skipped} {
+		agentjob.Running, agentjob.Waiting, agentjob.Paused, agentjob.Done,
+		agentjob.Failed, agentjob.Skipped} {
 		if n := counts[st]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, st))
 		}

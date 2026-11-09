@@ -22,8 +22,8 @@ nvidia-smi / journalctl. Prints a snapshot of the stack:
 Known engines are checked even when down, so a dead engine is reported
 rather than silently missing:
 
-  main   docker container `jarvis-engine`   (brain on the RTX 4090, :11434)
-  igpu   systemd unit `jarvis-engine-igpu`  (helper on the iGPU, :11435)
+  main   docker container `jarvis-engine`     (brain on the RTX 4090, :11434)
+  igpu   docker container `jarvis-engine-igpu` (helper on the Ryzen iGPU, :11435)
 
 Usage:
   jarvis-stack-status          human-readable report
@@ -47,7 +47,7 @@ import urllib.request
 KNOWN_ENGINES = [
     # (label, kind, name, hint shown in the report)
     ("main", "container", "jarvis-engine", "brain on the RTX 4090"),
-    ("igpu", "unit", "jarvis-engine-igpu", "helper on the Ryzen iGPU"),
+    ("igpu", "container", "jarvis-engine-igpu", "helper on the Ryzen iGPU"),
 ]
 HTTP_TIMEOUT = 3.0
 
@@ -320,7 +320,7 @@ def swap_state():
 
 
 def known_engine_states(container_ids):
-    """State of each known engine source (container / systemd unit)."""
+    """State of each known engine (both are docker containers now)."""
     states = []
     for label, kind, name, _hint in KNOWN_ENGINES:
         if kind == "container":
@@ -498,7 +498,7 @@ def print_human(r):
     if q:
         # active states only — done/skipped are history, not current state
         active = [f"{k} {v}" for k, v in sorted(q.items())
-                  if k in ("ready", "pending", "running", "failed", "parked")]
+                  if k in ("ready", "pending", "running", "failed", "parked", "waiting")]
         print("Queue (agent jobs):")
         print(f"  {', '.join(active) if active else 'none active'}  (done {q.get('done', 0)})")
         print()

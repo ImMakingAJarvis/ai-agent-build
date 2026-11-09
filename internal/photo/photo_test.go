@@ -161,3 +161,31 @@ func TestStandardInstructions(t *testing.T) {
 		t.Fatalf("missing code-executor note: %s", s)
 	}
 }
+
+func TestSizePath(t *testing.T) {
+	want := filepath.Join("/data", "photos", "chat-1-ab.size")
+	if got := SizePath("/data", "chat-1-ab"); got != want {
+		t.Fatalf("SizePath = %q, want %q", got, want)
+	}
+}
+
+func TestWriteReadSize(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteSize(dir, "chat-1-ab", "16x9\n"); err != nil {
+		t.Fatalf("WriteSize: %v", err)
+	}
+	got, err := ReadSize(dir, "chat-1-ab")
+	if err != nil {
+		t.Fatalf("ReadSize: %v", err)
+	}
+	if got != "16x9" {
+		t.Fatalf("ReadSize = %q, want %q", got, "16x9")
+	}
+}
+
+func TestReadSizeMissing(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := ReadSize(dir, "chat-1-xx"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("want os.ErrNotExist for missing size file, got %v", err)
+	}
+}

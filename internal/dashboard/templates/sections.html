@@ -144,131 +144,73 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
 
 {{end}}
 
-{{define "jobs-section"}}
-<!-- Cost Summary -->
+{{define "dead-section"}}
+<!-- Dead Letters: rejected/expired messages that nowhere else can go
+     (EVB-10). Nothing disappears silently — every one is listed here
+     with its reason until it is requeued or dropped on purpose. -->
 <div class="section">
-  <div class="section-title">Cost Tracking</div>
-  <div class="cost-row">
-    <div class="cost-card">
-      <div class="value cost-total">{{ formatCost .TotalCost }}</div>
-      <div class="label">Total Estimated Cost</div>
-    </div>
-    <div class="cost-card">
-      <div class="value cost-api">{{ .APICount }}</div>
-      <div class="label">API Jobs</div>
-    </div>
-    <div class="cost-card">
-      <div class="value cost-local">{{ .LocalCount }}</div>
-      <div class="label">Local Jobs</div>
-    </div>
-    <div class="cost-card">
-      <div class="value cost-rate">
-        {{ if and .APICount (ne .APICount 0) }}{{ formatCost (divCost .TotalCost .APICount) }}{{ else }}-{{ end }}
-      </div>
-      <div class="label">Avg Cost / API Job</div>
-    </div>
-    <div class="cost-card">
-      <div class="value cost-power">{{ formatCost .TotalPowerCost }}</div>
-      <div class="label">Power Cost (local)</div>
-    </div>
-    <div class="cost-card">
-      <div class="value cost-power">{{ formatKwh .TotalKwh }}</div>
-      <div class="label">Energy (local)</div>
-    </div>
+  <div class="section-title">
+    Dead Letters
+    <button class="btn" id="dead-refresh-btn" onclick="refreshDead()">Refresh</button>
+  </div>
+  <div id="dead-content">
+    <div class="empty-state">Click Refresh to load dead letters from the dead queue.</div>
   </div>
 </div>
 
-<!-- Recent Jobs -->
-<div class="section">
-  <div class="section-title">Recent Jobs</div>
-  {{ if .RecentJobs }}
-  <div class="table-wrap">
-  <table>
-    <thead>
-      <tr>
-        <th>Status</th>
-        <th>ID</th>
-        <th>Type</th>
-        <th>Model</th>
-        <th>Queue</th>
-        <th>Cost</th>
-        <th>Started</th>
-        <th>Duration</th>
-        <th>Log</th>
-        <th>Error</th>
-      </tr>
-    </thead>
-    <tbody>
-      {{ range .RecentJobs }}
-      <tr>
-        <td class="{{ statusClass .Status }}">{{ .Status }}</td>
-        <td>{{ .ID }}</td>
-        <td>{{ .Type }}</td>
-        <td>
-          <span class="model-badge">{{ .Model }}</span>
-          {{ if .UseLocal }}<span class="local-badge">local</span>{{ else }}<span class="api-badge">api</span>{{ end }}
-        </td>
-        <td>{{ .Queue }}</td>
-        <td class="cost-cell">
-          {{ formatCost .EstimatedCost }}
-          {{ if .PowerCost }}<span class="power-cost"> ⚡ {{ formatCost .PowerCost }} &middot; {{ formatKwh .Kwh }}</span>{{ end }}
-        </td>
-        <td class="timestamp">{{ .StartedAt }}</td>
-        <td>{{ .Duration }}</td>
-        <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
-        <td class="error-text" title="{{ .Error }}">{{ .Error }}</td>
-      </tr>
-      {{ end }}
-    </tbody>
-  </table>
-  </div>
-  {{ else }}
-  <div class="empty-state">No jobs recorded yet.</div>
-  {{ end }}
-</div>
-{{end}}
+<script>
+async function refreshDead() {
+  const container = document.getElementById('dead-content');
+  const btn = document.getElementById('dead-refresh-btn');
+  container.innerHTML = '<div class="empty-state">Loading&hellip;</div>';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/dead-letters');
+    if (!resp.ok) {
+      container.innerHTML = '<div class="error-state">Failed to load: ' + resp.status + '</div>';
+      btn.disabled = false;
+      return;
+    }
+    const data = await resp.json();
+    if (!data || data.length === 0) {
+      container.innerHTML = '<div class="empty-state">No dead letters — nothing has been rejected.</div>';
+      btn.disabled = false;
+      return;
+    }
+    let html = '';
+    for (const dl of data) {
+      html += '<div class="pending-row">';
+      html += '<div><span class="pending-id">' + esc(dl.queue) + '</span>';
+      html += '<span class="pending-meta"> &middot; ' + esc(dl.routing_key) + '</span></div>';
+      html += '<div class="pending-meta">reason=' + esc(dl.reason);
+      if (dl.count > 1) html += ' &middot; dead-lettered ' + dl.count + 'x';
+      if (dl.dead_at) html += ' &middot; ' + esc(dl.dead_at);
+      html += ' &middot; ' + dl.size + ' bytes</div>';
+      if (dl.preview) html += '<div class="pending-prompt" title="' + esc(dl.preview) + '">' + esc(dl.preview) + '</div>';
+      html += '<div class="pending-meta">';
+      html += '<button class="btn" onclick="deadAction(\'' + esc(dl.id) + '\', \'requeue\')">Requeue</button> ';
+      html += '<button class="btn" onclick="deadAction(\'' + esc(dl.id) + '\', \'drop\')">Drop</button>';
+      html += '</div></div>';
+    }
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = '<div class="error-state">Error: ' + esc(e.message) + '</div>';
+  }
+  btn.disabled = false;
+}
+async function deadAction(id, action) {
+  const btns = document.querySelectorAll('#dead-content .btn');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const resp = await fetch('/api/dead-letters/' + encodeURIComponent(id) + '/' + action, {method: 'POST'});
+    if (!resp.ok) alert('Failed: ' + resp.status + ' ' + (await resp.text()));
+  } catch (e) {
+    alert('Failed: ' + e.message);
+  }
+  refreshDead();
+}
+</script>
 
-{{define "agent-jobs-section"}}
-<!-- Agent Jobs (build work) -->
-<div class="section">
-  <div class="section-title">Agent Jobs</div>
-  {{ if .WorkerMessages }}
-  <div class="msg-waiting">{{ .WorkerMessages }} message(s) waiting for the worker &mdash; picked up at its next step</div>
-  {{ end }}
-  {{ if .AgentJobs }}
-  <div class="section-title">In progress</div>
-  {{ if .InProgress }}{{ template "agent-jobs-table" .InProgress }}{{ else }}<div class="empty-state">Nothing running right now.</div>{{ end }}
-  {{ if .Waiting }}
-  <div class="section-title">Waiting{{ if .WaitingMore }} (next {{ len .Waiting }}, +{{ .WaitingMore }} more in the Queue below){{ end }}</div>
-  {{ template "agent-jobs-table" .Waiting }}
-  {{ end }}
-  <div class="section-title">Recently finished (latest {{ len .Finished }} of {{ .FinishedTotal }})</div>
-  {{ if .Finished }}{{ template "agent-jobs-table" .Finished }}{{ else }}<div class="empty-state">Nothing finished yet.</div>{{ end }}
-  {{ else }}
-  <div class="empty-state">No agent jobs.</div>
-  {{ end }}
-</div>
-{{end}}
-
-{{define "agent-jobs-table"}}
-<div class="table-wrap">
-<table>
-  <thead><tr><th>Job</th><th>Status</th><th>Driver</th><th>Power</th><th>Log</th><th>PR</th><th>Depends on</th></tr></thead>
-  <tbody>
-    {{ range . }}
-    <tr>
-      <td title="{{ .ID }}">{{ .ID }} — {{ .Title }}</td>
-      <td>{{ .Status }}</td>
-      <td>{{ if .RanWith }}{{ .RanWith }}{{ else }}{{ .Spec.Driver }}{{ end }}</td>
-      <td class="cost-cell">{{ if .Kwh }}⚡ {{ formatKwh .Kwh }} &middot; {{ formatCost .PowerCost }}{{ else }}-{{ end }}</td>
-      <td><a class="log-link" href="{{ jobPath .ID }}">Log</a></td>
-      <td>{{ if .PRURL }}<a href="{{ .PRURL }}">PR</a>{{ end }}</td>
-      <td>{{ range .DependsOn }}{{ . }} {{ end }}</td>
-    </tr>
-    {{ end }}
-  </tbody>
-</table>
-</div>
 {{end}}
 
 {{define "queue-section"}}

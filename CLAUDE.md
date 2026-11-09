@@ -28,6 +28,12 @@ A Stop hook (`scripts/notes-stop-hook.sh`, wired in `.claude/settings.json`)
 blocks the first stop of a session when no note was written yet. If you
 get that reminder, write the section and end the run again.
 
+Do NOT commit this note (or any `notes/**` file) into a job's feature PR —
+the shared note files are the usual cause of PR merge conflicts. Write it
+to the working tree (that satisfies the hook and the vector graph) and
+persist it via the small notes-only commit described in "Keep notes" in the
+agent's own CLAUDE.md.
+
 ## Kanban: read the task's board entry before building
 
 Before starting a job whose title references a kanban entry (a kanban ID

@@ -44,8 +44,7 @@ Stable facts (trust them; re-verify only when a job says otherwise):
   `jarvis-swap status`).
 - **Services**: `agent-run` (job loop), `jarvis-watchdog`,
   `plane-bridge` (Plane webhooks), `task-runner` (kanban; dashboard on
-  :8080), `jarvis-memory` (:8101), `jarvis-engine-igpu`. Plane at
-  111.1.2.222:8088.
+  :8080), `jarvis-memory` (:8101). Plane at 111.1.2.222:8088.
 
 ## Helper model — small, always-on, on the iGPU
 
@@ -150,6 +149,30 @@ Each `add` writes the file AND pushes it into the vector graph immediately, so
 a note is searchable this session rather than after the 15-minute reindex.
 Search the graph (above) before grepping the filesystem for prior work.
 See `docs/agent-notes.md` for the full how-it-works.
+
+### Never commit note files in a job's PR (prevents merge conflicts)
+
+The note files — `notes/agent/done.md`, `notes/agent/system.md`,
+`notes/agent/asked.md`, and the per-day `notes/conversations/agent-<date>.md`
+— are shared and append-only, and nearly every job appends to them. If each
+job's branch commits its note lines, any two unmerged PRs append different
+lines at the same tail and conflict on merge. That was the recurring
+"PRs are docs/notes and they conflict" problem (Nathan, 2026-11-08).
+
+None of it needs a commit to work: the Stop hook only checks that the note
+file was *modified* in the working tree, and the vector graph (`jarvis-notes`
++ the 15-minute reindex) reads the working-tree file directly. So:
+
+- Keep writing notes to the working tree exactly as above. Do NOT
+  `git add` / commit any `notes/**` file into a job's feature branch. A
+  job PR contains only the job's actual work (code + its own docs).
+- Persist notes to git separately, in a small **notes-only** commit on a
+  branch rebased onto the latest `origin/main`, merged promptly. Keep at
+  most one notes-only PR open; if one already is, rebase/update it instead
+  of opening a second. That PR is the only one that touches notes, so it
+  conflicts rarely and resolves trivially (keep both sides, chronological).
+- If you catch that a note file is staged in a job branch, `git restore
+  --staged` it before committing.
 
 ## Home Assistant (the house)
 

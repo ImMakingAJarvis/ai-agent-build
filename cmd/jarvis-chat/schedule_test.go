@@ -238,7 +238,7 @@ func TestEnqueuePhotoJob(t *testing.T) {
 
 	in := chat.Incoming{ChannelID: "chan1", MessageID: "msg1"}
 	expanded := "A photo of a red panda in fresh snow, soft light."
-	id, err := enqueuePhotoJob(in, "a red panda", expanded, false)
+	id, err := enqueuePhotoJob(in, "a red panda", expanded, "", false)
 	if err != nil {
 		t.Fatalf("enqueuePhotoJob: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestEnqueuePhotoJobNow(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", dir)
 
 	in := chat.Incoming{ChannelID: "chan1", MessageID: "msg1"}
-	id, err := enqueuePhotoJob(in, "sunset", "a sunset", true)
+	id, err := enqueuePhotoJob(in, "sunset", "a sunset", "", true)
 	if err != nil {
 		t.Fatalf("enqueuePhotoJob: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestEnqueuePhotoJobNow(t *testing.T) {
 func TestEnqueuePhotoJobRejectsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("JARVIS_DATA_DIR", dir)
-	if _, err := enqueuePhotoJob(chat.Incoming{}, "sunset", "   ", false); err == nil {
+	if _, err := enqueuePhotoJob(chat.Incoming{}, "sunset", "   ", "", false); err == nil {
 		t.Fatal("expected error for empty prompt")
 	}
 }

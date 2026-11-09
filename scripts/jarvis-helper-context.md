@@ -14,7 +14,7 @@ Be brief: the direct answer, then the command(s) if any. Max ~10 lines.
 
 - Ubuntu 26.04, AMD Ryzen 7 7800X3D (8C/16T), 128 GB RAM
 - dGPU: NVIDIA RTX 4090 (card1) — the brain runs here
-- iGPU: AMD Raphael RDNA2 (card0) — you run here via Vulkan
+- iGPU: AMD Raphael RDNA2 (card2, renderD129) — you run here via Vulkan
 - The stack is one docker-compose project `ai-agent-build`, repo root
   `/home/agent/ai-agent-build` (compose commands run from there)
 
@@ -23,6 +23,7 @@ Be brief: the direct answer, then the command(s) if any. Max ~10 lines.
 | service | port(s) | what it is |
 |---|---|---|
 | engine | 11434 (127.0.0.1) | the brain: llama.cpp serving jarvis-brain (qwen3.8 27B GGUF) |
+| engine-igpu | 11435 (127.0.0.1) | you: Vulkan llama.cpp serving jarvis-igpu (Qwen2.5-3B GGUF) on the Ryzen iGPU — always on, never stopped by photo swap windows |
 | art | 8120 | photo generation (Z-Image-Turbo 6B) + gallery site |
 | chat | — | Discord bot answering owner DMs with the brain; bridges voice wake events to jobs |
 | dashboard | 8080 | web dashboard: jobs, queue, system state (PWA) |
@@ -48,8 +49,8 @@ path — prefer `docker compose` for the running stack.
   round ends; `--now` forces; `--dry-run` previews). Inhibit it with
   `touch /var/lib/jarvis/agent-run.disabled`.
 - `agent-resume` — resumes the agent after a reboot.
-- `jarvis-engine-igpu` — you: Vulkan llama.cpp on the iGPU, port 11435,
-  model file `/opt/jarvis-igpu/models/jarvis-igpu.gguf`.
+- `jarvis-engine-igpu` — disabled legacy unit (rollback path only); you
+  run in the compose container of that name.
 - `ollama` — installed but disabled (the engine superseded it).
 - A full host reboot: `agent-reboot "reason"` — it asks the owner on
   Discord first and only reboots if approved. Never reboot any other way.
@@ -61,7 +62,7 @@ path — prefer `docker compose` for the running stack.
 - Restart the whole stack: `docker compose up -d` (from repo root)
 - Stack state: `docker compose ps` · logs: `docker compose logs -f --tail 100 <svc>`
 - Host unit logs: `journalctl -u <unit> -n 100 --no-pager`
-- Restart the iGPU helper engine: `sudo systemctl restart jarvis-engine-igpu`
+- Restart the iGPU helper engine: `docker compose restart engine-igpu` (container `jarvis-engine-igpu`)
 - Restart the agent itself (mid-round safe): `agent-run-restart`
 
 ## CLI tools (on PATH)
@@ -77,7 +78,7 @@ path — prefer `docker compose` for the running stack.
 - Repo `/home/agent/ai-agent-build` — `docs/` is the authoritative docs,
   `CLAUDE.md` the standing instructions, `docker-compose.yml` the stack
 - Brain GGUF `/opt/jarvis-engine/models/jarvis-brain.gguf` (templates in `/opt/jarvis-engine/templates/`)
-- Helper GGUF `/opt/jarvis-igpu/models/jarvis-igpu.gguf` (swap by replacing the file + `sudo systemctl restart jarvis-engine-igpu`)
+- Helper GGUF `/opt/jarvis-igpu/models/jarvis-igpu.gguf` (swap by replacing the file + `docker compose restart engine-igpu`; the container bind-mounts `/opt/jarvis-igpu`)
 - Config & secrets `~/.config/jarvis/` (agent.env, local.env, ha.env, discord.env) — never printed or committed
 - Job store `~/.local/share/jarvis/jobs` · memory db `~/.local/share/jarvis/memory` · kanban `~/.local/share/jarvis/kanban`
 - Home Assistant box: `http://111.1.2.200/` (HA behind port 80; API token in `/home/nathan/HAtoken.txt`, read with sudo)

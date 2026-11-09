@@ -11,11 +11,19 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
-// DefaultBase is where the art service listens on the host.
+// DefaultBase is where the art service listens for the local API clients
+// (they run on this host, so loopback is the right address for calls).
 const DefaultBase = "http://127.0.0.1:8120"
+
+// DefaultGallery is the LAN address the owner opens in a browser — this
+// box's LAN IP. Owner-facing links must never be loopback: from a computer
+// on the network, localhost points at that computer, not the jarvis box.
+const DefaultGallery = "http://111.1.2.27:8120"
 
 // Client talks to one art service.
 type Client struct {
@@ -59,10 +67,16 @@ func NewWithURL(base string) *Client {
 }
 
 // Generate runs one photo generation and blocks until it finishes.
-// A 1024x1024 image takes tens of seconds on the 4090; give the context
-// a few minutes.
-func (c *Client) Generate(ctx context.Context, prompt string) (*Image, error) {
-	body, _ := json.Marshal(map[string]string{"prompt": prompt})
+// size is the requested size — "1024x576" (explicit pixels) or an aspect
+// like "16x9" (long side scaled to the service's max) — and may be "" for
+// the service default (square 1024x1024). An image takes tens of seconds
+// on the 4090; give the context a few minutes.
+func (c *Client) Generate(ctx context.Context, prompt, size string) (*Image, error) {
+	reqBody := map[string]string{"prompt": prompt}
+	if size != "" {
+		reqBody["size"] = size
+	}
+	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/generate", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -95,14 +109,37 @@ func (c *Client) Generate(ctx context.Context, prompt string) (*Image, error) {
 	}
 }
 
-// GalleryURL returns the URL the owner can open to see every generated
-// photo. ART_GALLERY_URL overrides the default (the LAN address of the
-// art port).
+// GalleryURL returns the URL the owner can open in a browser to see every
+// generated photo — the LAN address by default, so the link works from
+// any computer on the network (loopback would not). ART_GALLERY_URL
+// overrides the default.
 func GalleryURL() string {
 	if u := os.Getenv("ART_GALLERY_URL"); u != "" {
 		return u
 	}
-	return DefaultBase
+	return DefaultGallery
+}
+
+// sizeRE matches a size token: "1024x576" (pixels) or "16x9" (aspect),
+// with 'x' or ':' as the separator.
+var sizeRE = regexp.MustCompile(`^(\d{1,4})\s*[x:]\s*(\d{1,4})$`)
+
+// ParseSize parses a size token such as "1024x576", "16x9" or "16:9".
+// It returns the two numbers as written; the art service turns small
+// numbers (<= 128) into an aspect ratio — long side scaled to its max —
+// and larger ones into explicit pixels. ok is false for anything else
+// (so "sunset", "1024" or "0x0" are not size tokens).
+func ParseSize(token string) (w, h int, ok bool) {
+	m := sizeRE.FindStringSubmatch(strings.TrimSpace(token))
+	if m == nil {
+		return 0, 0, false
+	}
+	w, _ = strconv.Atoi(m[1])
+	h, _ = strconv.Atoi(m[2])
+	if w < 1 || h < 1 {
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 func detail(d string) string {

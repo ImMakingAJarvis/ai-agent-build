@@ -154,6 +154,10 @@ func splitAgentJobs(jobs []agentjob.Job) (inProgress, waiting []agentjob.Job, wa
 			inProgress = append(inProgress, j)
 		case "ready", "pending", "":
 			waiting = append(waiting, j)
+		case agentjob.Waiting:
+			// Parked on external work: it waits on results, not its turn —
+			// keep it out of the finished bucket.
+			waiting = append(waiting, j)
 		default:
 			finished = append(finished, j)
 		}
@@ -174,6 +178,30 @@ func splitAgentJobs(jobs []agentjob.Job) (inProgress, waiting []agentjob.Job, wa
 		finished = finished[:panelFinishedMax]
 	}
 	return
+}
+
+// ApprovalPage is one window of the denied-job list.
+type ApprovalPage struct {
+	Items []ApprovalInfo
+	ListPage
+}
+
+// AgentJobsPage is one window of the agent job store, ordered for display.
+type AgentJobsPage struct {
+	Items          []agentjob.Job
+	WorkerMessages int
+	ListPage
+}
+
+// RecentJobsPage is the cost cards plus one window of jobs.jsonl.
+type RecentJobsPage struct {
+	Items          []JobRecord
+	TotalCost      float64
+	TotalPowerCost float64
+	TotalKwh       float64
+	APICount       int
+	LocalCount     int
+	ListPage
 }
 
 // LightweightState is returned for the initial page load.
@@ -248,6 +276,15 @@ type Server struct {
 	stateMu    sync.Mutex
 	stateCache DashboardState
 	stateTime  time.Time
+
+	// List caches for the paginated sections: the full distinct denied list
+	// and the full distinct recent-jobs list, each refreshed at most every
+	// 10s (longer than the state cache — they scan the whole history file).
+	listMu      sync.Mutex
+	deniedCache []ApprovalInfo
+	deniedAt    time.Time
+	recentCache []JobRecord
+	recentAt    time.Time
 }
 
 // New creates a dashboard server.
@@ -314,6 +351,7 @@ func New() *Server {
 		"formatCost":     FormatCost,
 		"formatKwh":      FormatKwh,
 		"divCost":        DivCost,
+		"waitStatus":     waitStatus,
 		"slotRuntime":    SlotRuntime,
 		"jobPath":        JobPath,
 		"divGB":          DivGB,
@@ -419,11 +457,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /html/lightweight", s.handleLightweightHTML)
 	mux.HandleFunc("GET /html/machine", s.handleMachineHTML)
 	mux.HandleFunc("GET /html/jobs-section", s.handleJobsSectionHTML)
+	mux.HandleFunc("GET /html/recent-jobs", s.handleRecentJobsMore)
 	mux.HandleFunc("GET /html/agent-jobs-section", s.handleAgentJobsSectionHTML)
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
 	mux.HandleFunc("GET /api/queues", s.handleQueues)
 	mux.HandleFunc("GET /api/pending", s.handlePending)
+	mux.HandleFunc("GET /api/dead-letters", s.handleDeadLetters)
+	mux.HandleFunc("POST /api/dead-letters/{id}/requeue", s.handleDeadLetterRequeue)
+	mux.HandleFunc("POST /api/dead-letters/{id}/drop", s.handleDeadLetterDrop)
 	mux.HandleFunc("GET /api/approvals", s.handleApprovals)
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
 	mux.HandleFunc("POST /api/owner-message", s.handleOwnerMessage)
@@ -525,34 +567,32 @@ func (s *Server) handleLightweightHTML(w http.ResponseWriter, r *http.Request) {
 	buf.WriteTo(w)
 }
 
+// Paginated sections render on load and on "Load more" only — a periodic
+// refresh would reset the list to its first page, so the shell triggers
+// these endpoints once (see templates/index.html).
+
 func (s *Server) handleJobsSectionHTML(w http.ResponseWriter, r *http.Request) {
-	cached := s.getCachedJobData()
-	data := DashboardState{
-		RecentJobs:     cached.jobs,
-		TotalCost:      cached.totalCost,
-		TotalPowerCost: cached.totalPowerCost,
-		TotalKwh:       cached.totalKwh,
-		APICount:       cached.apiCount,
-		LocalCount:     cached.localCount,
-	}
-	var buf bytes.Buffer
-	if err := s.tmpl.ExecuteTemplate(&buf, "jobs-section", data); err != nil {
-		http.Error(w, "render error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	buf.WriteTo(w)
+	s.renderPage(w, "jobs-section", s.recentJobsPage(0))
+}
+
+// handleRecentJobsMore appends the next window of recent jobs.
+func (s *Server) handleRecentJobsMore(w http.ResponseWriter, r *http.Request) {
+	s.renderPage(w, "recent-jobs-more", s.recentJobsPage(parseOffset(r)))
 }
 
 func (s *Server) handleAgentJobsSectionHTML(w http.ResponseWriter, r *http.Request) {
-	cached := s.getCachedJobData()
-	data := DashboardState{
-		AgentJobs:      cached.agentJobs,
-		WorkerMessages: inbox.Count(),
+	off := parseOffset(r)
+	name := "agent-jobs-section"
+	if off > 0 {
+		name = "agent-jobs-more"
 	}
-	data.InProgress, data.Waiting, data.WaitingMore, data.Finished, data.FinishedTotal = splitAgentJobs(cached.agentJobs)
+	s.renderPage(w, name, s.agentJobsPage(off))
+}
+
+// renderPage renders one paginated section from the pre-compiled templates.
+func (s *Server) renderPage(w http.ResponseWriter, name string, page any) {
 	var buf bytes.Buffer
-	if err := s.tmpl.ExecuteTemplate(&buf, "agent-jobs-section", data); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&buf, name, page); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
 		return
 	}
@@ -937,9 +977,14 @@ func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
-	approvals := s.getDeniedJobs()
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	s.tmpl.ExecuteTemplate(w, "approvals.html", approvals)
+	off := parseOffset(r)
+	items, info := window(s.listDeniedJobs(), off, listPageSize)
+	page := ApprovalPage{Items: items, ListPage: info}
+	name := "approvals"
+	if off > 0 {
+		name = "approvals-more"
+	}
+	s.renderPage(w, name, page)
 }
 
 func (s *Server) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
@@ -1086,40 +1131,103 @@ func (s *Server) currentAgentJobID() string {
 	return ""
 }
 
-// getDeniedJobs reads the most recent denied jobs from the history file.
-func (s *Server) getDeniedJobs() []ApprovalInfo {
-	f, err := os.Open(s.historyPath)
-	if err != nil {
-		return nil
+// listDeniedJobs reads the distinct denied jobs from the history file,
+// newest first. A job writes one record per state change, so dedupe by ID
+// (the map keeps the last record seen). Cached for 10s: the scan covers the
+// whole file, not just the tail.
+func (s *Server) listDeniedJobs() []ApprovalInfo {
+	s.listMu.Lock()
+	defer s.listMu.Unlock()
+	if s.deniedCache != nil && time.Since(s.deniedAt) < 10*time.Second {
+		return s.deniedCache
 	}
-	defer f.Close()
 
-	var denied []ApprovalInfo
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		var rec JobRecord
-		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
-			continue
+	byID := make(map[string]ApprovalInfo)
+	if f, err := os.Open(s.historyPath); err == nil {
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			var rec JobRecord
+			if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+				continue
+			}
+			if rec.Status != "denied" {
+				continue
+			}
+			byID[rec.ID] = ApprovalInfo{
+				ID:            rec.ID,
+				Type:          rec.Type,
+				Queue:         rec.Queue,
+				Model:         rec.Model,
+				EstimatedCost: rec.EstimatedCost,
+				InputTokens:   rec.InputTokens,
+				OutputTokens:  rec.OutputTokens,
+				Source:        rec.Source,
+				StartedAt:     rec.StartedAt,
+			}
 		}
-		if rec.Status != "denied" {
-			continue
-		}
-		// Find the corresponding "running" record to get the prompt.
-		// Denied records don't have the prompt, but we can include the cost info.
-		ai := ApprovalInfo{
-			ID:            rec.ID,
-			Type:          rec.Type,
-			Queue:         rec.Queue,
-			Model:         rec.Model,
-			EstimatedCost: rec.EstimatedCost,
-			InputTokens:   rec.InputTokens,
-			OutputTokens:  rec.OutputTokens,
-			Source:        rec.Source,
-			StartedAt:     rec.StartedAt,
-		}
+		f.Close()
+	}
+	denied := make([]ApprovalInfo, 0, len(byID))
+	for _, ai := range byID {
 		denied = append(denied, ai)
 	}
+	sort.Slice(denied, func(i, j int) bool {
+		if denied[i].StartedAt != denied[j].StartedAt {
+			return denied[i].StartedAt > denied[j].StartedAt
+		}
+		return denied[i].ID < denied[j].ID
+	})
+	s.deniedCache, s.deniedAt = denied, time.Now()
 	return denied
+}
+
+// uniqueRecentJobs returns every distinct job in the history file, newest
+// first (readRecentJobs already dedupes and sorts). Cached for 10s.
+func (s *Server) uniqueRecentJobs() []JobRecord {
+	s.listMu.Lock()
+	if s.recentCache != nil && time.Since(s.recentAt) < 10*time.Second {
+		out := s.recentCache
+		s.listMu.Unlock()
+		return out
+	}
+	s.listMu.Unlock()
+	all := s.readRecentJobs(1 << 20)
+	s.listMu.Lock()
+	s.recentCache, s.recentAt = all, time.Now()
+	s.listMu.Unlock()
+	return all
+}
+
+// recentJobsPage is the cost cards (aggregated over the full history) plus
+// one window of the distinct recent jobs.
+func (s *Server) recentJobsPage(offset int) RecentJobsPage {
+	all := s.uniqueRecentJobs()
+	var totalCost, totalPowerCost, totalKwh float64
+	var apiCount, localCount int
+	for _, rec := range all {
+		if rec.UseLocal {
+			localCount++
+		} else {
+			apiCount++
+			if rec.EstimatedCost > 0 {
+				totalCost += rec.EstimatedCost
+			} else if rec.ActualCost > 0 {
+				totalCost += rec.ActualCost
+			}
+		}
+		totalPowerCost += rec.PowerCost
+		totalKwh += rec.Kwh
+	}
+	items, info := window(all, offset, listPageSize)
+	return RecentJobsPage{Items: items, TotalCost: totalCost, TotalPowerCost: totalPowerCost, TotalKwh: totalKwh, APICount: apiCount, LocalCount: localCount, ListPage: info}
+}
+
+// agentJobsPage is one window of the agent job store, ordered for display.
+func (s *Server) agentJobsPage(offset int) AgentJobsPage {
+	cached := s.getCachedJobData()
+	items, info := window(orderAgentJobs(cached.agentJobs), offset, listPageSize)
+	return AgentJobsPage{Items: items, WorkerMessages: inbox.Count(), ListPage: info}
 }
 
 // approveJob re-enqueues a denied job with auto_approve set, so the worker
@@ -1282,6 +1390,54 @@ func StatusClass(status string) string {
 		return "status-denied"
 	default:
 		return ""
+	}
+}
+
+// WaitStatusText renders the status cell of a waiting job:
+// "waiting on <corr, ...> (<age>)" — what the round is parked on and how
+// long it has been (State.WaitingSince). A wait with no correlation ids
+// (a manual-wake yield) shows just the age. Other statuses pass through.
+// Age buckets: "45s", "12m", "2h3m", "2d2h"; an unknown since is "(?)".
+func WaitStatusText(j agentjob.Job, now time.Time) string {
+	if j.Status != agentjob.Waiting {
+		return j.Status
+	}
+	age := humanAge(j.WaitingSince, now)
+	if len(j.WaitOn) == 0 {
+		return "waiting (" + age + ")"
+	}
+	return "waiting on " + strings.Join(j.WaitOn, ", ") + " (" + age + ")"
+}
+
+// waitStatus wraps WaitStatusText for templates (now = time.Now()).
+func waitStatus(j agentjob.Job) string {
+	return WaitStatusText(j, time.Now())
+}
+
+// humanAge renders a wait age as a short string: "45s", "12m", "2h3m",
+// "2d2h". An empty or unparseable since renders as "?" rather than breaking
+// the row.
+func humanAge(since string, now time.Time) string {
+	if since == "" {
+		return "?"
+	}
+	t, err := time.Parse(time.RFC3339, since)
+	if err != nil {
+		return "?"
+	}
+	d := now.Sub(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
 	}
 }
 

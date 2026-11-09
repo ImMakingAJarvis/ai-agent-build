@@ -53,6 +53,32 @@ func ReadPrompt(dataDir, id string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
+// SizePath is the file holding a photo job's requested size token
+// ("16x9", "1024x576", ...), next to the prompt: <data>/photos/<id>.size.
+func SizePath(dataDir, id string) string {
+	return filepath.Join(dataDir, PromptSubdir, id+".size")
+}
+
+// WriteSize stores a photo job's size token alongside its prompt.
+func WriteSize(dataDir, id, size string) error {
+	p := SizePath(dataDir, id)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, []byte(size), 0o644)
+}
+
+// ReadSize loads a photo job's size token. It returns os.ErrNotExist when
+// the file is missing (the job was queued before sizes existed): callers
+// treat that as "no size" (the art service default).
+func ReadSize(dataDir, id string) (string, error) {
+	b, err := os.ReadFile(SizePath(dataDir, id))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
 // SentPath is the marker a photo job's run leaves behind once its image was
 // generated AND delivered to Discord (jarvis-photo writes it). The run
 // wrapper (agentjob Runner.finish) treats a photo run that ends without the

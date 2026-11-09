@@ -59,17 +59,11 @@ func (p *PlanPublisher) PublishPlan(ctx context.Context, m Message) (int, error)
 	}
 	confirms := make(chan amqp.Confirmation, 1)
 	ch.NotifyPublish(confirms)
-	body, err := encodeMessage(m)
+	pub, err := newPublishing(m, uint8(PlanEpicPriority))
 	if err != nil {
 		return 0, fmt.Errorf("plan publish: encode job %s: %w", m.ID, err)
 	}
-	if err := ch.PublishWithContext(ctx, p.conn.Exchange(), p.queue+".plan", false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		Body:         body,
-		Priority:     uint8(PlanEpicPriority),
-		DeliveryMode: amqp.Persistent,
-		Timestamp:    m.CreatedAt,
-	}); err != nil {
+	if err := ch.PublishWithContext(ctx, p.conn.Exchange(), p.queue+".plan", false, false, pub); err != nil {
 		return 0, fmt.Errorf("plan publish: %s: %w", p.queue, err)
 	}
 	// AMQP publishes are async: wait for the broker's confirm so the

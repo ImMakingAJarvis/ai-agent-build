@@ -10,11 +10,17 @@ Serves the art model behind a small HTTP API so the rest of the stack
                      name, prompt, seed and timing (from the sidecar .json
                      written next to each PNG)
   GET  /img/N.png -> the image file itself (basename only, no traversal)
-  POST /generate  -> {"prompt": ..., "seed"?: int, "size"?: "1024x1024",
+  POST /generate  -> {"prompt": ..., "seed"?: int,
+                      "size"?: "1024x1024" | "16x9" | "16:9",
                       "steps"?: int}
                      saves a PNG under ART_OUT_DIR and returns its path
-                     plus timing. Generations take tens of seconds; clients
-                     should allow a few minutes for the request.
+                     plus timing. size is either explicit pixels (WxH,
+                     each dim capped at ART_MAX_DIM) or an aspect ratio
+                     (small numbers like 16x9: the long side is scaled to
+                     ART_MAX_DIM and both sides rounded to a multiple of
+                     16, the VAE patch). Generations take tens of
+                     seconds; clients should allow a few minutes for the
+                     request.
 
 The brain (llama.cpp) owns ~20 GB of the 4090's 24.5 GB and the model is
 bigger than the remainder in every component, so the pipeline runs with
@@ -51,6 +57,37 @@ OUT_DIR = os.environ.get("ART_OUT_DIR", "/var/lib/jarvis/art/out")
 # (distilled), so guidance_scale=0.
 DEFAULT_STEPS = int(os.environ.get("ART_STEPS", "9"))
 MAX_DIM = int(os.environ.get("ART_MAX_DIM", "1024"))
+
+# A size spec: "1024x1024" (explicit pixels) or "16x9" / "16:9" (aspect).
+SIZE_RE = re.compile(r"(\d{1,4})\s*[x:]\s*(\d{1,4})")
+
+
+def resolve_size(spec):
+    """Resolve a size spec to pixel (w, h), each side within [64, MAX_DIM].
+
+    Two forms:
+      * aspect ratio — both numbers small (<= 128; "16x9", "16:9", "1x1"):
+        long side is scaled to MAX_DIM and both sides are rounded to a
+        multiple of 16 (the VAE patch), keeping the ratio as close as the
+        grid allows (16x9 -> 1024x576, 4x3 -> 1024x768, 9x16 -> 576x1024);
+      * explicit pixels ("1024x576"): used as-is, each side capped at
+        MAX_DIM.
+    """
+    m = SIZE_RE.fullmatch(str(spec).strip())
+    if not m:
+        raise HTTPException(
+            400, "size must look like 1024x1024 or an aspect ratio like 16x9"
+        )
+    a, b = int(m.group(1)), int(m.group(2))
+    if a < 1 or b < 1:
+        raise HTTPException(400, "size must look like 1024x1024 or 16x9")
+    if a <= 128 and b <= 128:  # small numbers = aspect ratio, not pixels
+        scale = MAX_DIM / max(a, b)
+        w = int(round(a * scale / 16.0)) * 16
+        h = int(round(b * scale / 16.0)) * 16
+    else:
+        w, h = a, b
+    return max(64, min(w, MAX_DIM)), max(64, min(h, MAX_DIM))
 
 # --- VRAM backpressure ----------------------------------------------------
 # The brain (llama.cpp) holds most of the 4090's VRAM as KV cache while a
@@ -107,9 +144,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="jarvis-art", lifespan=lifespan)
 
-# The gallery: a self-contained page (no external assets) that fetches
-# /images and renders every generated photo with its prompt and timing.
-# It re-fetches every 30 s, so a new photo appears without reloading.
+# The gallery: a small page that fetches /images and renders every
+# generated photo with its prompt and timing. It re-fetches every 30 s, so
+# a new photo appears without reloading. Timestamps render in the VIEWER'S
+# local timezone (moment from a CDN, with a plain-Date fallback when the
+# CDN is unreachable) — never raw UTC, which is not the owner's time.
 GALLERY_PAGE = """<!doctype html>
 <html>
 <head>
@@ -141,7 +180,15 @@ GALLERY_PAGE = """<!doctype html>
 <div id="grid"></div>
 <div id="empty" hidden>No photos yet — ask Jarvis on Discord:
 <code>!photo a photo of ...</code></div>
+<script src="https://cdn.jsdelivr.net/npm/moment@2.30.1/moment.min.js"></script>
 <script>
+// Timestamps: moment in the viewer's local zone (e.g. "2026-11-08 05:36 PST");
+// if the CDN never loaded, fall back to the browser's own local formatting.
+function fmtWhen(iso) {
+  if (!iso) return null;
+  if (window.moment) return moment(iso).local().format('YYYY-MM-DD HH:mm z');
+  return new Date(iso).toLocaleString([], {dateStyle: 'medium', timeStyle: 'short'});
+}
 async function refresh() {
   try {
     const r = await fetch('/images?limit=200');
@@ -163,7 +210,7 @@ async function refresh() {
       p.textContent = it.prompt || '(no prompt saved)';
       const m = document.createElement('div'); m.className = 'm';
       m.textContent = [
-        it.modified ? it.modified.replace('T', ' ').slice(0, 16) + ' UTC' : null,
+        fmtWhen(it.modified),
         it.seed != null ? 'seed ' + it.seed : null,
         it.seconds != null ? it.seconds + 's' : null,
       ].filter(Boolean).join(' \\u00b7 ');
@@ -326,11 +373,7 @@ def generate(payload: dict):
 def _run(prompt, payload):
     import torch
 
-    size = payload.get("size") or "1024x1024"
-    m = re.fullmatch(r"(\d{2,4})x(\d{2,4})", str(size))
-    if not m:
-        raise HTTPException(400, "size must look like 1024x1024")
-    w, h = min(int(m.group(1)), MAX_DIM), min(int(m.group(2)), MAX_DIM)
+    w, h = resolve_size(payload.get("size") or "1024x1024")
     steps = int(payload.get("steps") or DEFAULT_STEPS)
     seed = (
         int(payload["seed"])

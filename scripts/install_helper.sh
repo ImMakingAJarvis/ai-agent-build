@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # install_helper: deploy the jarvis-helper CLI + setup context, and make
-# the iGPU engine always-on.
+# the iGPU engine container always-on.
 #
-#   install_helper.sh    deploy CLI + context, enable jarvis-engine-igpu
+#   install_helper.sh    deploy CLI + context, start jarvis-engine-igpu
 #
 # Re-run after editing scripts/jarvis-helper or
 # scripts/jarvis-helper-context.md.
@@ -24,8 +24,11 @@ if [[ ! -s /opt/jarvis-igpu/models/jarvis-igpu.gguf ]]; then
   echo "    https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
 fi
 
-echo "==> Enabling jarvis-engine-igpu (always-on)"
-sudo systemctl enable --now jarvis-engine-igpu
+echo "==> Starting jarvis-engine-igpu (always-on container)"
+# Same project/flags as jarvis-stack.service at boot, so this manages the
+# existing stack's container instead of creating a second project.
+(cd "$REPO_ROOT" && sudo docker compose -p ai-agent-build \
+  -f "$REPO_ROOT/docker-compose.yml" up -d engine-igpu)
 
 echo "==> Health"
 for _ in $(seq 1 30); do
