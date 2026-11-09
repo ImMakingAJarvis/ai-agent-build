@@ -45,6 +45,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/boardnote"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
@@ -179,12 +180,28 @@ func main() {
 	}
 	defer conn.Close()
 
+	// The board-mapped job's "resumed" Plane comment (plan §3.5, invariant
+	// 10): the switchboard wakes the job, this hook posts the card comment.
+	// Best-effort — boardnote returns nil when the title carries no Plane
+	// ref or Plane is not configured, and logs (never fails) otherwise.
+	onWake := func(j agentjob.Job, rec agentjob.WakeRecord) {
+		missing := 0
+		if miss, err := jobs.MissingResults(j.ID); err == nil {
+			missing = len(miss)
+		}
+		// The post is off the poll loop: a hung Plane must not delay the
+		// next wake (the switchboard is single-goroutine; the store's
+		// atomic-rename writes make the async read safe).
+		go boardnote.PostWake(j, rec, missing)
+	}
+
 	sb := switchboard.New(switchboard.Config{
 		Conn:            conn,
 		Jobs:            jobs,
 		Listen:          listenStore,
 		M:               metrics,
 		Notify:          buildNotifier(),
+		OnWake:          onWake,
 		PollInterval:    envDuration("POLL_INTERVAL", "250ms"),
 		TimeoutInterval: envDuration("TIMEOUT_INTERVAL", "5s"),
 		MaxBatch:        envInt("MAX_BATCH", "100"),

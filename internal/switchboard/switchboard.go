@@ -39,6 +39,14 @@ type Config struct {
 	// (the message is acked so it is not retried forever).
 	Notify func(ctx context.Context, text string) error
 
+	// OnWake, when set, is called after every successful wake (result wake,
+	// timeout wake, or a timeout pass that finds a result arrived in the
+	// gap) with the woken job and its wake record — the hook behind the
+	// board-mapped job's "resumed" Plane comment (plan §3.5, invariant 10).
+	// It must not block: the switchboard ignores its error and returns to
+	// polling.
+	OnWake func(j agentjob.Job, rec agentjob.WakeRecord)
+
 	// PollInterval is how often the listener queues are peeked.
 	PollInterval time.Duration
 	// TimeoutInterval is how often waiting-job deadlines are checked.
@@ -322,6 +330,17 @@ func (sb *Switchboard) doWake(l Listener, corr, ref string) {
 	}
 	sb.cfg.M.WakesTotal.Inc()
 	sb.log.Printf("switchboard: woke job %s (%s) via listener %s", l.JobID, rec.Reason, l.ID)
+	sb.fireOnWake(j, rec)
+}
+
+// fireOnWake calls the OnWake hook (the board-mapped job's "resumed"
+// comment). The wake is already complete when it runs, so a hook failure is
+// not an error — boardnote logs its own and the comment is a best-effort
+// overlay on the authoritative wake state.
+func (sb *Switchboard) fireOnWake(j agentjob.Job, rec agentjob.WakeRecord) {
+	if sb.cfg.OnWake != nil {
+		sb.cfg.OnWake(j, rec)
+	}
 }
 
 // forward republishes the raw delivery to target (direct, empty exchange) in
@@ -442,10 +461,12 @@ func (sb *Switchboard) checkTimeouts(ctx context.Context) {
 			// A result landed between the deadline check and the wake: it woke
 			// on "all", not "timeout". Count it as a normal wake, not a timeout.
 			sb.cfg.M.WakesTotal.Inc()
+			sb.fireOnWake(j, rec)
 			continue
 		}
 		sb.cfg.M.TimeoutsTotal.Inc()
 		sb.log.Printf("switchboard: job %s timed out waiting (deadline %s)", l.JobID, dl.Format(time.RFC3339))
+		sb.fireOnWake(j, rec)
 		if l.TimeoutAction == TimeoutNotify {
 			text := l.Text
 			if text == "" {

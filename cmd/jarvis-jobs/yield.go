@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/boardnote"
 )
 
 // defaultWaitUntil is the wait deadline a yield gets when --wait-until is
@@ -187,6 +188,11 @@ func cmdYield(store *agentjob.Store, args []string) error {
 	}
 	fmt.Printf("yielded: %s — waiting on %s until %s (deadline %s)\n",
 		id, strings.Join(corrs, ", "), c.WaitUntil, agentjob.WaitRemaining(j, time.Now()))
+	// Board-mapped jobs say they are waiting on their Plane card (plan §3.5,
+	// invariant 10: every cross-model hop is visible). Best-effort — a post
+	// failure is logged inside boardnote, never an error here: the yield
+	// itself is authoritative.
+	boardnote.PostYield(j, content[agentjob.SectionFlight], content[agentjob.SectionNext])
 	return nil
 }
 
@@ -292,5 +298,13 @@ func cmdWake(store *agentjob.Store, args []string) error {
 	for _, c := range corrs {
 		fmt.Printf("  %s -> %s\n", c, rec.Results[c])
 	}
+	// Board-mapped jobs say they are back on their Plane card (plan §3.5,
+	// invariant 10). Best-effort, like the yield comment: the wake is
+	// authoritative, the comment is the overlay.
+	missing := 0
+	if miss, merr := store.MissingResults(id); merr == nil {
+		missing = len(miss)
+	}
+	boardnote.PostWake(j, rec, missing)
 	return nil
 }
