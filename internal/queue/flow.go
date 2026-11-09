@@ -28,20 +28,25 @@ func FlowQueueName(name string) string { return FlowQueuePrefix + name }
 // IsFlowQueue reports whether name is a flow (result) queue.
 func IsFlowQueue(name string) bool { return strings.HasPrefix(name, FlowQueuePrefix) }
 
-// EnsureFlowQueue declares the flow queue (durable, no args) and binds it
-// to the tasks exchange on <name>.#, so a message published before any
-// consumer exists is held on the broker until it is consumed. Re-declaring
-// with identical args is a no-op, which is what makes this safe to call on
-// every publish.
+// EnsureFlowQueue declares the flow queue (durable, with the dead-letter
+// args — see dlx.go) and binds it to the tasks exchange on <name>.#, so a
+// message published before any consumer exists is held on the broker until
+// it is consumed or dead-letters with a reason. Re-declaring with
+// identical args is a no-op, which is what makes this safe to call on
+// every publish; a pre-EVB-10 queue (no args) is migrated by
+// declareWithDLX when it holds nothing.
 func (c *Conn) EnsureFlowQueue(name string) error {
+	if err := c.EnsureDLX(); err != nil {
+		return fmt.Errorf("flow %s: %w", name, err)
+	}
+	if err := c.declareWithDLX(name); err != nil {
+		return fmt.Errorf("flow %s: declare: %w", name, err)
+	}
 	ch, err := c.NewChannel()
 	if err != nil {
 		return fmt.Errorf("flow %s: %w", name, err)
 	}
 	defer ch.Close()
-	if _, err := ch.QueueDeclare(name, true, false, false, false, nil); err != nil {
-		return fmt.Errorf("flow %s: declare: %w", name, err)
-	}
 	if err := ch.QueueBind(name, name+".#", c.Exchange(), true, nil); err != nil {
 		return fmt.Errorf("flow %s: bind: %w", name, err)
 	}
@@ -66,16 +71,11 @@ func (c *Conn) PublishFlow(ctx context.Context, name string, m Message) error {
 	}
 	confirms := make(chan amqp.Confirmation, 1)
 	ch.NotifyPublish(confirms)
-	body, err := encodeMessage(m)
+	pub, err := newPublishing(m, 0)
 	if err != nil {
 		return fmt.Errorf("flow %s: encode job %s: %w", name, m.ID, err)
 	}
-	if err := ch.PublishWithContext(ctx, c.Exchange(), name+".default", false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		Body:         body,
-		DeliveryMode: amqp.Persistent,
-		Timestamp:    m.CreatedAt,
-	}); err != nil {
+	if err := ch.PublishWithContext(ctx, c.Exchange(), name+".default", false, false, pub); err != nil {
 		return fmt.Errorf("flow %s: publish: %w", name, err)
 	}
 	select {

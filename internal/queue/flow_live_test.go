@@ -31,7 +31,7 @@ func TestPeekFlowDoesNotDestroyMessages(t *testing.T) {
 		if err != nil {
 			return
 		}
-		ch.Close()
+		defer ch.Close()
 		ch.QueueDelete(name, false, false, false)
 	}()
 

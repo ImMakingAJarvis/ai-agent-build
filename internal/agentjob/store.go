@@ -31,6 +31,14 @@ const (
 	// stay parked until the NoBrakes nightly gate (internal/nobrakes.
 	// AutoEnqueue) moves them to ready. Next never returns parked jobs.
 	Parked = "parked"
+	// Waiting: a brain round ended ON PURPOSE (Store.Yield) — the job is
+	// neither done nor failed but parked on external work (e.g. an image
+	// being generated on cap.image.generate). It carries WaitOn (the
+	// correlation ids of the results it waits for) and WaitUntil (its
+	// deadline — invariant 2: no job waits forever) and comes back to ready
+	// via Store.Wake. Next never returns waiting jobs; Recover never touches
+	// them (a reboot leaves a wait in place — its listeners are durable).
+	Waiting = "waiting"
 )
 
 // Job classes, highest priority first. A job's class decides where it sits
@@ -104,6 +112,23 @@ type Spec struct {
 	// built-in semantics: TagNightly (NoBrakes nightly gate), TagPhoto
 	// (brain-swap photo window).
 	Tags []string `json:"tags,omitempty"`
+
+	// WaitOn and WaitUntil describe the job's current wait, set by Store.
+	// Yield: WaitOn is the correlation id of every result the job waits for
+	// (e.g. "J-img-1" on flow.J) and WaitUntil is the deadline by which the
+	// job must be woken — invariant 2, no job waits forever. They are stale
+	// (kept for history) once the job has been woken or finished.
+	WaitOn    []string   `json:"wait_on,omitempty"`
+	WaitUntil *time.Time `json:"wait_until,omitempty"`
+}
+
+// WaitDeadline returns the job's wait deadline, or the zero time when the
+// job is not (or no longer) waiting.
+func (sp Spec) WaitDeadline() time.Time {
+	if sp.WaitUntil == nil {
+		return time.Time{}
+	}
+	return *sp.WaitUntil
 }
 
 // TagNightly marks a job for NoBrakes autonomous nightly execution. A
@@ -151,6 +176,12 @@ type State struct {
 	// (internal/power). Cumulative across all attempts of the job.
 	Kwh       float64 `json:"kwh,omitempty"`
 	PowerCost float64 `json:"power_cost,omitempty"`
+	// WaitingSince / WaitNote (waiting status): when the round yielded and
+	// the note the round left for its successor (what it is doing, what to
+	// do with the results). The continuation text itself lives in files
+	// (continuation.md, plan task 13).
+	WaitingSince string `json:"waiting_since,omitempty"`
+	WaitNote     string `json:"wait_note,omitempty"`
 }
 
 // Job is a spec plus its state.

@@ -16,8 +16,14 @@ import (
 	"strings"
 )
 
-// DefaultBase is where the art service listens on the host.
+// DefaultBase is where the art service listens for the local API clients
+// (they run on this host, so loopback is the right address for calls).
 const DefaultBase = "http://127.0.0.1:8120"
+
+// DefaultGallery is the LAN address the owner opens in a browser — this
+// box's LAN IP. Owner-facing links must never be loopback: from a computer
+// on the network, localhost points at that computer, not the jarvis box.
+const DefaultGallery = "http://111.1.2.27:8120"
 
 // Client talks to one art service.
 type Client struct {
@@ -103,14 +109,15 @@ func (c *Client) Generate(ctx context.Context, prompt, size string) (*Image, err
 	}
 }
 
-// GalleryURL returns the URL the owner can open to see every generated
-// photo. ART_GALLERY_URL overrides the default (the LAN address of the
-// art port).
+// GalleryURL returns the URL the owner can open in a browser to see every
+// generated photo — the LAN address by default, so the link works from
+// any computer on the network (loopback would not). ART_GALLERY_URL
+// overrides the default.
 func GalleryURL() string {
 	if u := os.Getenv("ART_GALLERY_URL"); u != "" {
 		return u
 	}
-	return DefaultBase
+	return DefaultGallery
 }
 
 // sizeRE matches a size token: "1024x576" (pixels) or "16x9" (aspect),

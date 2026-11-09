@@ -7,9 +7,28 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestGalleryURLDefaultsToLANAddress(t *testing.T) {
+	t.Setenv("ART_GALLERY_URL", "")
+	u := GalleryURL()
+	if u != DefaultGallery {
+		t.Errorf("GalleryURL() = %q, want default %q", u, DefaultGallery)
+	}
+	if strings.Contains(u, "localhost") || strings.Contains(u, "127.0.0.1") {
+		t.Errorf("owner-facing gallery link must be reachable from the LAN, got %q", u)
+	}
+}
+
+func TestGalleryURLEnvOverride(t *testing.T) {
+	t.Setenv("ART_GALLERY_URL", "http://10.0.0.5:8120")
+	if got := GalleryURL(); got != "http://10.0.0.5:8120" {
+		t.Errorf("GalleryURL() = %q, want the ART_GALLERY_URL override", got)
+	}
+}
 
 func TestGenerateSuccess(t *testing.T) {
 	var gotBody map[string]string

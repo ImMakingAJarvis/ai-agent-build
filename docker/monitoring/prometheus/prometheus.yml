@@ -41,3 +41,9 @@ scrape_configs:
   - job_name: "token_ledger"
     static_configs:
       - targets: ["jarvis-token-ledger:9102"]
+
+  # The event-driven brain's wait/wake listener service (plan task 14):
+  # active listeners, wakes fired, forwards, timeouts, resubscribes.
+  - job_name: "switchboard"
+    static_configs:
+      - targets: ["jarvis-switchboard:9103"]

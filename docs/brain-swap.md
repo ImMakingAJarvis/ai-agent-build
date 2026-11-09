@@ -26,11 +26,16 @@ swap` is that something; the watchdog's maintenance mode is the failsafe.
   the old host `jarvis-engine` systemd unit was removed 2026-11-06 (PR
   #184), so every brain stop/start in scripts and runbooks goes through
   `docker stop|start jarvis-engine` — never `systemctl`.
-- **iGPU helper** = Qwen2.5-3B on `127.0.0.1:11435` (unit
-  `jarvis-engine-igpu`). Jobs with `driver: igpu` in their spec run on
-  it — `scripts/agent-run` reads the driver from the job spec (32K
-  context). Chat already falls back to it when the brain is down
-  (`FALLBACK_ENGINE_URL=http://host.docker.internal:11435`).
+- **iGPU helper** = Qwen2.5-3B on `127.0.0.1:11435` (compose service
+  `engine-igpu`, container `jarvis-engine-igpu`) — its own container,
+  its own port, `restart: unless-stopped`, and **swap windows never
+  touch it** (only the brain container stops). Jobs with `driver: igpu`
+  in their spec run on it — `scripts/agent-run` reads the driver from
+  the job spec (32K context). Containers reach it by name
+  (`http://jarvis-engine-igpu:11435`); chat falls back to it when the
+  brain is down (`FALLBACK_ENGINE_URL`). The old host unit
+  `jarvis-engine-igpu.service` is disabled and kept as the rollback
+  path.
 - **Watchdog maintenance mode** = `jarvis-watchdog maintain <dur>
   [reason]` (45s|30m|2h|seconds). While unexpired, brain restarts are
   skipped; **at expiry the brain is re-armed even if the whole window
@@ -52,31 +57,39 @@ soon as the batch drains. Photo jobs get the tag from image-queue
 ingestion, or by hand: `jarvis-jobs add ... -tags photo`. The brain's
 part is now only:
 
-1. `jarvis-swap handoff` — scaffolds `notes/brain-handoff.md`. Fill in
-   "In flight" and "First thing on return" (two or three lines each; do
-   NOT re-plan — the point is to resume, not restart thinking).
-2. Make sure the photo work is queued (image-queue ingestion, or
+1. If the round leaves a job parked on a result that arrives in the
+   window, yield it: `jarvis-jobs yield <id> --wait-on <corr> --note
+   "..."` — that writes the job's continuation
+   (`jobs/<id>/continuation.md`, the durable per-job record;
+   docs/event-driven.md).
+2. `jarvis-swap handoff` — scaffolds `notes/brain-handoff.md`, which is a
+   pointer for the CURRENT WINDOW ONLY: the jobs in the window (each one
+   pointing at its continuation) and "First thing on return" (one or two
+   lines; do NOT re-plan — the point is to resume, not restart thinking).
+3. Make sure the photo work is queued (image-queue ingestion, or
    `jarvis-jobs add` with `-tags photo -driver igpu`).
-3. End the round. The watcher opens the window on the next pull.
+4. End the round. The watcher opens the window on the next pull.
 
 Then the loop carries it (no brain required):
 
-4. First photo pull → `jarvis-swap out` opens the watchdog window
+5. First photo pull → `jarvis-swap out` opens the watchdog window
    FIRST, stops the brain container, waits for the VRAM to clear,
    `docker compose up -d art bench` (no-ops if already up), waits for
    the art model to load, then flips the whole ready batch to `igpu`
    at priority 1000 and notifies Discord.
-5. The photo jobs run one by one on the iGPU helper while the brain is
+6. The photo jobs run one by one on the iGPU helper while the brain is
    off (expected — that is the whole point). Each pull re-flips the
    batch, so photo jobs that arrive mid-window are picked up too.
-6. When the batch drains, the loop runs `jarvis-swap in`: closes the
+7. When the batch drains, the loop runs `jarvis-swap in`: closes the
    window, stops art+bench, starts the brain container, waits up to 15 min
    for `/health`, runs the API check (a real completion must come back,
    not just a 200), notifies Discord.
-7. Next brain round: read `notes/brain-handoff.md`, do "First thing on
-   return", verify the photo results, then `mkdir -p notes/archive &&
-   mv notes/brain-handoff.md notes/archive/`, and record `jarvis-notes`.
-   Done.
+8. Next brain round: read `notes/brain-handoff.md`, and for each job in
+   the window read its continuation (`jobs/<id>/continuation.md`) — the
+   durable record; do "First thing on return", verify the photo results,
+   then `mkdir -p notes/archive && mv notes/brain-handoff.md
+   notes/archive/` (the continuations stay in the job store), and record
+   `jarvis-notes`. Done.
 
 ### Manual bracket (fallback)
 
