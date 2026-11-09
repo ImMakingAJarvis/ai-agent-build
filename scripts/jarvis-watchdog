@@ -7,11 +7,10 @@
 # with nothing noticing until a human rebooted the box.
 #
 # What it watches (one pass every 60 s by default):
-#   brain        host 11434 (systemd unit jarvis-engine)   -> start/restart the unit
-#   igpu         host 11435 (systemd unit jarvis-engine-igpu) -> restart the unit
+#   brain        host 11434 (docker container jarvis-engine) -> compose start/restart engine
+#   igpu         host 11435 (docker container jarvis-engine-igpu) -> docker restart
 #   engine-ct    docker container jarvis-engine            -> compose start when stopped
-#                 while the host brain is down; ESCALATE (no auto-fix) when it is a
-#                 network-less zombie or a port conflict with the systemd unit
+#                 or missing; ESCALATE (no auto-fix) when it is a network-less zombie
 #   rabbitmq     docker container jarvis-rabbitmq          -> docker start; persistent
 #                 boot failure escalates with the dets-corruption pointer (§3 of the doc)
 #   worker       docker container jarvis-worker            -> docker start (broker first)
@@ -52,12 +51,12 @@ STATE="${WD_STATE:-$HOME/.local/state/jarvis/watchdog}"
 LOG="${WD_LOG:-$HOME/.local/state/jarvis/watchdog.log}"
 AGENT_LOG="${WD_AGENT_LOG:-$HOME/.local/state/jarvis/agent.log}"
 BRAIN_URL="${WD_BRAIN_URL:-http://127.0.0.1:11434}"
-BRAIN_UNIT="${WD_BRAIN_UNIT:-jarvis-engine}"
-BRAIN_START_CMD="${WD_BRAIN_START_CMD:-sudo systemctl start}"
-BRAIN_RESTART_CMD="${WD_BRAIN_RESTART_CMD:-sudo systemctl restart}"
+BRAIN_UNIT="${WD_BRAIN_UNIT:-jarvis-engine}"   # docker container name (compose service: engine)
+BRAIN_START_CMD="${WD_BRAIN_START_CMD:-docker start}"
+BRAIN_RESTART_CMD="${WD_BRAIN_RESTART_CMD:-docker restart}"
 IGPU_URL="${WD_IGPU_URL:-http://127.0.0.1:11435}"
-IGPU_UNIT="${WD_IGPU_UNIT:-jarvis-engine-igpu}"
-IGPU_RESTART_CMD="${WD_IGPU_RESTART_CMD:-sudo systemctl restart}"
+IGPU_UNIT="${WD_IGPU_UNIT:-jarvis-engine-igpu}"   # docker container name (compose service: engine-igpu)
+IGPU_RESTART_CMD="${WD_IGPU_RESTART_CMD:-docker restart}"
 ENGINE_CT="${WD_ENGINE_CT:-jarvis-engine}"
 RABBITMQ_CT="${WD_RABBITMQ_CT:-jarvis-rabbitmq}"
 WORKER_CT="${WD_WORKER_CT:-jarvis-worker}"
@@ -157,20 +156,21 @@ maint_active() {
 }
 
 # do_brain_restart <why> — shared by check_brain and the log watcher.
-# An active unit that is not yet serving is usually mid model-load (minutes
-# for a 17 GB gguf): restarting it would abort a healthy load, so restarts
-# wait out $BRAIN_GRACE_S of silence. A dead/inactive unit starts at once.
+# A running container that is not yet serving is usually mid model-load
+# (minutes for a 17 GB gguf): restarting it would abort a healthy load, so
+# restarts wait out $BRAIN_GRACE_S of silence. A stopped/missing container
+# starts at once.
 do_brain_restart() {
   local st since_file now since
-  st=$(systemctl is-active "$BRAIN_UNIT" 2>/dev/null || echo unknown)
-  log "brain unit $BRAIN_UNIT state: $st"
-  if [[ "$st" == "active" ]]; then
+  st=$(docker_state "$BRAIN_UNIT")
+  log "brain container $BRAIN_UNIT state: $st"
+  if [[ "$st" == "running" ]]; then
     since_file="$STATE/brain-not-serving"
     now=$(date +%s)
     since=$(cat "$since_file" 2>/dev/null || echo "")
     if [[ -z "$since" ]]; then
       echo "$now" > "$since_file"
-      log "brain unit active but not serving yet — grace window open ($BRAIN_GRACE_S s) before any restart is attempted"
+      log "brain container running but not serving yet — grace window open ($BRAIN_GRACE_S s) before any restart is attempted"
       return 0
     fi
     if (( now - since < BRAIN_GRACE_S )); then
@@ -178,13 +178,13 @@ do_brain_restart() {
       return 0
     fi
     rm -f "$since_file"
-    log "brain not serving for $(( BRAIN_GRACE_S / 60 )) min with the unit active — restarting"
+    log "brain not serving for $(( BRAIN_GRACE_S / 60 )) min with the container running — restarting"
   else
     rm -f "$STATE/brain-not-serving"
   fi
   if restart_limit brain; then
-    if [[ "$st" == "active" ]]; then
-      $BRAIN_RESTART_CMD "$BRAIN_UNIT" && log "restarted $BRAIN_UNIT (active but not serving)" \
+    if [[ "$st" == "running" ]]; then
+      $BRAIN_RESTART_CMD "$BRAIN_UNIT" && log "restarted $BRAIN_UNIT (running but not serving)" \
         || log "FAILED to restart $BRAIN_UNIT"
     else
       $BRAIN_START_CMD "$BRAIN_UNIT" && log "started $BRAIN_UNIT" \
@@ -192,7 +192,7 @@ do_brain_restart() {
     fi
     notify "brain ($BRAIN_UNIT) was down — restarted it. ${1}"
   else
-    escalate brain "brain ($BRAIN_UNIT) still down after $MAX_RESTARTS restart attempts in the last hour — manual check: sudo systemctl status $BRAIN_UNIT"
+    escalate brain "brain ($BRAIN_UNIT) still down after $MAX_RESTARTS restart attempts in the last hour — manual check: docker logs $BRAIN_UNIT; docker compose start engine"
   fi
 }
 
@@ -221,7 +221,7 @@ check_igpu() {
     $IGPU_RESTART_CMD "$IGPU_UNIT" && { log "restarted $IGPU_UNIT"; notify "iGPU helper ($IGPU_UNIT) was down — restarted it."; } \
       || log "FAILED to restart $IGPU_UNIT"
   else
-    escalate igpu "iGPU helper still down after $MAX_RESTARTS attempts in the last hour — sudo systemctl status $IGPU_UNIT"
+    escalate igpu "iGPU helper still down after $MAX_RESTARTS attempts in the last hour — docker logs $IGPU_UNIT; docker compose start engine-igpu"
   fi
 }
 
@@ -242,20 +242,19 @@ check_engine_container() {
           log "engine container started via compose"
           notify "engine container was missing — recreated it (docker compose start engine)"
         else
-          escalate engine_ct "could not start the engine container; port 11434 may be held by the systemd $BRAIN_UNIT unit — reconcile the two brain deployments (docs/worker-moe-incident-2026-11-04.md §4)"
+          escalate engine_ct "could not start the engine container; docker compose start engine failed — check docker logs $ENGINE_CT and whether something else holds port 11434"
         fi
       else
         escalate engine_ct "engine container still not running after $MAX_RESTARTS attempts in the last hour"
       fi
       ;;
     exited)
-      # An explicit `docker compose stop engine` (the MOE sweep's step 1) lands
-      # here; unless-stopped never re-arms it. Only safe to restart when the
-      # host brain is NOT already serving — otherwise the container would fail
-      # on the port and the two deployments are in conflict anyway.
+      # An explicit `docker compose stop engine` lands here; unless-stopped
+      # never re-arms it. Restart unless something else already answers on
+      # the port (the container would fail to bind).
       if [[ "$(http_probe "$BRAIN_URL")" != "000" ]]; then
-        log "engine container stopped while systemd $BRAIN_UNIT serves the host brain — left stopped (deployment conflict)"
-        escalate engine_ct "engine container is stopped while the systemd $BRAIN_UNIT unit serves host 11434 — two brain deployments; pick one (docs/worker-moe-incident-2026-11-04.md §4)"
+        log "engine container stopped but something else serves $BRAIN_URL — left stopped"
+        escalate engine_ct "engine container is stopped while another process serves host 11434 — find and stop it (ss -tlnp | grep 11434), then docker compose start engine"
       elif restart_limit engine_ct; then
         if (cd "$REPO" && docker compose start engine >/dev/null 2>&1); then
           log "engine container restarted via compose"
@@ -274,7 +273,7 @@ check_engine_container() {
         # The Nov-4 zombie: Up, but attached to no network, so engine:11434
         # resolves for no one. Not a crash — escalating, not auto-fixing.
         log "engine container running but on NO docker network — zombie; escalating"
-        escalate engine_ct "engine container is up but attached to no docker network — engine:11434 is unreachable from the stack. Reconcile the brain deployment (docs/worker-moe-incident-2026-11-04.md §4); not auto-healing because this box may be running rounds on the systemd brain."
+        escalate engine_ct "engine container is up but attached to no docker network — engine:11434 is unreachable from the stack. Reconcile the brain deployment (docs/worker-moe-incident-2026-11-04.md §4); not auto-healing."
       fi
       ;;
   esac

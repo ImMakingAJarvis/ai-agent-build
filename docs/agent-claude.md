@@ -33,22 +33,25 @@ Stable facts (trust them; re-verify only when a job says otherwise):
   in a conversation. This engine is serving this conversation — never
   stop or kill it (the round brief explains why and what to do when a
   job needs the 4090 free: requeue it on its spec driver).
-- **iGPU helper**: Qwen2.5-3B Q4_K_M (3.4B), llama.cpp unit
-  `jarvis-engine-igpu`, port **11435**, 32K ctx, Vulkan.
+- **iGPU helper**: Qwen2.5-3B Q4_K_M (3.4B), llama.cpp in its own
+  container `jarvis-engine-igpu` (compose service `engine-igpu`), port
+  **11435**, 32K ctx, Vulkan. It stays up through photo swap windows —
+  only the brain container stops. Containers reach it by name
+  (`http://jarvis-engine-igpu:11435`); the old host unit of the same
+  name is disabled (rollback path).
 - **Photo generation** needs ~12 GB of free VRAM, so it runs in the
   brain's swap window (runbook `docs/brain-swap.md`, state
   `jarvis-swap status`).
 - **Services**: `agent-run` (job loop), `jarvis-watchdog`,
   `plane-bridge` (Plane webhooks), `task-runner` (kanban; dashboard on
-  :8080), `jarvis-memory` (:8101), `jarvis-engine-igpu`. Plane at
-  111.1.2.222:8088.
+  :8080), `jarvis-memory` (:8101). Plane at 111.1.2.222:8088.
 
 ## Helper model — small, always-on, on the iGPU
 
 When you need to change your own setup or restart something, ask the
 **helper** first: a small always-on model (Qwen2.5-3B Q4_K_M) running on
-the Ryzen iGPU (Vulkan, port 11435, unit `jarvis-engine-igpu`) — it costs
-zero CPU cores. It knows a curated setup brief (services, ports, restart
+the Ryzen iGPU (Vulkan, port 11435, container `jarvis-engine-igpu`) — it
+costs zero CPU cores. It knows a curated setup brief (services, ports, restart
 procedures, key paths — `scripts/jarvis-helper-context.md`) plus a live
 stack snapshot, and it answers "not in my context" honestly for anything
 else (then read the doc it points at — its pointers can be vague).
@@ -59,9 +62,10 @@ else (then read the doc it points at — its pointers can be vague).
     jarvis-helper --status                 # health
 
 Expect ~13 s prompt processing + ~13 tok/s decode on the iGPU. If the
-engine is down: `sudo systemctl restart jarvis-engine-igpu`. Swapping the
-model: replace `/opt/jarvis-igpu/models/jarvis-igpu.gguf` (keep a `.bak`),
-restart the unit, re-test. If the setup changes substantially, update
+engine is down: `docker restart jarvis-engine-igpu` (or `docker compose
+restart engine-igpu`). Swapping the model: replace
+`/opt/jarvis-igpu/models/jarvis-igpu.gguf` (keep a `.bak`), restart the
+container, re-test — the container bind-mounts `/opt/jarvis-igpu`. If the setup changes substantially, update
 `scripts/jarvis-helper-context.md` and re-run `scripts/install_helper.sh`.
 Investigation + benchmarks: docs/igpu-model-handler.md.
 

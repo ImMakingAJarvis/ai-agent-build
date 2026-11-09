@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -507,10 +508,12 @@ func run() error {
 // engines, and the B3 planning pipeline (the Plan/Decompose/Review prompts
 // plus the task JSON schema, prompts/).
 //
-// When the worker runs beside the engine (docker compose), the registry's
-// host-local endpoints (localhost:11434) are not reachable from the
-// container, so ENGINE_URL / OLLAMA_URL take precedence over them — the
-// same convention as models.NewClient.
+// When the worker runs beside the engines (docker compose), the
+// registry's host-local endpoints (localhost:11434) are not reachable
+// from the container, so ENGINE_URL / OLLAMA_URL / IGPU_URL take
+// precedence over them — the same convention as models.NewClient. The
+// iGPU helper is a different container from the brain, on its own port
+// (see mapEngineEndpoint).
 func newPlanHandler() (*planworker.Handler, error) {
 	regPath := os.Getenv("WORKER_MODELS_FILE")
 	if regPath == "" {
@@ -523,6 +526,13 @@ func newPlanHandler() (*planworker.Handler, error) {
 	engineBase := os.Getenv("ENGINE_URL")
 	if engineBase == "" {
 		engineBase = os.Getenv("OLLAMA_URL")
+	}
+	// The iGPU helper is its own container (jarvis-engine-igpu), reached
+	// by name on the compose network; IGPU_URL overrides that for hosts
+	// where the worker runs outside compose.
+	igpuBase := os.Getenv("IGPU_URL")
+	if igpuBase == "" {
+		igpuBase = defaultIGPUURL
 	}
 	engines := map[string]planworker.Engine{}
 	var mu sync.Mutex
@@ -544,10 +554,7 @@ func newPlanHandler() (*planworker.Handler, error) {
 	return &planworker.Handler{
 		Models: reg,
 		Engines: func(endpoint string) planworker.Engine {
-			base := endpoint
-			if engineBase != "" {
-				base = engineBase
-			}
+			base := mapEngineEndpoint(endpoint, engineBase, igpuBase)
 			mu.Lock()
 			defer mu.Unlock()
 			if e, ok := engines[base]; ok {
@@ -561,6 +568,36 @@ func newPlanHandler() (*planworker.Handler, error) {
 		Planner:  pipe,
 		FrontEnd: frontEnd,
 	}, nil
+}
+
+// defaultIGPUURL is where the worker reaches the iGPU helper container
+// from inside the compose network.
+const defaultIGPUURL = "http://jarvis-engine-igpu:11435"
+
+// mapEngineEndpoint maps a model-registry endpoint to the engine base
+// URL the worker actually calls. The worker runs beside the engines
+// (docker compose), where the registry's host-local endpoints
+// (localhost:11434) are not reachable, so the engine env vars take
+// precedence over them. The iGPU helper is a different container from
+// the brain — its own container, its own port — so its endpoint is
+// routed to IGPU_URL instead of being collapsed into the brain:
+//
+//	:11434 → the brain   (ENGINE_URL / OLLAMA_URL)
+//	:11435 → the iGPU    (IGPU_URL)
+//	other ports → the brain, as before
+// (the MoE ft serve on :11436 keeps the brain's address)
+//
+// With engineBase empty (the worker runs on the host) the endpoint is
+// passed through unchanged — localhost:11435 is then the host-published
+// port of the same container.
+func mapEngineEndpoint(endpoint, engineBase, igpuURL string) string {
+	if engineBase == "" {
+		return endpoint
+	}
+	if u, err := url.Parse(endpoint); err == nil && u.Port() == "11435" {
+		return igpuURL
+	}
+	return engineBase
 }
 
 // resolvePlanJobStore settles a plan job's agentjob store entry so the
