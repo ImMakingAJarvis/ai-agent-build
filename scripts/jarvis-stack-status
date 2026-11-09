@@ -498,7 +498,7 @@ def print_human(r):
     if q:
         # active states only — done/skipped are history, not current state
         active = [f"{k} {v}" for k, v in sorted(q.items())
-                  if k in ("ready", "pending", "running", "failed", "parked")]
+                  if k in ("ready", "pending", "running", "failed", "parked", "waiting")]
         print("Queue (agent jobs):")
         print(f"  {', '.join(active) if active else 'none active'}  (done {q.get('done', 0)})")
         print()

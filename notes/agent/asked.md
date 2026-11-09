@@ -95,3 +95,12 @@
 - 2026-11-07T11:34Z Nathan wanted the historical total tokens processed in Grafana, plus tokens per month and week (job chat-1794019399-8818)
 - 2026-11-08T05:54Z Nathan: photo-tagged jobs must not ask brain/sonnet/igpu — they run on the image generator in the swap window. Follow-up job chat-1794102878-59c7: photo-queue visibility on the :8080 dashboard (loaded model, RAM, on-hold) and a Discord post when a photo finishes.
 - 2026-11-08T07:18Z Nathan wants photo-swap insight on :8080 (loaded model, changes in flight, RAM, on hold) and photos posted to Discord when they finish — visibility fixed in PR #192; delivery path re-verified; live test = the 4 queued photos in the next swap window
+- 2026-11-08T11:42Z [chat-1794106018-34cb] Nathan: prevent notes/docs PR merge conflicts — asked whether the same non-code file is written in most PRs and if I can stop (2026-11-08, job chat-1794106018-34cb)
+- 2026-11-08T12:27Z Nathan: replying to a worker's Discord message must be ignored by the chatbot (never schedule a job), read+used by the worker, and acknowledged with a thumbs-up
+- 2026-11-08T13:24Z Nathan: the igpu should have its own container and its own port, the worker should know the igpu container is different and how to reach it, and the igpu should stay alive almost the whole time — photo swap windows stop only the brain (job chat-1794122808-9116)
+- 2026-11-08T13:50Z Nathan: the image gallery was showing a localhost address — fix it to the IP; standing rules: all links accessible by computers on the network (no localhost), all dates/times use moment, and show the correct timezone (job chat-1794123627-6324)
+- 2026-11-03T19:19Z Nathan: make NoBrakes the highest priority and start working on it next
+- 2026-11-08T19:57Z Nathan: EVB Phase 0 — merge cursor/dashboard-job-logs-5db6 with pagination, sweep stale notes/bench branches into one commit, resolve Reel branches per Gate 1 decisions; he merged PR #204 mid-round (active PR merging)
+- 2026-11-08T21:28Z HomeAI TTS announcements: Nathan confirmed keep (yes-cherry-pick, 2026-11-08, EVB-6)
+- 2026-11-08T22:13Z Nathan resolved the 2026-11-05 zombie-engine deviation: option A — compose container canonical (keep) (2026-11-08, EVB-7; recorded in notes/agent/system.md + PR #205)
+- 2026-11-08T23:50Z EVB-8 build was a pure plan-task (no new Nathan decision). One open item for Nathan to confirm on PR #205: the plan wrote StartedAt/FinishedAt time.Time with no json tags; I added started_at/finished_at for wire-format consistency with the snake_case siblings.

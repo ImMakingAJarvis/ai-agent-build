@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -59,10 +61,16 @@ func NewWithURL(base string) *Client {
 }
 
 // Generate runs one photo generation and blocks until it finishes.
-// A 1024x1024 image takes tens of seconds on the 4090; give the context
-// a few minutes.
-func (c *Client) Generate(ctx context.Context, prompt string) (*Image, error) {
-	body, _ := json.Marshal(map[string]string{"prompt": prompt})
+// size is the requested size — "1024x576" (explicit pixels) or an aspect
+// like "16x9" (long side scaled to the service's max) — and may be "" for
+// the service default (square 1024x1024). An image takes tens of seconds
+// on the 4090; give the context a few minutes.
+func (c *Client) Generate(ctx context.Context, prompt, size string) (*Image, error) {
+	reqBody := map[string]string{"prompt": prompt}
+	if size != "" {
+		reqBody["size"] = size
+	}
+	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/generate", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -103,6 +111,28 @@ func GalleryURL() string {
 		return u
 	}
 	return DefaultBase
+}
+
+// sizeRE matches a size token: "1024x576" (pixels) or "16x9" (aspect),
+// with 'x' or ':' as the separator.
+var sizeRE = regexp.MustCompile(`^(\d{1,4})\s*[x:]\s*(\d{1,4})$`)
+
+// ParseSize parses a size token such as "1024x576", "16x9" or "16:9".
+// It returns the two numbers as written; the art service turns small
+// numbers (<= 128) into an aspect ratio — long side scaled to its max —
+// and larger ones into explicit pixels. ok is false for anything else
+// (so "sunset", "1024" or "0x0" are not size tokens).
+func ParseSize(token string) (w, h int, ok bool) {
+	m := sizeRE.FindStringSubmatch(strings.TrimSpace(token))
+	if m == nil {
+		return 0, 0, false
+	}
+	w, _ = strconv.Atoi(m[1])
+	h, _ = strconv.Atoi(m[2])
+	if w < 1 || h < 1 {
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 func detail(d string) string {

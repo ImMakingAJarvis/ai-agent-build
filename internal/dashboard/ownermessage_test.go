@@ -78,7 +78,7 @@ func TestAgentJobsSectionShowsWaitingMessages(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&buf, "agent-jobs-section",
-		DashboardState{WorkerMessages: 3}); err != nil {
+		AgentJobsPage{WorkerMessages: 3}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "3 message(s) waiting for the worker") {

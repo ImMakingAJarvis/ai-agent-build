@@ -54,6 +54,26 @@ func run() error {
 	defer conn.Close()
 	log.Printf("worker: connected to RabbitMQ")
 
+	// Lifecycle events (plan §3.4): job.* for the jobs this worker
+	// processes itself. Fire-and-forget — a failed event is logged, never
+	// fatal to the job, and a missing publisher (broker down at boot)
+	// just disables events.
+	events, err := queue.NewEventPublisher(conn, "worker")
+	if err != nil {
+		log.Printf("worker: events publisher unavailable: %v (events disabled)", err)
+		events = nil
+	} else {
+		defer events.Close()
+	}
+	emitEvent := func(e queue.Event) {
+		if events == nil {
+			return
+		}
+		if err := events.Publish(context.Background(), e); err != nil {
+			log.Printf("worker: event %s: %v", e.RoutingKey(), err)
+		}
+	}
+
 	// Engine client for local model routing (Ollama or llama.cpp).
 	ollama := models.NewClient()
 
@@ -245,12 +265,14 @@ func run() error {
 		rec := history.Start(msg, job.ModelID, local, msg.Type)
 		log.Printf("worker: plan job %s → model %s (local=%v, effort=%s)",
 			msg.ID, job.ModelID, local, job.Effort)
+		emitEvent(queue.JobEvent(msg, "started", map[string]any{"model": job.ModelID}))
 
 		jobStart := time.Now()
 		res, err := planHandler.Run(context.Background(), job)
 		if err != nil {
 			log.Printf("worker: plan job %s failed: %v", msg.ID, err)
 			history.Fail(rec, err)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": err.Error()}))
 			ntf.OnFail(rec, err)
 			jobMetrics.ObserveFailed(msg.Type, job.ModelID)
 			resolvePlanJobStore(jobStore, msg, job.ModelID, "", err.Error())
@@ -268,6 +290,7 @@ func run() error {
 			derr := fmt.Errorf("plan delivery unavailable (no board credentials)")
 			log.Printf("worker: plan job %s: %v", msg.ID, derr)
 			history.Fail(rec, derr)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": derr.Error()}))
 			ntf.OnFail(rec, derr)
 			jobMetrics.ObserveFailed(msg.Type, job.ModelID)
 			resolvePlanJobStore(jobStore, msg, job.ModelID, "", derr.Error())
@@ -277,6 +300,7 @@ func run() error {
 		if derr != nil {
 			log.Printf("worker: plan job %s: delivery failed: %v", msg.ID, derr)
 			history.Fail(rec, derr)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": derr.Error()}))
 			ntf.OnFail(rec, derr)
 			jobMetrics.ObserveFailed(msg.Type, job.ModelID)
 			resolvePlanJobStore(jobStore, msg, job.ModelID, "", derr.Error())
@@ -287,6 +311,7 @@ func run() error {
 
 		rec.Summary = agentjob.Summary(res.Plan)
 		history.Complete(rec)
+		emitEvent(queue.JobEvent(msg, "done", nil))
 		jobMetrics.ObserveCompleted(msg.Type, job.ModelID, time.Since(jobStart).Seconds())
 		ntf.OnComplete(rec)
 		resolvePlanJobStore(jobStore, msg, job.ModelID, res.Plan, "")
@@ -386,6 +411,8 @@ func run() error {
 				rec.InputTokens = costEst.InputTokens
 				rec.OutputTokens = costEst.OutputTokens
 				history.Denied(rec, costEst.TotalCost)
+				emitEvent(queue.JobEvent(msg, "failed",
+					map[string]any{"reason": "approval denied", "estimated_cost": costEst.TotalCost}))
 				ntf.OnDenied(rec, costEst.TotalCost)
 				jobMetrics.ObserveDenied(msg.Type, modelName, costEst.TotalCost)
 				return queue.ErrApprovalDenied
@@ -399,6 +426,7 @@ func run() error {
 			rec.InputTokens = costEst.InputTokens
 			rec.OutputTokens = costEst.OutputTokens
 		}
+		emitEvent(queue.JobEvent(msg, "started", map[string]any{"model": modelName}))
 		sched.JobStarted(msg.Type)
 		defer sched.JobFinished(msg.Type)
 
@@ -408,6 +436,7 @@ func run() error {
 			err := fmt.Errorf("API dispatch not implemented (model %s)", modelName)
 			log.Printf("worker: job %s failed: %v", msg.ID, err)
 			history.Fail(rec, err)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": err.Error()}))
 			ntf.OnFail(rec, err)
 			jobMetrics.ObserveFailed(msg.Type, modelName)
 			return nil // recorded as failed; ack so it is not redelivered
@@ -420,6 +449,7 @@ func run() error {
 		resp, err := ollama.Generate(modelName, prompt)
 		if err != nil {
 			history.Fail(rec, err)
+			emitEvent(queue.JobEvent(msg, "failed", map[string]any{"error": err.Error()}))
 			jobMetrics.ObserveFailed(msg.Type, modelName)
 			return fmt.Errorf("generate: %w", err)
 		}
@@ -433,6 +463,7 @@ func run() error {
 		}
 		rec.Summary = agentjob.Summary(out)
 		history.Complete(rec)
+		emitEvent(queue.JobEvent(msg, "done", nil))
 		jobMetrics.ObserveCompleted(msg.Type, modelName, time.Since(jobStart).Seconds())
 		ntf.OnComplete(rec)
 		return nil

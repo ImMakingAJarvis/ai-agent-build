@@ -101,8 +101,8 @@ func (r *hermesRunner) handleMessage(in chat.Incoming) {
 
 	// !photo / !photoassist / !photocheck (and the "now" variants) work on
 	// the Hermes runner too.
-	if mode, prompt, ok := cutPhotoCmd(content); ok {
-		handlePhoto(r.discord, r.photoSvc, in, r.confDir, mode, prompt)
+	if mode, size, prompt, ok := cutPhotoCmd(content); ok {
+		handlePhoto(r.discord, r.photoSvc, in, r.confDir, mode, size, prompt)
 		return
 	}
 

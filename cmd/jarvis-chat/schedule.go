@@ -201,10 +201,11 @@ const (
 
 // enqueuePhotoJob stores a queued photo: the brain-expanded prompt goes to a
 // sidecar file (the iGPU round reads it via jarvis-photo), and the job
-// itself is tagged photo so the swap-window watcher brackets it. now=true
-// places the job at the top of the fix band instead of the top of the build
-// band.
-func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt string, now bool) (id string, err error) {
+// itself is tagged photo so the swap-window watcher brackets it. size is
+// the requested frame ("16x9", ...) — stored to its own sidecar file — or
+// "" for the service default (square). now=true places the job at the top
+// of the fix band instead of the top of the build band.
+func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool) (id string, err error) {
 	if strings.TrimSpace(usedPrompt) == "" {
 		return "", fmt.Errorf("empty prompt")
 	}
@@ -218,13 +219,18 @@ func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt string, now bool) (id str
 	if err := photo.WritePrompt(dataDir, id, usedPrompt); err != nil {
 		return "", err
 	}
+	if size != "" {
+		if err := photo.WriteSize(dataDir, id, size); err != nil {
+			return "", err
+		}
+	}
 	class, prio := agentjob.ClassBuild, photoJobPriority
 	if now {
 		class, prio = agentjob.ClassFix, photoNowJobPriority
 	}
 	_, err = store.Ingest(agentjob.Spec{
 		ID:               id,
-		Title:            "photo: " + shortTitle(raw),
+		Title:            "photo: " + photoTitle(raw, size),
 		Instructions:     photoJobInstructions(id),
 		Driver:           "igpu",
 		Class:            class,
@@ -246,6 +252,16 @@ func photoJobInstructions(id string) string {
 		"    jarvis-photo make --job " + id + "\n\n" +
 		"It reads the job's prompt, generates the photo on the art service (the brain is swapped out, so the 4090 is free) and sends the finished image to the owner's Discord DM.\n\n" +
 		"When it prints 'sent' and exits 0 you are done — reply: photo sent. If it exits non-zero, reply with the error it printed and nothing else."
+}
+
+// photoTitle builds a photo job's title: the trimmed raw prompt, with the
+// size in front (when set) so a 16x9 photo is recognizable in the queue.
+func photoTitle(raw, size string) string {
+	t := shortTitle(raw)
+	if size != "" {
+		t = size + " " + t
+	}
+	return t
 }
 
 // shortTitle trims a photo prompt for use as the job title.

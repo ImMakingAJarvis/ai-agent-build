@@ -58,11 +58,11 @@ func run(args []string) int {
 		return 1
 	}
 
-	// A few minutes: the art service waits up to ~90s for free VRAM, then a
-	// 1024x1024 image takes tens of seconds.
+	// A few minutes: the art service waits up to ~90s for free VRAM, then an
+	// image takes tens of seconds.
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
-	img, err := art.New().Generate(ctx, prompt)
+	img, err := makePhoto(ctx, dataDir, id, prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "jarvis-photo: generate failed: %v\n", err)
 		return 1
@@ -83,6 +83,17 @@ func run(args []string) int {
 	}
 	fmt.Println("sent " + filepath.Base(img.Path))
 	return 0
+}
+
+// makePhoto reads the job's size token (if any) and generates the image on
+// the art service. The size sidecar is optional: jobs queued before sizes
+// existed have none, and the service default (square 1024x1024) applies.
+func makePhoto(ctx context.Context, dataDir, id, prompt string) (*art.Image, error) {
+	size, err := photo.ReadSize(dataDir, id)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read size: %w", err)
+	}
+	return art.New().Generate(ctx, prompt, size)
 }
 
 // deliver sends the image to the owner's Discord DM via jarvis-discord, which

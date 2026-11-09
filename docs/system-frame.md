@@ -73,6 +73,8 @@ Layers, top to bottom:
 |---|---|---|---|
 | **jarvis-brain** — qwen3.8 GGUF, 128k ctx, 2 parallel slots, q4_0 KV | llama.cpp on the 4090, **127.0.0.1:11434** (docker container `jarvis-engine`) | the agent's rounds, chat, voice, Hermes classification, `jarvis-discord ask` reasoning | ~22 GB VRAM resident; slots saved under `/var/lib/jarvis/slots`. Binary/model/templates pinned at `/opt/jarvis-engine` |
 | **jarvis-igpu** — Qwen2.5-3B Q4_K_M, Vulkan on the Ryzen iGPU, 32k ctx | llama.cpp, **127.0.0.1:11435** (docker container `jarvis-engine-igpu`, compose service `engine-igpu`) | `jarvis-helper` CLI (setup questions, self-restart), **worker-busy fallback** for chat/voice LLM calls, `igpu` driver rounds | costs zero CPU cores; containers reach it by container name on the compose network (`http://jarvis-engine-igpu:11435`), the host via the published port. Own container + port, `restart: unless-stopped` — stays up through photo swap windows. Model: `/opt/jarvis-igpu/models/jarvis-igpu.gguf` |
+| **jarvis-brain** — qwen3.8 GGUF, 128k ctx, 2 parallel slots, q4_0 KV | llama.cpp on the 4090, **127.0.0.1:11434** (compose container `jarvis-engine` — the only brain deployment; host unit removed 2026-11-06, PR #184) | the agent's rounds, chat, voice, Hermes classification, `jarvis-discord ask` reasoning | ~22 GB VRAM resident; slots saved under `/var/lib/jarvis/slots`. Binary/model/templates pinned at `/opt/jarvis-engine` |
+| **jarvis-igpu** — Qwen2.5-3B Q4_K_M, Vulkan on the Ryzen iGPU, 32k ctx | llama.cpp, **0.0.0.0:11435** (compose container `jarvis-engine-igpu`; old host unit disabled) | `jarvis-helper` CLI (setup questions, self-restart), **worker-busy fallback** for chat/voice LLM calls, `igpu` driver rounds | costs zero CPU cores; containers reach it by name (`jarvis-engine-igpu:11435`) or via `host.docker.internal:11435`. Model: `/opt/jarvis-igpu/models/jarvis-igpu.gguf` |
 | **MoE bench engine** | unit `jarvis-moe-engine` (**disabled**) | VRAM-sweep benchmark rounds | started per-sweep by the benchmark driver |
 | **ollama** | host unit (**disabled**, `Conflicts=jarvis-engine`) | — | superseded by the llama.cpp engine; kept as rollback option |
 
@@ -83,14 +85,11 @@ calls to `FALLBACK_ENGINE_URL` (the iGPU) and `jarvis-voice` to
 `FALLBACK_OLLAMA_URL`, so Discord and voice stay responsive; both fall back
 to the brain when the iGPU is down. The voice model picker can force either.
 
-> **Current deviation (2026-11-05):** the *canonical* brain is the host
-> unit on 127.0.0.1:11434. The compose `jarvis-engine` container is a
-> **zombie** — `Up` but attached to no Docker network, so `engine:11434`
-> (what chat/voice/ha/worker reference in compose) does not resolve in
-> stack. The watchdog escalates this state to Discord and never auto-heals
-> it (it would conflict with the host unit for the port). Resolution
-> options are documented in `notes/agent/system.md` (2026-11-05 entry) and
-> await Nathan's call. See §8.
+> The 2026-11-05 zombie-engine deviation is resolved (§8): the brain is the
+> compose `jarvis-engine` container only — the host unit was removed
+> 2026-11-06 (PR #184) and Nathan confirmed compose canonical on
+> 2026-11-08. `engine:11434` resolves in stack; every brain stop/start goes
+> through `docker stop|start jarvis-engine` (docs/brain-swap.md).
 
 ## 3. Discord — the command reference
 
@@ -128,7 +127,7 @@ action instead of just replying:
 | `enqueue_job` | Enqueue a build job into the worker queue | full |
 | `check_status` | Current job status + agent log tail | all |
 | `list_jobs` | List kanban tasks and statuses | all |
-| `start_engine` / `stop_engine` | Start/stop the `jarvis-engine` systemd unit | full |
+| `start_engine` / `stop_engine` | Start/stop the `jarvis-engine` compose container | full |
 | `web_search` | DuckDuckGo + Wikipedia lookup | all |
 | `delegate` | Break a complex task into smaller jobs and enqueue them | full |
 | `set_automode` / `set_fullauto` | The NoBrakes mode switches | full |
@@ -263,6 +262,7 @@ safe (missing/corrupt value reads as off).
 |---|---|
 | `jarvis-engine.service` | removed 2026-11-06 (PR #184) — the brain is the compose container `jarvis-engine` (§2). |
 | `jarvis-engine-igpu.service` | the iGPU helper — **disabled legacy, rollback path only**; the running helper is the compose container `jarvis-engine-igpu` (§2). Enabling it while the container runs collides on 11435. |
+| `jarvis-engine-igpu.service` | **disabled** (rollback path) — the iGPU helper is the compose container `jarvis-engine-igpu` (§5.1), 0.0.0.0:11435. The old `jarvis-engine.service` (the brain) was removed 2026-11-06 (PR #184); the brain is the compose container only. |
 | `agent-run.service` | the agent loop (§4.3). `Restart=on-failure` (exit 0 stays stopped), inhibited by `touch /var/lib/jarvis/agent-run.disabled`. |
 | `agent-resume.service` | resumes a round after a reboot, on the same driver (`~/.config/jarvis/driver`). |
 | `jarvis-stack.service` | oneshot `docker compose up -d` at boot (`RemainAfterExit=yes`) — belt and braces over container restart policies. |
@@ -270,6 +270,7 @@ safe (missing/corrupt value reads as off).
 | `plane-bridge.service` | receives Plane webhooks (HMAC-verified, :8102) and turns board changes into agent jobs (§4.1); catch-up sync on every start; event log `~/.local/share/jarvis/plane-bridge/events.jsonl`. |
 | `ollama.service` | disabled (superseded). |
 | `jarvis-{chat,voice,ha,memory,moe-engine,….service}` | the **pre-2026-10-27 native units, kept for rollback** (all disabled — the engines run as compose containers too). Never run a container and its native unit at once (chat would double-reply and double-enqueue). |
+| `jarvis-{chat,voice,ha,memory,moe-engine,….service}` | the **pre-2026-10-27 native units, kept for rollback** (all disabled — the engines are compose containers, §5.1). Never run a container and its native unit at once (chat would double-reply and double-enqueue). |
 
 ### 5.3 CLIs (run on demand, not services)
 
@@ -331,15 +332,17 @@ Rollback to native units per service is still supported
 
 ## 8. Known deviations from the intended topology (2026-11-05)
 
-- **Zombie engine container.** The compose `jarvis-engine` is `Up` but on
-  **no** Docker network (no port mapping, `engine:11434` unresolvable in
-  stack), while the host unit serves 127.0.0.1:11434. Consequences: chat/
-  voice/ha/worker LLM calls to `engine:11434` fail in stack (chat's iGPU
-  fallback only triggers while a job runs, so Discord chat LLM is dark when
-  the queue is idle); the Prometheus `llama_engine` target is down. The
-  watchdog escalates it hourly and never auto-heals (port conflict).
-  Reconciliation options A/B are in `notes/agent/system.md` (2026-11-05) and
-  await Nathan's call.
+- **Zombie engine container — RESOLVED 2026-11-08 (option A: compose
+  canonical).** The 2026-11-05 deviation (compose `jarvis-engine` `Up` but
+  on **no** Docker network while the host unit served 127.0.0.1:11434)
+  went away on 2026-11-06 when the brain went docker-only (PR #184): the
+  host `jarvis-engine` unit was removed and the compose container became
+  the only brain deployment — on the stack network with the `engine` alias
+  and `127.0.0.1:11434` mapped. Nathan confirmed option A on 2026-11-08.
+  Verified: `engine:11434` answers in stack, Prometheus `llama_engine`
+  target up, no `jarvis-engine` unit in systemd. Every brain stop/start
+  goes through `docker stop|start jarvis-engine` — never `systemctl`
+  (docs/brain-swap.md).
 - **`wake-queue` not running** (optional profile) — the current voice path
   is HA-side wake+STT → `jarvis-voice`, not the in-stack wake bridge.
 - **Voice auth is OFF** (`/opt/jarvis-voice/auth-off.env`) until the
