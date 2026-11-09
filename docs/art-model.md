@@ -108,12 +108,59 @@ words and the caption says so. CLI equivalents:
 `jarvis-art enhance "<request>"` prints the mind's prompt;
 `jarvis-art generate "<request>" --mind` expands then generates.
 
+## Reference photos: FLUX.2 [klein] (added 2026-11-08, job chat-1794200798-5afb)
+
+The second model is **FLUX.2 [klein] 4B** (BFL) — a reference-capable
+pipeline: given one or more reference images it keeps their subject (a
+real person) while generating the prompt's scene around it. Weights:
+`black-forest-labs/FLUX.2-klein-4B` (~23 GB) in
+`/var/lib/jarvis/art/models/flux2-klein-4b`, via
+`scripts/install_klein.sh`. It is **lazy-loaded on the first reference
+generation** (a plain photo never pays for the 23 GB load), and because
+photo work runs in the brain-swap window (the 4090 is free) the
+transformer uses plain model CPU offload, not sequential.
+
+New API surface:
+
+- `POST /upload` — raw image bytes (png/jpeg/webp, ≤ 25 MB) staged under
+  `/var/lib/jarvis/art/refs` as `upload-<ts>-<hex>.<ext>`; returns
+  `{"name": ...}`.
+- `GET /refs/<name>` — a staged reference (basename only, no traversal).
+- `POST /generate` — new fields `model` (`"zimage"` default | `"klein"`)
+  and `refs` (staged names). **Any `refs` routes the generation to
+  klein** — an uploaded photo is meaningless to plain text-to-image.
+  Klein's defaults: 4 steps, guidance 1.0. `/health` reports
+  `klein_weights` / `klein_loaded` / `klein_error`.
+
+How a photo gets a reference:
+
+- **Discord:** `!photo` / `!photoassist` / `!photocheck` with an image
+  attached — the first png/jpeg/webp attachment is downloaded and stored
+  as the job's reference sidecar.
+- **Gallery page** (the `GET /` on :8120): a form with prompt, size, a
+  file input, **Assist** (POST `:8080/api/photo/assist` — the thinking
+  mind expands the basic request, like `!photoassist`) and **Send**
+  (uploads the file to `/upload`, then POSTs `:8080/api/photo/jobs`,
+  which queues the same photo-tagged job Discord queues). The dashboard
+  endpoints are CORS-enabled because the page is served from :8120.
+
+Both flows write the reference to the job's sidecar
+(`<data>/photos/<id>.png`). At generation time, `jarvis-photo make --job
+<id>` stages a copy as `ref-<jobid>-<unix>.png` in the refs directory
+(bound into the art container) and calls `/generate` with
+`model: "klein"` + the staged name; a job without a sidecar generates on
+Z-Image-Turbo as before.
+
 ## Operations
 
 - **Install/refresh:** `scripts/install_art.sh` (deploy code to
   `/opt/jarvis-art`, download weights to `/var/lib/jarvis/art/model`),
   then `docker compose up -d art`. First start loads the pipeline in
   ~1–2 min.
+- **Klein weights:** `scripts/install_klein.sh` (skips when
+  `model_index.json` is present; `ART_KLEIN_REPO` / `ART_KLEIN_DIR`
+  override the HF repo and target). The refs directory
+  (`/var/lib/jarvis/art/refs`) is created by `install_art.sh`.
 - **Swap model:** `ART_MODEL_REPO=<repo> scripts/install_art.sh` (any
   diffusers text-to-image pipeline works; `guidance_scale=0` and the step
   count assume a distilled turbo — revisit for a non-turbo model).
