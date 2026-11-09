@@ -937,7 +937,8 @@ func cmdList(store *agentjob.Store, args []string, w io.Writer) error {
 	}
 	var parts []string
 	for _, st := range []string{agentjob.Ready, agentjob.Parked, agentjob.Claimed,
-		agentjob.Running, agentjob.Paused, agentjob.Done, agentjob.Failed, agentjob.Skipped} {
+		agentjob.Running, agentjob.Waiting, agentjob.Paused, agentjob.Done,
+		agentjob.Failed, agentjob.Skipped} {
 		if n := counts[st]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, st))
 		}
