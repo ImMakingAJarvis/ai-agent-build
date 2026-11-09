@@ -94,7 +94,21 @@ func (s *Store) RecordResult(id, corr, ref string) error {
 		res = map[string]Result{}
 	}
 	res[corr] = Result{Corr: corr, Ref: ref, At: time.Now().UTC()}
-	return writeJSON(filepath.Join(s.JobDir(id), "results.json"), res)
+	if err := writeJSON(filepath.Join(s.JobDir(id), "results.json"), res); err != nil {
+		return err
+	}
+	// Keep the continuation's result refs in step (plan §3.5): the woken
+	// round reads continuation.json for the corr -> ref map. Best-effort —
+	// results.json is the authoritative sidecar Wake consults, so a missing
+	// or corrupt continuation never blocks recording a result.
+	if c, err := s.ReadContinuation(id); err == nil && c != nil {
+		if c.ResultRefs == nil {
+			c.ResultRefs = map[string]string{}
+		}
+		c.ResultRefs[corr] = ref
+		_ = s.WriteContinuation(c)
+	}
+	return nil
 }
 
 // results loads the job's results sidecar. A missing file is not an error:

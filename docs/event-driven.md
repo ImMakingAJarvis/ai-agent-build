@@ -72,6 +72,45 @@ Notes:
 5. **Tidy up**: `jarvis-mq delete flow.<name>` once the flow is finished
    (a durable empty queue is harmless, but deleting keeps the broker clean).
 
+## Parking a round on a result (yield / waiting / wake)
+
+The pattern above is the queue half; the agent-job store is the brain half.
+A round that has published work (a `correlation_id`) and needs the result in
+a LATER round does not finish — it **yields**: the job parks in the
+`waiting` state, and the round's durable record, the **continuation**, is
+written first.
+
+- **`jarvis-jobs yield <id> --wait-on c1,c2 --note "..."`** — writes
+  `jobs/<id>/continuation.md` (sections *Goal / Done so far / In flight
+  (corr ids) / What to do with each result / Next steps / Gotchas*; the
+  `--in-flight`/`--next`/`--results`/`--gotchas` flags fill them, a
+  continuation the round wrote in its own words is merged in with the
+  flags winning only the sections they name) and
+  `jobs/<id>/continuation.json` (corr ids, deadline, round count, last
+  driver, result refs), then flips the job to `waiting` via
+  `Store.Yield` (deadline `--wait-until`, a duration or RFC3339, default
+  2h). **The continuation is the precondition of the yield** (invariant
+  8): the CLI reads the file back and refuses if "In flight" or "Next
+  steps" is empty — the status is untouched, no `.json` is written, and
+  the scaffold stays on disk to be filled in and retried.
+- **`jarvis-jobs waiting`** — the waiting jobs: id, title, what it waits
+  on, age, deadline. Prints nothing when none wait.
+- **`jarvis-jobs wake <id>`** — the manual wake (the automatic one lands
+  with the switchboard, plan task 14). It asks `Store.Wake`, which honours
+  the same gate both paths share: the job wakes — back to `ready`,
+  priority bumped above the ready peers — when every `--wait-on` result
+  has been recorded or the deadline has passed; otherwise it stays
+  waiting and the operator is told which corr is still missing.
+  `jarvis-jobs requeue <id>` forces it ready regardless.
+
+The **woken round reads `jobs/<id>/continuation.md` first** — what its
+predecessor was doing, what it expected of each result, the exact next
+step — and resumes instead of re-planning. `notes/brain-handoff.md` is a
+pointer for the current window only (`docs/brain-swap.md`); the
+continuations in the job store are the durable per-job record. When a
+result is recorded (`Store.RecordResult`), the store keeps the
+continuation's `result_refs` in step with `results.json`.
+
 ## Semantics
 
 - Queues are **created on demand** (`PublishFlow` declares + binds before
@@ -215,3 +254,11 @@ running agent can hand work to another model mid-run without shelling out.
   `x-attempts` delivery budget, and `ListDead`/`RequeueDead`/`DropDead`.
 - `cmd/jarvis-mq/main.go` — the CLI above.
 - `internal/superagent/tools.go` — `runMQ`, the in-process tool.
+- `internal/agentjob/continuation.go` — the continuation sidecar:
+  `Continuation`, `RenderContinuationMD`/`ParseContinuationMD`, the
+  invariant-8 `ContinuationMDFilled` check, `WriteContinuation`/
+  `ReadContinuation`, `RecordedResults`/`MissingResults`, and the shared
+  `WaitAge`/`WaitRemaining` renderers.
+- `internal/agentjob/wait.go` — the waiting state machine (EVB-12):
+  `Store.Yield`, `Store.Wake`, `Store.RecordResult`.
+- `cmd/jarvis-jobs/yield.go` — `jarvis-jobs yield`, `waiting`, `wake`.
