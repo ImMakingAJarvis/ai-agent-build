@@ -199,7 +199,12 @@ if (( resume )); then
   # owner-message hook injects queue-site messages into this round too.
   resume_p="$(resume_prompt "carry on with what you were doing, following the same rules as before.")"
   if [[ -f "$CONF/current-job" ]]; then
-    JARVIS_JOB_ID="$(cat "$CONF/current-job")" run_claude "$m" 1 "$resume_p"; status=$?
+    # The rebooted round is a queued job: it resumes now — an agent.<job-id>.resumed
+    # lifecycle event (plan §3.4). Fire-and-forget: a failed event must not
+    # stop the resume.
+    jid="$(cat "$CONF/current-job")"
+    jarvis-mq event "agent.$jid.resumed" --source agent-run --job-id "$jid" --data reason=reboot || true
+    JARVIS_JOB_ID="$jid" run_claude "$m" 1 "$resume_p"; status=$?
   else
     run_claude "$m" 1 "$resume_p"; status=$?
   fi
