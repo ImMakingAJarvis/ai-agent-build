@@ -159,3 +159,4 @@
 - 2026-11-09T11:47Z [plan-plan-event-driven-brain-1794016330-17] EVB-17: cap.echo test worker + minimal capworker SDK + Phase 2 wait/wake gate — 4/4 PASS live (nil-conn reconnect panic caught by the gate's first run, fixed in-PR) (PR #213)
 - 2026-11-09T11:55Z [chat-1794220886-a989] Gallery URLs use the LAN IP (http://111.1.2.27:8120) on every owner-facing emitter: chat !photo DM (compose env, already deployed), jarvis-photo photo-DM caption + dashboard Gallery button (code default, PR #200 open/mergeable, awaits merge)
 >>>>>>> origin/main
+- 2026-11-09T22:06Z [plan-plan-event-driven-brain-1794016330-18] EVB-18: resume-vs-continuation measured (3 tasks x 2 modes, 18/18 correct) -- --resume saves 71-76% fresh input + 67% output per wake; wired as the woken-round default in Runner.Run with fresh-round fallback, SessionID recorded at yield (PR #215)
