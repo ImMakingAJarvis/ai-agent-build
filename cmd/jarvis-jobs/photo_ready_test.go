@@ -9,7 +9,9 @@ import (
 
 func seedPhotoJob(t *testing.T, s *agentjob.Store, id, status string) {
 	t.Helper()
-	if err := cmdAdd(s, []string{"-id", id, "-title", "T " + id, "-tags", "photo"}, strings.NewReader("do it")); err != nil {
+	// Photo jobs need the prompt sidecar (the code executor reads it), so
+	// the seed goes through the -prompt flag like a real enqueue.
+	if err := cmdAdd(s, []string{"-id", id, "-title", "T " + id, "-tags", "photo", "-prompt", "a test photo"}, strings.NewReader("")); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetStatus(id, agentjob.State{Status: status}); err != nil {
@@ -18,6 +20,9 @@ func seedPhotoJob(t *testing.T, s *agentjob.Store, id, status string) {
 }
 
 func TestPhotoReady(t *testing.T) {
+	// cmdAdd writes the prompt sidecar under agentjob.DataDir(): keep it
+	// out of the real data dir.
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
 	s, err := agentjob.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

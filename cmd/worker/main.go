@@ -30,6 +30,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/notify"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/planworker"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/router"
@@ -340,7 +341,9 @@ func run() error {
 				ReasoningEffort: msg.ReasoningEffort,
 			}
 			if msg.Type == queue.ImageQueue {
-				photoSpecDefaults(&spec, msg.Payload["prompt"])
+				if perr := photoSpecDefaults(&spec, jobStore.Dir(), msg.Payload["prompt"]); perr != nil {
+					return fmt.Errorf("image job %s: prompt sidecar: %w", msg.ID, perr)
+				}
 			}
 			added, err := jobStore.Ingest(spec)
 			if err != nil {
@@ -362,7 +365,9 @@ func run() error {
 				Class: msg.Class, Priority: msg.Priority, CreatedAt: msg.CreatedAt, Source: msg.Source,
 				ReasoningEffort: msg.ReasoningEffort,
 			}
-			photoSpecDefaults(&spec, msg.Payload["prompt"])
+			if perr := photoSpecDefaults(&spec, jobStore.Dir(), msg.Payload["prompt"]); perr != nil {
+				return fmt.Errorf("ingest image job %s: prompt sidecar: %w", msg.ID, perr)
+			}
 			added, err := jobStore.Ingest(spec)
 			if err != nil {
 				return fmt.Errorf("ingest image job %s: %w", msg.ID, err)
@@ -634,10 +639,14 @@ func resolvePlanJobStore(store *agentjob.Store, msg queue.Message, model, summar
 
 // photoSpecDefaults fills the photo-pipeline defaults into an image job's
 // spec when the message left a field empty: the prompt becomes the
-// title/instructions, the job runs as class fix at the front of the band
-// (photo jobs almost always take priority), and on the igpu driver — the
-// brain-swap window is what runs photo jobs (docs/brain-swap.md).
-func photoSpecDefaults(spec *agentjob.Spec, prompt string) {
+// title/instructions and is stored in the job's prompt sidecar (the
+// jarvis-photo code executor reads it from there — the job runs as code,
+// never as a model round), the job runs as class fix at the front of the
+// band (photo jobs almost always take priority), and on the igpu driver —
+// the brain-swap window is what runs photo jobs (docs/brain-swap.md).
+// sidecarErr reports a failed sidecar write (the job would be useless
+// without its prompt).
+func photoSpecDefaults(spec *agentjob.Spec, dataDir, prompt string) (sidecarErr error) {
 	if spec.Title == "" {
 		spec.Title = prompt
 	}
@@ -653,13 +662,18 @@ func photoSpecDefaults(spec *agentjob.Spec, prompt string) {
 	if spec.Driver == "" {
 		spec.Driver = "igpu"
 	}
-	// The "photo" tag (agentjob.TagPhoto once it lands on main) is what
-	// the queue watcher keys on to bracket the batch with a brain-swap
-	// window (scripts/agent-run) — photo work never runs with the brain
-	// on the 4090.
-	if !spec.HasTag("photo") {
-		spec.Tags = append(spec.Tags, "photo")
+	// The photo tag is what the queue watcher keys on to bracket the
+	// batch with a brain-swap window (scripts/agent-run) — photo work
+	// never runs with the brain on the 4090.
+	if !spec.HasTag(agentjob.TagPhoto) {
+		spec.Tags = append(spec.Tags, agentjob.TagPhoto)
 	}
+	// The executor reads the prompt from the sidecar, so store it before the
+	// job lands ready.
+	if prompt != "" {
+		return photo.WritePrompt(dataDir, spec.ID, prompt)
+	}
+	return nil
 }
 
 // getQueueDepths queries RabbitMQ for the pending message count on each

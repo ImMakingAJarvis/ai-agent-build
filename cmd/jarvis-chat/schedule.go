@@ -200,14 +200,15 @@ const (
 )
 
 // enqueuePhotoJob stores a queued photo: the brain-expanded prompt goes to a
-// sidecar file (the iGPU round reads it via jarvis-photo), and the job
-// itself is tagged photo so the swap-window watcher brackets it. size is
-// the requested frame ("16x9", ...) — stored to its own sidecar file — or
-// "" for the service default (square). refBytes is the photo of the subject
-// the image should keep (a pasted/uploaded image); when non-empty it is
-// stored to the reference sidecar and the round generates with the
-// reference-capable model. now=true places the job at the top of the fix
-// band instead of the top of the build band.
+// sidecar file (the jarvis-photo code executor reads it), and the job
+// itself is tagged photo so the swap-window watcher brackets it and the
+// runner executes it without a model round. size is the requested frame
+// ("16x9", ...) — stored to its own sidecar file — or "" for the service
+// default (square). refBytes is the photo of the subject the image should
+// keep (a pasted/uploaded image); when non-empty it is stored to the
+// reference sidecar and the executor generates with the reference-capable
+// model. now=true places the job at the top of the fix band instead of the
+// top of the build band.
 func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool, refBytes []byte) (id string, err error) {
 	if strings.TrimSpace(usedPrompt) == "" {
 		return "", fmt.Errorf("empty prompt")
@@ -239,7 +240,7 @@ func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool, r
 	_, err = store.Ingest(agentjob.Spec{
 		ID:               id,
 		Title:            "photo: " + photoTitle(raw, size),
-		Instructions:     photo.JobInstructions(id),
+		Instructions:     photoJobInstructions(id),
 		Driver:           "igpu",
 		Class:            class,
 		Priority:         prio,
@@ -249,6 +250,13 @@ func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool, r
 		Tags:             []string{photo.Tag},
 	})
 	return id, err
+}
+
+// photoJobInstructions is the canonical text of a photo job (shared with
+// jarvis-jobs add). Photo work runs as code — the jarvis-photo executor,
+// no model round — so the text only documents what the executor does.
+func photoJobInstructions(id string) string {
+	return photo.StandardInstructions(id)
 }
 
 // photoTitle builds a photo job's title: the trimmed raw prompt, with the

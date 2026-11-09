@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 )
 
@@ -134,12 +135,180 @@ func TestMakePhotoWithRefStagesAndRoutesToKlein(t *testing.T) {
 	}
 }
 
-func TestTruncatePrompt(t *testing.T) {
-	if got := truncatePrompt("short", 10); got != "short" {
+func TestTruncate(t *testing.T) {
+	if got := truncate("short", 10); got != "short" {
 		t.Fatalf("got %q", got)
 	}
 	long := "abcdefghijklmnopqrstuvwxyz0123456789" // 36 chars
-	if got := truncatePrompt(long, 10); got != "abcdefghij…" {
+	if got := truncate(long, 10); got != "abcdefghij…" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestEnsureArtLoaded(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Write([]byte(`{"status":"ok","model":"z","loaded":true}`))
+	}))
+	defer ts.Close()
+	t.Setenv("ART_URL", ts.URL)
+	if err := ensureArt(); err != nil {
+		t.Fatalf("ensureArt: %v", err)
+	}
+}
+
+func TestEnsureArtWaitsForLoad(t *testing.T) {
+	// Up but not loaded: the executor waits (bounded by PHOTO_ART_WAIT_S)
+	// and fails with the last health body.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"loaded":false,"error":"loading"}`))
+	}))
+	defer ts.Close()
+	t.Setenv("ART_URL", ts.URL)
+	t.Setenv("PHOTO_ART_WAIT_S", "1")
+	err := ensureArt()
+	if err == nil {
+		t.Fatal("want timeout error")
+	}
+	if !strings.Contains(err.Error(), "not loaded after") ||
+		!strings.Contains(err.Error(), `"loaded":false`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestEnsureArtDownStartFails(t *testing.T) {
+	// Unreachable: the executor tries `docker compose up -d art` in
+	// SWAP_REPO; a directory with no compose file must surface as an
+	// error, not hang or touch real containers.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := ts.URL
+	ts.Close()
+	t.Setenv("ART_URL", url)
+	t.Setenv("SWAP_REPO", t.TempDir())
+	t.Setenv("PHOTO_ART_WAIT_S", "0")
+	err := ensureArt()
+	if err == nil {
+		t.Fatal("want start failure")
+	}
+	if !strings.Contains(err.Error(), "could not be started") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestQueueFollowupNone(t *testing.T) {
+	dir := t.TempDir()
+	if code := queueFollowup(dir, "chat-1-ab", "/data/imgs/p1.png"); code != 0 {
+		t.Fatalf("exit = %d, want 0 (no sidecar, no follow-up)", code)
+	}
+}
+
+func TestQueueFollowupEmptyBody(t *testing.T) {
+	dir := t.TempDir()
+	if err := photo.WriteFollowup(dir, "chat-1-ab", "  \n"); err != nil {
+		t.Fatalf("WriteFollowup: %v", err)
+	}
+	if code := queueFollowup(dir, "chat-1-ab", "/data/imgs/p1.png"); code != 0 {
+		t.Fatalf("exit = %d, want 0 (empty body is no follow-up)", code)
+	}
+}
+
+func TestQueueFollowupPlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	body := "driver: local\nclass: build\npriority: 900\ntitle: caption it\n\nCaption {{image}}."
+	if err := photo.WriteFollowup(dir, "chat-1-ab", body); err != nil {
+		t.Fatalf("WriteFollowup: %v", err)
+	}
+	if code := queueFollowup(dir, "chat-1-ab", "/data/imgs/p1.png"); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	store, err := agentjob.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	j, err := store.Get("fu-chat-1-ab")
+	if err != nil {
+		t.Fatalf("follow-up job missing: %v", err)
+	}
+	if j.Title != "caption it" || j.Driver != "local" || j.Class != "build" || j.Priority != 900 {
+		t.Fatalf("spec: title=%q driver=%q class=%q priority=%d", j.Title, j.Driver, j.Class, j.Priority)
+	}
+	if j.Source != "photo-followup" {
+		t.Fatalf("source = %q", j.Source)
+	}
+	if !strings.HasPrefix(j.Instructions, "Caption /data/imgs/p1.png.") ||
+		strings.Contains(j.Instructions, "{{image}}") {
+		t.Fatalf("instructions = %q", j.Instructions)
+	}
+}
+
+func TestQueueFollowupNoPlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	if err := photo.WriteFollowup(dir, "chat-1-ab", "Post the result to the gallery channel."); err != nil {
+		t.Fatalf("WriteFollowup: %v", err)
+	}
+	if code := queueFollowup(dir, "chat-1-ab", "/data/imgs/p1.png"); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	store, err := agentjob.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	j, err := store.Get("fu-chat-1-ab")
+	if err != nil {
+		t.Fatalf("follow-up job missing: %v", err)
+	}
+	// No placeholder: the image path and the gallery are appended.
+	if !strings.Contains(j.Instructions, "Post the result to the gallery channel.") ||
+		!strings.Contains(j.Instructions, "Generated image: /data/imgs/p1.png") ||
+		!strings.Contains(j.Instructions, "Gallery: ") {
+		t.Fatalf("instructions = %q", j.Instructions)
+	}
+	// No headers: driver falls back to local, title is derived.
+	if j.Driver != "local" || j.Title != "follow-up for photo chat-1-ab" {
+		t.Fatalf("defaults: driver=%q title=%q", j.Driver, j.Title)
+	}
+}
+
+func TestQueueFollowupIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	if err := photo.WriteFollowup(dir, "chat-1-ab", "Caption {{image}}."); err != nil {
+		t.Fatalf("WriteFollowup: %v", err)
+	}
+	if code := queueFollowup(dir, "chat-1-ab", "/data/imgs/p1.png"); code != 0 {
+		t.Fatalf("first exit = %d", code)
+	}
+	// A re-run of the photo job re-enqueues the same follow-up id: Ingest
+	// is idempotent, so the second attempt must not fail or duplicate.
+	if code := queueFollowup(dir, "chat-1-ab", "/data/imgs/p1.png"); code != 0 {
+		t.Fatalf("second exit = %d, want 0 (idempotent re-queue)", code)
+	}
+	jobs, err := agentjob.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	all, err := jobs.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	n := 0
+	for _, x := range all {
+		if x.ID == "fu-chat-1-ab" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("fu-chat-1-ab appears %d times, want 1", n)
+	}
+}
+
+func TestQueueFollowupBadBody(t *testing.T) {
+	dir := t.TempDir()
+	if err := photo.WriteFollowup(dir, "chat-1-ab", "driver: local\n"); err != nil {
+		t.Fatalf("WriteFollowup: %v", err)
+	}
+	if code := queueFollowup(dir, "chat-1-ab", "/data/imgs/p1.png"); code != 1 {
+		t.Fatalf("exit = %d, want 1 (header-only body has no instruction text)", code)
 	}
 }

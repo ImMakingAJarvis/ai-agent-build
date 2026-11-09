@@ -157,7 +157,7 @@ func (s *Server) handlePhotoJobs(w http.ResponseWriter, r *http.Request) {
 	_, err = store.Ingest(agentjob.Spec{
 		ID:           id,
 		Title:        "photo: " + shortTitle(prompt),
-		Instructions: photo.JobInstructions(id),
+		Instructions: photo.StandardInstructions(id),
 		Driver:       "igpu",
 		Class:        agentjob.ClassBuild,
 		Priority:     photoJobPriority,

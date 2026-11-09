@@ -2,6 +2,7 @@ package agentjob
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -1200,41 +1201,6 @@ func newMockEngine(t *testing.T, handler func(action string) int) *mockEngine {
 // The iGPU agent exits 0 even when jarvis-photo failed, so a photo round
 // that ends without the delivery marker must be recorded failed (re-queue-
 // able), not done — otherwise a lost photo is silently closed.
-func TestPhotoRoundWithoutDeliveryMarkerFails(t *testing.T) {
-	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
-	s := newStore(t)
-	ingest(t, s, Spec{ID: "a", Title: "A", Tags: []string{photo.Tag}})
-	r := runner(t, s, `true`)
-	j, err := r.Run(context.Background(), "a", "r1", "igpu", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if j.Status != Failed || !strings.Contains(j.Error, "delivery marker") {
-		t.Fatalf("want failed photo job, got status=%s error=%q", j.Status, j.Error)
-	}
-	if got, _ := s.Get("a"); got.Status != Failed {
-		t.Fatalf("store status = %s, want failed", got.Status)
-	}
-}
-
-func TestPhotoRoundWithDeliveryMarkerDone(t *testing.T) {
-	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
-	s := newStore(t)
-	ingest(t, s, Spec{ID: "a", Title: "A", Tags: []string{photo.Tag}})
-	// The round's jarvis-photo generated and delivered: it writes the
-	// marker before the agent exits 0.
-	script := "mkdir -p " + s.Dir()+"/" + photo.PromptSubdir +
-		" && echo ok > " + photo.SentPath(s.Dir(), "a")
-	r := runner(t, s, script)
-	j, err := r.Run(context.Background(), "a", "r1", "igpu", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if j.Status != Done {
-		t.Fatalf("want done, got status=%s error=%q", j.Status, j.Error)
-	}
-}
-
 // photo-ready is the watcher's batch view: every ready photo job in run
 // order — non-photo ready jobs and dependency-blocked photo jobs excluded.
 func TestPhotoReady(t *testing.T) {
@@ -1268,5 +1234,69 @@ func TestPhotoReady(t *testing.T) {
 	}
 	if want := []string{"b", "c", "d"}; !reflect.DeepEqual(ids(got), want) {
 		t.Fatalf("PhotoReady after a=done = %v, want %v", ids(got), want)
+	}
+}
+
+func TestRunPhotoRunsExecutorNotModelRound(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "p1", Title: "photo: red panda", Instructions: "gen", Tags: []string{photo.Tag}})
+	marker := filepath.Join(s.Dir(), photo.PromptSubdir, "p1.sent")
+	r := runner(t, s, `echo SHOULD-NOT-RUN; exit 9`) // sentinel: must never run
+	r.PhotoCommand = func(id string) *exec.Cmd {
+		return exec.Command("sh", "-c", fmt.Sprintf(
+			"echo made the photo; mkdir -p %q && touch %q", filepath.Dir(marker), marker))
+	}
+	j, err := r.Run(context.Background(), "p1", "r1", "igpu", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != Done || j.Model != "jarvis-photo" || j.RanWith != "photo" {
+		t.Fatalf("bad job: status=%s model=%q ranwith=%q", j.Status, j.Model, j.RanWith)
+	}
+	got, _ := s.Get("p1")
+	if got.Status != Done {
+		t.Fatalf("state not stored: %+v", got.State)
+	}
+	b, _ := os.ReadFile(filepath.Join(s.JobDir("p1"), "transcript.txt"))
+	if !strings.Contains(string(b), "made the photo") || strings.Contains(string(b), "SHOULD-NOT-RUN") {
+		t.Fatalf("transcript: %q", b)
+	}
+}
+
+func TestRunPhotoNoMarkerIsFailure(t *testing.T) {
+	// The executor exited 0 but never wrote the delivery marker: the image
+	// was not sent, so the run is a failure the owner can re-queue — and
+	// the error propagates so the loop does not notify a done.
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "p1", Title: "photo: red panda", Tags: []string{photo.Tag}})
+	r := runner(t, s, `true`)
+	r.PhotoCommand = func(id string) *exec.Cmd { return exec.Command("sh", "-c", "echo generated but delivery lost; exit 0") }
+	j, err := r.Run(context.Background(), "p1", "r1", "igpu", "")
+	if err == nil {
+		t.Fatal("want error for missing delivery marker")
+	}
+	if j.Status != Failed || !strings.Contains(j.Error, "no delivery marker") {
+		t.Fatalf("got status=%s err=%q", j.Status, j.Error)
+	}
+	got, _ := s.Get("p1")
+	if got.Status != Failed {
+		t.Fatalf("state not stored: %+v", got.State)
+	}
+}
+
+func TestRunPhotoExecutorFailure(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "p1", Title: "photo: red panda", Tags: []string{photo.Tag}})
+	r := runner(t, s, `true`)
+	r.PhotoCommand = func(id string) *exec.Cmd { return exec.Command("sh", "-c", "echo art down; exit 3") }
+	if _, err := r.Run(context.Background(), "p1", "r1", "igpu", ""); err == nil {
+		t.Fatal("want error for failing executor")
+	}
+	got, _ := s.Get("p1")
+	if got.Status != Failed || !strings.Contains(got.Error, "status 3") {
+		t.Fatalf("got %+v", got.State)
 	}
 }
