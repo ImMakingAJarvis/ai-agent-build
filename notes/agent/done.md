@@ -146,3 +146,4 @@
 - 2026-11-09T08:30Z [plan-plan-event-driven-brain-1794016330-15] EVB-15: jarvis-mq capability-loop CLI (listen/unlisten/listeners/submit/results/caps) with shell round-trip + store tests (PR #211, with EVB-14)
 - 2026-11-09T09:20Z EVB-16 (plan task 16, board EVB-17): resumed rounds carry continuation.md + results in the prompt, JARVIS_JOB_ID/JARVIS_REPLY_QUEUE round env, yield/wake Plane comments via internal/boardnote (PR #211)
 - 2026-11-09T11:47Z [plan-plan-event-driven-brain-1794016330-17] EVB-17: cap.echo test worker + minimal capworker SDK + Phase 2 wait/wake gate — 4/4 PASS live (nil-conn reconnect panic caught by the gate's first run, fixed in-PR) (PR #213)
+- 2026-11-09T11:55Z [chat-1794220886-a989] Gallery URLs use the LAN IP (http://111.1.2.27:8120) on every owner-facing emitter: chat !photo DM (compose env, already deployed), jarvis-photo photo-DM caption + dashboard Gallery button (code default, PR #200 open/mergeable, awaits merge)
