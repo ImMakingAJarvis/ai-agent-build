@@ -95,18 +95,26 @@ func (c *Conn) EnsureDLX() error {
 }
 
 // declareWithDLX declares name as a durable queue with the dead-letter
-// args. A queue declared before dead-lettering (no args) answers a
-// redeclare with AMQP 406 PRECONDITION_FAILED; it is migrated only when
-// it holds nothing — delete and redeclare. A queue with messages or
-// consumers keeps its old shape: deleting it would lose its messages,
-// and they will drain through the old consumer anyway.
+// args (the flow.*/cap.* shape without priority).
 func (c *Conn) declareWithDLX(name string) error {
+	return c.declareWithDLXArgs(name, dlxArgs())
+}
+
+// declareWithDLXArgs declares name as a durable queue with the given
+// arguments (the dead-letter exchange plus anything queue-specific, like
+// the cap queues' x-max-priority). A queue declared with different args —
+// for instance before dead-lettering, or before the priority was added —
+// answers a redeclare with AMQP 406 PRECONDITION_FAILED; it is migrated
+// only when it holds nothing — delete and redeclare. A queue with messages
+// or consumers keeps its old shape: deleting it would lose its messages,
+// and they will drain through the old consumer anyway.
+func (c *Conn) declareWithDLXArgs(name string, args amqp.Table) error {
 	ch, err := c.NewChannel()
 	if err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	defer ch.Close()
-	if _, err := ch.QueueDeclare(name, true, false, false, false, dlxArgs()); err == nil {
+	if _, err := ch.QueueDeclare(name, true, false, false, false, args); err == nil {
 		return nil
 	} else {
 		var amqpErr *amqp.Error
@@ -127,12 +135,12 @@ func (c *Conn) declareWithDLX(name string) error {
 		return err // deleted between declare and inspect; surface the 406
 	}
 	if info.Messages > 0 || info.Consumers > 0 {
-		return nil // keep the pre-EVB-10 queue
+		return nil // keep the old queue
 	}
 	if _, derr := ch.QueueDelete(name, true, false, false); derr != nil {
 		return derr
 	}
-	if _, err := ch.QueueDeclare(name, true, false, false, false, dlxArgs()); err != nil {
+	if _, err := ch.QueueDeclare(name, true, false, false, false, args); err != nil {
 		return err
 	}
 	return nil

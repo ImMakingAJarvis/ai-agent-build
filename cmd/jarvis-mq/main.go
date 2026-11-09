@@ -1072,6 +1072,38 @@ func buildSubmitMessage(p submitParams) (queue.Message, error) {
 	return m, nil
 }
 
+// validCapabilityName reports whether s is acceptable as a `submit`
+// capability. The convention is a dotted path (image.generate,
+// audio.transcribe); a single word is allowed too, because the cap.echo test
+// worker (EVB-17) is single-word and the Phase-2 gate submits to it.
+// Segments are lowercase alphanumeric. A message to a capability with no
+// worker simply waits on its durable queue until the request's deadline, so a
+// misspelling degrades to the designed timeout path rather than being dropped
+// at submit time.
+func validCapabilityName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, seg := range strings.Split(s, ".") {
+		if !isCapSegment(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+func isCapSegment(seg string) bool {
+	if seg == "" {
+		return false
+	}
+	for _, r := range seg {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
 // runSubmit publishes an envelope-v2 request to cap.<capability> (plan
 // §3.2 step 3). Consumer priorities do the placement — the message goes to
 // the queue and the broker delivers it to the best free worker; there is no
@@ -1102,8 +1134,8 @@ func runSubmit(args []string) error {
 		return fmt.Errorf("unexpected extra argument %q", fs.Arg(0))
 	}
 	capability := args[0]
-	if !strings.Contains(capability, ".") {
-		return fmt.Errorf("capability %q should be dotted (image.generate, audio.transcribe)", capability)
+	if !validCapabilityName(capability) {
+		return fmt.Errorf("capability %q is not valid: a dotted path (image.generate) or a single word (echo), lowercase alphanumeric segments", capability)
 	}
 	var dl *time.Time
 	if *deadline != "" {

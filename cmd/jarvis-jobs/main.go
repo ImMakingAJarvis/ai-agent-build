@@ -28,6 +28,10 @@
 //	                               loop skips to the next work
 //	jarvis-jobs skip <id> | requeue [-driver local|igpu|sonnet|opus|superagent]
 //	                   [-class fix|build|background] [-priority N] <id> | show <id>
+//	jarvis-jobs mark-running <id>    stand-in round: put a ready job straight
+//	                                  into running without launching a round
+//	                                  (so a script can yield it — the Phase 2
+//	                                  wait/wake gate); refuses any other state
 //	jarvis-jobs yield <id> --wait-on corr[,corr...] --note TEXT
 //	                   [--in-flight TEXT] [--next TEXT] [--results TEXT]
 //	                   [--gotchas TEXT] [--wait-until 2h|RFC3339]
@@ -101,7 +105,7 @@ func die(format string, a ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: jarvis-jobs list [status]|next|photo-ready|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue|yield|waiting|wake")
+		die("usage: jarvis-jobs list [status]|next|photo-ready|run|finish|restart|stop|skip|requeue|show|pause|add|order|message|nightly|audit|fullauto|automode|keepgoing|autopause|failnote|running|enqueue|mark-running|yield|waiting|wake")
 	}
 	store, err := agentjob.Open(agentjob.DataDir())
 	if err != nil {
@@ -185,6 +189,10 @@ func main() {
 		}
 	case "requeue":
 		if err := cmdRequeue(store, args); err != nil {
+			die("%v", err)
+		}
+	case "mark-running":
+		if err := cmdMarkRunning(store, args); err != nil {
 			die("%v", err)
 		}
 	case "yield":

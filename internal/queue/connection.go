@@ -74,8 +74,17 @@ func (c *Conn) Reconnect() error {
 	if c.conn != nil && !c.conn.IsClosed() {
 		return nil
 	}
-	c.channel.Close()
-	c.conn.Close()
+	// A failed Dial leaves conn nil (connect assigns the error value), so the
+	// close of the previous attempt's leftovers must tolerate nil — the
+	// switchboard's poll loop calls Reconnect every 250 ms while the broker is
+	// down and the second call used to SIGSEGV on the nil conn (2026-11-09,
+	// Phase 2 gate S3).
+	if c.channel != nil {
+		c.channel.Close()
+	}
+	if c.conn != nil {
+		c.conn.Close()
+	}
 	return c.connect()
 }
 
@@ -129,12 +138,17 @@ func (c *Conn) QueueDepth(name string) (int, error) {
 func (c *Conn) Exchange() string { return c.exchange }
 
 // Close shuts down the connection. After Close, Reconnect can revive it.
+// Tolerates a nil conn/channel (a Dial that never succeeded).
 func (c *Conn) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
-	c.channel.Close()
-	c.conn.Close()
+	if c.channel != nil {
+		c.channel.Close()
+	}
+	if c.conn != nil {
+		c.conn.Close()
+	}
 }
 
 // IsClosed reports whether Close has been called.
