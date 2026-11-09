@@ -41,6 +41,15 @@ result back; the first model's next round consumes it and continues.
   agent-job id when it ingests `kind=agent`). `jarvis-mq` defaults to
   `mq-<unix>-<6 random hex>`; the superagent tool uses `sa-<unix>-<suffix>`.
   Never reuse a fixed id.
+- **Nothing disappears silently** (EVB-10): every `flow.*`/`cap.*` queue is
+  declared with `x-dead-letter-exchange=jarvis.dlx`, so the broker itself
+  routes a message to the durable `dead` queue when a consumer rejects it
+  (nack without requeue — the delivery budget is `MaxAttempts`, the count
+  rides in the `x-attempts` header) or when a per-message TTL expires.
+  Each dead letter carries an `x-death` header (reason, original queue,
+  time); the dashboard's Dead Letters section lists them and can requeue
+  one back to its original queue (recreated if it is gone) or drop it.
+  A message is either processed, dead-lettered with a reason, or requeued.
 
 ## Capability envelope (v2)
 
