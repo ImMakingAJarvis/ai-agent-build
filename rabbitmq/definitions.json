@@ -29,6 +29,15 @@
       "auto_delete": false,
       "internal": false,
       "arguments": {}
+    },
+    {
+      "name": "jarvis.dlx",
+      "vhost": "/",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
     }
   ],
   "queues": [
@@ -84,6 +93,13 @@
     },
     {
       "name": "jobs.igpu",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "dead",
       "vhost": "/",
       "durable": true,
       "auto_delete": false,
@@ -154,6 +170,14 @@
       "destination": "jobs.igpu",
       "destination_type": "queue",
       "routing_key": "jobs.igpu.#",
+      "arguments": {}
+    },
+    {
+      "source": "jarvis.dlx",
+      "vhost": "/",
+      "destination": "dead",
+      "destination_type": "queue",
+      "routing_key": "",
       "arguments": {}
     }
   ]
