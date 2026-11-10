@@ -2,9 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +11,7 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 )
 
 func TestRunUsage(t *testing.T) {
@@ -44,17 +42,30 @@ func TestRunEmptyPrompt(t *testing.T) {
 	}
 }
 
-func TestMakePhotoPassesSizeThrough(t *testing.T) {
-	var gotBody map[string]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &gotBody)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"path":"/x.png","width":1024,"height":576,"seed":1,"steps":9,"seconds":20}`))
-	}))
-	defer srv.Close()
-	t.Setenv("ART_URL", srv.URL)
+// buildRequest assembles the capability input from the job's sidecars —
+// the part of the old direct generation call that read local state.
 
+func TestBuildRequestPromptOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := photo.WritePrompt(dir, "chat-1-ab", "a red panda"); err != nil {
+		t.Fatal(err)
+	}
+	input, err := buildRequest(dir, "chat-1-ab", "a red panda")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if input["prompt"] != "a red panda" {
+		t.Errorf("prompt = %v", input["prompt"])
+	}
+	if _, hasSize := input["size"]; hasSize {
+		t.Errorf("no size should be set for legacy jobs: %v", input)
+	}
+	if _, hasRefs := input["refs"]; hasRefs {
+		t.Errorf("no refs should be set: %v", input)
+	}
+}
+
+func TestBuildRequestPassesSizeThrough(t *testing.T) {
 	dir := t.TempDir()
 	if err := photo.WritePrompt(dir, "chat-1-ab", "a wide valley"); err != nil {
 		t.Fatal(err)
@@ -62,50 +73,18 @@ func TestMakePhotoPassesSizeThrough(t *testing.T) {
 	if err := photo.WriteSize(dir, "chat-1-ab", "16x9"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := makePhoto(context.Background(), dir, "chat-1-ab", "a wide valley"); err != nil {
-		t.Fatalf("makePhoto: %v", err)
+	input, err := buildRequest(dir, "chat-1-ab", "a wide valley")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
 	}
-	if gotBody["size"] != "16x9" {
-		t.Errorf("art service body = %v, want size 16x9", gotBody)
-	}
-}
-
-func TestMakePhotoNoSizeSidecarSendsNoSize(t *testing.T) {
-	var gotBody map[string]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &gotBody)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"path":"/x.png","width":1024,"height":1024,"seed":1,"steps":9,"seconds":20}`))
-	}))
-	defer srv.Close()
-	t.Setenv("ART_URL", srv.URL)
-
-	dir := t.TempDir()
-	if err := photo.WritePrompt(dir, "chat-1-ab", "a red panda"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := makePhoto(context.Background(), dir, "chat-1-ab", "a red panda"); err != nil {
-		t.Fatalf("makePhoto: %v", err)
-	}
-	if _, hasSize := gotBody["size"]; hasSize {
-		t.Errorf("no size should be sent for legacy jobs: %v", gotBody)
+	if input["size"] != "16x9" {
+		t.Errorf("size = %v, want 16x9", input["size"])
 	}
 }
 
-func TestMakePhotoWithRefStagesAndRoutesToKlein(t *testing.T) {
-	var gotBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &gotBody)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"path":"/x.png","width":1024,"height":1024,"seed":1,"steps":4,"seconds":40}`))
-	}))
-	defer srv.Close()
-	t.Setenv("ART_URL", srv.URL)
+func TestBuildRequestStagesRef(t *testing.T) {
 	refsDir := t.TempDir()
 	t.Setenv("ART_REFS_DIR", refsDir)
-
 	dir := t.TempDir()
 	refBytes := []byte{0x89, 'P', 'N', 'G', 4, 5, 6}
 	if err := photo.WritePrompt(dir, "chat-1-ab", "me at the beach"); err != nil {
@@ -114,24 +93,85 @@ func TestMakePhotoWithRefStagesAndRoutesToKlein(t *testing.T) {
 	if err := photo.WriteRefBytes(dir, "chat-1-ab", refBytes); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := makePhoto(context.Background(), dir, "chat-1-ab", "me at the beach"); err != nil {
-		t.Fatalf("makePhoto: %v", err)
+	input, err := buildRequest(dir, "chat-1-ab", "me at the beach")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
 	}
-	// A reference must route to the reference-capable model, with the
-	// staged file name (not the sidecar path) as the ref.
-	if gotBody["model"] != "klein" {
-		t.Errorf("art service body = %v, want model klein", gotBody)
-	}
-	refs, _ := gotBody["refs"].([]any)
+	// The worker routes a request with refs to the reference-capable model;
+	// here the forwarder must hand it the staged name (not the sidecar path)
+	// and the staged file must hold the sidecar bytes.
+	refs, _ := input["refs"].([]string)
 	if len(refs) != 1 {
-		t.Fatalf("refs = %v, want one staged name", refs)
+		t.Fatalf("refs = %v, want one staged name", input["refs"])
 	}
-	name, _ := refs[0].(string)
+	name := refs[0]
 	if !strings.HasPrefix(name, "ref-chat-1-ab-") || !strings.HasSuffix(name, ".png") {
 		t.Errorf("staged name %q", name)
 	}
 	if got, err := os.ReadFile(filepath.Join(refsDir, name)); err != nil || !bytes.Equal(got, refBytes) {
 		t.Errorf("staged ref = %v (err %v), want the sidecar bytes", got, err)
+	}
+}
+
+func TestMatchResult(t *testing.T) {
+	res := queue.Result{Status: queue.ResultOK, CorrelationID: "chat-1-ab", Capability: capImageGenerate}
+	body, err := queue.EncodeResult(res)
+	if err != nil {
+		t.Fatalf("EncodeResult: %v", err)
+	}
+	if _, ok := matchResult(body, "chat-1-ab"); !ok {
+		t.Fatalf("want a match for the same correlation id")
+	}
+	if _, ok := matchResult(body, "chat-1-cc"); ok {
+		t.Fatalf("a foreign correlation id must not match")
+	}
+	// A plain capability message is not a Result (it has no status).
+	if _, ok := matchResult([]byte(`{"type":"capability","capability":"image.generate","correlation_id":"chat-1-ab"}`), "chat-1-ab"); ok {
+		t.Fatalf("a message body must not match")
+	}
+	if _, ok := matchResult([]byte(`not json`), "chat-1-ab"); ok {
+		t.Fatalf("garbage must not match")
+	}
+}
+
+func TestPhotoResultCaption(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "img-1.png")
+	if err := os.WriteFile(path, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := &queue.Result{
+		Status:    queue.ResultOK,
+		Artifacts: []string{path},
+		// Data arrives from the worker through JSON, so numbers are float64.
+		Data: map[string]any{
+			"seed": float64(42), "width": float64(1024), "height": float64(576), "seconds": 21.5,
+		},
+	}
+	gotPath, caption, err := photoResult(res, "a blue square")
+	if err != nil {
+		t.Fatalf("photoResult: %v", err)
+	}
+	if gotPath != path {
+		t.Errorf("path = %q", gotPath)
+	}
+	// Byte-identical to the caption the old direct call produced.
+	want := "**a blue square**\nseed 42 · 1024x576 · 22s\nGallery: http://111.1.2.27:8120"
+	if caption != want {
+		t.Errorf("caption = %q, want %q", caption, want)
+	}
+}
+
+func TestPhotoResultErrors(t *testing.T) {
+	if _, _, err := photoResult(&queue.Result{Status: queue.ResultError, Error: "art down"}, "p"); err == nil ||
+		!strings.Contains(err.Error(), "status error") {
+		t.Fatalf("want a status error, got %v", err)
+	}
+	if _, _, err := photoResult(&queue.Result{Status: queue.ResultOK}, "p"); err == nil {
+		t.Fatalf("want an error for a result with no artifacts")
+	}
+	if _, _, err := photoResult(&queue.Result{Status: queue.ResultOK, Artifacts: []string{"/no/such/file.png"}}, "p"); err == nil {
+		t.Fatalf("want an error for an unreadable artifact")
 	}
 }
 
