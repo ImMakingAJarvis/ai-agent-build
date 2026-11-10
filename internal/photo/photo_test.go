@@ -189,3 +189,34 @@ func TestReadSizeMissing(t *testing.T) {
 		t.Fatalf("want os.ErrNotExist for missing size file, got %v", err)
 	}
 }
+
+func TestRefPath(t *testing.T) {
+	want := filepath.Join("/data", "photos", "chat-1-ab.png")
+	if got := RefPath("/data", "chat-1-ab"); got != want {
+		t.Fatalf("RefPath = %q, want %q", got, want)
+	}
+}
+
+func TestWriteReadRef(t *testing.T) {
+	dir := t.TempDir()
+	b := []byte{0x89, 'P', 'N', 'G', 9, 13, 10, 13, 42}
+	if err := WriteRefBytes(dir, "chat-1-ab", b); err != nil {
+		t.Fatalf("WriteRefBytes: %v", err)
+	}
+	got, err := os.ReadFile(RefPath(dir, "chat-1-ab"))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != string(b) {
+		t.Errorf("ref bytes = %v, want %v", got, b)
+	}
+	// RefFile resolves the stored path when the sidecar exists...
+	p, err := RefFile(dir, "chat-1-ab")
+	if err != nil || p != RefPath(dir, "chat-1-ab") {
+		t.Errorf("RefFile = %q (err %v)", p, err)
+	}
+	// ...and reports a missing job as not existing (the plain photo case).
+	if _, err := RefFile(dir, "chat-9-zz"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("RefFile on missing job = err %v, want ErrNotExist", err)
+	}
+}

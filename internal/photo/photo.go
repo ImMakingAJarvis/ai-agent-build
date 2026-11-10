@@ -108,6 +108,36 @@ func ClearSent(dataDir, id string) error {
 	return os.Remove(SentPath(dataDir, id))
 }
 
+// RefPath is the file holding a photo job's reference image (the raw bytes
+// of the photo of the subject the generated image should keep), next to the
+// prompt: <data>/photos/<id>.png. A reference means the job must generate
+// with the reference-capable model (FLUX.2 [klein]) rather than the plain
+// text-to-image one.
+func RefPath(dataDir, id string) string {
+	return filepath.Join(dataDir, PromptSubdir, id+".png")
+}
+
+// WriteRefBytes stores a photo job's reference image (the image bytes)
+// alongside its prompt, creating the photos directory.
+func WriteRefBytes(dataDir, id string, b []byte) error {
+	p := RefPath(dataDir, id)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, b, 0o644)
+}
+
+// RefFile returns the path to a photo job's reference image. It returns
+// os.ErrNotExist when the job carries no reference (the common case: a plain
+// text-to-image photo), which callers treat as "no reference".
+func RefFile(dataDir, id string) (string, error) {
+	p := RefPath(dataDir, id)
+	if _, err := os.Stat(p); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
 // Followup is a photo job's trailing instruction: once the image has been
 // generated and delivered, the executor enqueues it as a new job, giving the
 // job the image (the path substituted into {{image}}, or appended when the

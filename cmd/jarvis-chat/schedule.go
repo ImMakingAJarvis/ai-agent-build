@@ -204,9 +204,12 @@ const (
 // itself is tagged photo so the swap-window watcher brackets it and the
 // runner executes it without a model round. size is the requested frame
 // ("16x9", ...) — stored to its own sidecar file — or "" for the service
-// default (square). now=true places the job at the top of the fix band
-// instead of the top of the build band.
-func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool) (id string, err error) {
+// default (square). refBytes is the photo of the subject the image should
+// keep (a pasted/uploaded image); when non-empty it is stored to the
+// reference sidecar and the executor generates with the reference-capable
+// model. now=true places the job at the top of the fix band instead of the
+// top of the build band.
+func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool, refBytes []byte) (id string, err error) {
 	if strings.TrimSpace(usedPrompt) == "" {
 		return "", fmt.Errorf("empty prompt")
 	}
@@ -222,6 +225,11 @@ func enqueuePhotoJob(in chat.Incoming, raw, usedPrompt, size string, now bool) (
 	}
 	if size != "" {
 		if err := photo.WriteSize(dataDir, id, size); err != nil {
+			return "", err
+		}
+	}
+	if len(refBytes) > 0 {
+		if err := photo.WriteRefBytes(dataDir, id, refBytes); err != nil {
 			return "", err
 		}
 	}

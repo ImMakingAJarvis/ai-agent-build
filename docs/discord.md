@@ -47,6 +47,12 @@ involved):
 - `!photo <prompt>` — generate a photo with the local art model.
 - `!photoassist <prompt>` — photo with iterative prompt assistance.
 - `!photocheck <prompt>` — generate, critique, improve the prompt, regenerate.
+
+  **Attach an image to any of these** and the photo becomes the
+  reference: the generation routes to the reference-capable model
+  (FLUX.2 [klein]) and the result keeps the subject from the photo
+  (e.g. a picture of you, sent with the message). See
+  docs/art-model.md, "Reference photos".
 - `!build <title…>` / `!fix <title…>` — queue a build/fix job.
 - `!automode on` / `!automode off` — NoBrakes nightly switch (auto-enqueue
   of nightly jobs). If the loop is stopped when you turn it on, the reply

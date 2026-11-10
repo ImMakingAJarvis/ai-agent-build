@@ -27,7 +27,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -565,6 +567,11 @@ func handleMessage(d sender, hAgent *hermes.Agent, voice *voices.Voice, mem *mem
 // runs next (it is queued at the top of the fix band). "check" keeps its
 // synchronous draft→generate→critique loop, which needs the brain resident
 // and therefore cannot run in the swap window.
+//
+// A DM that carries an image attachment (png/jpeg/webp) pastes a photo with
+// the prompt: the image is downloaded here, stored as the job's reference
+// sidecar, and the round generates with the reference-capable model so the
+// result keeps the subject (the owner) from the attached photo.
 func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDir, mode, size, prompt string) {
 	prompt = strings.TrimSpace(prompt)
 	cmdName := "!photo"
@@ -600,6 +607,23 @@ func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDi
 	defer typingCancel()
 	go typingLoop(typingCtx, d)
 
+	// An attached image is the reference: the subject the generated photo
+	// must keep. Fetch it now (the owner's photo, e.g. a pasted face shot)
+	// and store it on the job; the round stages it and generates with the
+	// reference-capable model.
+	var refBytes []byte
+	if in.AttachmentURL != "" {
+		b, err := downloadAttachment(in.AttachmentURL)
+		if err != nil {
+			log.Printf("jarvis-chat: photo attachment download: %v", err)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_ = d.Notify(ctx, "I couldn't download the image you attached — I've queued your photo without a reference.")
+			cancel()
+		} else if len(b) > 0 {
+			refBytes = b
+		}
+	}
+
 	usedPrompt := prompt
 	note := ""
 	if !svc.Healthy() {
@@ -617,7 +641,7 @@ func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDi
 		cancel()
 	}
 
-	id, err := enqueuePhotoJob(in, prompt, usedPrompt, size, now)
+	id, err := enqueuePhotoJob(in, prompt, usedPrompt, size, now, refBytes)
 	if err != nil {
 		log.Printf("jarvis-chat: photo enqueue: %v", err)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -653,6 +677,28 @@ func assistPrompt(svc *photomind.Service, request, size string) (string, error) 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	return svc.Assist(ctx, request, size)
+}
+
+// downloadAttachment fetches one Discord attachment URL (the owner's pasted
+// image) and returns its bytes, so it can be stored as the photo job's
+// reference sidecar. It caps the body: a Discord image attachment for this
+// bot is well under 25 MB, and a reference photo is a few MB.
+func downloadAttachment(u string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("attachment fetch: HTTP %d", res.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(res.Body, 25<<20))
 }
 
 // runPhotoCheck is the synchronous !photocheck loop: draft → generate →
