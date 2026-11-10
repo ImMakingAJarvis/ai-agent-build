@@ -549,6 +549,27 @@ services:
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
 
+  # ---------------- image-gen-worker (image.generate capability) ---------
+  # The GPU worker behind cap.image.generate (plan task EVB-20): consumes
+  # cap.image.generate, generates on the art service (http://art:8120 — up
+  # in the brain's swap window, needs_brain_out), copies the PNG into the
+  # request's OutDir, and replies with a Result. Artifacts land under
+  # ~/.local/share/jarvis/artifacts (the share dir is mounted below).
+  image-gen-worker:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/image-gen-worker }
+    image: jarvis/image-gen-worker:local
+    container_name: jarvis-image-gen-worker
+    restart: always
+    environment:
+      HOME: /home/agent
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      ART_URL: http://art:8120
+    volumes:
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+
   # ---------------- monitoring ----------------
   prometheus:
     image: prom/prometheus:v2.53.0
