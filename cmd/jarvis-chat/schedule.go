@@ -16,16 +16,33 @@ import (
 
 const chatJobPriority = 80
 
+// fixNowJobPriority places a !fixnow job at the top of the fix band — ahead
+// of every other fix, including a !photonow — so once the current round is
+// interrupted it is the very next work pulled. It matches photoNowJobPriority
+// (both are "do this before anything else" top-of-fix-band actions).
+const fixNowJobPriority = 1000
+
 type scheduleBlock struct {
 	Title        string
 	Instructions string
 }
 
+// cutBuildFix recognizes the queueing commands: !build (build band),
+// !fix (fix band) and !fixnow (top of the fix band, interrupts the running
+// round — the "stop whatever is being worked on and do this first" action).
+// !fixnow is matched before !fix so its prefix is never swallowed; a word
+// boundary is required so !fixnowxyz is not cut as !fixnow.
 func cutBuildFix(content string) (kind, rest string, ok bool) {
 	low := strings.ToLower(content)
 	switch {
 	case strings.HasPrefix(low, "!build"):
 		return "build", strings.TrimSpace(content[len("!build"):]), true
+	case strings.HasPrefix(low, "!fixnow"):
+		rest = content[len("!fixnow"):]
+		if rest != "" && rest[0] != ' ' && rest[0] != '\t' && rest[0] != '\n' {
+			return "", "", false
+		}
+		return "fixnow", strings.TrimSpace(rest), true
 	case strings.HasPrefix(low, "!fix"):
 		return "fix", strings.TrimSpace(content[len("!fix"):]), true
 	default:
@@ -166,7 +183,14 @@ func enqueueConfirm(id string) string {
 	return fmt.Sprintf("Queued agent job %s for the worker. queued; agent-run is not running, so it will wait.", id)
 }
 
-func enqueueFromChat(in chat.Incoming, class, title, instructions string) (id string, err error) {
+// fixNowConfirm is the owner reply to a !fixnow: the fix is queued at the top
+// of the fix band and the current round is being interrupted (its context
+// saved so it resumes right after the fix runs).
+func fixNowConfirm(id string) string {
+	return fmt.Sprintf("!fixnow: queued %s at the top of the fix band and interrupted the current round. The interrupted job's work is saved and it picks back up right after this fix runs.", id)
+}
+
+func enqueueFromChat(in chat.Incoming, class, title, instructions string, priority int) (id string, err error) {
 	if title == "" {
 		return "", fmt.Errorf("empty title")
 	}
@@ -181,7 +205,7 @@ func enqueueFromChat(in chat.Incoming, class, title, instructions string) (id st
 		Instructions:     instructions,
 		Driver:           "local",
 		Class:            class,
-		Priority:         chatJobPriority,
+		Priority:         priority,
 		Source:           "discord",
 		DiscordChannelID: in.ChannelID,
 		DiscordMessageID: in.MessageID,
@@ -287,7 +311,7 @@ func applySchedule(answer string, in chat.Incoming) (visible, extra string) {
 	if malformed {
 		return visible, "SCHEDULE block is malformed (need title: and instructions:). Did not enqueue."
 	}
-	id, err := enqueueFromChat(in, agentjob.ClassBuild, block.Title, block.Instructions)
+	id, err := enqueueFromChat(in, agentjob.ClassBuild, block.Title, block.Instructions, chatJobPriority)
 	if err != nil {
 		return visible, "Could not enqueue the SCHEDULE job: " + err.Error()
 	}
