@@ -1,0 +1,40 @@
+[
+ {
+  "file": "01-sentence-card.png",
+  "kind": "text",
+  "truth": "white card, two lines of black text: 'The quick brown fox jumps over the lazy dog.'"
+ },
+ {
+  "file": "02-exit-sign.png",
+  "kind": "text",
+  "truth": "dark background; green sign with white 'EXIT'; yellow text 'Room 42' on the right"
+ },
+ {
+  "file": "03-shapes.png",
+  "kind": "shapes",
+  "truth": "light gray background; a red circle top-left, a blue square to its right, a yellow/orange triangle bottom-center"
+ },
+ {
+  "file": "04-bar-chart.png",
+  "kind": "chart",
+  "truth": "bar chart titled 'Weekly visits'; three bars A, B, C; B is the tallest, then C, then A"
+ },
+ {
+  "file": "05-photo-20261108-212944-1635215837.png",
+  "kind": "photo",
+  "src": "/var/lib/jarvis/art/out/20261108-212944-1635215837.png",
+  "truth": "(free-form; judge plausibility)"
+ },
+ {
+  "file": "06-photo-20261108-195900-1701843947.png",
+  "kind": "photo",
+  "src": "/var/lib/jarvis/art/out/20261108-195900-1701843947.png",
+  "truth": "(free-form; judge plausibility)"
+ },
+ {
+  "file": "07-photo-20261108-073813-2031604446.png",
+  "kind": "photo",
+  "src": "/var/lib/jarvis/art/out/20261108-073813-2031604446.png",
+  "truth": "(free-form; judge plausibility)"
+ }
+]
