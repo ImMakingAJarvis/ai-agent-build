@@ -170,3 +170,6 @@
 - 2026-11-10T11:22Z [plan-glm53-flash-vram-sweep-p-1793859678-1] GLM 5.3 flash model pulled (UD-IQ2_XXS) + provenance (PR #223)
 - 2026-11-10T12:51Z [plan-glm53-flash-vram-sweep-p-1793859678-4] GLM 5.3 flash sweep pt 3/6 (200 MB): engine loads but serves nothing — KDA autotune needs 256 MiB (PR #223)
 - 2026-11-10T13:39Z [chat-1794313175-cda3] iGPU worker down fixed: dashboard+chat containers kept stale host.docker.internal:11435 URLs from before the iGPU container move (9734d81); recreated both (machine panel back up) and jarvis-stack-status now flags engine-URL env drift vs compose (PR #224)
+- 2026-11-10T14:13Z [plan-glm53-flash-vram-sweep-p-1793859678-5] GLM sweep pt4 250MB: nothing servable, autotune OOM (PR #223)
+- 2026-11-10T14:26Z [plan-glm53-flash-vram-sweep-p-1793859678-6] GLM 5.3 flash VRAM sweep 300 MB point: nothing servable (PR #223)
+- 2026-11-10T21:04Z [plan-plan-event-driven-brain-1794016330-22] audio.transcribe@cpu worker (EVB-22, PR #226): faster-whisper small int8 on CPU, bench-picked over whisper.cpp 3.6x; per-request subprocess, RAM lease, InputRefs read-only; E2E + co-existence + no-GPU evidence on a downloaded LibriVox clip
