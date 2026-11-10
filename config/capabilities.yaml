@@ -83,3 +83,19 @@ capabilities:
         stop: "docker compose stop art"
         typical_runtime: 45s
         idle_s: 300      # the model reload is expensive — hold it 5 min
+
+  audio.transcribe:
+    description: "audio/video clip(s) -> text transcript (Whisper small on CPU — faster-whisper/CT2 int8, bench-picked over whisper.cpp: 3.6x faster at equal WER); one JSON + txt per clip plus an index file"
+    workers:
+      - location: cpu
+        model: whisper-small
+        vram_mb: 0
+        ram_mb: 800     # measured peak RSS, faster-whisper small int8 (bench)
+        needs_brain_out: false  # CPU only — the first "alongside the brain,
+                                # no window" capability; the worker's lease
+                                # checks host RAM per consume session
+        start: ""
+        stop: ""
+        typical_runtime: 30s  # bench RTF ~= 0.14: a ~160 s clip takes ~23 s
+                              # plus ~2 s model load; camera clips are shorter
+        idle_s: 0             # per-request subprocess: no resident model to unload

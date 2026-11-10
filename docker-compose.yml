@@ -625,6 +625,33 @@ services:
       - /opt/jarvis-vlm:/opt/jarvis-vlm:ro
       - /usr/local/cuda-13.1/lib64:/usr/local/cuda-13.1/lib64:ro
 
+  # ---------------- audio-transcribe-worker (audio.transcribe capability) -
+  # The CPU worker behind cap.audio.transcribe (plan task EVB-22): consumes
+  # cap.audio.transcribe, transcribes each clip with faster-whisper (Whisper
+  # small, CT2 int8 — docs/benchmarks/audio-transcribe-whisper-benchmark.md)
+  # as a per-request Python subprocess, and replies with a Result whose
+  # artifacts are one JSON + txt per clip plus an index. CPU only — no
+  # nvidia runtime, no swap window: it runs alongside the brain (the lease
+  # checks host RAM per session). The model is bind-mounted read-only from
+  # /opt/jarvis-whisper; clips arrive as read-only refs (the worker never
+  # writes to its inputs).
+  audio-transcribe-worker:
+    build:
+      context: .
+      dockerfile: docker/jarvis-audio-worker/Dockerfile
+      args: { BIN: cmd/audio-transcribe-worker }
+    image: jarvis/audio-transcribe-worker:local
+    container_name: jarvis-audio-transcribe-worker
+    restart: always
+    environment:
+      HOME: /home/agent
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      # the bench's numbers were taken at 16 threads
+      AT_THREADS: "16"
+    volumes:
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /opt/jarvis-whisper:/opt/jarvis-whisper:ro
+
   # ---------------- monitoring ----------------
   prometheus:
     image: prom/prometheus:v2.53.0

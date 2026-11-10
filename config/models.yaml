@@ -7,6 +7,8 @@
 #   display_name       shown in the selector
 #   location           local | cloud — groups the dropdown
 #   engine             ollama | llama.cpp | vllm | anthropic | openai-compatible
+#                      | whisper (ASR models the audio-transcribe worker
+#                      runs through faster-whisper — not a serving engine)
 #   endpoint           base URL the worker calls
 #   roles              any of: planner, executor, reviewer
 #   context_tokens     caps what the planner packs in
@@ -113,6 +115,29 @@ models:
     enabled: false
     home_location: cpu
     fallback_location: cpu
+
+  # Whisper small (ASR) behind the audio.transcribe capability (EVB-22).
+  # A capability resource, not a conversational model: the
+  # audio-transcribe worker runs it through faster-whisper (CT2 int8 on
+  # CPU) as a per-request subprocess — there is no serving endpoint, so
+  # the field names the model dir the subprocess loads (compose mounts
+  # /opt/jarvis-whisper read-only; the CT2 files are
+  # Systran/faster-whisper-small). context_tokens is Whisper's actual text
+  # context (448). enabled: false keeps it out of the model selector.
+  - id: whisper-small
+    display_name: Whisper small (ASR)
+    location: local
+    engine: whisper
+    endpoint: /opt/jarvis-whisper/models/small
+    roles: [executor]
+    context_tokens: 448
+    vram_gb: 0
+    ram_gb: 1
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: false
+    home_location: cpu
+    fallback_location: none
 
   # Cloud planner and reviewer for big or stuck epics.
   - id: claude-sonnet-5-5
