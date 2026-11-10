@@ -54,6 +54,9 @@ involved):
   (e.g. a picture of you, sent with the message). See
   docs/art-model.md, "Reference photos".
 - `!build <title…>` / `!fix <title…>` — queue a build/fix job.
+- `!fixnow <title…>` — a fix that runs before anything else: interrupts the
+  running round and queues the job at the top of the fix band. The cut-off
+  job's context is saved (Redis, 24 h TTL) so it resumes right after the fix.
 - `!automode on` / `!automode off` — NoBrakes nightly switch (auto-enqueue
   of nightly jobs). If the loop is stopped when you turn it on, the reply
   says so. See docs/nobrakes/redis.md.

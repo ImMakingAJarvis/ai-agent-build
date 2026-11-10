@@ -285,10 +285,6 @@ func main() {
 				}
 
 				if kind, rest, ok := cutBuildFix(content); ok {
-					class := agentjob.ClassBuild
-					if kind == "fix" {
-						class = agentjob.ClassFix
-					}
 					title, body := titleAndBody(rest)
 					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 					defer cancel()
@@ -296,7 +292,25 @@ func main() {
 						_ = d.Notify(ctx, "Need a title after !build / !fix.")
 						return
 					}
-					id, err := enqueueFromChat(in, class, title, body)
+					if kind == "fixnow" {
+						// Stop whatever is running and do this fix first: queue
+						// it at the top of the fix band, then write the
+						// !fixnow restart signal so the running round is cut off
+						// and its context saved for the re-run (fixnow.go).
+						id, err := enqueueFromChat(in, agentjob.ClassFix, title, body, fixNowJobPriority)
+						if err != nil {
+							_ = d.Notify(ctx, "Could not enqueue: "+err.Error())
+							return
+						}
+						preemptRound(confDir, agentjob.FixNowSignal)
+						_ = d.Notify(ctx, fixNowConfirm(id))
+						return
+					}
+					class := agentjob.ClassBuild
+					if kind == "fix" {
+						class = agentjob.ClassFix
+					}
+					id, err := enqueueFromChat(in, class, title, body, chatJobPriority)
 					if err != nil {
 						_ = d.Notify(ctx, "Could not enqueue: "+err.Error())
 						return
@@ -654,7 +668,7 @@ func handlePhoto(d photoSender, svc *photomind.Service, in chat.Incoming, confDi
 	if now {
 		// Interrupt the running job (if any) so this top-priority photo runs
 		// next; the interrupted job is re-queued and resumes after the photo.
-		preemptRound(confDir)
+		preemptRound(confDir, "!photonow")
 		_ = d.Notify(ctx, "Now! I've queued your photo at the very top ("+id+"). I'll pause the current job, generate it in the brain-swap window, send it to your DM, then pick the paused work back up.")
 	} else {
 		what := "your photo"
@@ -756,15 +770,18 @@ func runPhotoCheck(d photoSender, svc *photomind.Service, prompt, size string) {
 	}
 }
 
-// preemptRound interrupts the running job (if any) so a top-priority photo
-// runs next, mirroring the !restart signal. Between rounds it is a no-op: the
-// loop clears the signal before each round and Store.Restart only acts on a
-// running job, so a stale signal cannot interrupt the next job.
-func preemptRound(confDir string) {
+// preemptRound interrupts the running job (if any) so the caller's
+// top-priority work runs next, mirroring the !restart signal. cmd is written
+// to the restart-signal file so the killed round knows why it was cut off
+// ("!photonow", "!fixnow"); only a "!fixnow" cut-off saves the round's context
+// for the re-run (agentjob). Between rounds it is a no-op: the loop clears the
+// signal before each round and Store.Restart only acts on a running job, so a
+// stale signal cannot interrupt the next job.
+func preemptRound(confDir, cmd string) {
 	if confDir == "" {
 		return
 	}
-	_ = os.WriteFile(confDir+"/restart-signal", []byte("!photonow"), 0o644)
+	_ = os.WriteFile(confDir+"/restart-signal", []byte(cmd), 0o644)
 }
 
 // photoCaption builds the caption under a generated photo: an optional

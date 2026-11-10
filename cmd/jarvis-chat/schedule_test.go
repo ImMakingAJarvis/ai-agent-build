@@ -63,7 +63,7 @@ func TestEnqueueFromChatAndConfirm(t *testing.T) {
 	t.Setenv("JARVIS_CONF", dir)
 	in := chat.Incoming{ChannelID: "c1", MessageID: "m1", Content: "!build add /health\nsmall job"}
 	title, body := titleAndBody("add /health\nsmall job")
-	id, err := enqueueFromChat(in, agentjob.ClassBuild, title, body)
+	id, err := enqueueFromChat(in, agentjob.ClassBuild, title, body, chatJobPriority)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestEnqueueFromChatFixClass(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("JARVIS_DATA_DIR", dir)
 	in := chat.Incoming{ChannelID: "c1", MessageID: "m1"}
-	id, err := enqueueFromChat(in, agentjob.ClassFix, "fix the fan curve", "body")
+	id, err := enqueueFromChat(in, agentjob.ClassFix, "fix the fan curve", "body", chatJobPriority)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +111,60 @@ func TestEnqueueFromChatFixClass(t *testing.T) {
 	}
 	if j.Class != agentjob.ClassFix {
 		t.Fatalf("!fix job class = %q, want fix", j.Class)
+	}
+}
+
+func TestEnqueueFromChatFixNow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JARVIS_DATA_DIR", dir)
+	in := chat.Incoming{ChannelID: "c1", MessageID: "m1"}
+	id, err := enqueueFromChat(in, agentjob.ClassFix, "fixnow: unblock the build", "body", fixNowJobPriority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := agentjob.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A !fixnow job lands in the fix band at the top-of-band priority, ahead
+	// of ordinary fixes (chatJobPriority) and alongside a !photonow.
+	if j.Class != agentjob.ClassFix {
+		t.Errorf("class = %q, want fix", j.Class)
+	}
+	if j.Priority != fixNowJobPriority {
+		t.Errorf("priority = %d, want %d", j.Priority, fixNowJobPriority)
+	}
+	if j.Priority < photoNowJobPriority {
+		t.Errorf("fixnow priority %d must not be below photonow %d", j.Priority, photoNowJobPriority)
+	}
+}
+
+func TestPreemptRoundFixNow(t *testing.T) {
+	confDir := t.TempDir()
+	preemptRound(confDir, agentjob.FixNowSignal)
+	got, err := os.ReadFile(confDir + "/restart-signal")
+	if err != nil {
+		t.Fatalf("restart-signal not written: %v", err)
+	}
+	// The signal content is what the runner's signalWatcher captures to decide
+	// the round was cut off by a !fixnow (and must save its context).
+	if string(got) != agentjob.FixNowSignal {
+		t.Errorf("restart-signal = %q, want %q", got, agentjob.FixNowSignal)
+	}
+	// An empty confDir is a no-op (jarvis-chat may run without a conf dir).
+	preemptRound("", agentjob.FixNowSignal)
+}
+
+func TestFixNowConfirm(t *testing.T) {
+	msg := fixNowConfirm("chat-1-abc")
+	for _, want := range []string{"chat-1-abc", "top of the fix band", "interrupt"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("fixNowConfirm missing %q: %q", want, msg)
+		}
 	}
 }
 
@@ -139,16 +193,29 @@ func TestApplyScheduleGoodAndMalformed(t *testing.T) {
 }
 
 func TestCutBuildFix(t *testing.T) {
-	kind, rest, ok := cutBuildFix("!build add a handler")
-	if !ok || kind != "build" || rest != "add a handler" {
-		t.Fatalf("%q %q %v", kind, rest, ok)
+	cases := []struct {
+		in      string
+		kind    string
+		rest    string
+		ok      bool
+	}{
+		{"!build add a handler", "build", "add a handler", true},
+		{"!FIX the fan curve", "fix", "the fan curve", true},
+		{"!fix", "fix", "", true},
+		{"!fixnow restart the engine when it wedges", "fixnow", "restart the engine when it wedges", true},
+		{"!FIXNOW drop the stale cache", "fixnow", "drop the stale cache", true},
+		{"!fixnow", "fixnow", "", true},
+		{"!fixnow\ta tab-sep fix", "fixnow", "a tab-sep fix", true},
+		{"!fix", "fix", "", true},
+		{"!fixnowxyz a fix", "", "", false}, // no word boundary: not a fixnow
+		{"!fixx a fix", "fix", "x a fix", true}, // !fix prefix still matches
+		{"hello", "", "", false},
 	}
-	kind, rest, ok = cutBuildFix("!FIX the fan curve")
-	if !ok || kind != "fix" || rest != "the fan curve" {
-		t.Fatalf("%q %q %v", kind, rest, ok)
-	}
-	if _, _, ok := cutBuildFix("hello"); ok {
-		t.Fatal("want miss")
+	for _, c := range cases {
+		kind, rest, ok := cutBuildFix(c.in)
+		if ok != c.ok || (ok && (kind != c.kind || rest != c.rest)) {
+			t.Errorf("cutBuildFix(%q) = %q %q %v; want %q %q %v", c.in, kind, rest, ok, c.kind, c.rest, c.ok)
+		}
 	}
 }
 
