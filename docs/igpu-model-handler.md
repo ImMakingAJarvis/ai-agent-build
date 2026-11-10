@@ -5,7 +5,11 @@ chip serve as another model handler, alongside the 4090 engine?
 
 **Status (2026-10-28, job chat-1793124710-b1cf): adopted.** The iGPU now
 runs the always-on **helper model** — Qwen2.5-3B Q4_K_M
-(`qwen2.5-3b-instruct-q4_k_m.gguf` from `Qwen/Qwen2.5-3B-Instruct-GGUF`)
+(`qwen2.5-3b-instruct-q4_k_m.gguf` from `Qwen/Qwen2.5-3B-Instruct-GGUF`).
+Evaluated 2026-11-09 (job chat-1794262130-71d7): NVIDIA's looped
+**Dory 1.0 4B** ran at 3.56 tok/s decode on the iGPU — at the hardware
+bandwidth ceiling for its 4-loop design but 3.8× slower than the 3B
+helper, so the helper **stays Qwen2.5-3B** (see "Dory 1.0 4B" below).
 serving OpenAI-compatible chat on 11435, queried through
 the `jarvis-helper` CLI (setup brief in
 `scripts/jarvis-helper-context.md`). Since 2026-11-08 (job
@@ -130,6 +134,101 @@ many tokens per turn) → the CPU would be faster, but the iGPU still
 costs zero CPU cores, which is why the helper lives there; long-prompt
 batch work (summarizing transcripts) → the iGPU is the better
 prefill device *and* still costs no CPU cores.
+
+## Dory 1.0 4B (NVIDIA Nemotron Labs) — evaluated 2026-11-09
+
+Job chat-1794262130-71d7 (Nathan): download NVIDIA's Dory model and
+benchmark it as an iGPU and a CPU model, in parallel with the 4090
+brain, and switch the iGPU (and later a CPU engine) to it if the
+tok/s look decent.
+
+**What it is.** Dory 1.0 4B (2026-10-16, OpenMDW-1.1 license) is a
+*looped* (latent-recurrent) normalized GPT: 3.98B params, official
+GGUF is Q5_K_M only (3.41 GiB), 256K context. The file's architecture
+metadata (read from the GGUF):
+
+- 72 physical blocks = **16 input + 40 recurrent + 16 output**;
+  `dory.num_loops` = **4**, so the graph executes
+  16 + 40×4 + 16 = **208 layer passes per token** (the 40 recurrent
+  weights are re-read once per loop).
+- `dory.recurrent_kv_cache_mode` = `per_loop` — each loop gets its own
+  KV cache slots, so KV memory scales with the loop count
+  (~0.85 MB/token across all 208 cache layers before sliding-window
+  reduction; 54/72 blocks are sliding-window, window 1024).
+- Attention: 16 q / 4 kv heads (GQA 4:1), head dim 256, embedding
+  2560, ffn 7168.
+- It is a **thinking model**: the chat template emits
+  `reasoning_content` (thinking tokens) before the final answer
+  (llama-server enables "preserving reasoning" for it automatically).
+
+**llama.cpp support is not upstream.** Both stock master (3b4d6ab) and
+the installed iGPU build (cf24317) fail with
+`unknown model architecture: 'dory'`. Working support exists only in
+draft PR [ggml-org/llama.cpp#30306](https://github.com/ggml-org/llama.cpp/pull/30306)
+(branch `dory-support`, head `1c3cdd2`, 2026-11-02, +671/−28 —
+`models/dory.cpp`, per-loop KV mapping in `llama-kv-cache.cpp`).
+Experiment-grade, unmerged: treat its numbers as implementation
+dependent. Build it with the install script's new overrides:
+
+    LLAMA_REPO=https://github.com/brianchmielNV/llama.cpp \
+    LLAMA_REF=dory-support LLAMA_SRC=/opt/jarvis-igpu/src-dory \
+    LLAMA_BUILD=/opt/jarvis-igpu/build-dory LLAMA_BIN=/opt/jarvis-igpu/bin-dory \
+    install_igpu_engine.sh --build-only
+
+(On this machine that build lives at
+`/opt/jarvis-igpu/build-dory/bin/` and the model at
+`/opt/jarvis-igpu/models/dory-4b-q5_k_m.gguf`, 3,673,288,864 bytes,
+byte-verified against the Hugging Face file.)
+
+**Bench (2026-11-09, llama-bench pp512/tg512; the 4090 brain served
+this whole round concurrently — the parallel operation the job asked
+for; CPU and iGPU runs strictly sequential):**
+
+| model | device | pp512 tok/s | tg512 tok/s |
+|---|---|---|---|
+| Dory 1.0 4B (Q5_K_M, 3.98B) | CPU (16 threads) | 61.83 ± 1.47 | 1.16 ± 0.06 |
+| Dory 1.0 4B (Q5_K_M, 3.98B) | iGPU (Vulkan1) | 23.31 ± 0.01 | 3.56 ± 0.00 |
+| qwen2.5 3B (Q4_K_M, 3.40B) | CPU (16 threads) | 45–49 ¹ | 22.94 ± 0.02 ² |
+| qwen2.5 3B (Q4_K_M, 3.40B) | iGPU (Vulkan1) | 116.7 ± 0.01 ² | 13.55 ± 0.01 ² |
+
+The known-broken CPU pp column (¹) did *not* misbehave in the Dory
+build (61.8 is a sane value; a live `-ngl 0` server prefill agreed in
+magnitude). Live-server decode on the iGPU measured 3.44–3.45 t/s,
+matching the bench.
+
+**Reading the numbers.** The loop count is fixed in the file (no
+runtime flag in the PR build), so per-token weight traffic is
+≈ 3.41 GB × 208/72 ≈ **9.9 GB**. At the iGPU's measured ~27 GB/s
+effective bandwidth the ceiling is ~3.7 t/s — the measured 3.56 is
+**97% of the hardware ceiling**, i.e. the iGPU path is efficient and
+this speed is what the 4-loop design costs on this hardware (the
+looping trades compute for accuracy: SWE-bench Verified
+50.3/59.5/61.8 at 1/2/4 loops). The CPU sits at 1.16 t/s, only ~25%
+of its ~4.5 t/s ceiling — the draft PR forces F32 precision on the
+Dory mul_mat nodes (F32 inputs from the recurrent normalizations), so
+the CPU path is the under-optimized one; even at its ceiling it would
+be 5× slower than the 3B's 22.9. Prefill flips the 3B comparison too:
+iGPU 23.3 vs CPU 61.8 (for the 3B the iGPU won 2.2×), i.e. the
+per-loop KV handling also costs the Vulkan prefill path. A loop-1 or
+loop-2 GGUF, if NVIDIA ever ships one, would scale the iGPU decode
+roughly with the loop count (loop 1 ≈ 72 passes ≈ 3.4 GB/token →
+~13 t/s class).
+
+**Decision: not adopted.** Pre-declared gate — switch the iGPU to
+Dory if tg ≳ 4 t/s and pp512 ≳ 25 with sane output. Measured 3.56 /
+23.3: both just under, and 3.56 t/s decode is 3.8× slower than the
+3B helper's 13.55, which matters for the voice-pipeline LLM step that
+routes to the iGPU for responsiveness. Output quality itself is fine
+(thinking + final answer coherent in spot checks). The iGPU helper
+**stays Qwen2.5-3B**; no swap was made, so no rollback. The same gate
+closes the CPU side: 1.16 t/s vs 22.9 — Dory is not the model for a
+CPU lane either. Both conclusions are recorded on Plane (DRY-5, DRY-8,
+project DRY); the model and the PR-branch build are kept in place for
+a re-test once the PR matures or a lower-loop GGUF appears. The
+queue question behind the job — answered in the DRY project notes:
+`jobs.cpu`/`jobs.igpu` exist and are consumed by parallel
+task-runner workers, but no cpu/igpu model is registered and no CPU
+engine exists yet (DRY-6, DRY-7, DRY-9).
 
 ## How to adopt it (done — helper model, 2026-10-28)
 

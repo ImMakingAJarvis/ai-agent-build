@@ -53,8 +53,11 @@ func (c *Consumer) Start() error {
 			return fmt.Errorf("declare queue %s: %w", q, err)
 		}
 		// Bind to the tasks exchange with the appropriate routing key.
+		// Synchronous (noWait=false): a noWait bind returns before the
+		// broker registers the binding, so an early publish from another
+		// channel of the same connection would be dropped as unroutable.
 		routingKey := q + ".#"
-		if err := ch.QueueBind(q, routingKey, c.conn.Exchange(), true, nil); err != nil {
+		if err := ch.QueueBind(q, routingKey, c.conn.Exchange(), false, nil); err != nil {
 			return fmt.Errorf("bind %s to %s: %w", q, c.conn.Exchange(), err)
 		}
 	}

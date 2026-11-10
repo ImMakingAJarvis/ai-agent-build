@@ -2,6 +2,7 @@ package capworker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -281,6 +282,327 @@ func (f failingHandler) Handle(ctx context.Context, req queue.Message) (queue.Re
 	return queue.Result{}, f.err
 }
 
+// okHandler answers immediately (no artifact).
+type okHandler struct{}
+
+func (okHandler) Handle(ctx context.Context, req queue.Message) (queue.Result, error) {
+	return queue.Result{Status: queue.ResultOK, Summary: "ok"}, nil
+}
+
+// blockingHandler holds each request for block — the test's way of
+// occupying a prefetch=1 worker.
+type blockingHandler struct{ block time.Duration }
+
+func (b blockingHandler) Handle(ctx context.Context, req queue.Message) (queue.Result, error) {
+	select {
+	case <-time.After(b.block):
+	case <-ctx.Done():
+		return queue.Result{}, ctx.Err()
+	}
+	return queue.Result{Status: queue.ResultOK, Summary: "blocked done"}, nil
+}
+
+// TestWorkerLeaseGate is a live test of the plan §3.6 lease hook: while
+// the worker's lease is denied it must NOT consume — the message waits
+// on the durable queue (for a lower-priority placement of the same
+// capability) — and once granted, the same message is picked up and
+// answered.
+func TestWorkerLeaseGate(t *testing.T) {
+	c, err := queue.NewConn()
+	if err != nil {
+		t.Skipf("RabbitMQ unavailable: %v", err)
+	}
+	defer c.Close()
+
+	suffix := fmt.Sprintf("capwl-%d", time.Now().UnixNano())
+	capQ := queue.CapQueueName(suffix)
+	flowQ := queue.FlowQueueName(suffix)
+	corr := "corr-" + suffix
+	granted := &atomic.Bool{} // denied until the test flips it
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := New(Config{
+		Cap:    suffix,
+		Name:   "lease-worker",
+		Model:  "test",
+		Conn:   c,
+		Handler: okHandler{},
+		Lease: func(ctx context.Context) error {
+			if granted.Load() {
+				return nil
+			}
+			return errors.New("lease denied (test)")
+		},
+	})
+	go w.Run(ctx)
+
+	// Make the queues exist before publishing: a message routed to a queue
+	// that does not exist yet is unroutable and dropped.
+	if err := c.EnsureCapQueue(capQ); err != nil {
+		t.Fatalf("ensure cap: %v", err)
+	}
+	if err := c.EnsureFlowQueue(flowQ); err != nil {
+		t.Fatalf("ensure flow: %v", err)
+	}
+	defer deleteQueue(t, c, flowQ)
+	defer deleteQueue(t, c, capQ)
+
+	req := queue.Message{
+		ID: "req-" + suffix, Type: "capability", Capability: suffix,
+		CorrelationID: corr, ReplyTo: flowQ, SchemaVersion: 2,
+	}
+	if err := c.Publish(req, capQ+".default"); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+	if d, derr := c.QueueDepth(capQ); derr != nil {
+		t.Fatalf("depth: %v", derr)
+	} else if d != 1 {
+		t.Fatalf("queue depth while the lease is denied = %d, want 1 (the worker must not consume)", d)
+	}
+
+	granted.Store(true)
+	res := waitResult(t, c, flowQ, corr, 30*time.Second)
+	if res.Status != queue.ResultOK {
+		t.Errorf("status = %q, want ok", res.Status)
+	}
+	if res.Worker != "lease-worker" {
+		t.Errorf("worker = %q, want lease-worker", res.Worker)
+	}
+}
+
+// TestWorkerIdleUnload is a live test of the idle-unload cycle: with no
+// requests the worker unloads its resources after IdleS, and brings them
+// back (Load) before the next request is handled.
+func TestWorkerIdleUnload(t *testing.T) {
+	c, err := queue.NewConn()
+	if err != nil {
+		t.Skipf("RabbitMQ unavailable: %v", err)
+	}
+	defer c.Close()
+
+	suffix := fmt.Sprintf("capwi-%d", time.Now().UnixNano())
+	capQ := queue.CapQueueName(suffix)
+	flowQ := queue.FlowQueueName(suffix)
+	corr := "corr-" + suffix
+	var loads, unloads atomic.Int32
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := New(Config{
+		Cap:     suffix,
+		Name:    "idle-worker",
+		Model:   "test",
+		Conn:    c,
+		Handler: okHandler{},
+		IdleS:   time.Second,
+		Load:    func(ctx context.Context) error { loads.Add(1); return nil },
+		Unload:  func(ctx context.Context) error { unloads.Add(1); return nil },
+	})
+	go w.Run(ctx)
+
+	if err := c.EnsureFlowQueue(flowQ); err != nil {
+		t.Fatalf("ensure flow: %v", err)
+	}
+	defer deleteQueue(t, c, flowQ)
+	defer deleteQueue(t, c, capQ)
+
+	// Wait for the idle unload (the idle window is measured from
+	// startup: the worker never got a request).
+	deadline := time.Now().Add(10 * time.Second)
+	for unloads.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no idle unload within 10 s")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got := loads.Load(); got != 0 {
+		t.Fatalf("Load ran %d times before any request, want 0", got)
+	}
+
+	req := queue.Message{
+		ID: "req-" + suffix, Type: "capability", Capability: suffix,
+		CorrelationID: corr, ReplyTo: flowQ, SchemaVersion: 2,
+	}
+	if err := c.Publish(req, capQ+".default"); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	res := waitResult(t, c, flowQ, corr, 20*time.Second)
+	if res.Status != queue.ResultOK {
+		t.Errorf("status = %q, want ok", res.Status)
+	}
+	if got := loads.Load(); got != 1 {
+		t.Errorf("Load ran %d times before the reloaded request, want 1", got)
+	}
+	if got := unloads.Load(); got != 1 {
+		t.Errorf("Unload ran %d times, want 1 (a request in flight must not re-unload)", got)
+	}
+}
+
+// TestWorkerHeartbeat is a live test of the worker.<name>.heartbeat
+// events: a subscriber bound to worker.# on the events exchange must
+// receive heartbeats at the configured interval.
+func TestWorkerHeartbeat(t *testing.T) {
+	c, err := queue.NewConn()
+	if err != nil {
+		t.Skipf("RabbitMQ unavailable: %v", err)
+	}
+	defer c.Close()
+
+	events, err := queue.NewEventPublisher(c, "capworker-test")
+	if err != nil {
+		t.Skipf("events publisher: %v", err)
+	}
+	defer events.Close()
+
+	suffix := fmt.Sprintf("capwh-%d", time.Now().UnixNano())
+	capQ := queue.CapQueueName(suffix)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := New(Config{
+		Cap:        suffix,
+		Name:       "hb-worker",
+		Model:      "test",
+		Conn:       c,
+		Handler:    okHandler{},
+		Events:     events,
+		HeartbeatS: 300 * time.Millisecond,
+	})
+	go w.Run(ctx)
+	defer deleteQueue(t, c, capQ)
+
+	ch, err := c.NewChannel()
+	if err != nil {
+		t.Fatalf("channel: %v", err)
+	}
+	defer ch.Close()
+	subQ := "hb-" + suffix
+	if _, err := ch.QueueDeclare(subQ, true, false, false, false, nil); err != nil {
+		t.Fatalf("declare subscriber: %v", err)
+	}
+	defer ch.QueueDelete(subQ, false, false, false)
+	if err := ch.QueueBind(subQ, "worker.#", queue.EventsExchange, false, nil); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		del, ok, err := ch.Get(subQ, true)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if ok {
+			e, derr := queue.DecodeEvent(del.Body)
+			if derr != nil {
+				continue
+			}
+			if e.Kind == queue.WorkerKind && e.State == "heartbeat" && e.Subject == "hb-worker" {
+				if e.Data["capability"] != suffix {
+					t.Errorf("heartbeat data capability = %v, want %s", e.Data["capability"], suffix)
+				}
+				if p, _ := e.Data["priority"].(float64); p != 1 {
+					t.Errorf("heartbeat data priority = %v, want 1 (default location)", e.Data["priority"])
+				}
+				return
+			}
+		} else {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	t.Fatal("no worker.*.heartbeat event within 5 s")
+}
+
+// TestWorkerConsumerPriority is a live test of the plan §3.5 broker-side
+// scheduling: two placements of the same capability (a cpu worker at
+// consumer x-priority 1 and a gpu worker at x-priority 10) share the cap
+// queue. Consumer priority is a pure ranking — the broker delivers each
+// message to the highest-priority FREE consumer — so while both are free
+// the gpu placement takes the request, and while the gpu worker is busy
+// the next request falls through to the free cpu worker: the best free
+// worker, with no scheduler in between.
+func TestWorkerConsumerPriority(t *testing.T) {
+	c, err := queue.NewConn()
+	if err != nil {
+		t.Skipf("RabbitMQ unavailable: %v", err)
+	}
+	defer c.Close()
+
+	suffix := fmt.Sprintf("capwp-%d", time.Now().UnixNano())
+	capQ := queue.CapQueueName(suffix)
+	flowQ := queue.FlowQueueName(suffix)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cpuW := New(Config{Cap: suffix, Name: "a-cpu", Model: "test", Conn: c, Location: "cpu", Handler: okHandler{}})
+	gpuW := New(Config{Cap: suffix, Name: "b-gpu", Model: "test", Conn: c, Location: "gpu", Handler: blockingHandler{block: 2500 * time.Millisecond}})
+	go cpuW.Run(ctx)
+	go gpuW.Run(ctx)
+
+	if err := c.EnsureFlowQueue(flowQ); err != nil {
+		t.Fatalf("ensure flow: %v", err)
+	}
+	defer deleteQueue(t, c, flowQ)
+	defer deleteQueue(t, c, capQ)
+
+	mkReq := func(corr string, prio int) queue.Message {
+		return queue.Message{
+			ID: "req-" + suffix + "-" + corr, Type: "capability", Capability: suffix,
+			CorrelationID: corr, ReplyTo: flowQ, Priority: prio, SchemaVersion: 2,
+		}
+	}
+
+	// Wait until both workers are actually consuming before publishing.
+	// The broker confirms queue.bind on the queue side, but the exchange's
+	// routing table catches up asynchronously: a publish that races the
+	// workers' startup binds (on another channel of the same connection)
+	// comes back basic.return NO_ROUTE and the message is dropped — a
+	// synchronous (noWait=false) bind does not close this window. In the
+	// running system the workers are long up before a request arrives;
+	// this wait is what sets up that state here.
+	waitConsumers(t, c, capQ, 2, 10*time.Second)
+
+	// Make the queue exist before publishing (a no-op now that the
+	// workers created it, but the publisher-side contract stays): a
+	// message routed to a queue that does not exist yet is unroutable
+	// and dropped.
+	if err := c.EnsureCapQueue(capQ); err != nil {
+		t.Fatalf("ensure cap: %v", err)
+	}
+
+	// Phase 1: both placements free — the gpu worker (the higher consumer
+	// priority) takes the request.
+	m1 := mkReq("p1-"+suffix, 5)
+	if err := c.Publish(m1, capQ+".default"); err != nil {
+		t.Fatalf("publish m1: %v", err)
+	}
+	res := waitResult(t, c, flowQ, m1.CorrelationID, 20*time.Second)
+	if res.Worker != "b-gpu" {
+		t.Fatalf("request answered by %q, want b-gpu (the free highest-priority consumer)", res.Worker)
+	}
+
+	// Phase 2: occupy the gpu worker (it takes the next request), then the
+	// following request must fall through to the free cpu worker.
+	m2 := mkReq("p2-"+suffix, 0)
+	if err := c.Publish(m2, capQ+".default"); err != nil {
+		t.Fatalf("publish m2: %v", err)
+	}
+	time.Sleep(700 * time.Millisecond) // b-gpu is now blocked in its handler (prefetch 1)
+	m3 := mkReq("p3-"+suffix, 1)
+	if err := c.Publish(m3, capQ+".default"); err != nil {
+		t.Fatalf("publish m3: %v", err)
+	}
+	res3 := waitResult(t, c, flowQ, m3.CorrelationID, 20*time.Second)
+	if res3.Worker != "a-cpu" {
+		t.Errorf("request while the gpu worker is busy answered by %q, want a-cpu", res3.Worker)
+	}
+	res2 := waitResult(t, c, flowQ, m2.CorrelationID, 20*time.Second)
+	if res2.Worker != "b-gpu" {
+		t.Errorf("occupying request answered by %q, want b-gpu (it was the free highest-priority consumer)", res2.Worker)
+	}
+}
+
 func deleteQueue(t *testing.T, c *queue.Conn, name string) {
 	t.Helper()
 	ch, err := c.NewChannel()
@@ -289,4 +611,28 @@ func deleteQueue(t *testing.T, c *queue.Conn, name string) {
 	}
 	defer ch.Close()
 	ch.QueueDelete(name, false, false, false)
+}
+
+// waitConsumers polls the queue until n consumers are attached (the
+// workers finished their ensure+consume), failing after the timeout. A
+// 404 (queue not declared yet) is just "not yet".
+func waitConsumers(t *testing.T, c *queue.Conn, name string, n int, timeout time.Duration) {
+	t.Helper()
+	ch, err := c.NewChannel()
+	if err != nil {
+		t.Fatalf("wait consumers channel: %v", err)
+	}
+	defer ch.Close()
+	deadline := time.Now().Add(timeout)
+	last := -1
+	for time.Now().Before(deadline) {
+		if q, ierr := ch.QueueInspect(name); ierr == nil {
+			last = q.Consumers
+			if q.Consumers >= n {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("queue %s: %d consumers not attached within %v (last seen: %d)", name, n, timeout, last)
 }

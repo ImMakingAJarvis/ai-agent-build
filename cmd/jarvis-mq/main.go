@@ -30,6 +30,7 @@
 //	jarvis-mq listeners
 //	jarvis-mq results flow.plan-x          # consume + pretty-print Results (acks)
 //	jarvis-mq unlisten flow.plan-x
+//	jarvis-mq caps                         # catalog: where/cost/depth/runtime per capability
 package main
 
 import (
@@ -37,6 +38,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -56,6 +58,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/catalog"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/switchboard"
 )
@@ -127,7 +130,9 @@ func usage() {
   listeners                   list all listeners (queue, action, target, timeout)
   submit <capability> [flags] publish an envelope-v2 request to cap.<capability>
   results <queue> [-n N]      consume and pretty-print Result messages (acks them)
-  caps                        the capability catalog (stub: lands in task EVB-19)
+  caps [--file PATH]          the capability catalog, one line per capability:
+                              where it runs, the cost, current queue depth,
+                              typical runtime (readable by the model as-is)
 
 listen flags:
   --wake JOB                wake agentjob JOB when a message lands (default action)
@@ -1274,17 +1279,74 @@ func sortedKeysAny(m map[string]any) []string {
 	return out
 }
 
-// runCaps is a stub: the capability catalog (config/capabilities.yaml —
-// workers, models, memory, needs-brain-out per capability) lands in task
-// EVB-19 with the capworker SDK.
+// catalogDefaultPath is where the capability catalog lives on this
+// machine: $JARVIS_CAPABILITIES, else the repo's config/capabilities.yaml.
+func catalogDefaultPath() string {
+	if p := os.Getenv("JARVIS_CAPABILITIES"); p != "" {
+		return p
+	}
+	return "/home/agent/ai-agent-build/config/capabilities.yaml"
+}
+
+// capDepths connects to the broker and returns a depth function for cap
+// queues (a missing queue is depth 0 — nothing queued). ok=false when
+// the broker is unreachable; the caller then prints "-" depths, because
+// the catalog is still useful when the broker is down. The connection is
+// left open: the command prints and the process exits.
+func capDepths() (func(string) (int, error), bool) {
+	c, err := queue.NewConn()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-mq: broker unreachable (%v); printing depths as -\n", err)
+		return nil, false
+	}
+	return func(name string) (int, error) {
+		d, err := c.QueueDepth(queue.CapQueueName(name))
+		if err != nil {
+			var aerr *amqp.Error
+			if errors.As(err, &aerr) && aerr.Code == amqp.NotFound {
+				return 0, nil
+			}
+			return 0, err
+		}
+		return d, nil
+	}, true
+}
+
+// runCaps prints the capability catalog (config/capabilities.yaml) for
+// the model: one line per capability — where it can run, what it costs
+// ("needs brain out" / "runs alongside you on cpu"), the current queue
+// depth, and how long it usually takes. The lines are designed to be
+// read, not parsed: the round preamble will feed them to the model as-is.
 func runCaps(args []string) error {
 	fs := flag.NewFlagSet("caps", flag.ExitOnError)
+	file := fs.String("file", catalogDefaultPath(), "capability catalog file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: jarvis-mq caps")
+		return fmt.Errorf("usage: jarvis-mq caps [--file PATH]")
 	}
-	fmt.Println("capability catalog: lands in task EVB-19 (config/capabilities.yaml)")
-	return nil
+	f, err := catalog.Load(*file)
+	if err != nil {
+		return err
+	}
+	depth, ok := capDepths()
+	tw := tabwriter.NewWriter(os.Stdout, 8, 8, 2, ' ', 0)
+	for _, name := range f.SortedNames() {
+		c := f.Capabilities[name]
+		depths := "-"
+		if ok {
+			if d, derr := depth(name); derr == nil {
+				depths = strconv.Itoa(d)
+			}
+		}
+		rt, rerr := c.TypicalRuntime()
+		rts := "unknown"
+		if rerr == nil {
+			rts = rt.String()
+		}
+		fmt.Fprintf(tw, "%s\twhere=%s\tcost=%s\tdepth=%s\ttypical~%s\n",
+			name, strings.Join(c.Locations(), ","), c.Cost(), depths, rts)
+	}
+	return tw.Flush()
 }
