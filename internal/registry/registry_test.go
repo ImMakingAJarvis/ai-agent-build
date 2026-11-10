@@ -33,8 +33,8 @@ func TestLoadRealRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(f.Models) != 7 {
-		t.Fatalf("got %d models, want 7", len(f.Models))
+	if len(f.Models) != 8 {
+		t.Fatalf("got %d models, want 8", len(f.Models))
 	}
 	byID := make(map[string]Model, len(f.Models))
 	for _, m := range f.Models {
@@ -44,9 +44,10 @@ func TestLoadRealRegistry(t *testing.T) {
 		t.Fatal("registry contains duplicate ids")
 	}
 
-	// The image.describe VLMs (EVB-21) and the audio.transcribe ASR model
-	// (EVB-22) are capability resources, hidden from the model selector.
-	for _, id := range []string{"qwen3-vl-2b", "qwen3-vl-8b", "whisper-small"} {
+	// The image.describe VLMs (EVB-21), the audio.transcribe ASR model
+	// (EVB-22) and the llm.small instruct model (EVB-23) are capability
+	// resources, hidden from the model selector.
+	for _, id := range []string{"qwen3-vl-2b", "qwen3-vl-8b", "whisper-small", "qwen2.5-7b-instruct"} {
 		m, ok := byID[id]
 		if !ok {
 			t.Fatalf("missing %s entry", id)

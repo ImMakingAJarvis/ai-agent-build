@@ -99,3 +99,50 @@ capabilities:
         typical_runtime: 30s  # bench RTF ~= 0.14: a ~160 s clip takes ~23 s
                               # plus ~2 s model load; camera clips are shorter
         idle_s: 0             # per-request subprocess: no resident model to unload
+
+  llm.small:
+    # BOUNDARY (plan §4, Phase 3): this capability is for BATCH sub-tasks
+    # only (summarise / classify / extract over files). The iGPU helper
+    # (Qwen2.5-3B on :11435) remains the CONVERSATION fallback during the
+    # brain's swap windows — do not point conversational traffic here.
+    #
+    # GPU placement (EVB-23): Qwen2.5-7B-Instruct Q4_K_M fully on the
+    # 4090's SPARE VRAM. Measured ~5.4 GB (bench: docs/benchmarks/
+    # llm-small-model-benchmark.md — 16/28 layers = 3339 MiB delta,
+    # extrapolated to 28). The worker's lease requires 6.5 GB free, i.e.
+    # it only runs in the plan's co-scheduling window (the brain out for
+    # a 12 GB image job leaves ~10 GB). With the idle brain (~3.7 GB
+    # free) the gpu session is refused per consume and the cpu placement
+    # takes the request — a routing decision, never an OOM (the coprocess
+    # starts only after the lease grants).
+    #
+    # CPU fallback: the same 7B in host RAM (--n-gpu-layers 0; residual
+    # CUDA-context VRAM ~630 MiB measured, the binary always inits the
+    # CUDA backend). Slower (~2 tok/s at 16 threads, bench) — the
+    # fallback, not the fast path.
+    description: "text file(s) -> a structured sub-task result (task: summarise | classify | extract | custom verb + optional instructions); the result in Data plus a result.json artifact"
+    workers:
+      - location: gpu
+        model: qwen2.5-7b-instruct
+        vram_mb: 5500   # measured ~5.4 GB, 7B Q4_K_M + 8K ctx (bench)
+        ram_mb: 512
+        needs_brain_out: false  # fits the co-scheduling window's spare;
+                                # the worker's lease checks free VRAM per
+                                # session and refuses below 6.5 GB
+        start: ""
+        stop: ""
+        typical_runtime: 30s  # coprocess load (~10 s) + a few hundred
+                              # tokens at ~20-30 tok/s on the 4090
+        idle_s: 300      # the coprocess is unloaded after 5 min idle
+      - location: cpu
+        model: qwen2.5-7b-instruct
+        vram_mb: 658    # measured residual CUDA-context floor
+                        # (--n-gpu-layers 0; the 2B VLM's was 488)
+        ram_mb: 5120    # 7B Q4 weights (mmap-backed) + 8K KV + buffers
+        needs_brain_out: false
+        start: ""
+        stop: ""
+        typical_runtime: 240s  # bench ~2 tok/s at 16 threads: a few
+                               # hundred tokens of reply is minutes;
+                               # plus ~10 s coprocess load
+        idle_s: 300

@@ -139,6 +139,36 @@ models:
     home_location: cpu
     fallback_location: none
 
+  # Qwen2.5-7B-Instruct (llm.small capability, EVB-23). A capability
+  # resource, not a conversational model: the llm-small worker runs it as
+  # its own llama-server coprocess (internal/vlmserver), unloading it
+  # after the idle window. The endpoint is the coprocess's in-container
+  # API port (LMS_PORT, default 11520) while it is up; enabled: false
+  # keeps it out of the model selector. BOUNDARY: the iGPU helper
+  # (Qwen2.5-3B on :11435) stays the CONVERSATION fallback during
+  # windows — llm.small is for batch sub-tasks only.
+  #
+  # Sourcing: huggingface.co is IP-blocked from this box (401), so the
+  # official Qwen GGUF was pulled from ModelScope (Qwen/
+  # Qwen2.5-7B-Instruct-GGUF) — split Q4_K_M file under
+  # /opt/jarvis-llm-small/models. Measured: ~5.4 GB VRAM on the 4090
+  # (28/28 layers, 8K ctx) or ~630 MiB residual VRAM on CPU (bench doc
+  # docs/benchmarks/llm-small-model-benchmark.md).
+  - id: qwen2.5-7b-instruct
+    display_name: Qwen 2.5 7B Instruct (llm.small)
+    location: local
+    engine: llama.cpp
+    endpoint: http://127.0.0.1:11520/v1
+    roles: [executor]
+    context_tokens: 8192
+    vram_gb: 5.4
+    ram_gb: 5
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: false
+    home_location: gpu
+    fallback_location: cpu
+
   # Cloud planner and reviewer for big or stuck epics.
   - id: claude-sonnet-5-5
     display_name: Claude Sonnet (cloud)
