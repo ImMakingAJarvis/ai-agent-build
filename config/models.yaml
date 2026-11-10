@@ -77,6 +77,43 @@ models:
     home_location: gpu
     fallback_location: cpu
 
+  # Small local vision models behind the image.describe capability
+  # (EVB-21). They are capability resources, not conversational models:
+  # the image-describe worker runs each one as its own llama-server
+  # coprocess (internal/vlmserver), unloading it after the idle window.
+  # The endpoint is the coprocess's in-container API port (IDESC_PORT,
+  # default 11510) while it is up; enabled: false keeps them out of the
+  # model selector.
+  - id: qwen3-vl-2b
+    display_name: Qwen3-VL 2B (VLM)
+    location: local
+    engine: llama.cpp
+    endpoint: http://127.0.0.1:11510/v1
+    roles: [executor]
+    context_tokens: 4096
+    vram_gb: 4
+    ram_gb: 0
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: false
+    home_location: gpu
+    fallback_location: cpu
+
+  - id: qwen3-vl-4b
+    display_name: Qwen3-VL 4B (VLM)
+    location: local
+    engine: llama.cpp
+    endpoint: http://127.0.0.1:11510/v1
+    roles: [executor]
+    context_tokens: 4096
+    vram_gb: 4
+    ram_gb: 0
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: false
+    home_location: gpu
+    fallback_location: cpu
+
   # Cloud planner and reviewer for big or stuck epics.
   - id: claude-sonnet-5-5
     display_name: Claude Sonnet (cloud)

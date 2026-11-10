@@ -33,8 +33,8 @@ func TestLoadRealRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(f.Models) != 4 {
-		t.Fatalf("got %d models, want 4", len(f.Models))
+	if len(f.Models) != 6 {
+		t.Fatalf("got %d models, want 6", len(f.Models))
 	}
 	byID := make(map[string]Model, len(f.Models))
 	for _, m := range f.Models {
@@ -42,6 +42,18 @@ func TestLoadRealRegistry(t *testing.T) {
 	}
 	if len(byID) != len(f.Models) {
 		t.Fatal("registry contains duplicate ids")
+	}
+
+	// The image.describe VLMs (EVB-21) are capability resources, hidden
+	// from the model selector.
+	for _, id := range []string{"qwen3-vl-2b", "qwen3-vl-4b"} {
+		m, ok := byID[id]
+		if !ok {
+			t.Fatalf("missing %s entry", id)
+		}
+		if m.Enabled {
+			t.Errorf("%s should be disabled (capability resource)", id)
+		}
 	}
 
 	t.Run("qwen3.8-27b", func(t *testing.T) {

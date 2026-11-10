@@ -36,6 +36,38 @@ capabilities:
         typical_runtime: 30s
         idle_s: 0
 
+  image.describe:
+    # First-check outcome (EVB-21): the brain build supports --mmproj and
+    # a matching Qwen3.8-27B projector is published (unsloth) — a smoke
+    # test verified it loads and describes correctly. Future option, in a
+    # follow-up job: load the projector on the brain engine itself (brain
+    # ~20.4 GB + ~1 GB projector < the 4090's 24.5 GB) so the brain can
+    # describe images whenever it is loaded — no swap window. Until then
+    # this capability runs on the small dedicated VLMs below.
+    description: "image(s) -> caption + text-to-image prompt + tags; one JSON per image plus an index file"
+    workers:
+      - location: gpu
+        model: qwen3-vl-2b
+        vram_mb: 3244    # measured peak, Qwen3-VL-2B Q4_K_M + F16 mmproj (bench)
+        ram_mb: 2048
+        needs_brain_out: false  # fits the spare VRAM even with a busy brain;
+                                # the worker's lease checks free VRAM per session
+        start: ""
+        stop: ""
+        typical_runtime: 30s
+        idle_s: 300      # the coprocess is unloaded after 5 min idle
+      - location: cpu
+        model: qwen3-vl-4b
+        vram_mb: 564     # measured residual CUDA-context floor (--n-gpu-layers 0
+                         # --no-mmproj-offload; the 2B's was 488 — bench)
+        ram_mb: 4096
+        needs_brain_out: false
+        start: ""
+        stop: ""
+        typical_runtime: 300s  # bench: 46-407 s per image (16 threads); a
+                               # folder request scales per image
+        idle_s: 300
+
   image.generate:
     description: "text-to-image (art service :8120; Z-Image-Turbo, reference photos via FLUX.2 klein)"
     workers:
