@@ -107,6 +107,7 @@ timestamps** — the box is PST).
 | `!restart-service` / `!restart-service now` | Restart the `agent-run` **service** (not just the round). Defers until the current round ends unless `now`; also starts the service if it is down. Runs `agent-run-restart`. |
 | `!build <title…>` | Enqueue a build job into the agentjob store (first line = title, rest = instructions). Replies with the job id. |
 | `!fix <title…>` | Same, class `fix`. |
+| `!fixnow <title…>` | A fix that runs before anything else: interrupts the current round (like `!photonow`) and queues the job at the top of the fix band. The interrupted job's context is saved to Redis (24 h TTL) so it picks up right where it was cut off. |
 | `!photo <prompt>` | Generate a photo with the local art model (brain expands the prompt first — "thinking mind"), send it back as a DM attachment. |
 | `!photoassist <prompt>` | Photo generation with iterative prompt assistance. |
 | `!photocheck <prompt>` | Two passes: generate, critique, improve the prompt, regenerate. |
