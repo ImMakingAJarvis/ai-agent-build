@@ -57,14 +57,15 @@ capabilities:
         typical_runtime: 30s
         idle_s: 300      # the coprocess is unloaded after 5 min idle
       - location: cpu
-        model: qwen3-vl-4b
-        vram_mb: 564     # measured residual CUDA-context floor (--n-gpu-layers 0
+        model: qwen3-vl-8b
+        vram_mb: 580     # measured residual CUDA-context floor (--n-gpu-layers 0
                          # --no-mmproj-offload; the 2B's was 488 — bench)
-        ram_mb: 4096
+        ram_mb: 6144     # 8B Q4 + F16 mmproj + KV, host-resident
         needs_brain_out: false
         start: ""
         stop: ""
-        typical_runtime: 300s  # bench: 46-407 s per image (16 threads); a
+        typical_runtime: 120s  # bench: 52-175 s per image steady (16 threads);
+                               # a cold start's first image takes ~240 s; a
                                # folder request scales per image
         idle_s: 300
 

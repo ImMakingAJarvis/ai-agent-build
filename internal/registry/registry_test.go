@@ -46,7 +46,7 @@ func TestLoadRealRegistry(t *testing.T) {
 
 	// The image.describe VLMs (EVB-21) are capability resources, hidden
 	// from the model selector.
-	for _, id := range []string{"qwen3-vl-2b", "qwen3-vl-4b"} {
+	for _, id := range []string{"qwen3-vl-2b", "qwen3-vl-8b"} {
 		m, ok := byID[id]
 		if !ok {
 			t.Fatalf("missing %s entry", id)

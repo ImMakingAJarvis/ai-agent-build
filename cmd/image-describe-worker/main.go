@@ -1,7 +1,7 @@
 // image-describe-worker is the image.describe capability worker (plan
 // task EVB-21): the GPU and CPU placements behind cap.image.describe.
 // It consumes cap.image.describe, describes each input image with a
-// small local VLM (Qwen3-VL-2B on the GPU placement, Qwen3-VL-4B on the
+// small local VLM (Qwen3-VL-2B on the GPU placement, Qwen3-VL-8B on the
 // CPU fallback — picked by the bench in
 // docs/benchmarks/image-describe-vlm-benchmark.md), and replies
 // with a Result whose Artifacts point at one JSON per image plus an
@@ -22,9 +22,12 @@
 //	     the brain is in a conversation and the spare is gone, the
 //	     worker refuses the session and the broker delivers the request
 //	     to the cpu placement instead (consumer priority 1).
-//	cpu  location cpu — consumer priority 1; Qwen3-VL-4B fully in host
-//	     RAM (--n-gpu-layers 0 --no-mmproj-offload: measured 564 MiB of
-//	     residual CUDA-context VRAM, never blocked on the GPU). Slower.
+//	cpu  location cpu — consumer priority 1; Qwen3-VL-8B fully in host
+//	     RAM (--n-gpu-layers 0 --no-mmproj-offload: measured 580 MiB of
+//	     residual CUDA-context VRAM, never blocked on the GPU). Slower
+//	     than the GPU placement; on the CPU it beats the 4B where it
+//	     matters — the cold start (one slow image vs three, the bench doc
+//	     has the numbers) — with slightly better captions too.
 //
 // Request input (envelope v2):
 //
@@ -49,7 +52,7 @@
 //	RABBITMQ_URL            the broker. Default amqp://jarvis:jarvis-local@localhost:5672.
 //	IDESC_MODE              gpu | cpu. Default gpu.
 //	IDESC_MODEL             vision GGUF. Default by mode: Qwen3VL-2B-Instruct-Q4_K_M.gguf (gpu),
-//	                          Qwen3VL-4B-Instruct-Q4_K_M.gguf (cpu), under /opt/jarvis-vlm/models/.
+//	                          Qwen3VL-8B-Instruct-Q4_K_M.gguf (cpu), under /opt/jarvis-vlm/models/.
 //	IDESC_MMPROJ            its projector. Default by mode: the matching mmproj-...-F16.gguf.
 //	IDESC_LLAMA_SERVER      llama-server binary. Default /opt/jarvis-engine/bin/llama-server
 //	IDESC_PORT              the coprocess port (in-container). Default 11510.
@@ -92,11 +95,13 @@ const (
 
 // modelForMode is the bench's pick (see docs/benchmarks): the GPU
 // placement runs the 2B because it fits in the 4090's spare VRAM even
-// with a busy brain; the CPU fallback runs the 4B because quality is
-// worth more than speed when the request is already waiting on CPU.
+// with a busy brain; the CPU fallback runs the 8B because it passed every
+// truth the 4B did with slightly better captions and the better cold
+// start (the worker's requests are usually the first of a cold session —
+// the bench doc has the numbers).
 func modelForMode(mode string) string {
 	if mode == "cpu" {
-		return "qwen3-vl-4b"
+		return "qwen3-vl-8b"
 	}
 	return "qwen3-vl-2b"
 }
@@ -394,7 +399,7 @@ func main() {
 
 // nglForMode: GPU loads every layer onto the 4090; CPU keeps them all in
 // host RAM (the cpu placement's residual VRAM is the CUDA-context floor
-// measured in the bench — 488 MiB for the 2B, 564 for the 4B; the binary
+// measured in the bench — 488 MiB for the 2B, 580 for the 8B; the binary
 // always initializes the CUDA backend, whatever --n-gpu-layers says).
 func nglForMode(mode string) int {
 	if mode == "cpu" {
@@ -408,7 +413,7 @@ func nglForMode(mode string) int {
 func modelFileForMode(mode, kind string) string {
 	size := "2B"
 	if mode == "cpu" {
-		size = "4B"
+		size = "8B"
 	}
 	if kind == "mmproj" {
 		return "mmproj-Qwen3VL-" + size + "-Instruct-F16.gguf"

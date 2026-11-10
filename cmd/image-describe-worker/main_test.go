@@ -298,13 +298,16 @@ func TestModelSelection(t *testing.T) {
 	if modelForMode("gpu") != "qwen3-vl-2b" {
 		t.Errorf("gpu placement should run the 2B: %s", modelForMode("gpu"))
 	}
-	if modelForMode("cpu") != "qwen3-vl-4b" {
-		t.Errorf("cpu placement should run the 4B: %s", modelForMode("cpu"))
+	if modelForMode("cpu") != "qwen3-vl-8b" {
+		t.Errorf("cpu placement should run the 8B: %s", modelForMode("cpu"))
 	}
 	if got := modelFileForMode("gpu", "gguf"); got != "Qwen3VL-2B-Instruct-Q4_K_M.gguf" {
 		t.Errorf("gpu gguf file = %s", got)
 	}
-	if got := modelFileForMode("cpu", "mmproj"); got != "mmproj-Qwen3VL-4B-Instruct-F16.gguf" {
+	if got := modelFileForMode("cpu", "gguf"); got != "Qwen3VL-8B-Instruct-Q4_K_M.gguf" {
+		t.Errorf("cpu gguf file = %s", got)
+	}
+	if got := modelFileForMode("cpu", "mmproj"); got != "mmproj-Qwen3VL-8B-Instruct-F16.gguf" {
 		t.Errorf("cpu mmproj file = %s", got)
 	}
 }
