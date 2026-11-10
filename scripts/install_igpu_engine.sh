@@ -21,9 +21,17 @@ set -euo pipefail
 BUILD_ONLY=0
 [[ "${1:-}" == "--build-only" ]] && BUILD_ONLY=1
 
-SRC=/opt/jarvis-igpu/src
+# Overridable so the Dory build (docs/igpu-model-handler.md) is reproducible:
+#   LLAMA_REPO=https://github.com/brianchmielNV/llama.cpp \
+#   LLAMA_REF=dory-support LLAMA_SRC=/opt/jarvis-igpu/src-dory \
+#   LLAMA_BUILD=/opt/jarvis-igpu/build-dory LLAMA_BIN=/opt/jarvis-igpu/bin-dory \
+#   install_igpu_engine.sh --build-only
+SRC="${LLAMA_SRC:-/opt/jarvis-igpu/src}"
 DEST=/opt/jarvis-igpu
-BUILD=$DEST/build
+BUILD="${LLAMA_BUILD:-/opt/jarvis-igpu/build}"
+BIN="${LLAMA_BIN:-/opt/jarvis-igpu/bin}"
+LLAMA_REPO="${LLAMA_REPO:-https://github.com/ggml-org/llama.cpp}"
+LLAMA_REF="${LLAMA_REF:-}"
 
 log() { echo "==> $*"; }
 
@@ -47,21 +55,21 @@ fi
 # 2. Source + build (Vulkan only; CUDA stays with the 4090 engine)
 ########################################
 if [[ ! -d $SRC ]]; then
-  log "Cloning llama.cpp ..."
-  git clone --depth 1 https://github.com/ggml-org/llama.cpp "$SRC"
+  log "Cloning $LLAMA_REPO${LLAMA_REF:+ (ref: $LLAMA_REF)} ..."
+  git clone --depth 1 ${LLAMA_REF:+"--branch" "$LLAMA_REF"} "$LLAMA_REPO" "$SRC"
 fi
 log "Building (Vulkan) ..."
 cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
   -DGGML_VULKAN=ON -DGGML_CUDA=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF > /dev/null
 cmake --build "$BUILD" --config Release -j"$(nproc)" \
   --target llama-server llama-bench
-mkdir -p "$DEST/bin"
-cp "$BUILD"/bin/llama-server "$BUILD"/bin/llama-bench "$DEST/bin/"
+mkdir -p "$BIN"
+cp "$BUILD"/bin/llama-server "$BUILD"/bin/llama-bench "$BIN/"
 # The service and model dir are agent-owned: the server runs as agent and
 # the model is swapped in by hand.
-sudo chown -R agent:agent "$DEST"/bin
+sudo chown -R agent:agent "$BIN"
 sudo install -d -o agent -g agent "$DEST/models"
-log "Installed to $DEST/bin"
+log "Installed to $BIN"
 
 if [[ $BUILD_ONLY -eq 1 ]]; then
   log "--build-only: done"
