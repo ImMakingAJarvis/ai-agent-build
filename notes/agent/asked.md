@@ -117,3 +117,4 @@
 - 2026-11-10T05:06Z Nathan wants a total redesign of the queue webpage: purple as anchor color (others welcome), graphics + moving features, mobile friendly, intuitive; build the new one beside the old ('don't break the old site'), sunset old after he's happy (chat-1794263128-a1f4)
 
 - 2026-11-10T09:19Z Nathan queued the GLM 5.3 flash VRAM cache sweep plan (dashboard upload 2026-11-10) — GLM joins the MoE benchmark list with its own Plane project GLM and 6 cache points
+- 2026-11-10T22:24Z Nathan wants Claude Fable (claude-fable-5-1) available as a planner but strictly opt-in: plan work only, only when he explicitly picks it as the planner — never a default or fallback for the local planner
