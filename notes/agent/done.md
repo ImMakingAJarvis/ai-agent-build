@@ -164,3 +164,9 @@
 - 2026-11-10T03:32Z [chat-1794262173-30ef] PR #215 (EVB-18 resume) unblocked: merged origin/main (4e14c5a) into phase-event-driven-brain — auto-merged clean, no manual edits; pushed 87f4e20, MERGEABLE again, awaits merge
 - 2026-11-10T04:30Z [chat-1794262476-476a] !fixnow: a fix that interrupts the running round and runs first (top-of-fix-band, priority 1000 = photonow); a !fixnow cut-off saves the round's transcript to transcript.preempted.txt + Redis (24h TTL) and Prompt() re-injects a RESUME block on the re-run (PR #219)
 - 2026-11-10T05:06Z [chat-1794263128-a1f4] Plane project WRD 'Website Redesign' (epic WRD-1) + 12-task breakdown WRD-2..13 (queue-page redesign: inventory → design spec → scaffold on new route keeping old site → core views → extras → visual/mobile/a11y → parity → cutover)
+
+- 2026-11-10T09:07Z [plan-plan-event-driven-brain-1794016330-21] image.describe capability worker (EVB-21, PR #222): vlmserver coprocess manager + one-binary gpu/cpu placements (2B gpu spare-VRAM lease-gated, 8B cpu VRAM-neutral), fixed 7-image bench + doc, shell E2E verified with live GPU→CPU fallback
+- 2026-11-10T09:19Z [plan-glm53-flash-vram-sweep-p-1793859678] GLM 5.3 flash VRAM sweep plan broken into 7 queue jobs (pull + 6 points 100-400MB, driver sonnet, kanban epic d635d2fe, Plane GLM-2..7) — no PR, planner job
+- 2026-11-10T11:22Z [plan-glm53-flash-vram-sweep-p-1793859678-1] GLM 5.3 flash model pulled (UD-IQ2_XXS) + provenance (PR #223)
+- 2026-11-10T12:51Z [plan-glm53-flash-vram-sweep-p-1793859678-4] GLM 5.3 flash sweep pt 3/6 (200 MB): engine loads but serves nothing — KDA autotune needs 256 MiB (PR #223)
+- 2026-11-10T13:39Z [chat-1794313175-cda3] iGPU worker down fixed: dashboard+chat containers kept stale host.docker.internal:11435 URLs from before the iGPU container move (9734d81); recreated both (machine panel back up) and jarvis-stack-status now flags engine-URL env drift vs compose (PR #224)
