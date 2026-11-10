@@ -77,7 +77,10 @@ func (w *LocationWorker) Start() error {
 		ch.Close()
 		return fmt.Errorf("declare %s: %w", w.queue, err)
 	}
-	if err := ch.QueueBind(w.queue, w.queue+".#", w.conn.Exchange(), true, nil); err != nil {
+	// Synchronous bind: a noWait bind returns before the broker registers
+	// the binding, and a publish racing it from another channel would be
+	// dropped as unroutable.
+	if err := ch.QueueBind(w.queue, w.queue+".#", w.conn.Exchange(), false, nil); err != nil {
 		ch.Close()
 		return fmt.Errorf("bind %s to %s: %w", w.queue, w.queue+".#", err)
 	}
@@ -185,7 +188,7 @@ func (w *LocationWorker) resubscribe() <-chan amqp.Delivery {
 		log.Printf("location: %s: declare after reconnect: %v", w.queue, err)
 		return nil
 	}
-	if err := ch.QueueBind(w.queue, w.queue+".#", w.conn.Exchange(), true, nil); err != nil {
+	if err := ch.QueueBind(w.queue, w.queue+".#", w.conn.Exchange(), false, nil); err != nil {
 		ch.Close()
 		log.Printf("location: %s: bind after reconnect: %v", w.queue, err)
 		return nil

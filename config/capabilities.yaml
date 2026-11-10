@@ -1,0 +1,52 @@
+# config/capabilities.yaml — the capability catalog (plan §3.5, task EVB-19).
+#
+# Where every capability can run, what it costs, and how long it takes.
+# `jarvis-mq caps` renders this for the model (one line per capability:
+# where / cost / queue depth / typical runtime); resourced (task 26) will
+# budget it; the brain's round preamble will read it. A capability may
+# list several placements — the broker's consumer priority (GPU 10 /
+# iGPU 5 / CPU 1) then delivers each request to the best free one.
+#
+# Worker fields (all required):
+#   location          gpu | igpu | cpu | remote:<host>
+#   model             model id from config/models.yaml
+#   vram_mb           VRAM the placement holds while loaded (0 = none)
+#   ram_mb            host RAM it holds
+#   needs_brain_out   true = needs the 4090's VRAM free of the brain —
+#                     runs in the brain's swap window (docs/brain-swap.md)
+#   start             command that brings the placement up ("" = always on)
+#   stop              command that frees it again
+#   typical_runtime   Go duration — how long one request usually takes
+#   idle_s            unload after this many idle seconds (0 = never)
+#
+# Phase 3 capabilities land as their tasks do (EVB-20..24): their entries
+# are added here the same way.
+
+capabilities:
+  echo:
+    description: "test capability (Phase 2 wait/wake gate): sleeps its delay, writes an artifact, replies"
+    workers:
+      - location: cpu
+        model: echo
+        vram_mb: 0
+        ram_mb: 64
+        needs_brain_out: false
+        start: ""
+        stop: ""
+        typical_runtime: 30s
+        idle_s: 0
+
+  image.generate:
+    description: "text-to-image (art service :8120; Z-Image-Turbo, reference photos via FLUX.2 klein)"
+    workers:
+      - location: gpu
+        # zimage-turbo's models.yaml entry lands with the capability
+        # models (EVB-20..24); the id is reserved here.
+        model: zimage-turbo
+        vram_mb: 12288   # ~12 GB of the 4090's 24.5 — why it needs the brain out
+        ram_mb: 4096
+        needs_brain_out: true
+        start: "docker compose up -d art"
+        stop: "docker compose stop art"
+        typical_runtime: 45s
+        idle_s: 300      # the model reload is expensive — hold it 5 min

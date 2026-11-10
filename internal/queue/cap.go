@@ -58,7 +58,11 @@ func (c *Conn) EnsureCapQueue(name string) error {
 		return fmt.Errorf("cap %s: %w", name, err)
 	}
 	defer ch.Close()
-	if err := ch.QueueBind(name, name+".#", c.Exchange(), true, nil); err != nil {
+	// Synchronous bind: noWait would return once the frame is written,
+	// and a publish on another channel of the same connection is not
+	// ordered after it — the broker can route-check the publish before
+	// the binding is registered and silently drop it (EVB-19).
+	if err := ch.QueueBind(name, name+".#", c.Exchange(), false, nil); err != nil {
 		return fmt.Errorf("cap %s: bind: %w", name, err)
 	}
 	return nil
