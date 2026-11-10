@@ -99,6 +99,10 @@
 - 2026-11-08T12:27Z Nathan: replying to a worker's Discord message must be ignored by the chatbot (never schedule a job), read+used by the worker, and acknowledged with a thumbs-up
 - 2026-11-08T13:24Z Nathan: the igpu should have its own container and its own port, the worker should know the igpu container is different and how to reach it, and the igpu should stay alive almost the whole time — photo swap windows stop only the brain (job chat-1794122808-9116)
 - 2026-11-08T13:50Z Nathan: the image gallery was showing a localhost address — fix it to the IP; standing rules: all links accessible by computers on the network (no localhost), all dates/times use moment, and show the correct timezone (job chat-1794123627-6324)
+- 2026-11-08T15:02Z Nathan: image generation should not need any model (not even the iGPU helper) — pure code that stands up the generator, waits, generates, saves, DMs, galleries, and queues a follow-up with the image if the job asked for one; the job creator decides on follow-ups
+- 2026-11-08T16:03Z 2026-11-08: Nathan asked for auto mode on (nightly gate). It was already on; confirmed. fullauto also on, keepgoing off.
+- 2026-11-03T19:19Z Nathan: make NoBrakes the highest priority and start working on it next
+- 2026-11-08T23:06Z Nathan: the image generator only did 1024x1024 — he wants landscape 16x9 (and by extension other shapes/sizes) (2026-11-08).
 - 2026-11-03T19:19Z Nathan: make NoBrakes the highest priority and start working on it next
 - 2026-11-08T15:02Z Nathan: image generation should not need any model (not even the iGPU helper) — pure code that stands up the generator, waits, generates, saves, DMs, galleries, and queues a follow-up with the image if the job asked for one; the job creator decides on follow-ups
 - 2026-11-08T16:03Z 2026-11-08: Nathan asked for auto mode on (nightly gate). It was already on; confirmed. fullauto also on, keepgoing off.

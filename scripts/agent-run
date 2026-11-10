@@ -506,6 +506,12 @@ $q"); then
 
   # Start Discord watcher so the user can interrupt this job at any time.
   start_watcher
+  # Woken rounds (a job that yielded and the switchboard woke) are
+  # launched with --resume <session-id> by the runner itself, when the
+  # yielding session can be re-attached: EVB-18 measured 71-76% fewer
+  # fresh input tokens per round at equal correctness (docs/benchmarks/
+  # resume-vs-continuation.md). The decision and its fresh-round fallback
+  # live in Runner.Run (internal/agentjob/run.go); nothing here to wire.
   # NoBrakes 6/6: a full-auto round runs under the auto-execution guard
   # (-auto: take the nobrakes:running marker — at most one concurrent
   # auto job — released when the round ends). A supervised round never
