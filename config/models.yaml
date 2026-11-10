@@ -184,3 +184,28 @@ models:
     enabled: true
     home_location: cloud
     fallback_location: none
+
+  # Claude Fable 5.1 (cloud) — the most capable widely released model;
+  # the top cloud planner for big epics. Planner-only by design
+  # (job chat-1794348211-f033): it appears in the plan: selector and runs
+  # an epic only when that epic is explicitly labelled plan:claude-fable-5-1
+  # — never as a default or fallback for the local planner, and not as an
+  # executor or reviewer.
+  # thinking: "" — the Fable family always thinks and REJECTS the
+  # budget_tokens form (400), so the worker must omit the thinking param
+  # entirely; adaptive thinking is the API default.
+  # cost_per_mtok is the input price ($10 in / $50 out per MTok).
+  - id: claude-fable-5-1
+    display_name: Claude Fable (cloud)
+    location: cloud
+    engine: anthropic
+    endpoint: https://api.anthropic.com/v1
+    roles: [planner]
+    context_tokens: 1000000
+    vram_gb: 0
+    ram_gb: 0
+    thinking: ""
+    cost_per_mtok: 10
+    enabled: true
+    home_location: cloud
+    fallback_location: none
