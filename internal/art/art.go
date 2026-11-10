@@ -99,6 +99,66 @@ func (c *Client) GenerateRef(ctx context.Context, prompt, size string, refs []st
 	return c.post(ctx, reqBody)
 }
 
+// Health asks the service for /health and reports whether the model is
+// loaded. err is non-nil when the service cannot be reached or answers
+// with a non-200.
+func (c *Client) Health(ctx context.Context) (loaded bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/health", nil)
+	if err != nil {
+		return false, err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, &ErrUnavailable{Detail: "cannot reach the art service: " + err.Error()}
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return false, &ErrUnavailable{Detail: fmt.Sprintf("art service error %d", res.StatusCode)}
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, 8192))
+	if err != nil {
+		return false, &ErrUnavailable{Detail: "read health: " + err.Error()}
+	}
+	var h struct {
+		Loaded bool `json:"loaded"`
+	}
+	if err := json.Unmarshal(b, &h); err != nil {
+		return false, &ErrUnavailable{Detail: "art service returned bad health JSON: " + err.Error()}
+	}
+	return h.Loaded, nil
+}
+
+// FetchImage downloads a generated image by file name (GET /img/<name>,
+// basename only — the service guards against traversal) and returns the
+// bytes. A generated 1024-class PNG is a few MB; the read is capped at
+// 64 MB.
+func (c *Client) FetchImage(ctx context.Context, name string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/img/"+url.PathEscape(name), nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &ErrUnavailable{Detail: "fetch image: " + err.Error()}
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		return nil, &ErrUnavailable{Detail: fmt.Sprintf("art service error %d: %s", res.StatusCode, strings.TrimSpace(string(b)))}
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, 64<<20))
+	if err != nil {
+		return nil, &ErrUnavailable{Detail: "read image: " + err.Error()}
+	}
+	return b, nil
+}
+
 // FetchRef downloads a staged reference image by name (GET /refs/<name>).
 // The dashboard uses it to pull an image the gallery uploaded so it can be
 // stored as the job's reference sidecar.
