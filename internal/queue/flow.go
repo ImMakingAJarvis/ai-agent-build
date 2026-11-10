@@ -47,7 +47,10 @@ func (c *Conn) EnsureFlowQueue(name string) error {
 		return fmt.Errorf("flow %s: %w", name, err)
 	}
 	defer ch.Close()
-	if err := ch.QueueBind(name, name+".#", c.Exchange(), true, nil); err != nil {
+	// Synchronous bind — see EnsureCapQueue: a noWait bind returns
+	// before the broker has registered the binding, and a publish on
+	// another channel of the same connection can race ahead of it.
+	if err := ch.QueueBind(name, name+".#", c.Exchange(), false, nil); err != nil {
 		return fmt.Errorf("flow %s: bind: %w", name, err)
 	}
 	return nil

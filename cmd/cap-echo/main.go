@@ -6,12 +6,20 @@
 // the request's OutDir, and reply with a Result whose artifacts point at
 // the file (a reference, not the bytes — invariant 7).
 //
+// It runs on the capworker SDK with the SDK's full placement story
+// (plan §3.5): location cpu (consumer priority 1 — the Phase 2 gate's
+// submit publishes at priority 1, so a cpu worker takes it), a heartbeat
+// on the events exchange, and the metrics endpoint behind
+// ECHO_METRICS_ADDR (off by default — the gate does not scrape it).
+//
 // Configuration (env):
 //
-//	RABBITMQ_URL    the broker. Default amqp://jarvis:jarvis-local@localhost:5672.
-//	ECHO_DELAY      how long one echo takes. Default 30s.
-//	ECHO_OUT_DIR    artifact root for requests without an OutDir.
-//	                Default ~/.local/share/jarvis/artifacts.
+//	RABBITMQ_URL         the broker. Default amqp://jarvis:jarvis-local@localhost:5672.
+//	ECHO_DELAY           how long one echo takes. Default 30s.
+//	ECHO_OUT_DIR         artifact root for requests without an OutDir.
+//	                     Default ~/.local/share/jarvis/artifacts.
+//	ECHO_METRICS_ADDR    serve Prometheus /metrics here (e.g. 127.0.0.1:9115).
+//	                     Default: off.
 package main
 
 import (
@@ -132,14 +140,16 @@ func main() {
 	}
 
 	w := capworker.New(capworker.Config{
-		Cap:        capability,
-		Name:       workerName,
-		Model:      "echo",
-		Conn:       conn,
-		Events:     events,
-		Handler:    handler{delay: envDuration("ECHO_DELAY", "30s")},
-		OutDirBase: envOr("ECHO_OUT_DIR", filepath.Join(os.Getenv("HOME"), ".local", "share", "jarvis", "artifacts")),
-		Log:        log.Default(),
+		Cap:         capability,
+		Name:        workerName,
+		Model:       "echo",
+		Location:    "cpu", // consumer priority 1 (LocationPriority); no behavior change — the gate submits at priority 1
+		Conn:        conn,
+		Events:      events,
+		MetricsAddr: os.Getenv("ECHO_METRICS_ADDR"),
+		Handler:     handler{delay: envDuration("ECHO_DELAY", "30s")},
+		OutDirBase:  envOr("ECHO_OUT_DIR", filepath.Join(os.Getenv("HOME"), ".local", "share", "jarvis", "artifacts")),
+		Log:         log.Default(),
 	})
 	if err := w.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("cap-echo: run: %v", err)

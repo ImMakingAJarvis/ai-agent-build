@@ -88,7 +88,9 @@ func (c *Conn) EnsureDLX() error {
 	if _, err := ch.QueueDeclare(DeadQueue, true, false, false, false, nil); err != nil {
 		return fmt.Errorf("dlx: declare queue: %w", err)
 	}
-	if err := ch.QueueBind(DeadQueue, "", DLXExchange, true, nil); err != nil {
+	// Synchronous bind: a dead letter published before a noWait bind is
+	// registered would be unroutable and vanish silently.
+	if err := ch.QueueBind(DeadQueue, "", DLXExchange, false, nil); err != nil {
 		return fmt.Errorf("dlx: bind: %w", err)
 	}
 	return nil

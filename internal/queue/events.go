@@ -8,6 +8,7 @@
 //	agent.<job-id>.<yielded|woken|resumed>
 //	window.<opened|closed>
 //	lease.<granted|released|denied>
+//	worker.<worker-id>.<heartbeat|loaded|unloaded>
 //
 // Events are fire-and-forget and never the source of truth: a lost event
 // is acceptable, so publishing one must never fail or block the emitting
@@ -35,6 +36,7 @@ const (
 	AgentKind  = "agent"  // agent.<job-id>.<state>
 	WindowKind = "window" // window.<state>
 	LeaseKind  = "lease"  // lease.<state>
+	WorkerKind = "worker" // worker.<worker-id>.<state>
 )
 
 // Event is one lifecycle event. Kind/Subject/State are the routing key's
@@ -90,6 +92,14 @@ func WindowEvent(state string, data map[string]any) Event {
 // LeaseEvent builds a lease.<state> event (granted/released/denied).
 func LeaseEvent(state string, data map[string]any) Event {
 	return Event{Kind: LeaseKind, State: state, At: time.Now().UTC(), Data: data}
+}
+
+// WorkerEvent builds a worker.<worker-id>.<state> event (the capworker
+// SDK's heartbeat and loaded/unloaded transitions). The worker id may
+// contain "/" (e.g. "echo@cpu/cap-echo") — only "." is special in a
+// routing key.
+func WorkerEvent(workerID, state string, data map[string]any) Event {
+	return Event{Kind: WorkerKind, Subject: workerID, State: state, At: time.Now().UTC(), Data: data}
 }
 
 // ParseEventRoutingKey splits a routing key into its kind, subject and
