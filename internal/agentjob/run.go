@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
@@ -93,6 +95,38 @@ type Runner struct {
 	// returns a stop function reporting the accumulated watt-hours.
 	// The default (nil) disables sampling. See internal/power.
 	Power func(jobDir string) func() float64
+
+	// restartSigMu guards rsig: the content of the restart-signal file that
+	// interrupted the current round (e.g. "!fixnow"), captured by
+	// signalWatcher before it consumes the file. Run() reads it after Wait to
+	// decide whether the killed round's context should be saved (fixnow.go).
+	restartSigMu sync.Mutex
+	rsig         string
+}
+
+// setRestartSig records what triggered the round's restart (fixnow.go).
+func (r *Runner) setRestartSig(s string) {
+	r.restartSigMu.Lock()
+	r.rsig = s
+	r.restartSigMu.Unlock()
+}
+
+// restartSig returns what triggered the round's restart, "" for a fresh run.
+func (r *Runner) restartSig() string {
+	r.restartSigMu.Lock()
+	defer r.restartSigMu.Unlock()
+	return r.rsig
+}
+
+// readRestartSignal returns the trimmed content of a restart-signal file —
+// the command that wrote it ("!fixnow", "!restart", "!photonow") — or "" when
+// the file is missing or empty.
+func readRestartSignal(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // ModelFor names the model a driver uses.
@@ -349,6 +383,12 @@ func (r *Runner) Prompt(j Job, driver, note string) string {
 	if cont := r.continuationBlock(j); cont != "" {
 		b.WriteString(cont)
 	}
+	// A round cut off by a !fixnow preemption resumes with its saved context
+	// (fixnow.go). The check always runs and is empty for a novel job; it
+	// consumes the record so the block appears exactly once.
+	if fc := TakeFixNowContext(j.ID); fc != nil {
+		b.WriteString(fixNowResumeBlock(fc))
+	}
 	b.WriteString(j.Instructions)
 	if note != "" {
 		fmt.Fprintf(&b, "\n\nInstructions from me for this round (they take priority): %s\n", note)
@@ -456,6 +496,10 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	if driver == "" {
 		driver = "local"
 	}
+	// A round only saves its fixnow context if ITS OWN restart signal was a
+	// !fixnow (fixnow.go); reset the captured signal so a reused Runner can
+	// never carry one from a previous round into this round's save decision.
+	r.setRestartSig("")
 	// A stop signal left over from a previous round (one that landed after
 	// that round's watcher was gone) must not park this round's job: clear
 	// it before the claim. A stop pressed during this round lands after the
@@ -558,11 +602,40 @@ func (r *Runner) Run(ctx context.Context, id, round, driver, note string) (Job, 
 	if ctx.Err() != nil && runErr == nil {
 		runErr = ctx.Err()
 	}
+	out := buf.String()
+	// A !fixnow preemption cut this round off: save what it was working on
+	// (fixnow.go) so the job's re-run picks up where it stopped instead of
+	// starting cold. A plain !restart is a deliberate fresh start and saves
+	// nothing. Best-effort — a dead Redis only means the re-run starts cold.
+	if sig := r.restartSig(); sig == FixNowSignal {
+		tail := boundTranscript(out)
+		// Durable copy of the cut-off round, kept separate from transcript.txt
+		// (which the re-run truncates at the start of its own round) so the
+		// resume block can point the model at the interrupted work. Best-effort:
+		// a failed write only means the model has the inline tail, not more.
+		if err := os.WriteFile(filepath.Join(r.Store.JobDir(id), FixNowPreemptedFile), []byte(tail), 0o644); err != nil {
+			log.Printf("agentjob: write preempted transcript for %s: %v", id, err)
+		}
+		fc := &FixNowContext{
+			JobID:      id,
+			Title:      j.Title,
+			Driver:     driver,
+			Model:      j.Model,
+			Round:      j.State.Round,
+			SavedAt:    time.Now().UTC().Format(time.RFC3339),
+			Transcript: tail,
+		}
+		if err := SaveFixNowContext(fc); err != nil {
+			// The round was killed (runErr is set), so a save failure here is a
+			// real Redis error worth seeing — it means the re-run starts cold.
+			log.Printf("agentjob: save fixnow context for %s: %v", id, err)
+		}
+	}
 	var wh float64
 	if stopPower != nil {
 		wh = stopPower()
 	}
-	return r.finish(j, rec, buf.String(), runErr, wh)
+	return r.finish(j, rec, out, runErr, wh)
 }
 
 // defaultPhotoCommand is the code executor for a photo job.
@@ -664,6 +737,12 @@ func (r *Runner) signalWatcher(id string, cmd *exec.Cmd) {
 	for {
 		if r.RestartSignalFile != "" {
 			if _, err := os.Stat(r.RestartSignalFile); err == nil {
+				// Capture what triggered the restart ("!fixnow", "!restart",
+				// "!photonow") before consuming the file, so the killed round
+				// can save its context for the re-run when a !fixnow cut it
+				// off (Run() reads r.restartSig() after Wait). A plain restart
+				// carries no context.
+				r.setRestartSig(readRestartSignal(r.RestartSignalFile))
 				// Kill first, then re-queue: if the command already exited,
 				// Restart() is a no-op on a non-running job, so a late
 				// signal can never re-run a finished job.
