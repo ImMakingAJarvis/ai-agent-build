@@ -14,7 +14,7 @@ import (
 // Known values from the PLAN.md field table.
 var (
 	Locations  = []string{"local", "cloud"}
-	Engines    = []string{"ollama", "llama.cpp", "vllm", "anthropic", "openai-compatible"}
+	Engines    = []string{"ollama", "llama.cpp", "vllm", "anthropic", "openai-compatible", "whisper"}
 	Roles      = []string{"planner", "executor", "reviewer"}
 	Placements = []string{"gpu", "cpu", "igpu", "cloud", "none"}
 )

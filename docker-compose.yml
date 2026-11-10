@@ -625,6 +625,94 @@ services:
       - /opt/jarvis-vlm:/opt/jarvis-vlm:ro
       - /usr/local/cuda-13.1/lib64:/usr/local/cuda-13.1/lib64:ro
 
+  # ---------------- audio-transcribe-worker (audio.transcribe capability) -
+  # The CPU worker behind cap.audio.transcribe (plan task EVB-22): consumes
+  # cap.audio.transcribe, transcribes each clip with faster-whisper (Whisper
+  # small, CT2 int8 — docs/benchmarks/audio-transcribe-whisper-benchmark.md)
+  # as a per-request Python subprocess, and replies with a Result whose
+  # artifacts are one JSON + txt per clip plus an index. CPU only — no
+  # nvidia runtime, no swap window: it runs alongside the brain (the lease
+  # checks host RAM per session). The model is bind-mounted read-only from
+  # /opt/jarvis-whisper; clips arrive as read-only refs (the worker never
+  # writes to its inputs).
+  audio-transcribe-worker:
+    build:
+      context: .
+      dockerfile: docker/jarvis-audio-worker/Dockerfile
+      args: { BIN: cmd/audio-transcribe-worker }
+    image: jarvis/audio-transcribe-worker:local
+    container_name: jarvis-audio-transcribe-worker
+    restart: always
+    environment:
+      HOME: /home/agent
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      # the bench's numbers were taken at 16 threads
+      AT_THREADS: "16"
+    volumes:
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /opt/jarvis-whisper:/opt/jarvis-whisper:ro
+
+  # ---------------- llm-small-worker (llm.small capability) --------------
+  # The two placements behind cap.llm.small (plan task EVB-23): one
+  # binary, LMS_MODE selects gpu (Qwen2.5-7B-Instruct fully on the 4090's
+  # SPARE VRAM, ~5.4 GB measured — lease-gated per consume session at
+  # 6.5 GB free, i.e. only in the brain's co-scheduling window) or cpu
+  # (the same 7B in host RAM, --n-gpu-layers 0 — the fallback the broker
+  # picks whenever the brain has eaten the spare). BOUNDARY: the iGPU
+  # helper (Qwen2.5-3B on :11435) stays the CONVERSATION fallback during
+  # windows; llm.small is for batch sub-tasks only (capabilities.yaml).
+  # Each runs llama-server as its own coprocess (internal/vlmserver),
+  # unloading it after the idle window; the engine/model/CUDA mounts
+  # mirror the engine service because the coprocess is the host's pinned
+  # llama-server. The nvidia runtime is needed in BOTH modes: the binary
+  # links libcuda.so.1, which only the nvidia container runtime injects.
+  llm-small-worker-gpu:
+    build:
+      context: .
+      dockerfile: docker/jarvis-vlm-worker/Dockerfile
+      args: { BIN: cmd/llm-small-worker }
+    image: jarvis/llm-small-worker:local
+    container_name: jarvis-llm-small-worker-gpu
+    restart: always
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      HOME: /home/agent
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      LMS_MODE: gpu
+      # CUDA 13.1 toolkit libs (cudart .so.13) bind-mounted below
+      LD_LIBRARY_PATH: /usr/local/cuda-13.1/lib64
+      # the 7B holds ~5.4 GB (bench); require 6.5 GB free so the load
+      # only happens in the plan's co-scheduling window (brain out for a
+      # 12 GB image job → ~10 GB free). While the idle brain holds the
+      # spare (~3.7 GB free), the lease refuses and the cpu placement
+      # takes the request.
+      LMS_MIN_FREE_MB: "6656"
+    volumes:
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /opt/jarvis-engine:/opt/jarvis-engine:ro
+      - /opt/jarvis-llm-small:/opt/jarvis-llm-small:ro
+      - /usr/local/cuda-13.1/lib64:/usr/local/cuda-13.1/lib64:ro
+
+  llm-small-worker-cpu:
+    image: jarvis/llm-small-worker:local
+    container_name: jarvis-llm-small-worker-cpu
+    restart: always
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      HOME: /home/agent
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      LMS_MODE: cpu
+      LD_LIBRARY_PATH: /usr/local/cuda-13.1/lib64
+      # the bench's CPU numbers were taken at 16 threads
+      LMS_THREADS: "16"
+    volumes:
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /opt/jarvis-engine:/opt/jarvis-engine:ro
+      - /opt/jarvis-llm-small:/opt/jarvis-llm-small:ro
+      - /usr/local/cuda-13.1/lib64:/usr/local/cuda-13.1/lib64:ro
+
   # ---------------- monitoring ----------------
   prometheus:
     image: prom/prometheus:v2.53.0
