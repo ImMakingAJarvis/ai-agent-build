@@ -30,6 +30,7 @@ for rollback.
 | `nvidia-exporter` | GPU metrics (nvidia-smi wrapper, nvidia runtime) | 3001 | `jarvis-nvidia-exporter` | — |
 | `jellyfin` | Reel media server (Jellyfin 12.4, 4090 NVENC transcoding); demo library now, NAS share at `/mnt/jarvis` later. docs/reel/jellyfin-baseline.md | 8096 (LAN) | `jarvis-jellyfin` | config: `/var/lib/jarvis/jellyfin/config`; media ro: `/var/lib/jarvis/jellyfin/demo`; admin creds in `~/.config/jarvis/jellyfin.env` (never committed) |
 | `token-ledger` | Polls the engines' `llamacpp:*` token counters (brain 11434, iGPU 11435), folds restarts into an all-time cumulative and re-exposes it as `jarvis_tokens_total` — feeds the Grafana "Tokens (historical)" row (all-time stat + per-day/week/month buckets) | 9102 (compose network) | `jarvis-token-ledger` | `~/.local/share/jarvis/token-ledger/state.json` |
+| `resourced` | VRAM/RAM ledger and lease broker (EVB-25): keeps the brain's standing GPU lease (measured live from nvidia-smi, never hardcoded) plus the workers' leases; POST /lease grants when it fits, queues (FIFO) when not, denies with a reason when never; every grant/release/deny emits a `lease.*` event on the events exchange | 9104 (host localhost; compose net as `jarvis-resourced`) | `jarvis-resourced` (nvidia runtime for the smi reads) | in-memory (re-measured on every startup) |
 
 The full map of every service and its connections — including the host
 units (agent-run, plane-bridge, jarvis-watchdog, the engines) and the

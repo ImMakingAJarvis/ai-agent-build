@@ -1,0 +1,261 @@
+package resources
+
+import (
+	"strings"
+	"testing"
+)
+
+// testLedger is the box of the plan: a 4090 with 24576 MB VRAM and 128 GB
+// of shared system RAM (cpu and igpu both draw it).
+func testLedger() *Ledger {
+	return New(
+		Device{Name: DeviceGPU, Present: true, VRAMTotalMB: 24576},
+		Device{Name: DeviceCPU, Present: true, RAMTotalMB: 131072, Cores: 16},
+		Device{Name: DeviceIGPU, Present: true, RAMTotalMB: 131072},
+	)
+}
+
+func req(holder, device string, vram, ram int64) Request {
+	return Request{Holder: holder, Capability: "test", Device: device, VRAMMB: vram, RAMMB: ram}
+}
+
+func status(t *testing.T, got, want Outcome) {
+	t.Helper()
+	if got.Status != want.Status {
+		t.Fatalf("status = %q (reason %q), want %q", got.Status, got.Reason, want.Status)
+	}
+}
+
+// TestRequestTable is the policy seed: grant if it fits (total − leases),
+// queue if not but it might later, deny with a reason if never.
+func TestRequestTable(t *testing.T) {
+	tests := []struct {
+		name   string
+		req    Request
+		want   Status
+		reason string // substring of the denial reason, when denied
+	}{
+		{"grants: fits in the free VRAM remainder", req("w", DeviceGPU, 4096, 512), Granted, ""},
+		{"grants: exactly the free remainder", req("w", DeviceGPU, 24576, 0), Granted, ""},
+		{"grants: RAM-only lease on the cpu", req("w", DeviceCPU, 0, 4096), Granted, ""},
+		{"grants: RAM-only lease on the igpu (shared pool)", req("w", DeviceIGPU, 0, 4096), Granted, ""},
+		{"denies: RAM over the pool total", req("w", DeviceCPU, 0, 131073), Denied, "the box has 131072 MB total"},
+		{"denies: unknown device", req("w", "tpu", 0, 1), Denied, "unknown device"},
+		{"denies: unknown remote host before self-report", req("w", "remote:gpu-rack", 0, 1), Denied, "no self-report"},
+		{"denies: VRAM bigger than the device total", req("w", DeviceGPU, 24577, 0), Denied, "has 24576 MB total"},
+		{"denies: RAM bigger than the box total", req("w", DeviceCPU, 0, 200000), Denied, "the box has 131072 MB total"},
+		{"denies: VRAM requested on a RAM-only device", req("w", DeviceCPU, 1024, 0), Denied, "has no VRAM"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := testLedger().Request(tt.req)
+			status(t, got, Outcome{Status: tt.want})
+			if tt.want == Denied && tt.reason != "" && !strings.Contains(got.Reason, tt.reason) {
+				t.Errorf("reason %q missing %q", got.Reason, tt.reason)
+			}
+			if tt.want == Queued && got.Position != 1 {
+				t.Errorf("queue position = %d, want 1", got.Position)
+			}
+		})
+	}
+}
+
+// TestAbsentDevice: a probe that failed (the GPU is off) denies instead
+// of guessing at capacity.
+func TestAbsentDevice(t *testing.T) {
+	l := New(Device{Name: DeviceGPU, Present: false})
+	got := l.Request(req("w", DeviceGPU, 1024, 0))
+	status(t, got, Outcome{Status: Denied})
+	if !strings.Contains(got.Reason, "not present") {
+		t.Errorf("reason %q missing 'not present'", got.Reason)
+	}
+}
+
+// TestSharedRAMPool: cpu, igpu and gpu leases all draw the same system
+// RAM pool, so the remainder is checked across devices.
+func TestSharedRAMPool(t *testing.T) {
+	l := testLedger()
+	// 64 GB on the cpu, 64 GB on the igpu: the pool (128 GB) is full.
+	if got := l.Request(req("a", DeviceCPU, 0, 65536)); got.Status != Granted {
+		t.Fatalf("cpu lease: %v", got)
+	}
+	if got := l.Request(req("b", DeviceIGPU, 0, 65536)); got.Status != Granted {
+		t.Fatalf("igpu lease: %v", got)
+	}
+	// The third one does not fit — but it might, so it queues, not denies.
+	if got := l.Request(req("c", DeviceCPU, 0, 1024)); got.Status != Queued {
+		t.Fatalf("third lease = %q, want queued", got.Status)
+	}
+}
+
+// TestReleaseReevaluate: releasing a lease frees the remainder, and the
+// FIFO queue is re-evaluated — the earliest waiting lease that now fits
+// is the one granted, and a swap window (the brain's standing lease
+// shrinking to zero) does the same.
+func TestReleaseReevaluate(t *testing.T) {
+	l := testLedger()
+	brain := l.Request(req(BrainHolder, DeviceGPU, 20480, 0))
+	worker := l.Request(req("worker", DeviceGPU, 2048, 0))
+	if brain.Status != Granted || worker.Status != Granted {
+		t.Fatalf("setup: %v / %v", brain.Status, worker.Status)
+	}
+	// 2048 MB free: both requests are bigger, so both queue.
+	first := l.Request(req("first", DeviceGPU, 3072, 0))
+	second := l.Request(req("second", DeviceGPU, 2560, 0))
+	if first.Status != Queued || second.Status != Queued {
+		t.Fatalf("queue setup: %v / %v", first.Status, second.Status)
+	}
+	if second.Position != 2 {
+		t.Errorf("second position = %d, want 2", second.Position)
+	}
+	if outs := l.Reevaluate(); len(outs) != 0 {
+		t.Fatalf("reevaluate with 2048 MB free moved %d leases, want 0", len(outs))
+	}
+	// The worker's job finishes: 4096 MB free. Only the FIFO-first
+	// (3072) fits; the second (2560) stays behind it.
+	if _, ok := l.Release(worker.Lease.ID); !ok {
+		t.Fatal("releasing the worker lease failed")
+	}
+	outs := l.Reevaluate()
+	if len(outs) != 1 || outs[0].Status != Granted || outs[0].Lease.ID != first.Lease.ID {
+		t.Fatalf("reevaluate = %+v, want the FIFO-first lease granted", outs)
+	}
+	if len(l.Queued()) != 1 || l.Queued()[0].ID != second.Lease.ID {
+		t.Errorf("queue after the first grant = %+v, want the second waiting", l.Queued())
+	}
+	// The swap window opens: the brain's standing lease measures to
+	// zero, and the last waiter fits in what is left.
+	l.RefreshBrainLease(0)
+	outs = l.Reevaluate()
+	if len(outs) != 1 || outs[0].Status != Granted || outs[0].Lease.ID != second.Lease.ID {
+		t.Fatalf("reevaluate in the window = %+v, want the FIFO-second lease granted", outs)
+	}
+	if len(l.Queued()) != 0 {
+		t.Error("the queue should be empty once both fit")
+	}
+	// The brain is back: the queue re-evaluates to nothing (it is empty,
+	// and a shrinking remainder never re-takes granted leases).
+	l.RefreshBrainLease(20480)
+	if outs = l.Reevaluate(); len(outs) != 0 {
+		t.Fatalf("reevaluate with the brain back moved %d leases, want 0", len(outs))
+	}
+}
+
+// TestReleaseWithdrawsQueued: DELETE on a queued lease withdraws it.
+func TestReleaseWithdrawsQueued(t *testing.T) {
+	l := testLedger()
+	if got := l.Request(req(BrainHolder, DeviceGPU, 19456, 0)); got.Status != Granted {
+		t.Fatalf("brain setup: %v", got)
+	}
+	queued := l.Request(req("w", DeviceGPU, 20480, 0))
+	if queued.Status != Queued {
+		t.Fatalf("setup: %v", queued)
+	}
+	if lease, ok := l.Release(queued.Lease.ID); !ok || lease.Holder != "w" {
+		t.Fatalf("withdrawing the queued lease: ok=%v lease=%+v", ok, lease)
+	}
+	if len(l.Queued()) != 0 {
+		t.Error("queue should be empty after the withdrawal")
+	}
+	if _, ok := l.Release(queued.Lease.ID); ok {
+		t.Error("releasing the same id twice should report not found")
+	}
+}
+
+// TestBrainStandingLease: the brain's lease is measured, created on the
+// first refresh (created=true) and resized in place afterwards (same
+// id, no second lease, created=false).
+func TestBrainStandingLease(t *testing.T) {
+	l := testLedger()
+	lease, created := l.RefreshBrainLease(19456)
+	if !created {
+		t.Fatal("first refresh should create the standing lease")
+	}
+	if lease.Holder != BrainHolder || lease.Device != DeviceGPU || lease.VRAMMB != 19456 {
+		t.Errorf("standing lease = %+v", lease)
+	}
+	// It counts against the free remainder like any other lease.
+	if got := l.Request(req("w", DeviceGPU, 24576, 0)); got.Status != Queued {
+		t.Errorf("full-GPU request with the brain in = %q, want queued", got.Status)
+	}
+	// The conversation deepens: the KV cache grows, the lease is resized
+	// in place.
+	resized, created := l.RefreshBrainLease(21504)
+	if created {
+		t.Error("second refresh should not create a second standing lease")
+	}
+	if resized.ID != lease.ID {
+		t.Errorf("resize changed the lease id: %s -> %s", lease.ID, resized.ID)
+	}
+	if got := len(l.ActiveLeases()); got != 1 {
+		t.Errorf("active leases = %d, want 1 (the standing lease)", got)
+	}
+	// Negative readings clamp to zero (the GPU is empty in the window).
+	l.RefreshBrainLease(-5)
+	if leases := l.ActiveLeases(); len(leases) != 1 || leases[0].VRAMMB != 0 {
+		t.Errorf("after clamp: %+v", leases)
+	}
+}
+
+// TestReevaluateDeniesShrunkDevice: a capacity refresh that shrinks the
+// device below a queued request denies it with a reason.
+func TestReevaluateDeniesShrunkDevice(t *testing.T) {
+	l := New(Device{Name: DeviceGPU, Present: true, VRAMTotalMB: 24576})
+	if got := l.Request(req(BrainHolder, DeviceGPU, 8192, 0)); got.Status != Granted {
+		t.Fatalf("brain setup: %v", got)
+	}
+	queued := l.Request(req("w", DeviceGPU, 20000, 0))
+	if queued.Status != Queued {
+		t.Fatalf("setup: %v", queued)
+	}
+	// A swap-out box with less VRAM than was probed at start.
+	l.SetDevice(Device{Name: DeviceGPU, Present: true, VRAMTotalMB: 16384})
+	outs := l.Reevaluate()
+	if len(outs) != 1 || outs[0].Status != Denied {
+		t.Fatalf("reevaluate = %+v, want one denial", outs)
+	}
+	if !strings.Contains(outs[0].Reason, "no longer fits") {
+		t.Errorf("reason %q missing 'no longer fits'", outs[0].Reason)
+	}
+	if len(l.Queued()) != 0 {
+		t.Error("the denied lease should leave the queue")
+	}
+}
+
+// TestStateSnapshot: GET /state shows devices, the active leases
+// (including the brain's) and the queue in FIFO order.
+func TestStateSnapshot(t *testing.T) {
+	l := testLedger()
+	l.RefreshBrainLease(10240)
+	queued := l.Request(req("w", DeviceGPU, 20480, 0))
+	if queued.Status != Queued {
+		t.Fatalf("setup: %v", queued)
+	}
+	st := l.State()
+	if len(st.Devices) != 3 {
+		t.Errorf("devices = %d, want 3", len(st.Devices))
+	}
+	if len(st.Leases) != 1 || st.Leases[0].Holder != BrainHolder {
+		t.Errorf("active leases = %+v, want the brain standing lease", st.Leases)
+	}
+	if len(st.Queued) != 1 || st.Queued[0].ID != queued.Lease.ID {
+		t.Errorf("queue = %+v, want the queued request", st.Queued)
+	}
+}
+
+// TestGrantOrdering: leases list in grant (id) order, l10 before l2.
+func TestGrantOrdering(t *testing.T) {
+	l := testLedger()
+	for i := 0; i < 12; i++ {
+		if got := l.Request(req("w", DeviceCPU, 0, 64)); got.Status != Granted {
+			t.Fatalf("lease %d: %v", i, got)
+		}
+	}
+	leases := l.ActiveLeases()
+	if len(leases) != 12 {
+		t.Fatalf("leases = %d, want 12", len(leases))
+	}
+	if leases[0].ID != "l1" || leases[10].ID != "l11" || leases[11].ID != "l12" {
+		t.Errorf("grant order broken: first=%s tenth=%s last=%s", leases[0].ID, leases[10].ID, leases[11].ID)
+	}
+}

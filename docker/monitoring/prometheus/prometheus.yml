@@ -47,3 +47,9 @@ scrape_configs:
   - job_name: "switchboard"
     static_configs:
       - targets: ["jarvis-switchboard:9103"]
+
+  # VRAM/RAM ledger (plan task EVB-25): leases per device (count + MB),
+  # the wait queue depth, lease decisions and wait times, live capacities.
+  - job_name: "resourced"
+    static_configs:
+      - targets: ["jarvis-resourced:9104"]

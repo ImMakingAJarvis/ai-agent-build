@@ -790,6 +790,32 @@ services:
     volumes:
       - /home/agent/.local/share/jarvis/token-ledger:/state
 
+  # VRAM/RAM ledger and lease broker (plan task EVB-25; docs/services.md):
+  # reads the live memory readings (nvidia-smi + /proc/meminfo, the nvidia
+  # runtime + smi wrapper like the ha service), keeps the brain's standing
+  # GPU lease, and brokers the capability workers' leases over a localhost
+  # HTTP API (POST /lease, DELETE /lease/<id>, GET /state). Every
+  # grant/release/deny emits a lease.* event on the events exchange; the
+  # window controller (EVB-27) reuses this ledger.
+  resourced:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/resourced }
+    image: jarvis/resourced:local
+    container_name: jarvis-resourced
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9104:9104"   # lease API + metrics: host localhost only
+    runtime: nvidia
+    environment:
+      LISTEN_ADDR: ":9104"
+      REFRESH_INTERVAL: 30s
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      NVIDIA_VISIBLE_DEVICES: "all"
+    volumes:
+      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
+
   grafana:
     image: grafana/grafana:11.4.0
     container_name: jarvis-grafana

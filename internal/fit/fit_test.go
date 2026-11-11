@@ -17,9 +17,9 @@ func model(vramGB, ramGB float64) registry.Model {
 // TestDecision is the A4 acceptance criterion: mocked nvidia-smi/memory
 // readings drive all three outcomes.
 func TestDecision(t *testing.T) {
-	local := model(20, 80)  // the MoE shape: 20 GiB VRAM, 80 GiB RAM
-	dense := model(20, 0)   // the dense 27B shape: VRAM, CPU fallback is cheap
-	cloud := model(0, 0)    // cloud models need nothing on this box
+	local := model(20, 80) // the MoE shape: 20 GiB VRAM, 80 GiB RAM
+	dense := model(20, 0)  // the dense 27B shape: VRAM, CPU fallback is cheap
+	cloud := model(0, 0)   // cloud models need nothing on this box
 	tests := []struct {
 		name string
 		m    registry.Model
@@ -44,38 +44,52 @@ func TestDecision(t *testing.T) {
 	}
 }
 
-func TestParseGPUFree(t *testing.T) {
-	got, err := parseGPUFree("2504\n")
+func TestParseGPUMem(t *testing.T) {
+	free, total, err := parseGPUMem("2504, 24564\n")
 	if err != nil {
 		t.Fatalf("single GPU: %v", err)
 	}
-	if want := 2504.0 / 1024; got != want {
-		t.Errorf("single GPU = %v GiB, want %v", got, want)
+	if want := 2504.0 / 1024; free != want {
+		t.Errorf("single GPU free = %v GiB, want %v", free, want)
 	}
-	got, err = parseGPUFree(" 2504 \n16000\n")
+	if want := 24564.0 / 1024; total != want {
+		t.Errorf("single GPU total = %v GiB, want %v", total, want)
+	}
+	free, total, err = parseGPUMem(" 2504, 24564 \n16000, 16384\n")
 	if err != nil {
 		t.Fatalf("multi GPU: %v", err)
 	}
-	if want := 16000.0 / 1024; got != want {
-		t.Errorf("multi GPU = %v GiB, want %v (the emptiest GPU)", got, want)
+	if want := 16000.0 / 1024; free != want {
+		t.Errorf("multi GPU free = %v GiB, want %v (the emptiest GPU)", free, want)
 	}
-	if _, err = parseGPUFree("garbage\n"); err == nil {
+	if want := 16384.0 / 1024; total != want {
+		t.Errorf("multi GPU total = %v GiB, want %v (the emptiest GPU's own total)", total, want)
+	}
+	if _, _, err = parseGPUMem("garbage\n"); err == nil {
 		t.Error("garbage input should fail")
 	}
-	if _, err = parseGPUFree(""); err == nil {
+	if _, _, err = parseGPUMem(""); err == nil {
 		t.Error("no GPUs should fail")
 	}
 }
 
-func TestParseMemAvailable(t *testing.T) {
-	got, err := parseMemAvailable([]byte("MemTotal:       128661436 kB\nMemFree:        50000000 kB\nMemAvailable:   59946448 kB\n"))
+func TestParseMemField(t *testing.T) {
+	mi := []byte("MemTotal:       128661436 kB\nMemFree:        50000000 kB\nMemAvailable:   59946448 kB\n")
+	got, err := parseMemField(mi, "MemAvailable:")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if want := 59946448.0 / 1024 / 1024; got != want {
 		t.Errorf("MemAvailable = %v GiB, want %v", got, want)
 	}
-	if _, err = parseMemAvailable([]byte("MemTotal: 1 kB\n")); err == nil {
+	got, err = parseMemField(mi, "MemTotal:")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if want := 128661436.0 / 1024 / 1024; got != want {
+		t.Errorf("MemTotal = %v GiB, want %v", got, want)
+	}
+	if _, err = parseMemField([]byte("MemTotal: 1 kB\n"), "MemAvailable:"); err == nil {
 		t.Error("missing MemAvailable should fail")
 	}
 }
@@ -91,7 +105,7 @@ func TestLiveReadings(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(dir, "fake-smi")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho 20480\n"), 0o755); err != nil {
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho \"20480, 24564\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	l := Live{Bin: bin, MemInfo: meminfo}
@@ -104,6 +118,12 @@ func TestLiveReadings(t *testing.T) {
 	}
 	if r.FreeRAMGB != 10 { // 10485760 kB
 		t.Errorf("FreeRAMGB = %v, want 10", r.FreeRAMGB)
+	}
+	if r.TotalVRAMGB != 24564.0/1024 {
+		t.Errorf("TotalVRAMGB = %v, want %v", r.TotalVRAMGB, 24564.0/1024)
+	}
+	if r.TotalRAMGB != 128661436.0/1024/1024 {
+		t.Errorf("TotalRAMGB = %v, want %v", r.TotalRAMGB, 128661436.0/1024/1024)
 	}
 }
 
