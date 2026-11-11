@@ -31,11 +31,18 @@
 //     §3.5). A capability that may run in several places runs one worker
 //     per placement; while the GPU worker is busy or has no lease, its
 //     messages fall to the cheaper placement.
-//   - a lease hook (plan §3.6): called before every consume session; an
-//     error means "not granted now" and the worker backs off instead of
-//     consuming (its messages stay on the queue for a lower-priority
-//     placement). The default stub assumes granted — the resourced
-//     broker integration lands in task 26.
+//   - a resourced lease (plan §3.6, lease.go): before every consume
+//     session the worker requests a lease from the resourced broker
+//     (LeaseBroker) — holder the worker identity, capability, device its
+//     location, memory the catalog's entry for the placement. No lease
+//     means it does not consume (its messages stay on the queue for a
+//     lower-priority placement — the fallback emerges from the consumer
+//     priorities, no router); a grant while it waits means it
+//     re-consumes; a lost lease (revocation) drains the in-flight
+//     delivery, then cancels the consumer. When resourced is unreachable
+//     the worker fails open to the pre-lease behavior (assumes granted,
+//     warning logged) and re-syncs on its poll tick. No broker
+//     (LeaseBroker nil) = un-gated.
 //   - idle unload: after IdleS without a request the worker calls Unload
 //     to free its resources (model weights, a GPU process) and calls
 //     Load again before the next request it has to handle.
@@ -101,14 +108,27 @@ type Config struct {
 	// Priority overrides the location-derived consumer priority; 0 =
 	// derive it from Location.
 	Priority int
-	// Lease acquires this worker's resource lease before it consumes
-	// (plan §3.6). It is called at the start of every consume session;
-	// an error means "not granted now" — the worker backs off and
-	// retries, and its messages stay on the queue for a lower-priority
-	// placement of the same capability (the resourced broker integration,
-	// which cancels the consumer on lease loss, lands in task 26). nil =
-	// the stub that assumes granted.
-	Lease func(ctx context.Context) error
+	// LeaseBroker gates this worker's consuming on a resourced lease
+	// (plan §3.6): the worker requests the spec's lease before every
+	// consume session and holds it while it consumes — released on idle
+	// unload (the resources are free again) and on shutdown. No lease
+	// means no consuming: the messages fall to a lower-priority
+	// placement of the same capability. A queued lease is re-checked on
+	// the poll interval; when it is granted the worker re-consumes. A
+	// lost lease (revoked by the window controller) drains the in-flight
+	// delivery, then cancels the consumer. When the broker is unreachable
+	// the worker fails open (assumes granted, warning logged) and
+	// re-syncs on the poll tick. nil = un-gated (the pre-lease behavior).
+	LeaseBroker LeaseBroker
+	// LeaseSpec is what the worker requests from the broker: holder (the
+	// worker identity), capability, device (its location) and the memory
+	// footprints — the capability catalog's entry for the placement
+	// (LeaseFor builds it). Used only when LeaseBroker is set.
+	LeaseSpec LeaseSpec
+	// LeasePollS is the lease state machine's poll interval: re-ask a
+	// denied lease, check a queued one for its grant, a held one for a
+	// revocation. 0 = default 30 s (minimum 1 s).
+	LeasePollS time.Duration
 	// IdleS is how long the worker may sit without a request before
 	// Unload is called to free its resources. 0 = never idle-unload.
 	IdleS time.Duration
@@ -147,6 +167,8 @@ type Worker struct {
 	cfg     Config
 	log     *log.Logger
 	metrics *Metrics
+	// lease is the lease state machine (plan §3.6); nil = un-gated.
+	lease *leaseManager
 
 	// loaded and the transition calls (Load/Unload) are guarded by mu:
 	// the idle watchdog runs concurrently with the delivery loop, and an
@@ -173,6 +195,13 @@ func New(cfg Config) *Worker {
 		cfg.HeartbeatS = 30 * time.Second
 	}
 	w := &Worker{cfg: cfg, log: cfg.Log, metrics: NewMetrics()}
+	if cfg.LeaseBroker != nil && cfg.LeaseSpec.Capability != "" {
+		poll := cfg.LeasePollS
+		if poll <= 0 {
+			poll = 30 * time.Second
+		}
+		w.lease = newLeaseManager(cfg.LeaseBroker, cfg.LeaseSpec, poll, cfg.Log)
+	}
 	// A worker starts with its resources resident: the first idle
 	// window is measured from startup, not from the first request.
 	w.loaded = true
@@ -214,14 +243,50 @@ func (w *Worker) effectivePriority() int {
 	return LocationPriority(w.cfg.Location)
 }
 
-// lease asks for this worker's resource lease (plan §3.6). The nil hook
-// is the task-19 stub: it assumes granted, and task 26 replaces it with
-// the resourced broker's grant.
-func (w *Worker) lease(ctx context.Context) error {
-	if w.cfg.Lease == nil {
-		return nil
+// ensureLease moves the lease state machine forward and reports whether
+// the worker may consume (plan §3.6): a granted lease, or a fail-open
+// assumption while resourced is unreachable. A worker without a broker
+// is un-gated: it always may (the pre-lease behavior).
+func (w *Worker) ensureLease(ctx context.Context) bool {
+	if w.lease == nil {
+		return true
 	}
-	return w.cfg.Lease(ctx)
+	return w.lease.ensureLease(ctx)
+}
+
+// releaseLease gives a held lease back (the idle-unload path: the
+// worker's resources are free, so the ledger's remainder is real again).
+// A no-op without a broker.
+func (w *Worker) releaseLease(ctx context.Context) {
+	if w.lease == nil {
+		return
+	}
+	w.lease.releaseHeld(ctx)
+}
+
+// leaseTick advances the lease state machine on the poll interval: a
+// denied or lost lease is re-asked, a queued one checked for its grant,
+// a held one for a revocation (the window controller's task-29 path),
+// and a fail-open one re-requested so the decision becomes real when
+// resourced answers again.
+func (w *Worker) leaseTick(ctx context.Context) {
+	interval := w.cfg.LeasePollS
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if interval < time.Second {
+		interval = time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			w.lease.tick(ctx)
+		}
+	}
 }
 
 // isLoaded reports whether the worker's resources are currently loaded.
@@ -245,6 +310,18 @@ func (w *Worker) lastWorkTime() time.Time {
 func (w *Worker) Run(ctx context.Context) error {
 	if w.cfg.Cap == "" {
 		return errors.New("capworker: Cap is required")
+	}
+	if w.lease != nil {
+		defer func() {
+			// Release on exit: the ledger is in-memory with no TTL, so an
+			// orphaned lease (held or queued) would block this worker's
+			// fresh request after a restart. A fresh context — ctx is
+			// cancelled here.
+			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			w.lease.release(rctx)
+		}()
+		go w.leaseTick(ctx)
 	}
 	if err := w.cfg.Conn.EnsureCapQueue(w.QueueName()); err != nil {
 		return fmt.Errorf("capworker: declare %s: %w", w.QueueName(), err)
@@ -280,11 +357,12 @@ func (w *Worker) Run(ctx context.Context) error {
 			backoff = time.Second
 			w.log.Printf("capworker %s: reconnected, resuming %s", w.cfg.Cap, w.QueueName())
 		}
-		if err := w.lease(ctx); err != nil {
+		if !w.ensureLease(ctx) {
 			// No lease (plan §3.6): do not consume. The messages stay on
 			// the durable queue, and a lower-priority consumer of the same
-			// capability can still take them. Back off and re-ask.
-			w.log.Printf("capworker %s: no lease, not consuming: %v", w.cfg.Cap, err)
+			// capability can still take them. The state machine re-asks on
+			// its own poll interval (and logs the denial reason per ask);
+			// back off here so a denied worker does not spin.
 			select {
 			case <-ctx.Done():
 				return nil
@@ -316,7 +394,10 @@ func (w *Worker) Run(ctx context.Context) error {
 // prefetch=1 (one in-flight request — a slow capability must not queue up
 // behind itself), a consumer priority per location (x-priority — the
 // broker delivers each message to the best free worker, plan §3.5), and
-// one delivery at a time.
+// one delivery at a time. The consumer carries a named tag: when the
+// worker's lease is lost (revoked) it cancels the consumer — unacked
+// deliveries requeue — so the queue falls to a lower-priority placement
+// (plan §3.6).
 func (w *Worker) consume(ctx context.Context) error {
 	ch, err := w.cfg.Conn.NewChannel()
 	if err != nil {
@@ -326,19 +407,47 @@ func (w *Worker) consume(ctx context.Context) error {
 	if err := ch.Qos(1, 0, true); err != nil {
 		return fmt.Errorf("qos: %w", err)
 	}
-	dels, err := ch.Consume(w.QueueName(), "", false, false, false, false, amqp.Table{"x-priority": w.effectivePriority()})
+	tag := fmt.Sprintf("%s-%d", w.cfg.Name, time.Now().UnixNano())
+	dels, err := ch.Consume(w.QueueName(), tag, false, false, false, false, amqp.Table{"x-priority": w.effectivePriority()})
 	if err != nil {
 		return err
+	}
+	// The lease-loss channel (nil without a broker): closed when the held
+	// lease is lost — revoked by the window controller, a fail-open
+	// re-sync that comes back denied, or an idle unload's release.
+	var lost <-chan struct{}
+	if w.lease != nil {
+		lost = w.lease.lost()
 	}
 	for {
 		select {
 		case <-ctx.Done():
+			return nil
+		case <-lost:
+			// The lease is gone: cancel the consumer and let the Run loop
+			// re-ask (the in-flight delivery, if any, was handled before
+			// the loss — prefetch=1, one delivery at a time).
+			w.log.Printf("capworker %s: lease lost, cancelling consumer", w.cfg.Cap)
+			if cerr := ch.Cancel(tag, true); cerr != nil {
+				w.log.Printf("capworker %s: cancel consumer: %v", w.cfg.Cap, cerr)
+			}
 			return nil
 		case del, ok := <-dels:
 			if !ok {
 				return errors.New("delivery channel closed")
 			}
 			w.handle(ctx, del)
+			if lost != nil && !w.lease.holding() {
+				// The lease was lost while this delivery was handled
+				// (select picked the delivery over the closed loss
+				// channel): the current request is drained — cancel so
+				// the queue falls to the next placement (plan §3.6).
+				w.log.Printf("capworker %s: lease lost after delivery, cancelling consumer", w.cfg.Cap)
+				if cerr := ch.Cancel(tag, true); cerr != nil {
+					w.log.Printf("capworker %s: cancel consumer: %v", w.cfg.Cap, cerr)
+				}
+				return nil
+			}
 		}
 	}
 }
@@ -363,6 +472,17 @@ func (w *Worker) handle(ctx context.Context, del amqp.Delivery) {
 		w.log.Printf("capworker %s: message without correlation_id, dead-lettering", w.cfg.Cap)
 		w.emit(req, "failed", map[string]any{"error": "no correlation_id"})
 		del.Nack(false, false)
+		return
+	}
+
+	// The lease is gone (revoked, or a fail-open re-sync that came back
+	// denied): this delivery may have arrived before the consumer's
+	// cancel landed. Requeue it — the work goes to a placement that
+	// holds a lease (plan §3.6). The consume loop cancels the consumer
+	// right after.
+	if w.lease != nil && !w.lease.holding() {
+		w.log.Printf("capworker %s: %s: lease not held, requeueing", w.cfg.Cap, req.CorrelationID)
+		del.Nack(false, true)
 		return
 	}
 
@@ -700,18 +820,26 @@ func (w *Worker) maybeUnload(ctx context.Context) {
 		return
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if !w.loaded {
+		w.mu.Unlock()
 		return
 	}
 	w.log.Printf("capworker %s: idle for %s, unloading", w.cfg.Cap, idle.Round(time.Second))
 	if err := w.cfg.Unload(ctx); err != nil {
 		w.log.Printf("capworker %s: unload failed, staying loaded: %v", w.cfg.Cap, err)
+		w.mu.Unlock()
 		return
 	}
 	w.loaded = false
 	w.metrics.SetLoaded(false)
 	w.workerEvent("unloaded", map[string]any{"capability": w.cfg.Cap, "location": w.cfg.Location, "idle_s": int(idle / time.Second)})
+	w.mu.Unlock()
+	// The resources are free: give the lease back so the ledger's
+	// remainder is real again (plan §3.6). Outside the critical section —
+	// the release is an HTTP round-trip to resourced. The worker re-asks
+	// on the Run loop's next pass (deferred by a poll interval) before it
+	// consumes again.
+	w.releaseLease(ctx)
 }
 
 // heartbeatLoop emits one worker.<name>.heartbeat event every
