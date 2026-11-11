@@ -94,6 +94,17 @@ func (c Capability) Locations() []string {
 	return out
 }
 
+// WorkerAt returns the capability's placement at location (the first
+// worker entry with that location), or nil when it has none there.
+func (c Capability) WorkerAt(location string) *Worker {
+	for i, w := range c.Workers {
+		if w.Location == location {
+			return &c.Workers[i]
+		}
+	}
+	return nil
+}
+
 // Cost renders the capability's cost: one placement's cost, or
 // "location:cost" pairs joined by " | " when it can run in several
 // places.
