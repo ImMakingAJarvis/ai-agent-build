@@ -19,13 +19,35 @@
 //	GET    /healthz     → 200
 //	GET    /metrics     → Prometheus
 //
+// Since EVB-27 it also runs the swap-window controller (plan §3.6,
+// rules 3–4): it opens the brain swap window (jarvis-swap out --for
+// <caps>) when queued GPU capability work exists and no local round is
+// running, drains all of it, and closes the window (jarvis-swap in)
+// when drained, at max_window, or when a ready brain job has waited
+// past max_brain_wait. Every open/close publishes a window.<opened|
+// closed> event; GET /state gains a "window" field (the broker's
+// devices/leases/queued keys are unchanged).
+//
 // Every grant/release/deny publishes a lease.<granted|released|denied>
 // event on the events exchange. Configuration (env):
 //
 //	LISTEN_ADDR        API + metrics address. Default :9104.
 //	REFRESH_INTERVAL   how often the live readings (and the brain's
 //	                   standing lease) are refreshed. Default 30s.
+//	WINDOW_INTERVAL    how often the window controller ticks.
+//	                   Default 30s.
+//	MAX_WINDOW         a window's hard cap. Default 2h (plan §7.2).
+//	MAX_BRAIN_WAIT     close when a ready brain job has waited this
+//	                   long. Default 20m (plan §7.2).
+//	MIN_WINDOW         a drained window younger than this holds.
+//	                   Default 2m (plan §7.2).
 //	RABBITMQ_URL       the events broker (queue.NewConn's default when unset).
+//	CAPABILITIES_FILE  the capability catalog (its needs_brain_out caps
+//	                   are the queues the window drains). Default
+//	                   config/capabilities.yaml.
+//	SWAP_CMD           the swap script. Default jarvis-swap.
+//	SWAP_STATE_FILE    the window state file jarvis-swap keeps. Default
+//	                   ~/.local/state/jarvis/swap-window.json.
 package main
 
 import (
@@ -35,6 +57,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -45,6 +68,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/catalog"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/fit"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/placement"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
@@ -57,13 +82,15 @@ type Publisher interface {
 	Publish(ctx context.Context, e queue.Event) error
 }
 
-// service is the broker: the ledger, the event publisher and the
-// metrics. Handlers and the refresh loop all go through it.
+// service is the broker: the ledger, the event publisher, the swap
+// window controller (EVB-27) and the metrics. Handlers and the refresh
+// loop all go through it.
 type service struct {
 	ledger   *resources.Ledger
 	pub      Publisher
 	readings fit.Source
 	detect   func(ctx context.Context) map[placement.Location]bool
+	window   *windowController // nil when the capability catalog is missing
 	log      *slog.Logger
 
 	// Push-style metrics (decisions and waits are events, not state).
@@ -223,7 +250,18 @@ func (s *service) handleLeaseDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *service) handleState(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.ledger.State())
+	st := s.ledger.State()
+	// The top-level keys are the broker contract (capworker parses
+	// devices/leases/queued); the window rides along as an extra field.
+	resp := map[string]any{
+		"devices": st.Devices,
+		"leases":  st.Leases,
+		"queued":  st.Queued,
+	}
+	if s.window != nil {
+		resp["window"] = s.window.State()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -288,6 +326,80 @@ func envOr(key, def string) string {
 	return def
 }
 
+// buildWindowController wires the production window controller (EVB-27):
+// the catalog's brain-out capabilities, the queue depths (AMQP ready +
+// management API unacked), the local jobs from the agent job store and
+// jarvis-swap as the SwapRunner. It returns nil when the capability
+// catalog is missing or the broker URL has no host — the ledger keeps
+// serving leases without windows.
+func buildWindowController(conn *queue.Conn, pub Publisher, reg *prometheus.Registry, log *slog.Logger) *windowController {
+	catalogPath := envOr("CAPABILITIES_FILE", "config/capabilities.yaml")
+	cat, err := catalog.Load(catalogPath)
+	if err != nil {
+		log.Error("capability catalog — the swap window controller is disabled", "file", catalogPath, "err", err)
+		return nil
+	}
+	amqpURL := queue.AMQPURL()
+	base, user, err := mgmtBase(amqpURL)
+	if err != nil {
+		log.Error("management API base — the swap window controller is disabled", "url", amqpURL, "err", err)
+		return nil
+	}
+	// The management API's queue routes are per-vhost; the amqp URL's
+	// path is the vhost (empty = "/").
+	vhost := "/"
+	if u, uerr := url.Parse(amqpURL); uerr == nil {
+		if v := strings.TrimPrefix(u.Path, "/"); v != "" {
+			vhost = v
+		}
+	}
+	mgmt := &mgmtClient{base: base, user: user, client: &http.Client{Timeout: 10 * time.Second}}
+	caps := brainOutCaps(cat)
+	def := resources.DefaultWindowConfig()
+	cfg := resources.WindowConfig{
+		MaxWindow:    durEnv("MAX_WINDOW", def.MaxWindow, log),
+		MaxBrainWait: durEnv("MAX_BRAIN_WAIT", def.MaxBrainWait, log),
+		MinWindow:    durEnv("MIN_WINDOW", def.MinWindow, log),
+	}
+	log.Info("swap window controller wired", "caps", caps,
+		"max_window", cfg.MaxWindow.String(),
+		"max_brain_wait", cfg.MaxBrainWait.String(),
+		"min_window", cfg.MinWindow.String())
+	return newWindowController(
+		cfg,
+		newShellSwapRunner(envOr("SWAP_CMD", "jarvis-swap"), os.Getenv("SWAP_STATE_FILE"), 0, log),
+		caps,
+		func(ctx context.Context, name string) (int, error) { return conn.QueueDepth(name) },
+		func(ctx context.Context) (map[string]int, error) { return mgmt.unacked(ctx, vhost) },
+		func(ctx context.Context) (int, []resources.ReadyJob, error) {
+			store, err := agentjob.Open(agentjob.DataDir())
+			if err != nil {
+				return 0, nil, err
+			}
+			return localJobs(store, log)
+		},
+		pub,
+		reg,
+		log,
+	)
+}
+
+// durEnv reads a duration env var, falling back to def when unset and
+// exiting on a value that cannot be a positive duration (a typo in the
+// unit file must not silently change the window policy).
+func durEnv(key string, def time.Duration, log *slog.Logger) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		log.Error("bad duration env", "key", key, "value", v)
+		os.Exit(1)
+	}
+	return d
+}
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	listen := envOr("LISTEN_ADDR", ":9104")
@@ -327,6 +439,13 @@ func main() {
 	svc := newService(ledger, pub, fit.Live{}, reg, log)
 	svc.refresh(ctx) // first pass before the API takes traffic
 
+	// The swap-window controller (EVB-27, plan §3.6 rules 3–4). It
+	// needs the capability catalog to know which capability queues are
+	// the brain-out ones; without it the ledger still serves leases,
+	// the windows just never open.
+	windowInterval := durEnv("WINDOW_INTERVAL", 30*time.Second, log)
+	svc.window = buildWindowController(conn, pub, reg, log)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /lease", svc.handleLeasePost)
 	mux.HandleFunc("DELETE /lease/", svc.handleLeaseDelete)
@@ -343,6 +462,13 @@ func main() {
 			stop()
 		}
 	}()
+
+	// The window controller ticks on its own goroutine: an open or a
+	// close takes minutes (model load both ways) and must never block
+	// the ledger's refresh loop.
+	if svc.window != nil {
+		go windowTickLoop(ctx, svc.window, windowInterval)
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
