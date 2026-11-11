@@ -541,6 +541,7 @@ services:
       args: { BIN: cmd/cap-echo }
     image: jarvis/cap-echo:local
     container_name: jarvis-cap-echo
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: always
     environment:
       HOME: /home/agent
@@ -550,7 +551,7 @@ services:
       # consume is brokered by resourced (VRAM/RAM ledger + the brain's
       # standing lease); resourced unreachable = fail open (the pre-lease
       # behavior), logged.
-      RESOURCED_URL: http://resourced:9104
+      RESOURCED_URL: http://host.docker.internal:9104
       CAPABILITIES_FILE: /etc/jarvis/capabilities.yaml
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
@@ -570,6 +571,7 @@ services:
       args: { BIN: cmd/image-gen-worker }
     image: jarvis/image-gen-worker:local
     container_name: jarvis-image-gen-worker
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: always
     environment:
       HOME: /home/agent
@@ -577,7 +579,7 @@ services:
       ART_URL: http://art:8120
       # its 12 GB VRAM lease is granted only once the brain's standing
       # lease has left the ledger (the swap window)
-      RESOURCED_URL: http://resourced:9104
+      RESOURCED_URL: http://host.docker.internal:9104
       CAPABILITIES_FILE: /etc/jarvis/capabilities.yaml
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
@@ -601,6 +603,7 @@ services:
       args: { BIN: cmd/image-describe-worker }
     image: jarvis/image-describe-worker:local
     container_name: jarvis-image-describe-worker-gpu
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: always
     runtime: nvidia
     environment:
@@ -615,7 +618,7 @@ services:
       IDESC_MIN_FREE_MB: "4096"
       # its 3.2 GB VRAM lease is granted only while the brain's standing
       # lease leaves the room (resourced decides, per §3.6)
-      RESOURCED_URL: http://resourced:9104
+      RESOURCED_URL: http://host.docker.internal:9104
       CAPABILITIES_FILE: /etc/jarvis/capabilities.yaml
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
@@ -627,6 +630,7 @@ services:
   image-describe-worker-cpu:
     image: jarvis/image-describe-worker:local
     container_name: jarvis-image-describe-worker-cpu
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: always
     runtime: nvidia
     environment:
@@ -638,7 +642,7 @@ services:
       # the bench's CPU numbers were taken at 16 threads
       IDESC_THREADS: "16"
       # the cpu placement's lease is on the shared RAM pool (resourced)
-      RESOURCED_URL: http://resourced:9104
+      RESOURCED_URL: http://host.docker.internal:9104
       CAPABILITIES_FILE: /etc/jarvis/capabilities.yaml
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
@@ -664,6 +668,7 @@ services:
       args: { BIN: cmd/audio-transcribe-worker }
     image: jarvis/audio-transcribe-worker:local
     container_name: jarvis-audio-transcribe-worker
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: always
     environment:
       HOME: /home/agent
@@ -671,7 +676,7 @@ services:
       # the bench's numbers were taken at 16 threads
       AT_THREADS: "16"
       # the cpu placement's lease is on the shared RAM pool (resourced)
-      RESOURCED_URL: http://resourced:9104
+      RESOURCED_URL: http://host.docker.internal:9104
       CAPABILITIES_FILE: /etc/jarvis/capabilities.yaml
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
@@ -699,6 +704,7 @@ services:
       args: { BIN: cmd/llm-small-worker }
     image: jarvis/llm-small-worker:local
     container_name: jarvis-llm-small-worker-gpu
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: always
     runtime: nvidia
     environment:
@@ -717,7 +723,7 @@ services:
       # the same window, decided by resourced's ledger (its 5.5 GB VRAM
       # lease is granted only when the brain's standing lease fits around
       # it)
-      RESOURCED_URL: http://resourced:9104
+      RESOURCED_URL: http://host.docker.internal:9104
       CAPABILITIES_FILE: /etc/jarvis/capabilities.yaml
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
@@ -729,6 +735,7 @@ services:
   llm-small-worker-cpu:
     image: jarvis/llm-small-worker:local
     container_name: jarvis-llm-small-worker-cpu
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: always
     runtime: nvidia
     environment:
@@ -740,7 +747,7 @@ services:
       # the bench's CPU numbers were taken at 16 threads
       LMS_THREADS: "16"
       # the cpu placement's lease is on the shared RAM pool (resourced)
-      RESOURCED_URL: http://resourced:9104
+      RESOURCED_URL: http://host.docker.internal:9104
       CAPABILITIES_FILE: /etc/jarvis/capabilities.yaml
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
@@ -773,6 +780,7 @@ services:
       args: { BIN: cmd/bench-worker }
     image: jarvis/bench-worker:local
     container_name: jarvis-bench-worker
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: always
     environment:
       HOME: /home/agent
@@ -780,7 +788,7 @@ services:
       # the consumer is a cpu process (the bench's device is per-request
       # input), so its lease is the cpu placement's RAM lease on the
       # shared pool — it can never take the brain's VRAM
-      RESOURCED_URL: http://resourced:9104
+      RESOURCED_URL: http://host.docker.internal:9104
       CAPABILITIES_FILE: /etc/jarvis/capabilities.yaml
     group_add: ["44", "990"]   # video, render (for /dev/dri, like engine-igpu)
     volumes:
@@ -795,6 +803,7 @@ services:
   prometheus:
     image: prom/prometheus:v2.53.0
     container_name: jarvis-prometheus
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: unless-stopped
     ports:
       - "9090:9090"
@@ -832,31 +841,13 @@ services:
     volumes:
       - /home/agent/.local/share/jarvis/token-ledger:/state
 
-  # VRAM/RAM ledger and lease broker (plan task EVB-25; docs/services.md):
-  # reads the live memory readings (nvidia-smi + /proc/meminfo, the nvidia
-  # runtime + smi wrapper like the ha service), keeps the brain's standing
-  # GPU lease, and brokers the capability workers' leases over a localhost
-  # HTTP API (POST /lease, DELETE /lease/<id>, GET /state). Every
-  # grant/release/deny emits a lease.* event on the events exchange; the
-  # window controller (EVB-27) reuses this ledger.
-  resourced:
-    build:
-      context: .
-      dockerfile: docker/jarvis-go/Dockerfile
-      args: { BIN: cmd/resourced }
-    image: jarvis/resourced:local
-    container_name: jarvis-resourced
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:9104:9104"   # lease API + metrics: host localhost only
-    runtime: nvidia
-    environment:
-      LISTEN_ADDR: ":9104"
-      REFRESH_INTERVAL: 30s
-      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
-      NVIDIA_VISIBLE_DEVICES: "all"
-    volumes:
-      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
+  # resourced (VRAM/RAM ledger + lease broker + swap-window controller,
+  # plan tasks EVB-25/EVB-27) is a host systemd service since EVB-27
+  # (systemd/resourced.service, scripts/install_resourced.sh): the window
+  # controller shells out to jarvis-swap, so it needs the host's docker,
+  # nvidia-smi and the agent job store. It listens on the bridge gateway
+  # 172.17.0.1:9104; the workers and prometheus below reach it via
+  # host.docker.internal (extra_hosts host-gateway).
 
   grafana:
     image: grafana/grafana:11.4.0

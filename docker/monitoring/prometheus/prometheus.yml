@@ -52,4 +52,6 @@ scrape_configs:
   # the wait queue depth, lease decisions and wait times, live capacities.
   - job_name: "resourced"
     static_configs:
-      - targets: ["jarvis-resourced:9104"]
+      # Host systemd service (EVB-27); the container is gone. Reached via
+      # host.docker.internal (extra_hosts host-gateway in the service).
+      - targets: ["host.docker.internal:9104"]
