@@ -549,6 +549,51 @@ services:
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
 
+  # ---------------- sched-tick (cron publisher for the cadence queues) ----
+  # Publishes a sched.<cadence>.tick event to the events exchange each time a
+  # cadence boundary is crossed (hourly / daily / weekly / monthly), which
+  # routes to the durable sched.<cadence> queue (docs/scheduled-work.md). Any
+  # service may subscribe to a cadence queue to run scheduled work. Polls the
+  # clock every SCHED_POLL (default 30s); a boundary crossed while down is not
+  # replayed (cron-like, no catch-up).
+  sched-tick:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/sched-tick }
+    image: jarvis/sched-tick:local
+    container_name: jarvis-sched-tick
+    restart: always
+    environment:
+      HOME: /home/agent
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      TZ: America/Los_Angeles
+      SCHED_WEEK_DAY: "1" # Monday; must match sched-audit
+
+  # ---------------- sched-audit (weekly cadence subscriber) ---------------
+  # Consumes sched.weekly and enqueues one brain round (agentjob, class
+  # background, driver local) that audits the notes and files the brain uses
+  # and writes a report: still needed / could use changing / should be removed
+  # (docs/scheduled-work.md). Idempotent per week. Writes to the agentjob
+  # store (the share dir mounted below), which the existing agent-run loop
+  # picks up and runs — so the audit is a normal brain round, not a model call
+  # from this service.
+  sched-audit:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/sched-audit }
+    image: jarvis/sched-audit:local
+    container_name: jarvis-sched-audit
+    restart: always
+    environment:
+      HOME: /home/agent
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      TZ: America/Los_Angeles
+      SCHED_WEEK_DAY: "1" # Monday; must match sched-tick
+    volumes:
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+
   # ---------------- image-gen-worker (image.generate capability) ---------
   # The GPU worker behind cap.image.generate (plan task EVB-20): consumes
   # cap.image.generate, generates on the art service (http://art:8120 — up
