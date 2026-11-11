@@ -2,7 +2,7 @@
 //
 // The queue section shows the work, but not the machine it runs on. This
 // panel answers the four things the queue cannot: which model is loaded on
-// the GPU (brain, iGPU helper, art), whether a brain-swap photo window is in
+// the GPU (brain, iGPU helper, art), whether a brain-swap window is in
 // flight ("any changes happening"), how much VRAM is free ("what's in ram"),
 // and what is on hold for the GPU ("what's on hold" — the photo batch plus
 // the rest of the ready queue).
@@ -53,7 +53,7 @@ type machineHold struct {
 
 // MachineState is the body of the machine section (GET /html/machine).
 type MachineState struct {
-	Swap       string          `json:"swap"`        // "brain running" | "photo window open" | "brain down"
+	Swap       string          `json:"swap"`        // "brain running" | "swap window open" | "brain down"
 	SwapTone   string          `json:"swap_tone"`   // ok | warn | bad
 	SwapDetail string          `json:"swap_detail,omitempty"`
 	Engines    []machineEngine `json:"engines"`
@@ -79,15 +79,15 @@ func swapState(brainUp, windowOpen bool, windowDetail, artModel string) (label, 
 		return "brain running", "ok", ""
 	case windowOpen:
 		if windowDetail == "" {
-			windowDetail = "brain paused for the photo batch"
+			windowDetail = "brain paused for GPU work"
 		}
 		if artModel != "" {
 			windowDetail += " — " + artModel + " on the 4090"
 		}
-		return "photo window open", "warn", windowDetail
+		return "swap window open", "warn", windowDetail
 	default:
 		return "brain down", "bad",
-			"no photo window open — the watchdog re-arms the brain at the deadline"
+			"no swap window open — the watchdog re-arms the brain at the deadline"
 	}
 }
 
@@ -198,32 +198,34 @@ func parseSwapLog(path string) string {
 	return ""
 }
 
-// windowMarker reads the $JARVIS_CONF/photo-window marker the queue watcher
-// writes when it opens the photo window: "<date time> batch: <ids>". It
-// reports whether the window is open and a one-line detail.
-func windowMarker(path string) (open bool, detail string) {
+// swapWindowState reads the state file jarvis-swap writes next to
+// swap.log when a window is open: {"for":[...],"reason":"...","opened_at":
+// "RFC3339"} (EVB-27 — the window is driven by resourced, not the
+// queue watcher's old $CONF/photo-window marker). It reports whether the
+// window is open and a one-line detail (when it opened, and the
+// capabilities it serves). A file that exists but does not parse still
+// counts as open: it was written early by `out`, and a truncated read
+// should read "window", not "brain down".
+func swapWindowState(path string) (open bool, detail string) {
 	b, err := os.ReadFile(path)
-	if err != nil {
+	if err != nil || len(bytes.TrimSpace(b)) == 0 {
 		return false, ""
 	}
-	line := strings.TrimSpace(string(b))
-	if line == "" {
-		return false, ""
+	var st struct {
+		For      []string `json:"for"`
+		OpenedAt string   `json:"opened_at"`
 	}
-	fields := strings.Fields(line)
-	var when string
-	if len(fields) >= 2 && len(fields[1]) >= 5 {
-		when = fields[0] + " " + fields[1][:5] // "YYYY-MM-DD HH:MM"
+	if err := json.Unmarshal(b, &st); err != nil {
+		return true, ""
 	}
-	ids := ""
-	if i := strings.Index(line, "batch: "); i >= 0 {
-		ids = strings.TrimSpace(line[i+len("batch: "):])
+	if t, err := time.Parse(time.RFC3339, st.OpenedAt); err == nil {
+		detail = t.Format("2006-01-02 15:04")
 	}
-	switch {
-	case when != "" && ids != "":
-		detail = when + " — batch " + ids
-	case ids != "":
-		detail = "batch " + ids
+	if len(st.For) > 0 {
+		if detail != "" {
+			detail += " — "
+		}
+		detail += "for " + strings.Join(st.For, ", ")
 	}
 	return true, detail
 }
@@ -332,9 +334,10 @@ func (s *Server) gatherMachine() MachineState {
 	go func() { defer wg.Done(); st.VRAM = s.probeVRAM() }()
 	wg.Wait()
 
-	// The window is open when the watcher's marker exists; art being up with
-	// no marker is the closing edge (marker removed, art still loading out).
-	windowOpen, windowDetail := windowMarker(s.windowPath)
+	// The window is open when jarvis-swap's state file exists; art being up
+	// with no state file is the closing edge (file removed, art still
+	// loading out).
+	windowOpen, windowDetail := swapWindowState(s.windowPath)
 	if !windowOpen && artUp {
 		windowOpen = true
 	}

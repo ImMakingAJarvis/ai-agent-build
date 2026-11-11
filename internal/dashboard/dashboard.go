@@ -260,7 +260,7 @@ type Server struct {
 	plans        *plansState
 
 	// Machine panel (machine.go): the endpoints the panel probes for the
-	// loaded models, VRAM and the photo-window marker.
+	// loaded models, VRAM and the swap-window state file.
 	engineURL  string
 	igpuURL    string
 	artURL     string
@@ -332,10 +332,6 @@ func New() *Server {
 	if stateDir == "" {
 		stateDir = filepath.Join(home, ".local", "state", "jarvis")
 	}
-	confDir := os.Getenv("JARVIS_CONF")
-	if confDir == "" {
-		confDir = filepath.Join(home, ".config", "jarvis")
-	}
 
 	engineClient := slots.NewClient()
 
@@ -379,7 +375,7 @@ func New() *Server {
 		artURL:       artURL,
 		nvidiaURL:    nvidiaURL,
 		swapLog:      filepath.Join(stateDir, "swap.log"),
-		windowPath:   filepath.Join(confDir, "photo-window"),
+		windowPath:   filepath.Join(stateDir, "swap-window.json"),
 		httpClient:   &http.Client{Timeout: probeTimeout},
 	}
 }

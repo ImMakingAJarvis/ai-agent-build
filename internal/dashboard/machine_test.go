@@ -23,15 +23,15 @@ func TestSwapState(t *testing.T) {
 		wantDetail   string
 	}{
 		{"brain up", true, false, "", "", "brain running", "ok", ""},
-		{"brain up wins over stale marker", true, true, "batch a", "z-image-turbo", "brain running", "ok", ""},
-		{"window with marker and art", false, true, "2026-11-07 22:15 — batch chat-1", "z-image-turbo",
-			"photo window open", "warn", "2026-11-07 22:15 — batch chat-1 — z-image-turbo on the 4090"},
-		{"window, no marker (art closing)", false, true, "", "z-image-turbo",
-			"photo window open", "warn", "brain paused for the photo batch — z-image-turbo on the 4090"},
+		{"brain up wins over stale state file", true, true, "for image.generate", "z-image-turbo", "brain running", "ok", ""},
+		{"window with state file and art", false, true, "2026-11-07 22:15 — for image.generate", "z-image-turbo",
+			"swap window open", "warn", "2026-11-07 22:15 — for image.generate — z-image-turbo on the 4090"},
+		{"window, no state file (art closing)", false, true, "", "z-image-turbo",
+			"swap window open", "warn", "brain paused for GPU work — z-image-turbo on the 4090"},
 		{"window, no art yet", false, true, "", "",
-			"photo window open", "warn", "brain paused for the photo batch"},
+			"swap window open", "warn", "brain paused for GPU work"},
 		{"brain down, no window", false, false, "", "",
-			"brain down", "bad", "no photo window open — the watchdog re-arms the brain at the deadline"},
+			"brain down", "bad", "no swap window open — the watchdog re-arms the brain at the deadline"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,19 +114,35 @@ func TestParseSwapLog(t *testing.T) {
 	}
 }
 
-func TestWindowMarker(t *testing.T) {
+func TestSwapWindowState(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "photo-window")
+	path := filepath.Join(dir, "swap-window.json")
 
-	if open, _ := windowMarker(path); open {
-		t.Error("windowMarker(missing) = open, want closed")
+	if open, _ := swapWindowState(path); open {
+		t.Error("swapWindowState(missing) = open, want closed")
 	}
-	if err := os.WriteFile(path, []byte("2026-11-07 22:15:03 batch: chat-1 chat-2\n"), 0o644); err != nil {
+	body := `{"for":["image.generate"],"reason":"queued GPU work","opened_at":"2026-11-07T22:15:03Z"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	open, detail := windowMarker(path)
-	if !open || detail != "2026-11-07 22:15 — batch chat-1 chat-2" {
-		t.Errorf("windowMarker = (%v, %q), want (true, %q)", open, detail, "2026-11-07 22:15 — batch chat-1 chat-2")
+	open, detail := swapWindowState(path)
+	if !open || detail != "2026-11-07 22:15 — for image.generate" {
+		t.Errorf("swapWindowState = (%v, %q), want (true, %q)", open, detail, "2026-11-07 22:15 — for image.generate")
+	}
+	// A file that exists but does not parse still counts as open (written
+	// early by `out`; a truncated read should read "window", not "down").
+	if err := os.WriteFile(path, []byte(`{"for":["image.ge`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if open, detail := swapWindowState(path); !open || detail != "" {
+		t.Errorf("unparseable file = (%v, %q), want (true, %q)", open, detail, "")
+	}
+	// No for-list, no opened_at: open with no detail (the panel falls back).
+	if err := os.WriteFile(path, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if open, detail := swapWindowState(path); !open || detail != "" {
+		t.Errorf("empty object = (%v, %q), want (true, %q)", open, detail, "")
 	}
 }
 
@@ -180,7 +196,7 @@ func TestGatherMachineAllUp(t *testing.T) {
 		igpuURL:     igpu.URL,
 		artURL:      art.URL,
 		nvidiaURL:   nvidia.URL,
-		windowPath:  filepath.Join(conf, "photo-window"),
+		windowPath:  filepath.Join(conf, "swap-window.json"),
 		swapLog:     filepath.Join(conf, "swap.log"),
 		httpClient:  &http.Client{},
 	}
@@ -206,8 +222,8 @@ func TestGatherMachineAllUp(t *testing.T) {
 	}
 }
 
-// TestGatherMachinePhotoWindow: brain down, window marker open, art up —
-// the headline must read as a photo window, not a failure.
+// TestGatherMachinePhotoWindow: brain down, swap window state open, art up
+// — the headline must read as a swap window, not a failure.
 func TestGatherMachinePhotoWindow(t *testing.T) {
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "refused", http.StatusServiceUnavailable)
@@ -219,8 +235,8 @@ func TestGatherMachinePhotoWindow(t *testing.T) {
 	defer art.Close()
 
 	conf := t.TempDir()
-	if err := os.WriteFile(filepath.Join(conf, "photo-window"),
-		[]byte("2026-11-07 22:15:03 batch: chat-1 chat-2\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(conf, "swap-window.json"),
+		[]byte(`{"for":["image.generate"],"reason":"queued GPU work","opened_at":"2026-11-07T22:15:03Z"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{
@@ -229,16 +245,16 @@ func TestGatherMachinePhotoWindow(t *testing.T) {
 		igpuURL:     "http://127.0.0.1:1", // down: not part of the assertion
 		artURL:      art.URL,
 		nvidiaURL:   "http://127.0.0.1:1",
-		windowPath:  filepath.Join(conf, "photo-window"),
+		windowPath:  filepath.Join(conf, "swap-window.json"),
 		swapLog:     filepath.Join(conf, "swap.log"),
 		httpClient:  &http.Client{},
 	}
 
 	st := s.gatherMachine()
-	if st.Swap != "photo window open" || st.SwapTone != "warn" {
-		t.Errorf("Swap = %q (%s), want photo window open/warn", st.Swap, st.SwapTone)
+	if st.Swap != "swap window open" || st.SwapTone != "warn" {
+		t.Errorf("Swap = %q (%s), want swap window open/warn", st.Swap, st.SwapTone)
 	}
-	if st.SwapDetail != "2026-11-07 22:15 — batch chat-1 chat-2 — z-image-turbo on the 4090" {
+	if st.SwapDetail != "2026-11-07 22:15 — for image.generate — z-image-turbo on the 4090" {
 		t.Errorf("SwapDetail = %q", st.SwapDetail)
 	}
 	if st.Engines[0].State != "swapped" {
