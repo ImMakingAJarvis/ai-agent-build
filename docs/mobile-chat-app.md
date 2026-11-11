@@ -98,3 +98,52 @@ Verify: `curl -sk https://localhost:8443/app/` → 200 HTML, and
 - `POST /voice` with an espeak-ng wav, **no** model field (the HA call
   shape) → 200, perfect transcript, persona-correct reply, TTS wav,
   ~10 s end-to-end. With `model=jarvis-brain` field → 200, ~7 s.
+
+## Native app (React Native + Expo)
+
+Framework decision: **React Native + Expo** (SDK 58) in `jarvis-mobile/`,
+one codebase for iOS, Android and web (`react-native-web`). Capacitor would
+have just re-wrapped the PWA (same webview mic caveats, two codebases);
+Flutter is a bigger toolchain for a UI this small. Expo Go means a phone
+can test the app by scanning a QR code — no store, no signing — which is
+what the verification round needs. The app reuses the **same** backend
+(`scripts/voice_service.py`), unchanged: `/chat`, `/voice`, `/models`,
+`/health` (plus optional Basic auth, off by default).
+
+Voice input (PR: real app native mic + 5 s silence auto-stop):
+
+- **Tap-to-talk** mic button in the chat bar (🎙 → red ⏹ with a live
+  second count; ⏹ still stops and sends immediately — tap-to-stop is
+  unchanged from the PWA).
+- **Auto-stop** is the PWA's VAD logic (PR #79, ported from commit c0175fb
+  into `jarvis-mobile/src/vad.js`, pure and unit-tested in
+  `test/vad.test.js`): speech-level samples reset a 5 s silence countdown,
+  min record 2 s, 30 s safety cap. The level source differs — the PWA
+  watched an AnalyserNode RMS, the app polls
+  `recorder.getStatus().metering` (expo-audio, 100 ms ticks). Tuning
+  constants live at the top of `src/vad.js` (`VAD_THRESHOLD` is the one to
+  move if metering's scale differs from AnalyserNode RMS on device).
+- **Upload format**: the HIGH_QUALITY preset records m4a/AAC (iOS,
+  Android) and webm (web). The server transcodes any container via
+  ffmpeg (`ensure_wav()`, PR #78), so no format negotiation is needed.
+- **TTS playback**: the reply audio (edge-tts MP3) plays natively —
+  written to the app cache and played with expo-audio on the phones,
+  blob URL on web. `setAudioModeAsync({ playsInSilentMode,
+  allowsRecording })` keeps TTS on the speaker on iOS even while the mic
+  mode is armed.
+- **Self-signed cert, per platform**: iOS and web hit
+  `https://111.1.2.27:8443` (the phone already trusts the LAN CA profile —
+  that is how the PWA works, and iOS trusts user CAs in apps); Android does
+  **not** trust user-installed CAs, so it defaults to the same service's
+  plain-HTTP port `http://111.1.2.27:8100` — no certificate involved. Both
+  defaults are changeable in ⚙ Settings.
+- Voice turns join the chat history: the transcript lands as the user
+  bubble, the spoken reply as the assistant bubble, so later `/chat`
+  turns keep the spoken context.
+
+Status: VAD logic unit-tested (8/8, `node test/vad.test.js`), web +
+android + ios JS bundles export cleanly. **Real-device verification
+pending** — Expo Go on an Android phone first, then iOS (job
+`pr76-app-verify`): speak a phrase → expect auto-stop ~5 s after the last
+word → transcript + reply bubble + TTS audio; a <5 s pause mid-sentence
+must not cut; ⏹ still stops early.
