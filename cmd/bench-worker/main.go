@@ -54,7 +54,11 @@
 //	                          Default /usr/share/ollama/.ollama/models.
 //	BW_LIVE_SCRIPT          benchmark_q6.py. Default /usr/local/lib/jarvis-bench/benchmark_q6.py.
 //	BW_PYTHON               interpreter for the live bench. Default python3.
-//	BW_MIN_FREE_MB          RAM lease: minimum MemAvailable (MB). Default 2048.
+//	RESOURCED_URL           the resourced lease broker (plan §3.6); the
+//	                          worker gates its consuming on a lease from it.
+//	                          Default: off (un-gated, the pre-lease behavior).
+//	CAPABILITIES_FILE       the capability catalog the lease's memory spec
+//	                          comes from. Needed when RESOURCED_URL is set.
 //	BW_OUT_DIR              artifact root for requests without an OutDir.
 //	                          Default ~/.local/share/jarvis/artifacts.
 //	BW_METRICS_ADDR         serve Prometheus /metrics here. Default: off.
@@ -134,49 +138,6 @@ func connectWithRetry(ctx context.Context) (*queue.Conn, error) {
 		if backoff < 30*time.Second {
 			backoff *= 2
 		}
-	}
-}
-
-// memAvailableMB reads MemAvailable (MB) from /proc/meminfo — the host's
-// figure, since the container has no memory cgroup limit of its own.
-func memAvailableMB() (int, error) {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "MemAvailable:") {
-			continue
-		}
-		f := strings.Fields(line)
-		if len(f) < 2 {
-			break
-		}
-		kb, err := strconv.Atoi(f[1])
-		if err != nil {
-			return 0, fmt.Errorf("meminfo %q: %w", line, err)
-		}
-		return kb / 1024, nil
-	}
-	return 0, errors.New("MemAvailable not found in /proc/meminfo")
-}
-
-// ramLease is the RAM guard (the bench loads the model's weights through
-// system RAM — the iGPU is UMA, and the CPU path is RAM-resident): it
-// grants only when the host has at least minFree MB of MemAvailable. A
-// bigger model than the headroom is the requester's decision — llama-bench
-// fails gracefully and the attempt budget burns (the Phase 4 resourced
-// broker will budget this properly).
-func ramLease(minFreeMB int) func(context.Context) error {
-	return func(ctx context.Context) error {
-		free, err := memAvailableMB()
-		if err != nil {
-			return err
-		}
-		if free < minFreeMB {
-			return fmt.Errorf("insufficient free RAM: %d MB available, %d MB needed", free, minFreeMB)
-		}
-		return nil
 	}
 }
 
@@ -737,6 +698,17 @@ func main() {
 		defer events.Close()
 	}
 
+	// Lease gating (plan §3.6): the placement's lease draws on the shared
+	// RAM pool (the bench loads weights through system RAM — the iGPU is
+	// UMA, and the cpu path is RAM-resident). No broker (RESOURCED_URL
+	// unset) or a catalog problem = un-gated, the pre-lease behavior.
+	leaseBroker, leaseSpec, lerr := capworker.LeaseFor(
+		os.Getenv("RESOURCED_URL"), os.Getenv("CAPABILITIES_FILE"),
+		capability, "cpu", workerName)
+	if lerr != nil {
+		log.Printf("bench-worker: lease: %v (running un-gated)", lerr)
+	}
+
 	cfg := capworker.Config{
 		Cap:         capability,
 		Name:        workerName,
@@ -744,8 +716,9 @@ func main() {
 		Location:    "cpu", // consumer priority 1
 		Conn:        conn,
 		Events:      events,
+		LeaseBroker: leaseBroker,
+		LeaseSpec:   leaseSpec,
 		MetricsAddr: os.Getenv("BW_METRICS_ADDR"),
-		Lease:       ramLease(envInt("BW_MIN_FREE_MB", 2048)),
 		Handler: handler{
 			worker:     workerName,
 			llamaBench: envOr("BW_LLAMA_BENCH", benchBin),

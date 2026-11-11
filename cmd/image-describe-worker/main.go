@@ -17,11 +17,12 @@
 //
 //	gpu  location gpu — consumer priority 10; Qwen3-VL-2B Q4_K_M + F16
 //	     mmproj on the 4090's SPARE VRAM (measured 3146 MiB — see
-//	     docs/benchmarks/image-describe-vlm-benchmark.md). The Lease
-//	     checks nvidia-smi free VRAM before every consume session: when
-//	     the brain is in a conversation and the spare is gone, the
-//	     worker refuses the session and the broker delivers the request
-//	     to the cpu placement instead (consumer priority 1).
+//	     docs/benchmarks/image-describe-vlm-benchmark.md). A resourced
+//	     lease (plan §3.6) gates every consume session: when the brain
+//	     is in a conversation and the spare is gone (its standing lease
+//	     in the ledger), the worker holds no lease, does not consume,
+//	     and the broker delivers the request to the cpu placement
+//	     instead (consumer priority 1).
 //	cpu  location cpu — consumer priority 1; Qwen3-VL-8B fully in host
 //	     RAM (--n-gpu-layers 0 --no-mmproj-offload: measured 580 MiB of
 //	     residual CUDA-context VRAM, never blocked on the GPU). Slower
@@ -58,8 +59,11 @@
 //	IDESC_PORT              the coprocess port (in-container). Default 11510.
 //	IDESC_CTX               --ctx-size. Default 4096.
 //	IDESC_THREADS           --threads (0 = llama.cpp default).
-//	IDESC_MIN_FREE_MB       GPU lease: minimum free VRAM (MiB). Default 4096.
-//	IDESC_SMI               nvidia-smi binary for the lease. Default nvidia-smi.
+//	RESOURCED_URL           the resourced lease broker (plan §3.6); the
+//	                          worker gates its consuming on a lease from it.
+//	                          Default: off (un-gated, the pre-lease behavior).
+//	CAPABILITIES_FILE       the capability catalog the lease's memory spec
+//	                          comes from. Needed when RESOURCED_URL is set.
 //	IDESC_OUT_DIR           artifact root for requests without an OutDir.
 //	                          Default ~/.local/share/jarvis/artifacts.
 //	IDESC_METRICS_ADDR      serve Prometheus /metrics here. Default: off.
@@ -72,7 +76,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -144,37 +147,6 @@ func connectWithRetry(ctx context.Context) (*queue.Conn, error) {
 		if backoff < 30*time.Second {
 			backoff *= 2
 		}
-	}
-}
-
-// freeVRAMMB reads the first GPU's free memory (MiB) from nvidia-smi.
-func freeVRAMMB(smi string) (int, error) {
-	out, err := exec.Command(smi, "--query-gpu=memory.free", "--format=csv,noheader,nounits").Output()
-	if err != nil {
-		return 0, fmt.Errorf("nvidia-smi: %w", err)
-	}
-	line := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
-	n, err := strconv.Atoi(line)
-	if err != nil {
-		return 0, fmt.Errorf("nvidia-smi free VRAM %q: %w", line, err)
-	}
-	return n, nil
-}
-
-// gpuLease is the GPU placement's Lease: it grants only when the 4090 has
-// at least minFree MiB free — i.e. when the brain is idle (or out). When
-// it refuses, the SDK backs off and the message stays available for the
-// lower-priority CPU placement (consumer priority routing).
-func gpuLease(smi string, minFree int) func(context.Context) error {
-	return func(ctx context.Context) error {
-		free, err := freeVRAMMB(smi)
-		if err != nil {
-			return err
-		}
-		if free < minFree {
-			return fmt.Errorf("insufficient free VRAM: %d MiB free, %d MiB needed (brain in use?)", free, minFree)
-		}
-		return nil
 	}
 }
 
@@ -372,6 +344,19 @@ func main() {
 		Log:             log.Default(),
 	}
 
+	// Lease gating (plan §3.6): resourced decides whether this placement
+	// may consume — the gpu placement on free 4090 VRAM (the ledger's
+	// brain standing lease is the conversation guard the old nvidia-smi
+	// hook approximated), the cpu placement on the shared RAM pool. No
+	// broker (RESOURCED_URL unset) or a catalog problem = un-gated, the
+	// pre-lease behavior.
+	leaseBroker, leaseSpec, lerr := capworker.LeaseFor(
+		os.Getenv("RESOURCED_URL"), os.Getenv("CAPABILITIES_FILE"),
+		capability, mode, fmt.Sprintf(workerName, mode))
+	if lerr != nil {
+		log.Printf("image-describe-worker: lease: %v (running un-gated)", lerr)
+	}
+
 	cfg := capworker.Config{
 		Cap:         capability,
 		Name:        fmt.Sprintf(workerName, mode),
@@ -379,6 +364,8 @@ func main() {
 		Location:    mode, // gpu → consumer priority 10, cpu → 1
 		Conn:        conn,
 		Events:      events,
+		LeaseBroker: leaseBroker,
+		LeaseSpec:   leaseSpec,
 		MetricsAddr: os.Getenv("IDESC_METRICS_ADDR"),
 		IdleS:       300 * time.Second, // unload the model 5 min after the last request
 		Load:        srv.Start,
@@ -386,9 +373,6 @@ func main() {
 		Handler:     handler{srv: srv, worker: fmt.Sprintf(workerName, mode), model: model},
 		OutDirBase:  envOr("IDESC_OUT_DIR", filepath.Join(os.Getenv("HOME"), ".local", "share", "jarvis", "artifacts")),
 		Log:         log.Default(),
-	}
-	if mode == "gpu" {
-		cfg.Lease = gpuLease(envOr("IDESC_SMI", "nvidia-smi"), envInt("IDESC_MIN_FREE_MB", 4096))
 	}
 
 	if err := capworker.New(cfg).Run(ctx); err != nil && err != context.Canceled {

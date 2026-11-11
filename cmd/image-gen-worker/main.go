@@ -13,11 +13,11 @@
 // so the best free worker takes the request — and needs_brain_out: the
 // 4090's VRAM must be free of the brain, so in practice requests arrive
 // during the brain's swap window (docs/brain-swap.md), when the art
-// container is up and the model is loaded. Until the resourced broker
-// (task 26) arbitrates this, the worker behaves like today's art gate: it
-// waits for the model (bounded) and the art service itself waits for free
-// VRAM before generating, 503'ing — and the SDK's retry budget — when it
-// cannot.
+// container is up and the model is loaded. A resourced lease (plan §3.6)
+// makes that window explicit: the worker's 12 GB VRAM lease is granted
+// only once the brain's standing lease has left the ledger (the swap
+// window), held while the model is loaded, and released on unload — so
+// the worker consumes only when the 4090 is actually free.
 //
 // Request input (envelope v2, Input map):
 //
@@ -43,6 +43,11 @@
 //	IMAGEGEN_OUT_DIR     artifact root for requests without an OutDir.
 //	                     Default ~/.local/share/jarvis/artifacts.
 //	IMAGEGEN_METRICS_ADDR serve Prometheus /metrics here. Default: off.
+//	RESOURCED_URL        the resourced lease broker (plan §3.6); the
+//	                     worker gates its consuming on a lease from it.
+//	                     Default: off (un-gated, the pre-lease behavior).
+//	CAPABILITIES_FILE    the capability catalog the lease's memory spec
+//	                     comes from. Needed when RESOURCED_URL is set.
 package main
 
 import (
@@ -253,6 +258,18 @@ func main() {
 		defer events.Close()
 	}
 
+	// Lease gating (plan §3.6): the gpu placement's lease is the
+	// needs_brain_out story made explicit — 12 GB of VRAM is granted
+	// only while the brain's standing lease is out of the ledger (the
+	// swap window). No broker (RESOURCED_URL unset) or a catalog problem
+	// = un-gated, the pre-lease behavior.
+	leaseBroker, leaseSpec, lerr := capworker.LeaseFor(
+		os.Getenv("RESOURCED_URL"), os.Getenv("CAPABILITIES_FILE"),
+		capability, "gpu", workerName)
+	if lerr != nil {
+		log.Printf("image-gen-worker: lease: %v (running un-gated)", lerr)
+	}
+
 	w := capworker.New(capworker.Config{
 		Cap:         capability,
 		Name:        workerName,
@@ -260,6 +277,8 @@ func main() {
 		Location:    "gpu", // consumer priority 10: the best free worker takes the request
 		Conn:        conn,
 		Events:      events,
+		LeaseBroker: leaseBroker,
+		LeaseSpec:   leaseSpec,
 		MetricsAddr: os.Getenv("IMAGEGEN_METRICS_ADDR"),
 		Handler:     handler{art: art.New(), artWait: artWait()},
 		OutDirBase:  envOr("IMAGEGEN_OUT_DIR", filepath.Join(os.Getenv("HOME"), ".local", "share", "jarvis", "artifacts")),
