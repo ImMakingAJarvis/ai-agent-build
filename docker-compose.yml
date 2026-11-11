@@ -713,6 +713,42 @@ services:
       - /opt/jarvis-llm-small:/opt/jarvis-llm-small:ro
       - /usr/local/cuda-13.1/lib64:/usr/local/cuda-13.1/lib64:ro
 
+  # ---------------- bench-worker (bench.run capability) ------------------
+  # The worker behind cap.bench.run (plan task EVB-24, the last Phase 3
+  # worker): consumes cap.bench.run, runs the existing benchmark tooling as
+  # a thin adapter — llama-bench over a model on the iGPU (Vulkan0) or
+  # CPU, or the live script against a serving engine (bench: live) — and
+  # publishes the scores to the requester's flow queue with a report.md /
+  # index.json artifact under the request's OutDir (no ad-hoc result
+  # files). One container serves both placements: the device is
+  # per-request input, the consumer is a CPU process.
+  # /dev/dri + the video/render groups mirror engine-igpu (a plain bind
+  # of /dev/dri leaves the nodes outside the cgroup device whitelist); the
+  # image carries no NVIDIA ICD, so the 4090 is unreachable — bench work
+  # here can never take the brain's GPU. llama-bench + the iGPU models
+  # are bind-mounted from /opt/jarvis-igpu; Ollama names in requests
+  # resolve through the host's Ollama store (read-only, no copies).
+  # Engines for `bench: live` are reached by container name on the
+  # compose net (default http://jarvis-engine:11434, the brain).
+  bench-worker:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go-vulkan/Dockerfile
+      args: { BIN: cmd/bench-worker }
+    image: jarvis/bench-worker:local
+    container_name: jarvis-bench-worker
+    restart: always
+    environment:
+      HOME: /home/agent
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+    group_add: ["44", "990"]   # video, render (for /dev/dri, like engine-igpu)
+    volumes:
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /opt/jarvis-igpu:/opt/jarvis-igpu:ro
+      - /usr/share/ollama/.ollama/models:/usr/share/ollama/.ollama/models:ro
+    devices:
+      - /dev/dri
+
   # ---------------- monitoring ----------------
   prometheus:
     image: prom/prometheus:v2.53.0
