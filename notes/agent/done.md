@@ -170,3 +170,4 @@
 - 2026-11-10T11:22Z [plan-glm53-flash-vram-sweep-p-1793859678-1] GLM 5.3 flash model pulled (UD-IQ2_XXS) + provenance (PR #223)
 - 2026-11-10T12:51Z [plan-glm53-flash-vram-sweep-p-1793859678-4] GLM 5.3 flash sweep pt 3/6 (200 MB): engine loads but serves nothing — KDA autotune needs 256 MiB (PR #223)
 - 2026-11-10T13:39Z [chat-1794313175-cda3] iGPU worker down fixed: dashboard+chat containers kept stale host.docker.internal:11435 URLs from before the iGPU container move (9734d81); recreated both (machine panel back up) and jarvis-stack-status now flags engine-URL env drift vs compose (PR #224)
+- 2026-11-11T06:41Z [plan-plan-event-driven-brain-1794016330-26] EVB-28 (plan EVB-26): capworker lease gating — leaseManager state machine + ResourcedBroker + LeaseFor, all 6 worker mains + 8 compose services wired to resourced, fail-open documented, unit + live-queue + integration tests green (PR #231, carries EVB-24/25/26)
