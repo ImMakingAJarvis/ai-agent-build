@@ -44,6 +44,18 @@
 // VRAM footprint (POST /measure); the overlay budgets future leases
 // and alerts when measured > declared.
 //
+// Since EVB-29 it runs the game/stream watchdog (plan §3.6 rule 2):
+// while a game stream (Sunshine / Steam Remote Play, via the same
+// internal/streamwatcher the host watchdogs use) is active, the ledger
+// revokes every capability worker's GPU lease — granted AND queued, the
+// brain's standing lease exempt — and holds the GPU queue, and an open
+// swap window closes so the brain comes back BEFORE the game gets its
+// VRAM. The revoked workers run their task-26 drain; on stream end the
+// hold clears and the queued GPU leases grant again. CPU and iGPU
+// leases are never touched (the rule is GPU-only). stream.started /
+// stream.stopped events on the events exchange; the resourced_stream_
+// active gauge; GET /state gains a "stream_active" field.
+//
 // Every grant/release/deny publishes a lease.<granted|released|denied>
 // event on the events exchange. Configuration (env):
 //
@@ -66,6 +78,10 @@
 //	                   ~/.local/state/jarvis/swap-window.json.
 //	MEASUREMENTS_FILE  the measured-VRAM overlay (EVB-28). Default
 //	                   ~/.local/state/jarvis/cap-measurements.json.
+//	SUNSHINE_ENDPOINT  Sunshine API base for the stream watchdog (EVB-29).
+//	                   Optional — the NVENC fallback needs no endpoint.
+//	STEAM_ENDPOINT     Steam in-home streaming status page (EVB-29).
+//	                   Optional, likewise.
 package main
 
 import (
@@ -317,9 +333,10 @@ func (s *service) handleState(w http.ResponseWriter, r *http.Request) {
 	// The top-level keys are the broker contract (capworker parses
 	// devices/leases/queued); the window rides along as an extra field.
 	resp := map[string]any{
-		"devices": st.Devices,
-		"leases":  st.Leases,
-		"queued":  st.Queued,
+		"devices":       st.Devices,
+		"leases":        st.Leases,
+		"queued":        st.Queued,
+		"stream_active": st.StreamActive, // the game-watchdog hold (EVB-29)
 	}
 	if s.window != nil {
 		resp["window"] = s.window.State()
@@ -546,6 +563,13 @@ func main() {
 	if svc.window != nil {
 		go windowTickLoop(ctx, svc.window, windowInterval)
 	}
+
+	// The game/stream watchdog (EVB-29, plan §3.6 rule 2): while a game
+	// stream is active the ledger revokes the capability workers' GPU
+	// leases and holds the GPU queue, and an open window closes (the
+	// brain comes back first). Its own goroutine — the window close
+	// blocks for the model load.
+	go newStreamController(svc, reg, log).Run(ctx)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
