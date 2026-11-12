@@ -263,3 +263,138 @@ func TestListNightlyTasks(t *testing.T) {
 		t.Errorf("empty nightly set marshals as %s, want []", b)
 	}
 }
+
+// TestCommentRoundTrip covers the comment lifecycle: add onto an existing
+// task, list oldest-first, delete, and the error paths (missing task,
+// missing comment).
+func TestCommentRoundTrip(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := s.AddEpic("epic", "")
+	tk := s.AddTask(ep.ID, "task", "", 5)
+
+	// A comment cannot orphan onto a missing task.
+	if _, err := s.AddComment("no-such-task", "agent", "hi"); err == nil {
+		t.Error("AddComment on missing task should error")
+	}
+
+	c1, err := s.AddComment(tk.ID, "nathan", "first")
+	if err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	if _, err := s.AddComment(tk.ID, "agent", "second"); err != nil {
+		t.Fatalf("AddComment second: %v", err)
+	}
+
+	// Persisted as <id>.json under comments/ with the fields intact.
+	raw, err := os.ReadFile(filepath.Join(s.root, "comments", c1.ID+".json"))
+	if err != nil {
+		t.Fatalf("comment file missing: %v", err)
+	}
+	var onDisk Comment
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.TaskID != tk.ID || onDisk.Author != "nathan" || onDisk.Body != "first" {
+		t.Errorf("comment on disk = %+v", onDisk)
+	}
+
+	// Oldest first, both present.
+	list, err := s.ListComments(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].ID != c1.ID || list[1].Body != "second" {
+		t.Errorf("ListComments = %+v, want [first second] oldest first", list)
+	}
+
+	// Another task's comments stay out.
+	other := s.AddTask(ep.ID, "other", "", 5)
+	if got, _ := s.ListComments(other.ID); len(got) != 0 {
+		t.Errorf("other task comments = %v, want empty", got)
+	}
+
+	// Delete works; deleting again errors (no silent no-op).
+	if err := s.DeleteComment(c1.ID); err != nil {
+		t.Fatalf("DeleteComment: %v", err)
+	}
+	if _, err := s.GetComment(c1.ID); err == nil {
+		t.Error("comment should be gone")
+	}
+	if err := s.DeleteComment(c1.ID); err == nil {
+		t.Error("DeleteComment of missing comment should error")
+	}
+	if got, _ := s.ListComments(tk.ID); len(got) != 1 || got[0].Body != "second" {
+		t.Errorf("after delete ListComments = %+v", got)
+	}
+}
+
+// TestCommentListEmptyMarshalsAsArray keeps the API contract: an empty
+// comment list is [] and never null, matching the other list endpoints.
+func TestCommentListEmptyMarshalsAsArray(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments, err := s.ListComments("missing-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comments == nil {
+		t.Fatal("ListComments on a missing task = nil, want non-nil empty")
+	}
+	if b, _ := json.Marshal(comments); string(b) != "[]" {
+		t.Errorf("empty comment list marshals as %s, want []", b)
+	}
+}
+
+// TestDeleteTaskRemovesComments is the cascade: deleting a task takes its
+// comments with it, and other tasks' comments survive.
+func TestDeleteTaskRemovesComments(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := s.AddEpic("e", "")
+	a := s.AddTask(ep.ID, "a", "", 0)
+	b := s.AddTask(ep.ID, "b", "", 0)
+	ca, err := s.AddComment(a.ID, "agent", "on a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddComment(b.ID, "agent", "on b"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteTask(a.ID); err != nil {
+		t.Fatalf("DeleteTask: %v", err)
+	}
+	if _, err := s.GetComment(ca.ID); err == nil {
+		t.Error("comment of deleted task should be gone")
+	}
+	if got, _ := s.ListComments(b.ID); len(got) != 1 {
+		t.Errorf("surviving task's comments = %v, want 1", got)
+	}
+}
+
+// TestDeleteEpicRemovesComments is the epic-level cascade.
+func TestDeleteEpicRemovesComments(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := s.AddEpic("e", "")
+	tk := s.AddTask(ep.ID, "t", "", 0)
+	c, err := s.AddComment(tk.ID, "nathan", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteEpic(ep.ID); err != nil {
+		t.Fatalf("DeleteEpic: %v", err)
+	}
+	if _, err := s.GetComment(c.ID); err == nil {
+		t.Error("comment should be gone with its epic")
+	}
+}
