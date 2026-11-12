@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	"sort"
+
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 )
@@ -40,6 +42,17 @@ type machineVRAM struct {
 	TotalMB int64 `json:"total_mb"`
 }
 
+// machineMeasured is one entry of resourced's measured-VRAM overlay
+// (EVB-28): what the capability declared in the catalog and what its
+// first run actually took off the GPU. Over = the alert case (the
+// catalog under-declared).
+type machineMeasured struct {
+	Cap        string `json:"cap"` // capability@device
+	DeclaredMB int64  `json:"declared_mb"`
+	MeasuredMB int64  `json:"measured_mb"`
+	Over       bool   `json:"over"`
+}
+
 // FreeMB is what a photo job could take from the GPU.
 func (v machineVRAM) FreeMB() int64 { return v.TotalMB - v.UsedMB }
 
@@ -53,13 +66,14 @@ type machineHold struct {
 
 // MachineState is the body of the machine section (GET /html/machine).
 type MachineState struct {
-	Swap       string          `json:"swap"`        // "brain running" | "swap window open" | "brain down"
-	SwapTone   string          `json:"swap_tone"`   // ok | warn | bad
-	SwapDetail string          `json:"swap_detail,omitempty"`
-	Engines    []machineEngine `json:"engines"`
-	VRAM       *machineVRAM    `json:"vram,omitempty"`
-	Hold       machineHold     `json:"hold"`
-	LastSwap   string          `json:"last_swap,omitempty"`
+	Swap       string            `json:"swap"`        // "brain running" | "swap window open" | "brain down"
+	SwapTone   string            `json:"swap_tone"`   // ok | warn | bad
+	SwapDetail string            `json:"swap_detail,omitempty"`
+	Engines    []machineEngine   `json:"engines"`
+	VRAM       *machineVRAM      `json:"vram,omitempty"`
+	Measured   []machineMeasured `json:"measured,omitempty"` // resourced's VRAM overlay (EVB-28)
+	Hold       machineHold       `json:"hold"`
+	LastSwap   string            `json:"last_swap,omitempty"`
 }
 
 // probeTimeout bounds one machine probe: the section refreshes every 5 s, so
@@ -319,6 +333,29 @@ func (s *Server) probeVRAM() *machineVRAM {
 	return parseVRAMMetrics(body)
 }
 
+// probeMeasured reads resourced's measured-VRAM overlay (EVB-28): the
+// capabilities whose first run has measured their actual GPU footprint,
+// in stable (key) order. Nil when resourced is down or has none yet.
+func (s *Server) probeMeasured() []machineMeasured {
+	body, err := s.getBody(s.resourcedURL + "/measured")
+	if err != nil {
+		return nil
+	}
+	var out struct {
+		Measurements map[string]machineMeasured `json:"measurements"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil || len(out.Measurements) == 0 {
+		return nil
+	}
+	rows := make([]machineMeasured, 0, len(out.Measurements))
+	for key, m := range out.Measurements {
+		m.Cap = key
+		rows = append(rows, m)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Cap < rows[j].Cap })
+	return rows
+}
+
 // gatherMachine collects the machine panel. Every probe runs in parallel
 // with its own timeout, and a dead endpoint degrades to a "down"/"—" card
 // rather than failing the section.
@@ -327,11 +364,12 @@ func (s *Server) gatherMachine() MachineState {
 	var brainUp, igpuUp, artUp bool
 	var brainModel, igpuModel, artModel string
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() { defer wg.Done(); brainUp, brainModel = s.probeEngine(s.engineURL) }()
 	go func() { defer wg.Done(); igpuUp, igpuModel = s.probeEngine(s.igpuURL) }()
 	go func() { defer wg.Done(); artUp, artModel = s.probeArt() }()
 	go func() { defer wg.Done(); st.VRAM = s.probeVRAM() }()
+	go func() { defer wg.Done(); st.Measured = s.probeMeasured() }()
 	wg.Wait()
 
 	// The window is open when jarvis-swap's state file exists; art being up

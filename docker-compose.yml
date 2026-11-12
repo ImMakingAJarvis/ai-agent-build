@@ -305,6 +305,7 @@ services:
       args: { BIN: cmd/dashboard }
     image: jarvis/jarvis-dashboard:local
     container_name: jarvis-dashboard
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -320,6 +321,9 @@ services:
       IGPU_URL: http://jarvis-engine-igpu:11435
       ART_URL: http://art:8120
       NVIDIA_EXPORTER_URL: http://nvidia-exporter:3001
+      # Measured-VRAM overlay (EVB-28): resourced is a host systemd
+      # service, reached through host-gateway.
+      RESOURCED_URL: http://host.docker.internal:9104
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
       # Live job streams (see the redis service above); unset means the
       # dashboard falls back to tailing transcript files.

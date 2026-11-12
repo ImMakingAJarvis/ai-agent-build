@@ -261,13 +261,14 @@ type Server struct {
 
 	// Machine panel (machine.go): the endpoints the panel probes for the
 	// loaded models, VRAM and the swap-window state file.
-	engineURL  string
-	igpuURL    string
-	artURL     string
-	nvidiaURL  string
-	swapLog    string
-	windowPath string
-	httpClient *http.Client
+	engineURL    string
+	igpuURL      string
+	artURL       string
+	nvidiaURL    string
+	resourcedURL string // measured-VRAM overlay (EVB-28)
+	swapLog      string
+	windowPath   string
+	httpClient   *http.Client
 
 	// Pre-compiled templates (parsed once at startup).
 	tmpl *template.Template
@@ -328,6 +329,10 @@ func New() *Server {
 	if nvidiaURL == "" {
 		nvidiaURL = "http://127.0.0.1:3001"
 	}
+	resourcedURL := os.Getenv("RESOURCED_URL")
+	if resourcedURL == "" {
+		resourcedURL = "http://127.0.0.1:9104"
+	}
 	stateDir := os.Getenv("JARVIS_STATE_DIR")
 	if stateDir == "" {
 		stateDir = filepath.Join(home, ".local", "state", "jarvis")
@@ -374,6 +379,7 @@ func New() *Server {
 		igpuURL:      igpuURL,
 		artURL:       artURL,
 		nvidiaURL:    nvidiaURL,
+		resourcedURL: resourcedURL,
 		swapLog:      filepath.Join(stateDir, "swap.log"),
 		windowPath:   filepath.Join(stateDir, "swap-window.json"),
 		httpClient:   &http.Client{Timeout: probeTimeout},

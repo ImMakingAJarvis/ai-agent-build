@@ -66,6 +66,20 @@
       <div class="label">{{ if .VRAM }}free / total GB{{ else }}exporter down{{ end }}</div>
     </div>
     <div class="machine-card">
+      <div class="name">Measured VRAM</div>
+      {{- if .Measured }}
+      <div class="meas-list">
+        {{- range .Measured }}
+        <div class="meas{{ if .Over }} meas-over{{ end }}">{{ .Cap }}: {{ divGB .DeclaredMB }} → {{ divGB .MeasuredMB }}</div>
+        {{- end }}
+      </div>
+      <div class="label">declared → measured GB</div>
+      {{- else }}
+      <div class="model">—</div>
+      <div class="label">none measured yet</div>
+      {{- end }}
+    </div>
+    <div class="machine-card">
       <div class="name">On hold</div>
       <div class="model">{{ .Hold.Ready }} ready{{ if .Hold.Photo }} · {{ .Hold.Photo }} photo{{ end }}{{ if .Hold.Running }} · {{ .Hold.Running }} running{{ end }}{{ if .Hold.Failed }} · {{ .Hold.Failed }} failed{{ end }}</div>
       <div class="label"><a href="#queue" class="machine-link">queue</a></div>
