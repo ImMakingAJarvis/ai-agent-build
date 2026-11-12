@@ -119,9 +119,11 @@ except Exception:
 v=$1
 print(json.dumps(v))" 2>/dev/null
 }
-window_open() { [ "$(state_get "d.get('window',{}).get('open')")" = "True" ]; }
-stream_active() { [ "$(state_get "d.get('stream_active')")" = "True" ]; }
+window_open() { [ "$(state_get "d.get('window',{}).get('open')")" = "true" ]; }
+window_closed() { ! window_open; }
+stream_active() { [ "$(state_get "d.get('stream_active')")" = "true" ]; }
 stream_off() { ! stream_active; }
+brain_down() { ! brain_up; }
 # gpu_leases -> one "holder capability vram_mb" line per gpu lease
 gpu_leases() {
   state 2>/dev/null | python3 -c "import json,sys
@@ -133,7 +135,9 @@ for l in d.get('leases',[]):
     if l.get('device')=='gpu':
         print(l.get('holder','?'), l.get('capability',''), l.get('vram_mb',0))" 2>/dev/null
 }
-brain_up() { curl -sf --max-time 3 "$BRAIN/api/health" 2>/dev/null | grep -q "ok"; }
+# Up = the engine answers at all (200 healthy or 503 busy — a stopped
+# container is a connection failure, which is the down signal).
+brain_up() { curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$BRAIN/health" 2>/dev/null | grep -qE '^(200|503)$'; }
 
 # wait_flag <desc> <predicate-fn> <budget_ms> — poll until the predicate is
 # true. Returns 0 on success.
@@ -177,10 +181,10 @@ wait_window_open() {
   wait_flag "window open" window_open "${1:-$WINDOW_OPEN_BUDGET_MS}"
 }
 wait_window_closed() {
-  ! wait_flag "window closed" window_open "${1:-$WINDOW_CLOSE_BUDGET_MS}"
+  wait_flag "window closed" window_closed "${1:-$WINDOW_CLOSE_BUDGET_MS}"
 }
 wait_brain_down() {
-  ! wait_flag "brain down" brain_up "${1:-$BRAIN_DOWN_BUDGET_MS}"
+  wait_flag "brain down" brain_down "${1:-$BRAIN_DOWN_BUDGET_MS}"
 }
 wait_brain_up() {
   wait_flag "brain up" brain_up "${1:-$BRAIN_UP_BUDGET_MS}"
@@ -280,12 +284,12 @@ s1_s2() {
     fail S1 "window open but the brain engine is still answering (jarvis-swap out did not take effect)"
     cleanup_scenario "$id" "$flow"; return
   fi
-  log "S1: brain engine DOWN ($(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$BRAIN/api/health" 2>/dev/null || echo unreachable))"
+  log "S1: brain engine DOWN ($(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$BRAIN/health" 2>/dev/null || echo unreachable))"
 
   # --- S2: voice during the window ------------------------------------------
   log "S2: voice /chat during the window (brain down) — expecting the iGPU helper"
   local vh
-  vh="$(curl -sf --max-time "$VOICE_BUDGET_MS" -o "$ART_ROOT/voice-s2.json" -w '%{http_code}' \
+  vh="$(curl -sf --max-time "$(( VOICE_BUDGET_MS / 1000 ))" -o "$ART_ROOT/voice-s2.json" -w '%{http_code}' \
     -X POST "$VOICE/chat" -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"Gate check: reply with the single word OK."}]}' 2>&1)"
   if [ "$vh" != "200" ] || [ ! -s "$ART_ROOT/voice-s2.json" ]; then
@@ -516,11 +520,20 @@ on_exit() {
   done
   rm -rf "$ART_ROOT" 2>/dev/null || true
   # Restore the caller's round job: it was paused so rule 3 could open the
-  # window; back to ready (the round finishes it itself).
+  # window. If the caller's owner process is still alive the round finishes
+  # the job itself (jarvis-jobs finish works from paused) — requeueing it
+  # while the owner lives would hand it to a second runner. Only when the
+  # owner is gone does the job need to go back to ready for a later round.
   if [ -n "$ROUND_JOB" ] && [ "$(status_of "$ROUND_JOB")" = "paused" ]; then
-    log "cleanup: restoring round job $ROUND_JOB (paused -> ready)"
-    jarvis-jobs requeue "$ROUND_JOB" >/dev/null 2>&1 || \
-      log "cleanup: requeue of $ROUND_JOB failed (status now: $(status_of "$ROUND_JOB"))"
+    local opid
+    opid="$(python3 -c "import json;print(json.load(open('$JOBS/$ROUND_JOB/state.json')).get('pid',0))" 2>/dev/null || echo 0)"
+    if [ "${opid:-0}" != "0" ] && kill -0 "$opid" 2>/dev/null; then
+      log "cleanup: round job owner (pid $opid) still alive — leaving $ROUND_JOB paused for the round to finish it"
+    else
+      log "cleanup: round job owner gone — requeueing $ROUND_JOB (paused -> ready) so a later round can finish it"
+      jarvis-jobs requeue "$ROUND_JOB" >/dev/null 2>&1 || \
+        log "cleanup: requeue of $ROUND_JOB failed (status now: $(status_of "$ROUND_JOB"))"
+    fi
   fi
   log "stack health (should all be running):"
   docker ps --format '    {{.Names}}: {{.Status}}' 2>/dev/null | grep -E 'jarvis-engine |jarvis-switchboard|jarvis-image-gen|jarvis-llm-small-worker-gpu|jarvis-rabbitmq' || true
@@ -569,13 +582,13 @@ preflight() {
   if ! state >/dev/null 2>&1; then
     log "preflight: cannot reach resourced $RESOURCED/state"; rc=1
   else
-    if [ "$(state_get "d.get('window',{}) and 'cap_depths' in d['window']")" != "True" ]; then
+    if [ "$(state_get "d.get('window',{}) and 'cap_depths' in d['window']")" != "true" ]; then
       log "preflight: resourced /state has no window.cap_depths — the deployed binary predates this tree"; rc=1
     fi
-    if [ "$(state_get "d.get('window',{}).get('open')")" != "False" ]; then
+    if [ "$(state_get "d.get('window',{}).get('open')")" != "false" ]; then
       log "preflight: a swap window is already open"; rc=1
     fi
-    if [ "$(state_get "d.get('stream_active')")" != "False" ]; then
+    if [ "$(state_get "d.get('stream_active')")" != "false" ]; then
       log "preflight: a game stream is already active"; rc=1
     fi
   fi
