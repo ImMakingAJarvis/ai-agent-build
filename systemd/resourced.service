@@ -30,6 +30,8 @@ Environment=RABBITMQ_URL=amqp://jarvis:jarvis-local@localhost:5672
 Environment=CAPABILITIES_FILE=/home/agent/ai-agent-build/config/capabilities.yaml
 Environment=REFRESH_INTERVAL=30s
 Environment=WINDOW_INTERVAL=30s
+# Sunshine's video-stream UDP port (its config here is all-default).
+Environment=SUNSHINE_STREAM_PORT=48010
 # plan §7.2 defaults (no Nathan answer in the Discord logs, PR #231)
 Environment=MAX_WINDOW=2h
 Environment=MAX_BRAIN_WAIT=20m

@@ -107,13 +107,16 @@ func (w *world) setUnacked(m map[string]int) {
 }
 
 // newTestWindowController wires a controller over the world with the
-// plan-default config and two watched capabilities.
+// plan-default config and two watched (brain-out) capabilities; the
+// depth snapshot covers a wider catalog, as production does (every
+// catalog capability, EVB-30).
 func newTestWindowController(t *testing.T, swap *fakeSwap, w *world, pub Publisher) *windowController {
 	t.Helper()
 	return newWindowController(
 		resources.DefaultWindowConfig(),
 		swap,
 		[]string{"image.generate", "video.render"},
+		[]string{"audio.transcribe", "image.describe", "image.generate", "llm.small", "video.render"},
 		func(ctx context.Context, name string) (int, error) {
 			w.mu.Lock()
 			defer w.mu.Unlock()
@@ -409,6 +412,26 @@ func writeJob(t *testing.T, store *agentjob.Store, id, driver, status string, ag
 	}
 }
 
+// writeJobWithDeps is writeJob with a depends_on list (ingested in one
+// step — Ingest is a no-op for an existing id, so the deps must be in
+// the first call).
+func writeJobWithDeps(t *testing.T, store *agentjob.Store, id, driver, status string, age time.Duration, deps []string) {
+	t.Helper()
+	if _, err := store.Ingest(agentjob.Spec{ID: id, Driver: driver, DependsOn: deps}); err != nil {
+		t.Fatalf("ingest %s: %v", id, err)
+	}
+	if err := store.SetStatus(id, agentjob.State{Status: status}); err != nil {
+		t.Fatalf("status %s: %v", id, err)
+	}
+	if age > 0 {
+		p := filepath.Join(store.JobDir(id), "state.json")
+		past := time.Now().Add(-age)
+		if err := os.Chtimes(p, past, past); err != nil {
+			t.Fatalf("chtimes %s: %v", id, err)
+		}
+	}
+}
+
 // writePhotoJob is writeJob with the photo tag (the executor is code —
 // jarvis-photo — so the job is GPU work, not a brain round).
 func writePhotoJob(t *testing.T, store *agentjob.Store, id, status string, age time.Duration) {
@@ -434,7 +457,12 @@ func writePhotoJob(t *testing.T, store *agentjob.Store, id, status string, age t
 // file's mtime as the ready time. Photo-tagged jobs are excluded even
 // with a local driver — the running one must not block rule 3 (that
 // deadlocks the window the job itself waits for) and the ready one's
-// 30m wait must not trigger the brain-wait close.
+// 30m wait must not trigger the brain-wait close. A ready local job
+// whose depends_on is not all done is dep-blocked backlog: it cannot
+// run even with the brain back, so its (days-old) wait must not count
+// toward rule 4 — counting it would close every window on the first
+// tick. A ready job whose deps ARE done counts (the brain could run it
+// the moment it is back).
 func TestLocalJobs(t *testing.T) {
 	store, err := agentjob.Open(t.TempDir())
 	if err != nil {
@@ -447,6 +475,11 @@ func TestLocalJobs(t *testing.T) {
 	writeJob(t, store, "igpu-1", "igpu", agentjob.Running, 0) // not a brain job
 	writePhotoJob(t, store, "photo-run", agentjob.Running, 0)
 	writePhotoJob(t, store, "photo-ready", agentjob.Ready, 30*time.Minute)
+	// Dep-blocked backlog: days old, deps not done — must NOT count.
+	writeJobWithDeps(t, store, "dep-blocked", "", agentjob.Ready, 48*time.Hour, []string{"not-done-yet"})
+	// Deps satisfied: the dependency is done, so the brain could run it.
+	writeJob(t, store, "dep-done", "", agentjob.Done, 0)
+	writeJobWithDeps(t, store, "ready-dep-ok", "", agentjob.Ready, 21*time.Minute, []string{"dep-done"})
 
 	running, ready, err := localJobs(store, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -455,10 +488,26 @@ func TestLocalJobs(t *testing.T) {
 	if running != 1 {
 		t.Fatalf("running = %d, want 1 (a running photo job is GPU work, not a brain round)", running)
 	}
-	if len(ready) != 1 || ready[0].ID != "ready-1" {
-		t.Fatalf("ready = %+v, want only ready-1", ready)
+	if len(ready) != 2 {
+		t.Fatalf("ready = %+v, want ready-1 and ready-dep-ok (dep-blocked excluded)", ready)
 	}
-	waited := time.Since(ready[0].ReadySince)
+	byID := map[string]resources.ReadyJob{}
+	for _, r := range ready {
+		byID[r.ID] = r
+	}
+	if _, ok := byID["ready-1"]; !ok {
+		t.Fatalf("ready-1 missing from %+v", ready)
+	}
+	if _, ok := byID["ready-dep-ok"]; !ok {
+		t.Fatalf("ready-dep-ok missing from %+v", ready)
+	}
+	if _, ok := byID["dep-blocked"]; ok {
+		t.Fatalf("dep-blocked must not count toward rule 4: %+v", ready)
+	}
+	if _, ok := byID["ready-remote"]; ok {
+		t.Fatalf("remote driver must not count: %+v", ready)
+	}
+	waited := time.Since(byID["ready-1"].ReadySince)
 	if waited < 20*time.Minute || waited > 25*time.Minute {
 		t.Fatalf("ready-1 waited %s, want ~21m", waited)
 	}
@@ -488,5 +537,42 @@ func TestStateIncludesWindow(t *testing.T) {
 	winfo := st["window"].(map[string]any)
 	if winfo["open"] != false {
 		t.Fatalf("window before any tick = %v, want open=false", winfo["open"])
+	}
+}
+
+// TestStateCapDepths: the window field of GET /state carries the
+// per-capability depth snapshot (EVB-30, the Machine view's data
+// source): ready plus unacked, for every snapshotted capability — a
+// zero is present, so the dashboard can tell "empty" from "unreached".
+func TestStateCapDepths(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	swap := &fakeSwap{}
+	w := &world{
+		depth:   map[string]int{queue.CapQueueName("image.generate"): 2},
+		unacked: map[string]int{queue.CapQueueName("llm.small"): 1},
+	}
+	wc := newTestWindowController(t, swap, w, &fakePub{})
+	wc.tick(context.Background())
+	svc.window = wc
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /state", svc.handleState)
+
+	code, st := doWith(t, mux, "GET", "/state", "")
+	if code != 200 {
+		t.Fatalf("state: %d", code)
+	}
+	winfo := st["window"].(map[string]any)
+	depths, ok := winfo["cap_depths"].(map[string]any)
+	if !ok {
+		t.Fatalf("window.cap_depths missing: %v", winfo)
+	}
+	if got := depths["image.generate"]; got != float64(2) {
+		t.Fatalf("image.generate depth = %v, want 2", got)
+	}
+	if got := depths["llm.small"]; got != float64(1) {
+		t.Fatalf("llm.small depth = %v, want 1 (unacked counts as work)", got)
+	}
+	if got := depths["audio.transcribe"]; got != float64(0) {
+		t.Fatalf("audio.transcribe depth = %v, want 0 (present, empty)", got)
 	}
 }

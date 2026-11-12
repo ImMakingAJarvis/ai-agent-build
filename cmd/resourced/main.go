@@ -449,6 +449,7 @@ func buildWindowController(conn *queue.Conn, pub Publisher, reg *prometheus.Regi
 		cfg,
 		newShellSwapRunner(envOr("SWAP_CMD", "jarvis-swap"), os.Getenv("SWAP_STATE_FILE"), 0, log),
 		caps,
+		cat.SortedNames(), // the /state depth snapshot covers the whole catalog (EVB-30)
 		func(ctx context.Context, name string) (int, error) { return conn.QueueDepth(name) },
 		func(ctx context.Context) (map[string]int, error) { return mgmt.unacked(ctx, vhost) },
 		func(ctx context.Context) (int, []resources.ReadyJob, error) {

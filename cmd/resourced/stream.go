@@ -56,6 +56,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -89,10 +90,14 @@ func newStreamController(svc *service, reg *prometheus.Registry, log *slog.Logge
 // boots mid-stream takes the game path immediately (the watcher's first
 // StateChange is the current state, not just later transitions).
 func (sc *streamController) Run(ctx context.Context) {
-	watch := streamwatcher.New(streamwatcher.Config{
+	cfg := streamwatcher.Config{
 		SunshineEndpoint: os.Getenv("SUNSHINE_ENDPOINT"),
 		SteamEndpoint:    os.Getenv("STEAM_ENDPOINT"),
-	})
+	}
+	if p, err := strconv.Atoi(os.Getenv("SUNSHINE_STREAM_PORT")); err == nil && p > 0 {
+		cfg.SunshineStreamPort = p
+	}
+	watch := streamwatcher.New(cfg)
 	ch := make(chan streamwatcher.StateChange, 1)
 	watch.Start(ch)
 	sc.log.Info("stream watchdog started (game → revoke GPU leases, close the window)")

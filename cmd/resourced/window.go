@@ -238,6 +238,14 @@ func localDriver(d string) bool { return d == "" || d == "local" }
 // A ready job without a state file is skipped (not counted): guessing
 // its wait early could close a window it should not close.
 //
+// Rule 4 counts only ready jobs the brain could ACTUALLY run — the same
+// deps gate as Next (DepsMet). The store fills with dep-blocked backlog
+// jobs (dozens, days old); counting their wait would close every window
+// on the first tick after it opens (oldest ready state.json >> 20 m),
+// before the GPU work that triggered it has even started. A dep-blocked
+// job is not served by the brain coming back — its wait is on its
+// dependencies, not on the window.
+//
 // Photo-tagged jobs are NOT brain jobs even though they run with a local
 // driver: the executor is code (jarvis-photo) that publishes the
 // image.generate request and blocks for the Result — the work the window
@@ -251,6 +259,10 @@ func localJobs(store *agentjob.Store, log *slog.Logger) (int, []resources.ReadyJ
 	if err != nil {
 		return 0, nil, err
 	}
+	status := make(map[string]string, len(all))
+	for _, j := range all {
+		status[j.ID] = j.Status
+	}
 	running := 0
 	var ready []resources.ReadyJob
 	for _, j := range all {
@@ -261,6 +273,9 @@ func localJobs(store *agentjob.Store, log *slog.Logger) (int, []resources.ReadyJ
 		case agentjob.Running:
 			running++
 		case agentjob.Ready:
+			if !agentjob.DepsMet(j, status) {
+				continue // dep-blocked: not a brain wait
+			}
 			fi, err := os.Stat(filepath.Join(store.JobDir(j.ID), "state.json"))
 			if err != nil {
 				log.Warn("window: ready job has no state file — not counting its wait", "job", j.ID, "err", err)
@@ -294,13 +309,17 @@ func brainOutCaps(cat *catalog.File) []string {
 
 // windowInfo is the "window" field of GET /state: the last known shape
 // of the window and the last decision's reason (why it holds, or why it
-// just closed).
+// just closed). CapDepths is the per-capability queue depth snapshot
+// (EVB-30, the dashboard's Machine view): ready count plus unacked, per
+// catalog capability name — the AMQP side of "what is waiting for the
+// machine".
 type windowInfo struct {
-	Open     bool      `json:"open"`
-	For      []string  `json:"for,omitempty"`
-	OpenedAt time.Time `json:"opened_at,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
-	LastTick time.Time `json:"last_tick,omitempty"`
+	Open      bool          `json:"open"`
+	For       []string      `json:"for,omitempty"`
+	OpenedAt  time.Time     `json:"opened_at,omitempty"`
+	Reason    string        `json:"reason,omitempty"`
+	LastTick  time.Time     `json:"last_tick,omitempty"`
+	CapDepths map[string]int `json:"cap_depths,omitempty"`
 }
 
 // windowController owns one window's lifecycle: it ticks on its own
@@ -310,7 +329,8 @@ type windowInfo struct {
 type windowController struct {
 	cfg  resources.WindowConfig
 	swap SwapRunner
-	caps []string // the watched capability names (sorted)
+	caps      []string // the watched (brain-out) capability names, for the decision
+	depthCaps []string // every catalog capability — the /state depth snapshot
 
 	depth   func(ctx context.Context, queueName string) (int, error)          // AMQP ready count
 	unacked func(ctx context.Context) (map[string]int, error)                 // mgmt, queue name → count
@@ -332,6 +352,7 @@ func newWindowController(
 	cfg resources.WindowConfig,
 	swap SwapRunner,
 	caps []string,
+	depthCaps []string,
 	depth func(ctx context.Context, queueName string) (int, error),
 	unacked func(ctx context.Context) (map[string]int, error),
 	jobs func(ctx context.Context) (int, []resources.ReadyJob, error),
@@ -340,7 +361,7 @@ func newWindowController(
 	log *slog.Logger,
 ) *windowController {
 	wc := &windowController{
-		cfg: cfg, swap: swap, caps: caps,
+		cfg: cfg, swap: swap, caps: caps, depthCaps: depthCaps,
 		depth: depth, unacked: unacked, jobs: jobs,
 		pub: pub, log: log,
 		openGauge: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -373,15 +394,19 @@ func (wc *windowController) tick(ctx context.Context) {
 		wc.log.Warn("window: cannot read the swap state — holding the tick", "err", err)
 		return
 	}
-	depth := make(map[string]int, len(wc.caps))
-	for _, cap := range wc.caps {
+	// The depth snapshot covers every catalog capability (EVB-30: the
+	// dashboard's per-capability depth comes from here, not from a
+	// second management-API call); the decision's watched set is the
+	// brain-out subset of it, so each queue is read once per tick.
+	snap := make(map[string]int, len(wc.depthCaps))
+	for _, cap := range wc.depthCaps {
 		name := queue.CapQueueName(cap)
 		n, err := wc.depth(ctx, name)
 		if err != nil {
 			wc.log.Warn("window: queue depth failed — holding the tick", "queue", name, "err", err)
 			return
 		}
-		depth[cap] = n
+		snap[cap] = n
 	}
 	uaKnown := true
 	if ua, err := wc.unacked(ctx); err != nil {
@@ -394,9 +419,13 @@ func (wc *windowController) tick(ctx context.Context) {
 		// same process, so this path is rare.
 		wc.log.Warn("window: management API unreachable — no drained close this tick", "err", err)
 	} else {
-		for _, cap := range wc.caps {
-			depth[cap] += ua[queue.CapQueueName(cap)]
+		for cap := range snap {
+			snap[cap] += ua[queue.CapQueueName(cap)]
 		}
+	}
+	depth := make(map[string]int, len(wc.caps))
+	for _, cap := range wc.caps {
+		depth[cap] = snap[cap]
 	}
 	running, ready, err := wc.jobs(ctx)
 	if err != nil {
@@ -424,7 +453,7 @@ func (wc *windowController) tick(ctx context.Context) {
 	}
 	now := time.Now().UTC()
 	wc.mu.Lock()
-	wc.last = windowInfo{Open: open, For: forCaps, OpenedAt: openedAt, Reason: d.Reason, LastTick: now}
+	wc.last = windowInfo{Open: open, For: forCaps, OpenedAt: openedAt, Reason: d.Reason, LastTick: now, CapDepths: snap}
 	wc.mu.Unlock()
 	wc.openGauge.Set(boolFloat(open))
 	if open && !openedAt.IsZero() {

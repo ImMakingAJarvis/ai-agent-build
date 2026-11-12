@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
@@ -62,6 +63,7 @@ func TestParseVRAMMetrics(t *testing.T) {
 nvidia_gpu_mem_used_mb {gpu="0"} 20376
 # TYPE nvidia_gpu_mem_used_mb gauge
 nvidia_gpu_mem_total_mb {gpu="0"} 24564
+nvidia_gpu_power_w {gpu="0"} 352.4
 nvidia_gpu_temp_celsius {gpu="0"} 42
 `
 	v := parseVRAMMetrics(body)
@@ -70,6 +72,9 @@ nvidia_gpu_temp_celsius {gpu="0"} 42
 	}
 	if v.UsedMB != 20376 || v.TotalMB != 24564 || v.FreeMB() != 24564-20376 {
 		t.Errorf("got %+v, want used=20376 total=24564", v)
+	}
+	if v.PowerW != 352.4 {
+		t.Errorf("PowerW = %v, want 352.4", v.PowerW)
 	}
 	if got := parseVRAMMetrics("no gpu metrics here\n"); got != nil {
 		t.Errorf("parseVRAMMetrics(no metrics) = %+v, want nil", got)
@@ -262,5 +267,169 @@ func TestGatherMachinePhotoWindow(t *testing.T) {
 	}
 	if st.Engines[2].State != "up" || st.Engines[2].Model != "z-image-turbo" {
 		t.Errorf("art card = %+v, want up/z-image-turbo", st.Engines[2])
+	}
+}
+
+// TestProbeResourced: the broker's /state becomes the Machine view's
+// window card, the per-device lease list and the capability queue
+// depths (EVB-30) — grouped, sorted, and with the in-flight depth from
+// the snapshot.
+func TestProbeResourced(t *testing.T) {
+	state := `{
+	  "leases": [
+	    {"holder":"brain","device":"gpu","vram_mb":17600,"since":"2026-11-12T10:00:00Z"},
+	    {"holder":"capworker:image.generate","capability":"image.generate","device":"gpu","vram_mb":12288,"since":"2026-11-12T10:05:00Z"},
+	    {"holder":"capworker:llm.small","capability":"llm.small","device":"igpu","vram_mb":5500,"since":"2026-11-12T10:06:00Z"}
+	  ],
+	  "window": {
+	    "open": true,
+	    "for": ["image.generate"],
+	    "opened_at": "2026-11-12T10:04:00Z",
+	    "reason": "queued work on image.generate with the brain idle",
+	    "cap_depths": {"image.generate": 1, "llm.small": 0}
+	  }
+	}`
+	res := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/state" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(state))
+	}))
+	defer res.Close()
+
+	s := &Server{resourcedURL: res.URL, httpClient: &http.Client{}}
+	p := s.probeResourced()
+	if p == nil {
+		t.Fatal("probeResourced = nil")
+	}
+	if !p.Window.Open || len(p.Window.For) != 1 || p.Window.For[0] != "image.generate" {
+		t.Errorf("window = %+v, want open for image.generate", p.Window)
+	}
+	if p.Window.Reason != "queued work on image.generate with the brain idle" {
+		t.Errorf("window reason = %q", p.Window.Reason)
+	}
+	if p.Window.Age == "" {
+		t.Error("open window must carry an age")
+	}
+	if len(p.Leases) != 2 || p.Leases[0].Device != "gpu" || len(p.Leases[0].Leases) != 2 ||
+		p.Leases[1].Device != "igpu" || len(p.Leases[1].Leases) != 1 {
+		t.Fatalf("leases = %+v, want gpu(2) then igpu(1)", p.Leases)
+	}
+	if p.Leases[0].Leases[0].Holder != "brain" || p.Leases[0].Leases[1].Capability != "image.generate" {
+		t.Errorf("gpu leases = %+v", p.Leases[0].Leases)
+	}
+	if len(p.CapDepths) != 2 || p.CapDepths[0].Cap != "image.generate" || p.CapDepths[0].Depth != 1 ||
+		p.CapDepths[1].Cap != "llm.small" || p.CapDepths[1].Depth != 0 {
+		t.Errorf("cap depths = %+v, want image.generate:1 then llm.small:0", p.CapDepths)
+	}
+
+	// A closed window still reports the last decision's reason.
+	res2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"window":{"open":false,"reason":"drained (all capability queues empty)"}}`))
+	}))
+	defer res2.Close()
+	s2 := &Server{resourcedURL: res2.URL, httpClient: &http.Client{}}
+	p2 := s2.probeResourced()
+	if p2 == nil || p2.Window.Open || !p2.Window.Up ||
+		p2.Window.Reason != "drained (all capability queues empty)" {
+		t.Errorf("closed window = %+v, want up/closed with the last reason", p2)
+	}
+
+	// resourced down: the probe degrades to nil, not an error.
+	s3 := &Server{resourcedURL: "http://127.0.0.1:1", httpClient: &http.Client{}}
+	if got := s3.probeResourced(); got != nil {
+		t.Errorf("probeResourced(down) = %+v, want nil", got)
+	}
+}
+
+// TestWaitingBrainJobs: only the waiting LOCAL jobs show, with their
+// wait age and what they wait on; a non-local driver and a ready job
+// are not brain waits.
+func TestWaitingBrainJobs(t *testing.T) {
+	now := time.Now()
+	since := now.Add(-45 * time.Second).UTC().Format(time.RFC3339)
+	jobs := []agentjob.Job{
+		{Spec: agentjob.Spec{ID: "j1", Title: "make a photo", WaitOn: []string{"j1-img-1"}},
+			State: agentjob.State{Status: agentjob.Waiting, WaitingSince: since, WaitNote: "image in flight"}},
+		{Spec: agentjob.Spec{ID: "j2", Driver: "sonnet", WaitOn: []string{"x"}},
+			State: agentjob.State{Status: agentjob.Waiting, WaitingSince: since}},
+		{Spec: agentjob.Spec{ID: "j3"}, State: agentjob.State{Status: agentjob.Ready}},
+	}
+	out := waitingBrainJobs(jobs, now)
+	if len(out) != 1 || out[0].ID != "j1" {
+		t.Fatalf("waitingBrainJobs = %+v, want only j1", out)
+	}
+	if out[0].WaitAge != "45s" || out[0].WaitNote != "image in flight" {
+		t.Errorf("j1 row = %+v, want waited 45s with the note", out[0])
+	}
+	if len(out[0].WaitOn) != 1 || out[0].WaitOn[0] != "j1-img-1" {
+		t.Errorf("j1 wait_on = %v", out[0].WaitOn)
+	}
+	// A waiting job with no WaitOn renders a placeholder, not nothing.
+	blank := waitingBrainJobs([]agentjob.Job{
+		{Spec: agentjob.Spec{ID: "j9"}, State: agentjob.State{Status: agentjob.Waiting}},
+	}, now)
+	if len(blank) != 1 || len(blank[0].WaitOn) != 1 || blank[0].WaitOn[0] != "—" {
+		t.Errorf("no-wait_on job = %+v, want the — placeholder", blank)
+	}
+}
+
+// TestGatherMachineWithResourced: the broker's window view wins over the
+// state file — the headline shows the broker's reason and the window
+// card carries the open state (EVB-30).
+func TestGatherMachineWithResourced(t *testing.T) {
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "refused", http.StatusServiceUnavailable)
+	}))
+	defer brain.Close()
+	res := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/state" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`{"leases":[],"window":{"open":true,"for":["image.generate"],"opened_at":"2026-11-12T10:04:00Z","reason":"queued work","cap_depths":{"image.generate":1}}}`))
+	}))
+	defer res.Close()
+
+	conf := t.TempDir()
+	s := &Server{
+		historyPath:  filepath.Join(conf, "jobs.jsonl"),
+		engineURL:    brain.URL,
+		igpuURL:      "http://127.0.0.1:1",
+		artURL:       "http://127.0.0.1:1",
+		nvidiaURL:    "http://127.0.0.1:1",
+		resourcedURL: res.URL,
+		windowPath:   filepath.Join(conf, "swap-window.json"), // no file: broker view alone
+		swapLog:      filepath.Join(conf, "swap.log"),
+		httpClient:   &http.Client{},
+	}
+
+	st := s.gatherMachine()
+	if st.Swap != "swap window open" || st.SwapTone != "warn" {
+		t.Errorf("Swap = %q (%s), want swap window open/warn", st.Swap, st.SwapTone)
+	}
+	if st.SwapDetail != "for image.generate — queued work" {
+		t.Errorf("SwapDetail = %q, want the broker's for+reason", st.SwapDetail)
+	}
+	if st.Window == nil || !st.Window.Open || st.Window.Age == "" {
+		t.Errorf("Window = %+v, want open with an age", st.Window)
+	}
+	if len(st.CapDepths) != 1 || st.CapDepths[0].Cap != "image.generate" || st.CapDepths[0].Depth != 1 {
+		t.Errorf("CapDepths = %+v", st.CapDepths)
+	}
+}
+
+func TestShortDur(t *testing.T) {
+	cases := map[time.Duration]string{
+		-5 * time.Second: "0s",
+		45 * time.Second: "45s",
+		12 * time.Minute: "12m",
+		2*time.Hour + 3 * time.Minute: "2h3m",
+	}
+	for in, want := range cases {
+		if got := shortDur(in); got != want {
+			t.Errorf("shortDur(%v) = %q, want %q", in, got, want)
+		}
 	}
 }
