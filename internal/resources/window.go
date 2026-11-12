@@ -12,10 +12,11 @@ package resources
 // Rule 4: batch windows. Open a window when queued GPU-needing capability
 // work exists and rule 3 holds. Inside a window, drain ALL queued GPU
 // capability work (not just what triggered it). Close when drained, or at
-// max_window, or when a brain job is ready and has waited longer than
-// max_brain_wait — whichever first. A window younger than min_window does
-// not close on drain (avoids thrash: each swap costs minutes of model
-// load both ways).
+// max_window, or when a brain job that became ready during the window has
+// waited longer than max_brain_wait — whichever first. A job already ready
+// before the window opened is not counted: its wait is the queue's, not
+// the window's. A window younger than min_window does not close on drain
+// (avoids thrash: each swap costs minutes of model load both ways).
 //
 // The watchdog's maintenance deadline (opened with the window by
 // jarvis-swap out) remains the hard failsafe beyond max_window.
@@ -130,10 +131,17 @@ func DecideWindow(cfg WindowConfig, in WindowInput) WindowDecision {
 	}
 
 	// Rule 4: a ready brain job that has waited past max_brain_wait ends
-	// the window (it resumes the moment the brain is back).
+	// the window (it resumes the moment the brain is back). Only jobs
+	// that became ready AFTER the window opened count: the store holds a
+	// backlog of long-ready jobs, and counting their age would close
+	// every window on its first tick (EVB-30 gate: a 21-day-old ready
+	// job fired this rule with "waited 522h" and aborted the flow).
 	var brainJob string
 	var brainWait time.Duration
 	for _, j := range in.ReadyLocal {
+		if j.ReadySince.Before(in.OpenedAt) {
+			continue // ready before the window: its wait is not the window's
+		}
 		waited := in.Now.Sub(j.ReadySince)
 		if waited >= cfg.MaxBrainWait && (brainJob == "" || waited > brainWait) {
 			brainJob, brainWait = j.ID, waited

@@ -170,33 +170,45 @@ func (h handler) Handle(ctx context.Context, req queue.Message) (queue.Result, e
 }
 
 // ensureArt makes sure the art service is up and its model loaded before a
-// generation: it probes GET /health and, when the service is up but the
-// model is still loading, waits (bounded by artWait) — the same wait the
-// old jarvis-photo did. A service that is down is an error for this
-// attempt: it comes up with the swap window, and if it is not there the
-// SDK burns an attempt (retry, then the message dead-letters with a
-// reason) rather than this worker blocking forever.
+// generation: it probes GET /health and waits (bounded by artWait) while
+// the service is down or the model is still loading. The down case is a
+// wait, not an immediate error, because the message that triggered the
+// swap window is the reason the art service is about to come up: the
+// worker holds its lease and consumes the trigger the moment it lands,
+// which is BEFORE the window opens and `jarvis-swap out` has started the
+// art container (EVB-30 gate: the trigger message was dead-lettered in
+// three same-second attempts against a stopped art service, and the
+// window that followed had no work to do). If the service is not there
+// after artWait the SDK burns an attempt (retry, then the message
+// dead-letters with a reason) rather than this worker blocking forever.
 func (h handler) ensureArt(ctx context.Context) error {
-	loaded, err := h.health()
-	if err != nil {
-		return &art.ErrUnavailable{Detail: "art service not reachable (is the swap window open?)"}
-	}
-	if loaded {
-		return nil
-	}
 	deadline := time.Now().Add(h.artWait)
-	log.Printf("image-gen-worker: art service is up, model not loaded — waiting (up to %s)", h.artWait)
-	for time.Now().Before(deadline) {
+	loading := false
+	for {
+		loaded, err := h.health()
+		if err == nil && loaded {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return &art.ErrUnavailable{Detail: fmt.Sprintf("art service not reachable after %s (is the swap window open?)", h.artWait)}
+			}
+			return &art.ErrUnavailable{Detail: fmt.Sprintf("art model not loaded after %s", h.artWait)}
+		}
+		if !loading {
+			if err != nil {
+				log.Printf("image-gen-worker: art service down — waiting for the swap window (up to %s)", h.artWait)
+			} else {
+				log.Printf("image-gen-worker: art service is up, model not loaded — waiting (up to %s)", h.artWait)
+			}
+			loading = true
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
-		if loaded, err := h.health(); err == nil && loaded {
-			return nil
-		}
 	}
-	return &art.ErrUnavailable{Detail: fmt.Sprintf("art model not loaded after %s", h.artWait)}
 }
 
 // health probes the art service's /health (10s bound) and reports whether

@@ -425,6 +425,53 @@ func TestRevokeGPULeases(t *testing.T) {
 	}
 }
 
+// TestRevokeGPULeasesFor is the window close's filtered revocation
+// (EVB-30): only the named capabilities' GPU leases — granted AND
+// queued — leave the ledger; another GPU capability (llm.small,
+// needs_brain_out=false) keeps its lease through a normal window close,
+// because that is exactly what co-schedules with the brain. nil = all
+// (the game watchdog's path).
+func TestRevokeGPULeasesFor(t *testing.T) {
+	l := testLedger()
+	if _, created := l.RefreshBrainLease(2048); !created {
+		t.Fatal("brain setup: no standing lease")
+	}
+	img := Request{Holder: "img-w", Capability: "image.generate", Device: DeviceGPU, VRAMMB: 12288}
+	small := Request{Holder: "small-w", Capability: "llm.small", Device: DeviceGPU, VRAMMB: 5500}
+	desc := Request{Holder: "desc-w", Capability: "image.describe", Device: DeviceGPU, VRAMMB: 3244}
+	for _, r := range []Request{img, small, desc} {
+		if got := l.Request(r); got.Status != Granted {
+			t.Fatalf("%s: %v", r.Holder, got)
+		}
+	}
+	if got := l.Request(Request{Holder: "img-q", Capability: "image.generate", Device: DeviceGPU, VRAMMB: 4096}); got.Status != Queued {
+		t.Fatalf("img-q: %v (the box is full — it must queue)", got)
+	}
+	// The window closes for the brain-out caps: their leases (granted
+	// and queued) go, llm.small's stays.
+	revoked := l.RevokeGPULeasesFor([]string{"image.generate", "image.describe"})
+	if len(revoked) != 3 {
+		t.Fatalf("revoked = %+v, want img (granted), desc (granted), img-q (queued)", revoked)
+	}
+	if revoked[0].Holder != "img-w" || revoked[1].Holder != "desc-w" || revoked[2].Holder != "img-q" {
+		t.Errorf("revoked order = %+v, want img-w, desc-w, img-q", revoked)
+	}
+	active := l.ActiveLeases()
+	if len(active) != 2 {
+		t.Fatalf("active after filtered revoke = %+v, want the brain and llm.small", active)
+	}
+	if active[1].Holder != "small-w" {
+		t.Errorf("llm.small's lease must survive the window close: %+v", active[1])
+	}
+	if queued := l.Queued(); len(queued) != 0 {
+		t.Errorf("queue after filtered revoke = %+v, want empty", queued)
+	}
+	// nil = all: the game path takes even llm.small.
+	if again := l.RevokeGPULeasesFor(nil); len(again) != 1 || again[0].Holder != "small-w" {
+		t.Errorf("nil revoke = %+v, want exactly llm.small left", again)
+	}
+}
+
 // TestGrantOrdering: leases list in grant (id) order, l10 before l2.
 func TestGrantOrdering(t *testing.T) {
 	l := testLedger()

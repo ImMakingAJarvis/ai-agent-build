@@ -314,11 +314,11 @@ func brainOutCaps(cat *catalog.File) []string {
 // catalog capability name — the AMQP side of "what is waiting for the
 // machine".
 type windowInfo struct {
-	Open      bool          `json:"open"`
-	For       []string      `json:"for,omitempty"`
-	OpenedAt  time.Time     `json:"opened_at,omitempty"`
-	Reason    string        `json:"reason,omitempty"`
-	LastTick  time.Time     `json:"last_tick,omitempty"`
+	Open      bool           `json:"open"`
+	For       []string       `json:"for,omitempty"`
+	OpenedAt  time.Time      `json:"opened_at,omitempty"`
+	Reason    string         `json:"reason,omitempty"`
+	LastTick  time.Time      `json:"last_tick,omitempty"`
 	CapDepths map[string]int `json:"cap_depths,omitempty"`
 }
 
@@ -327,14 +327,15 @@ type windowInfo struct {
 // SwapRunner. The policy stays in internal/resources; everything here
 // is collection and side effects.
 type windowController struct {
-	cfg  resources.WindowConfig
-	swap SwapRunner
+	cfg       resources.WindowConfig
+	swap      SwapRunner
 	caps      []string // the watched (brain-out) capability names, for the decision
 	depthCaps []string // every catalog capability — the /state depth snapshot
 
-	depth   func(ctx context.Context, queueName string) (int, error)          // AMQP ready count
-	unacked func(ctx context.Context) (map[string]int, error)                 // mgmt, queue name → count
-	jobs    func(ctx context.Context) (int, []resources.ReadyJob, error)      // running, ready local
+	depth   func(ctx context.Context, queueName string) (int, error)     // AMQP ready count
+	unacked func(ctx context.Context) (map[string]int, error)            // mgmt, queue name → count
+	jobs    func(ctx context.Context) (int, []resources.ReadyJob, error) // running, ready local
+	revoke  func(caps []string) []resources.Lease                        // GPU-lease revocation (nil = none)
 	pub     Publisher
 	log     *slog.Logger
 
@@ -356,13 +357,14 @@ func newWindowController(
 	depth func(ctx context.Context, queueName string) (int, error),
 	unacked func(ctx context.Context) (map[string]int, error),
 	jobs func(ctx context.Context) (int, []resources.ReadyJob, error),
+	revoke func(caps []string) []resources.Lease,
 	pub Publisher,
 	reg *prometheus.Registry,
 	log *slog.Logger,
 ) *windowController {
 	wc := &windowController{
 		cfg: cfg, swap: swap, caps: caps, depthCaps: depthCaps,
-		depth: depth, unacked: unacked, jobs: jobs,
+		depth: depth, unacked: unacked, jobs: jobs, revoke: revoke,
 		pub: pub, log: log,
 		openGauge: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "resourced_window_open",
@@ -508,6 +510,26 @@ func (wc *windowController) closeWindow(ctx context.Context, reason, cls string)
 	if !open {
 		wc.log.Info("window: already closed (another path won the race) — skipping", "reason", reason)
 		return nil
+	}
+	// Revoke the window's capability leases BEFORE the brain comes home
+	// (EVB-30): a worker holding a stale lease would consume the next
+	// message the instant the queue delivers it — with the art service
+	// already stopped by the close — and burn its attempts (the Phase 4
+	// gate: the image worker pulled the new window's trigger message
+	// across the close and dead-lettered it, so the new window never
+	// saw its work). Revoke first so nothing is consumed while the brain
+	// loads; the workers re-ask on their own poll tick (queued while the
+	// brain is home, granted in the next window). The brain's standing
+	// lease and the needs-brain-out=false capabilities (llm.small) keep
+	// theirs. If the close then fails, the window is still open and the
+	// re-asks are granted again — the revocation self-heals.
+	if wc.revoke != nil {
+		for _, lease := range wc.revoke(wc.caps) {
+			wc.publish(ctx, queue.LeaseEvent("released", map[string]any{
+				"lease":  lease,
+				"reason": "swap window closing: " + reason,
+			}))
+		}
 	}
 	if err := wc.swap.Close(ctx, reason); err != nil {
 		return err

@@ -87,8 +87,12 @@ type Server struct {
 	// Log; nil = the standard logger.
 	Log *log.Logger
 
-	mu   sync.Mutex
-	cmd  *exec.Cmd
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	waitDone chan error // set by Start after cmd.Start; its single Wait
+	// goroutine writes the exit here, and Start's health
+	// loop and Stop both wait on it (exactly one consumer
+	// claims it, under mu)
 	errb *bytes.Buffer // tail of the server's stderr, for Start failures
 }
 
@@ -162,6 +166,16 @@ func (s *Server) Start(ctx context.Context) error {
 			s.mu.Unlock()
 			return fmt.Errorf("vlmserver: start %s: %w", s.Binary, err)
 		}
+		// One Wait goroutine owns the reap (EVB-30 gate): Start's health
+		// loop watches its channel so a process that dies during load
+		// fails immediately instead of waiting out the full health
+		// timeout (a 7B that cannot reserve VRAM cost 240 s per attempt,
+		// and three attempts burned the request's whole retry budget),
+		// and Stop later waits on the same channel. cmd.ProcessState
+		// could never have been used for this — it is only set after
+		// Wait, and Start never Waits.
+		s.waitDone = make(chan error, 1)
+		go func() { s.waitDone <- cmd.Wait() }()
 	}
 	s.cmd = cmd
 	s.mu.Unlock()
@@ -182,20 +196,30 @@ func (s *Server) Start(ctx context.Context) error {
 			s.log().Printf("vlmserver: up (port %d, ngl %d, %s)", or(s.Port, 11510), s.NGL, filepath.Base(s.Model))
 			return nil
 		}
-		// The process died while loading (bad model, OOM): stop waiting.
+		// The process died while loading (bad model, OOM, VRAM reservation
+		// failed): stop waiting. The receive and the claim happen under
+		// one lock so a concurrent Stop cannot also take the channel.
 		s.mu.Lock()
-		dead := s.cmd != nil && s.cmd.ProcessState != nil
-		s.mu.Unlock()
+		var werr error
+		dead := false
+		if s.waitDone != nil {
+			select {
+			case werr = <-s.waitDone:
+				dead = true
+				s.waitDone = nil
+			default:
+			}
+		}
 		if dead {
+			s.cmd = nil
+			s.mu.Unlock()
 			tail := s.errb.String()
 			if len(tail) > 512 {
 				tail = tail[len(tail)-512:]
 			}
-			s.mu.Lock()
-			s.cmd = nil
-			s.mu.Unlock()
-			return fmt.Errorf("vlmserver: process exited during load: %s", strings.TrimSpace(tail))
+			return fmt.Errorf("vlmserver: process exited during load (%v): %s", werr, strings.TrimSpace(tail))
 		}
+		s.mu.Unlock()
 	}
 	s.Stop()
 	tail := s.errb.String()
@@ -210,19 +234,29 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Stop() error {
 	s.mu.Lock()
 	cmd := s.cmd
+	waitDone := s.waitDone
+	if waitDone != nil {
+		s.waitDone = nil // claim: exactly one caller reaps this process
+	}
 	s.cmd = nil
 	s.mu.Unlock()
-	if cmd == nil || cmd.ProcessState != nil {
+	if cmd == nil {
 		return nil
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	cmd.Process.Signal(os.Interrupt) // llama.cpp shuts down on SIGINT/SIGTERM
+	// Start's Wait goroutine owns the reap: wait for the exit, asking for
+	// a clean shutdown while the process is still running. (A second
+	// cmd.Wait — the old behavior — panics, so the channel is shared
+	// rather than started here.)
 	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		cmd.Process.Kill()
-		<-done
+	case <-waitDone: // already exited (died during load)
+	default:
+		cmd.Process.Signal(os.Interrupt) // llama.cpp shuts down on SIGINT/SIGTERM
+		select {
+		case <-waitDone:
+		case <-time.After(10 * time.Second):
+			cmd.Process.Kill()
+			<-waitDone
+		}
 	}
 	s.log().Printf("vlmserver: stopped (port %d)", or(s.Port, 11510))
 	return nil

@@ -302,7 +302,11 @@ s1_s2() {
       fail S2 "empty reply"
     else
       local bu route
-      bu="$(curl -sf --max-time 5 "$VOICE/health" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('fallback',{}).get('brain_up'))" 2>/dev/null)"
+      # No -f: while the brain is down the voice /health answers 503 BY
+      # DESIGN, and -f would drop the body — the brain_up flag lives in
+      # that 503 body. (EVB-30 gate: -sf made bu="" and S2 always
+      # failed even when the fallback routed correctly.)
+      bu="$(curl -s --max-time 5 "$VOICE/health" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('fallback',{}).get('brain_up'))" 2>/dev/null)"
       log "S2: voice /health fallback.brain_up=$bu (want False)"
       route="$(docker logs jarvis-voice --since 5m 2>&1 | grep -c 'brain down -> fallback' || true)"
       log "S2: voice route log 'brain down -> fallback' lines: $route (want >= 1)"

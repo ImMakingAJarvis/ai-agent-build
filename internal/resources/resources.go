@@ -378,21 +378,43 @@ func (l *Ledger) StreamActive() bool {
 	return l.streamActive
 }
 
-// RevokeGPULeases is the game watchdog's revocation (plan §3.6 rule 2,
-// EVB-29): it releases every GPU lease held by a capability worker —
-// granted and queued — and returns them, in grant order, so the
-// service can emit one lease.released event per revoked lease
-// (invariant 10). The brain's standing lease is never touched (rules
-// 1 and 3: a working brain is not evicted; the window controller brings
-// the brain back through jarvis-swap, and the game waits for its VRAM
-// after). CPU and iGPU leases stay — a game stream does not compete for
-// system RAM.
-func (l *Ledger) RevokeGPULeases() []Lease {
+// RevokeGPULeasesFor is the filtered revocation (EVB-30): it releases
+// the GPU leases — granted and queued — whose capability is in caps,
+// and returns them (granted first, in grant order, then the revoked
+// queued ones) so the caller can emit one lease.released event per
+// revoked lease (invariant 10). The window's drained close uses it with
+// the window's own capability names: the brain is coming home, and a
+// worker holding a stale lease would consume the next message — with
+// the art service already stopped — and burn its attempts. A nil caps
+// slice revokes every capability worker's GPU lease (the game
+// watchdog's path). The brain's standing lease is never touched (rules
+// 1 and 3: a working brain is not evicted). Capabilities whose gpu
+// placement does not need the brain out (llm.small) are not in the
+// window's cap set, so their leases survive a normal close — that is
+// exactly what co-schedules with the brain. CPU and iGPU leases stay —
+// a revocation is about the 4090. Revoked workers re-ask on their own
+// poll tick (lease.go: lost → re-ask), so a revocation can never leave
+// a worker un-leasable: while the brain is home the re-ask queues, and
+// the next window's open finds it in the held queue.
+func (l *Ledger) RevokeGPULeasesFor(caps []string) []Lease {
+	var want map[string]bool
+	if caps != nil {
+		want = make(map[string]bool, len(caps))
+		for _, c := range caps {
+			want[c] = true
+		}
+	}
+	match := func(lease Lease) bool {
+		if lease.Device != DeviceGPU || lease.Holder == BrainHolder {
+			return false
+		}
+		return want == nil || want[lease.Capability]
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var out []Lease
 	for id, lease := range l.active {
-		if lease.Device == DeviceGPU && lease.Holder != BrainHolder {
+		if match(lease) {
 			out = append(out, lease)
 			delete(l.active, id)
 		}
@@ -400,7 +422,7 @@ func (l *Ledger) RevokeGPULeases() []Lease {
 	sort.Slice(out, func(i, j int) bool { return lessID(out[i].ID, out[j].ID) })
 	var kept []Lease
 	for _, lease := range l.queued {
-		if lease.Device == DeviceGPU && lease.Holder != BrainHolder {
+		if match(lease) {
 			out = append(out, lease)
 		} else {
 			kept = append(kept, lease)
@@ -408,6 +430,14 @@ func (l *Ledger) RevokeGPULeases() []Lease {
 	}
 	l.queued = kept
 	return out
+}
+
+// RevokeGPULeases is the game watchdog's revocation (plan §3.6 rule 2,
+// EVB-29): every capability worker's GPU lease — granted and queued.
+// The brain's standing lease is never touched, and CPU/iGPU leases stay
+// (a game stream does not compete for system RAM).
+func (l *Ledger) RevokeGPULeases() []Lease {
+	return l.RevokeGPULeasesFor(nil)
 }
 
 // ActiveLeases returns the granted leases, including the brain's

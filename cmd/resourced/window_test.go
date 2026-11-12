@@ -82,7 +82,9 @@ func (f *fakeSwap) backdate(d time.Duration) {
 }
 
 // world is the tick's external facts: queue depths, the management
-// API's unacked counts and the local jobs.
+// API's unacked counts and the local jobs, plus the ledger's revocation
+// calls (EVB-30: the window close revokes the window's capability
+// leases before the brain comes home).
 type world struct {
 	mu       sync.Mutex
 	depth    map[string]int // queue name → ready
@@ -92,6 +94,7 @@ type world struct {
 	jobsErr  error
 	running  int
 	ready    []resources.ReadyJob
+	revoked  [][]string // every revoke call's cap set, in order
 }
 
 func (w *world) setDepth(m map[string]int) {
@@ -145,10 +148,27 @@ func newTestWindowController(t *testing.T, swap *fakeSwap, w *world, pub Publish
 			}
 			return w.running, w.ready, nil
 		},
+		func(caps []string) []resources.Lease {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			w.revoked = append(w.revoked, append([]string{}, caps...))
+			return nil
+		},
 		pub,
 		prometheus.NewRegistry(),
 		slog.New(slog.DiscardHandler),
 	)
+}
+
+// lastRevoked returns the cap set of the most recent revoke call (nil
+// when the window never revoked anything).
+func (w *world) lastRevoked() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.revoked) == 0 {
+		return nil
+	}
+	return w.revoked[len(w.revoked)-1]
 }
 
 // TestWindowLifecycle is the acceptance path: queued GPU work and an
@@ -308,6 +328,51 @@ func TestWindowBrainWaitCloses(t *testing.T) {
 	wc2.tick(ctx)
 	if !swap2.open || swap2.closeCalls != 0 {
 		t.Fatalf("young brain job: open=%v closes=%d, want still open", swap2.open, swap2.closeCalls)
+	}
+
+	// A job already ready BEFORE the window opened (the store's
+	// backlog) does not close the window no matter how long it has
+	// waited: its wait is the queue's, not the window's (EVB-30: a
+	// 21-day-old ready job closed every window on its first tick and
+	// aborted the Phase 4 gate).
+	swap3 := &fakeSwap{}
+	w3 := &world{depth: map[string]int{queue.CapQueueName("image.generate"): 1}}
+	wc3 := newTestWindowController(t, swap3, w3, &fakePub{})
+	wc3.tick(ctx)
+	w3.mu.Lock()
+	w3.ready = []resources.ReadyJob{{ID: "stale-1", ReadySince: now.Add(-24 * time.Hour)}}
+	w3.mu.Unlock()
+	swap3.backdate(30 * time.Minute)
+	wc3.tick(ctx)
+	if !swap3.open || swap3.closeCalls != 0 {
+		t.Fatalf("stale backlog job: open=%v closes=%d, want still open", swap3.open, swap3.closeCalls)
+	}
+}
+
+// TestWindowCloseRevokesCaps: the drained close revokes exactly the
+// window's watched (brain-out) capability leases before the brain comes
+// home (EVB-30) — a worker holding a stale lease would consume the next
+// message with the art service already stopped.
+func TestWindowCloseRevokesCaps(t *testing.T) {
+	swap := &fakeSwap{}
+	w := &world{depth: map[string]int{queue.CapQueueName("image.generate"): 1}}
+	wc := newTestWindowController(t, swap, w, &fakePub{})
+	ctx := context.Background()
+
+	wc.tick(ctx) // open
+	if !swap.open {
+		t.Fatalf("setup: the window should open")
+	}
+	w.setDepth(map[string]int{})
+	swap.backdate(10 * time.Minute)
+	wc.tick(ctx) // drained + old → close
+	if swap.open || swap.closeCalls != 1 {
+		t.Fatalf("close: open=%v closes=%d, want closed", swap.open, swap.closeCalls)
+	}
+	got := w.lastRevoked()
+	want := []string{"image.generate", "video.render"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("revoked caps = %v, want the window's caps %v", got, want)
 	}
 }
 

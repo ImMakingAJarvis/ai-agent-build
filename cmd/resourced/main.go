@@ -406,13 +406,15 @@ func envOr(key, def string) string {
 	return def
 }
 
-// buildWindowController wires the production window controller (EVB-27):
-// the catalog's brain-out capabilities, the queue depths (AMQP ready +
-// management API unacked), the local jobs from the agent job store and
-// jarvis-swap as the SwapRunner. It returns nil when the capability
+// buildWindowController wires the production window controller (EVB-27,
+// revocation EVB-30): the catalog's brain-out capabilities, the queue
+// depths (AMQP ready + management API unacked), the local jobs from the
+// agent job store, jarvis-swap as the SwapRunner and the ledger's
+// filtered revocation (the window close gives the workers' VRAM back to
+// the brain that is coming home). It returns nil when the capability
 // catalog is missing or the broker URL has no host — the ledger keeps
 // serving leases without windows.
-func buildWindowController(conn *queue.Conn, pub Publisher, reg *prometheus.Registry, log *slog.Logger) *windowController {
+func buildWindowController(conn *queue.Conn, pub Publisher, reg *prometheus.Registry, log *slog.Logger, ledger *resources.Ledger) *windowController {
 	catalogPath := envOr("CAPABILITIES_FILE", "config/capabilities.yaml")
 	cat, err := catalog.Load(catalogPath)
 	if err != nil {
@@ -459,6 +461,7 @@ func buildWindowController(conn *queue.Conn, pub Publisher, reg *prometheus.Regi
 			}
 			return localJobs(store, log)
 		},
+		func(caps []string) []resources.Lease { return ledger.RevokeGPULeasesFor(caps) },
 		pub,
 		reg,
 		log,
@@ -536,7 +539,7 @@ func main() {
 	// the brain-out ones; without it the ledger still serves leases,
 	// the windows just never open.
 	windowInterval := durEnv("WINDOW_INTERVAL", 30*time.Second, log)
-	svc.window = buildWindowController(conn, pub, reg, log)
+	svc.window = buildWindowController(conn, pub, reg, log, ledger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /lease", svc.handleLeasePost)

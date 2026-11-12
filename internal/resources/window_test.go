@@ -79,7 +79,7 @@ func TestDecideWindowTable(t *testing.T) {
 			name: "closes: max_window reached even with work still queued",
 			in: WindowInput{
 				WindowOpen: true,
-				OpenedAt:   now.Add(-2 * time.Hour - time.Second),
+				OpenedAt:   now.Add(-2*time.Hour - time.Second),
 				Now:        now,
 				CapDepth:   map[string]int{"image.generate": 9},
 			},
@@ -89,9 +89,11 @@ func TestDecideWindowTable(t *testing.T) {
 			name: "closes: a ready brain job has waited past max_brain_wait",
 			in: WindowInput{
 				WindowOpen: true,
-				OpenedAt:   now.Add(-10 * time.Minute),
+				OpenedAt:   now.Add(-25 * time.Minute),
 				Now:        now,
 				CapDepth:   map[string]int{"image.generate": 2},
+				// job-42 became ready during the window (4 min after
+				// it opened) and has waited 21 min now.
 				ReadyLocal: []ReadyJob{{ID: "job-42", ReadySince: now.Add(-21 * time.Minute)}},
 			},
 			wantAction: WindowClose,
@@ -100,7 +102,7 @@ func TestDecideWindowTable(t *testing.T) {
 			name: "closes on the oldest brain job's wait (not the newest)",
 			in: WindowInput{
 				WindowOpen: true,
-				OpenedAt:   now.Add(-10 * time.Minute),
+				OpenedAt:   now.Add(-45 * time.Minute),
 				Now:        now,
 				ReadyLocal: []ReadyJob{
 					{ID: "new", ReadySince: now.Add(-5 * time.Minute)},
@@ -108,6 +110,20 @@ func TestDecideWindowTable(t *testing.T) {
 				},
 			},
 			wantAction: WindowClose,
+		},
+		{
+			name: "holds: a job ready before the window opened does not close it (the backlog is not the window's fault, EVB-30)",
+			in: WindowInput{
+				WindowOpen: true,
+				OpenedAt:   now.Add(-30 * time.Minute),
+				Now:        now,
+				CapDepth:   map[string]int{"image.generate": 2},
+				ReadyLocal: []ReadyJob{
+					{ID: "stale", ReadySince: now.Add(-500 * time.Hour)},
+					{ID: "young", ReadySince: now.Add(-5 * time.Minute)},
+				},
+			},
+			wantAction: WindowHold,
 		},
 		{
 			name: "holds: brain job ready but its wait is under max_brain_wait",
