@@ -308,8 +308,16 @@ s1_s2() {
       # failed even when the fallback routed correctly.)
       bu="$(curl -s --max-time 5 "$VOICE/health" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('fallback',{}).get('brain_up'))" 2>/dev/null)"
       log "S2: voice /health fallback.brain_up=$bu (want False)"
-      route="$(docker logs jarvis-voice --since 5m 2>&1 | grep -c 'brain down -> fallback' || true)"
-      log "S2: voice route log 'brain down -> fallback' lines: $route (want >= 1)"
+      # The routing evidence is the httpx line for the chat completion
+      # itself: the voice service logs every outbound request, so a
+      # /v1/chat/completions POST to the iGPU engine proves THIS request
+      # went to the fallback. (The 'brain down -> fallback' route-decision
+      # line is only logged when the route key CHANGES — a long-running
+      # voice service that already fell back in an earlier window logs it
+      # again only after a brain-route request in between, so it is not a
+      # reliable per-run check.)
+      route="$(docker logs jarvis-voice --since 5m 2>&1 | grep -c 'jarvis-engine-igpu:11435/v1/chat/completions' || true)"
+      log "S2: voice chat completions routed to the iGPU helper: $route (want >= 1)"
       if [ "$bu" = "False" ] && [ "${route:-0}" -ge 1 ] 2>/dev/null; then
         ok S2
       else
