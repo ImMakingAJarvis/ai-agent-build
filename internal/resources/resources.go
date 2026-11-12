@@ -15,6 +15,15 @@
 // decision is returned as an Outcome; the service turns Outcomes into
 // lease.granted / lease.released / lease.denied events on the events
 // exchange.
+//
+// Co-scheduling (plan §3.6 rule 5, EVB-28): free VRAM is the remainder
+// (total − active leases), and any worker whose footprint fits it is
+// granted without a swap window — a small LLM runs alongside a big image
+// job on what is left. CPU and iGPU workers draw only the shared RAM
+// pool and are grantable any time; their RAM requests are verified
+// against the live free-RAM reading (SetLiveFreeRAM) in addition to the
+// pool, so the ledger never commits more than the box actually has free
+// right now.
 package resources
 
 import (
@@ -111,6 +120,11 @@ type Ledger struct {
 	active  map[string]Lease  // id → granted lease (incl. the brain standing lease)
 	queued  []Lease           // FIFO wait queue
 	seq     int64             // lease id counter
+	// liveFreeRAMMB is the last live free-RAM reading in MB (the
+	// /proc/meminfo MemAvailable the service folds in on each refresh).
+	// 0 = no reading yet (or unreadable): RAM fits are judged on the pool
+	// minus leases alone.
+	liveFreeRAMMB int64
 }
 
 // New builds an empty ledger over the given devices.
@@ -133,6 +147,22 @@ func (l *Ledger) SetDevice(d Device) {
 	l.devices[d.Name] = d
 }
 
+// SetLiveFreeRAM records the box's current free system RAM in MB (the
+// live reading's MemAvailable, folded in by the service on each
+// refresh). RAM requests — cpu and igpu leases, and a gpu lease's
+// staging buffers — are granted only when they fit this in addition to
+// the pool minus leases (plan §3.6 rule 5: RAM-only workers are
+// grantable any time, verified against the live RAM). 0 = no reading
+// yet: the pool check stands alone.
+func (l *Ledger) SetLiveFreeRAM(mb int64) {
+	if mb < 0 {
+		mb = 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.liveFreeRAMMB = mb
+}
+
 // Devices returns the known devices in stable (sorted) order.
 func (l *Ledger) Devices() []Device {
 	l.mu.Lock()
@@ -148,6 +178,13 @@ func (l *Ledger) Devices() []Device {
 // Request decides one lease request: granted when it fits in the free
 // remainder (total − leases), queued when it does not but might later,
 // denied with a reason when it never can.
+//
+// The VRAM fit is the rule-5 co-scheduling check: the remainder is
+// total − every active GPU lease, so a request for whatever is left
+// (a 5.5 GB LLM next to a 12 GB image job on a 24 GB card) is granted
+// here, with no window. RAM requests are checked against the pool too —
+// denied when bigger than the box, queued (not granted) until the live
+// free-RAM reading (SetLiveFreeRAM) has room.
 func (l *Ledger) Request(req Request) Outcome {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -168,7 +205,7 @@ func (l *Ledger) Request(req Request) Outcome {
 		return denied(Outcome{}, fmt.Sprintf("needs %d MB RAM, the box has %d MB total", req.RAMMB, l.ramPool()))
 	}
 
-	if req.VRAMMB <= l.freeVRAMLocked() && req.RAMMB <= l.freeRAMLocked() {
+	if req.VRAMMB <= l.freeVRAMLocked() && l.ramFitsLocked(req.RAMMB) {
 		lease := l.newLeaseLocked(req)
 		l.active[lease.ID] = lease
 		return Outcome{Status: Granted, Lease: lease}
@@ -220,7 +257,7 @@ func (l *Ledger) Reevaluate() []Outcome {
 			out = append(out, denied(Outcome{Lease: lease},
 				fmt.Sprintf("no longer fits: needs %d MB VRAM / %d MB RAM, %s has %d MB VRAM / the box %d MB RAM",
 					lease.VRAMMB, lease.RAMMB, dev.Name, dev.VRAMTotalMB, l.ramPool())))
-		case lease.VRAMMB <= l.freeVRAMLocked() && lease.RAMMB <= l.freeRAMLocked():
+		case lease.VRAMMB <= l.freeVRAMLocked() && l.ramFitsLocked(lease.RAMMB):
 			lease.Since = time.Now().UTC()
 			l.active[lease.ID] = lease
 			out = append(out, Outcome{Status: Granted, Lease: lease})
@@ -241,9 +278,17 @@ func (l *Ledger) Reevaluate() []Outcome {
 // Measured usage, not a declared size: while the brain is the sole GPU
 // tenant it is exactly the brain's footprint (~18–22 GB, whatever the
 // loaded model needs); when the brain is out (swap window) it drops to
-// driver overhead and the GPU frees up; with co-tenants it counts their
-// usage too, so the ledger errs conservative — it never grants more
-// than is really free.
+// driver overhead and the GPU frees up.
+//
+// Co-tenants (EVB-28): the service subtracts the active capability
+// workers' declared GPU leases from the measured usage before calling —
+// nvidia-smi's used counts the workers' models too, and their leases
+// already reserve those bytes. Without the subtraction the ledger
+// double-counts co-tenant usage and can never grant a small worker while
+// a big one runs. The subtraction is clamped at 0 on the service side:
+// when the declared budgets exceed the measured usage (workers not
+// loaded yet), the standing lease floors and the ledger errs
+// conservative — it never grants more than is really free.
 func (l *Ledger) RefreshBrainLease(measuredVRAMMB int64) (Lease, bool) {
 	if measuredVRAMMB < 0 {
 		measuredVRAMMB = 0
@@ -363,6 +408,18 @@ func (l *Ledger) freeRAMLocked() int64 {
 		used += lease.RAMMB
 	}
 	return l.ramPool() - used
+}
+
+// ramFitsLocked is the grant test for a RAM request: it must fit the
+// pool remainder AND the live free-RAM reading when one exists. The
+// pool remainder counts committed leases; the live reading counts what
+// the box actually has free right now (committed or not) — the min of
+// the two is the conservative bound (rule 5).
+func (l *Ledger) ramFitsLocked(ramMB int64) bool {
+	if ramMB > l.freeRAMLocked() {
+		return false
+	}
+	return l.liveFreeRAMMB == 0 || ramMB <= l.liveFreeRAMMB
 }
 
 func (l *Ledger) knownDeviceNames() string {

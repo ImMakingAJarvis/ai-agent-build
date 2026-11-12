@@ -60,6 +60,89 @@ func TestRequestTable(t *testing.T) {
 	}
 }
 
+// TestCoScheduling is rule 5 (EVB-28): the free remainder is total −
+// active leases, and a worker that fits it is granted without a swap
+// window. A 12 GB image job on the 24 GB card leaves 12 GB — a small
+// worker fits, a second big one does not, and two workers competing for
+// the same remainder get one grant and one queue entry (FIFO).
+func TestCoScheduling(t *testing.T) {
+	l := testLedger()
+	// The big job: image.generate's 12288 MB.
+	if got := l.Request(req("image-gen", DeviceGPU, 12288, 0)); got.Status != Granted {
+		t.Fatalf("image job: %v", got)
+	}
+	// Small fits the remainder: llm.small's 5500 MB next to the image job.
+	if got := l.Request(req("llm-small", DeviceGPU, 5500, 0)); got.Status != Granted {
+		t.Fatalf("small next to the big job = %q, want granted (no window)", got.Status)
+	}
+	// Big does not fit the remainder: 24576 − 12288 − 5500 = 6788 left,
+	// a second 12288 job waits (it might fit once one of them releases).
+	if got := l.Request(req("image-gen-2", DeviceGPU, 12288, 0)); got.Status != Queued {
+		t.Fatalf("second big job = %q, want queued", got.Status)
+	}
+	// Two smalls compete for the remainder: clear the small and the
+	// queued big job, and split the 12288 remainder between two 8192
+	// workers — the first fits, the second must queue behind it.
+	if _, ok := l.Release("l2"); !ok { // the 5500 MB small lease
+		t.Fatal("releasing the small lease failed")
+	}
+	if _, ok := l.Release("l3"); !ok { // the queued second big job
+		t.Fatal("withdrawing the queued big job failed")
+	}
+	if got := l.Request(req("small-a", DeviceGPU, 8192, 0)); got.Status != Granted {
+		t.Fatalf("small-a: %v", got)
+	}
+	if got := l.Request(req("small-b", DeviceGPU, 8192, 0)); got.Status != Queued {
+		t.Fatalf("small-b = %q, want queued (the remainder is 4096)", got.Status)
+	}
+	if got := l.Queued(); len(got) != 1 || got[0].Holder != "small-b" {
+		t.Errorf("queue = %+v, want only small-b waiting", got)
+	}
+}
+
+// TestRAMLiveGate is rule 5's RAM half: RAM-only workers (cpu, iGPU) are
+// grantable any time, but their request must also fit the live free-RAM
+// reading (SetLiveFreeRAM) — not the pool alone. Fitting the pool but
+// not the live reading queues (the reading is a moment, it will change);
+// bigger than the whole pool still denies.
+func TestRAMLiveGate(t *testing.T) {
+	l := testLedger()
+	// No live reading yet: the pool check stands alone (the old behavior).
+	if got := l.Request(req("a", DeviceCPU, 0, 4096)); got.Status != Granted {
+		t.Fatalf("before the first reading: %v", got)
+	}
+	// The refresh says only 2 GB is free right now. A 4 GB RAM request
+	// fits the pool (128 GB − 4 GB leased) but not the box — it queues.
+	l.SetLiveFreeRAM(2048)
+	if got := l.Request(req("b", DeviceCPU, 0, 4096)); got.Status != Queued {
+		t.Fatalf("4 GB against 2 GB live free = %q, want queued", got.Status)
+	}
+	// A 1 GB request does fit the live reading.
+	if got := l.Request(req("c", DeviceCPU, 0, 1024)); got.Status != Granted {
+		t.Fatalf("1 GB against 2 GB live free = %q, want granted", got.Status)
+	}
+	// VRAM-only requests are not gated by RAM at all.
+	if got := l.Request(req("d", DeviceGPU, 1024, 0)); got.Status != Granted {
+		t.Fatalf("VRAM-only request with a tight live RAM: %v", got)
+	}
+	// The box frees up: the queued 4 GB now fits the live reading too.
+	l.SetLiveFreeRAM(8192)
+	outs := l.Reevaluate()
+	if len(outs) != 1 || outs[0].Status != Granted || outs[0].Lease.Holder != "b" {
+		t.Fatalf("reevaluate after RAM freed = %+v, want b granted", outs)
+	}
+	// Bigger than the whole pool still denies, whatever the reading says.
+	l.SetLiveFreeRAM(1 << 40)
+	if got := l.Request(req("e", DeviceCPU, 0, 200000)); got.Status != Denied {
+		t.Fatalf("200 GB request: %v, want denied", got)
+	}
+	// A negative reading clamps to 0 = "no reading", the pool stands alone.
+	l.SetLiveFreeRAM(-1)
+	if got := l.Request(req("f", DeviceCPU, 0, 1024)); got.Status != Granted {
+		t.Fatalf("after a clamped reading: %v", got)
+	}
+}
+
 // TestAbsentDevice: a probe that failed (the GPU is off) denies instead
 // of guessing at capacity.
 func TestAbsentDevice(t *testing.T) {
