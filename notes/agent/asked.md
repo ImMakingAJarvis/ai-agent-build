@@ -117,3 +117,4 @@
 - 2026-11-10T05:06Z Nathan wants a total redesign of the queue webpage: purple as anchor color (others welcome), graphics + moving features, mobile friendly, intuitive; build the new one beside the old ('don't break the old site'), sunset old after he's happy (chat-1794263128-a1f4)
 
 - 2026-11-10T09:19Z Nathan queued the GLM 5.3 flash VRAM cache sweep plan (dashboard upload 2026-11-10) — GLM joins the MoE benchmark list with its own Plane project GLM and 6 cache points
+- 2026-11-12T08:49Z Nathan is away from home for a week — real-device voice test of PR #241 deferred to the queued pr76-app-verify job; device-test checklist (Expo Go, Android first) left on Discord + in the PR
