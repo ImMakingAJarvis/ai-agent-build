@@ -323,8 +323,9 @@ type windowController struct {
 	opensTotal  *prometheus.CounterVec // resourced_window_opens_total{trigger}
 	closesTotal *prometheus.CounterVec // resourced_window_closes_total{reason}
 
-	mu   sync.Mutex
-	last windowInfo
+	swapMu sync.Mutex // serializes every jarvis-swap operation (see openWindow/closeWindow)
+	mu     sync.Mutex
+	last   windowInfo
 }
 
 func newWindowController(
@@ -434,24 +435,71 @@ func (wc *windowController) tick(ctx context.Context) {
 	switch d.Action {
 	case resources.WindowOpen:
 		wc.log.Info("window: opening", "for", d.For, "reason", d.Reason)
-		if err := wc.swap.Open(ctx, d.For, d.Reason); err != nil {
+		if err := wc.openWindow(ctx, d.For, d.Reason, "queued"); err != nil {
 			wc.log.Error("window: open failed — retrying next tick", "err", err)
 			return
 		}
-		wc.opensTotal.WithLabelValues("queued").Inc()
-		wc.publish(ctx, queue.WindowEvent("opened", map[string]any{"for": d.For, "reason": d.Reason}))
 	case resources.WindowClose:
 		wc.log.Info("window: closing", "reason", d.Reason)
-		if err := wc.swap.Close(ctx, d.Reason); err != nil {
+		if err := wc.closeWindow(ctx, d.Reason, closeClass(d.Reason)); err != nil {
 			wc.log.Error("window: close failed — retrying next tick", "err", err)
 			return
 		}
-		wc.closesTotal.WithLabelValues(closeClass(d.Reason)).Inc()
-		wc.publish(ctx, queue.WindowEvent("closed", map[string]any{"for": forCaps, "reason": d.Reason}))
-		wc.mu.Lock()
-		wc.last = windowInfo{Reason: "closed: " + d.Reason, LastTick: time.Now().UTC()}
-		wc.mu.Unlock()
 	}
+}
+
+// openWindow runs one `jarvis-swap out` and records it (metric +
+// window.opened event). Every swap operation goes through swapMu so the
+// game watchdog's close (CloseForGame) and a tick's open/close can never
+// run jarvis-swap concurrently — a double `in` would race the brain's
+// health check.
+func (wc *windowController) openWindow(ctx context.Context, forCaps []string, reason, trigger string) error {
+	wc.swapMu.Lock()
+	defer wc.swapMu.Unlock()
+	if err := wc.swap.Open(ctx, forCaps, reason); err != nil {
+		return err
+	}
+	wc.opensTotal.WithLabelValues(trigger).Inc()
+	wc.publish(ctx, queue.WindowEvent("opened", map[string]any{"for": forCaps, "reason": reason}))
+	return nil
+}
+
+// closeWindow runs one `jarvis-swap in` and records it. It re-checks the
+// window state under swapMu: when another path closed the window first
+// (the game watchdog racing a drained tick), the goal is already met and
+// the call is a no-op — a second `jarvis-swap in` against a running
+// brain is what the mutex exists to prevent.
+func (wc *windowController) closeWindow(ctx context.Context, reason, cls string) error {
+	wc.swapMu.Lock()
+	defer wc.swapMu.Unlock()
+	open, forCaps, _, err := wc.swap.State()
+	if err != nil {
+		return err
+	}
+	if !open {
+		wc.log.Info("window: already closed (another path won the race) — skipping", "reason", reason)
+		return nil
+	}
+	if err := wc.swap.Close(ctx, reason); err != nil {
+		return err
+	}
+	wc.closesTotal.WithLabelValues(cls).Inc()
+	wc.publish(ctx, queue.WindowEvent("closed", map[string]any{"for": forCaps, "reason": reason}))
+	wc.mu.Lock()
+	wc.last = windowInfo{Reason: "closed: " + reason, LastTick: time.Now().UTC()}
+	wc.mu.Unlock()
+	return nil
+}
+
+// CloseForGame is the game watchdog's window path (plan §3.6 rule 2,
+// EVB-29): the stream needs the 4090, so an open swap window closes now
+// and the brain comes back before the game gets its VRAM — the same
+// order as a drained close, for a game reason. A no-op when no window
+// is open. The caller (the stream controller) holds the GPU lease
+// revocation and the stream hold around this, so by the time the brain
+// is back there is no capability-worker VRAM left to wait for.
+func (wc *windowController) CloseForGame(ctx context.Context, reason string) error {
+	return wc.closeWindow(ctx, reason, "game")
 }
 
 func (wc *windowController) publish(ctx context.Context, ev queue.Event) {
