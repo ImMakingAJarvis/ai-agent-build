@@ -77,8 +77,8 @@ func TestMeasureFirstRun(t *testing.T) {
 		rep := &fakeReporter{ch: make(chan Measurement, 1)}
 		w := New(Config{
 			Cap: "image.describe", Name: "image-describe@gpu", Location: "gpu",
-			LeaseSpec: LeaseSpec{VRAMMB: 3244}, // the catalog declares 3 GB
-			Measurer:  (&fakeMeasurer{readings: []int64{23552}}).measure,
+			LeaseSpec:       LeaseSpec{VRAMMB: 3244}, // the catalog declares 3 GB
+			Measurer:        (&fakeMeasurer{readings: []int64{23552}}).measure,
 			MeasureReporter: rep,
 		})
 		w.baseVRAMMB.Store(16384) // the Run-start baseline read succeeded
@@ -102,8 +102,8 @@ func TestMeasureFirstRun(t *testing.T) {
 		rep := &fakeReporter{ch: make(chan Measurement, 2)}
 		w := New(Config{
 			Cap: "image.describe", Name: "image-describe@gpu", Location: "gpu",
-			LeaseSpec:         LeaseSpec{VRAMMB: 3244},
-			Measurer:          (&fakeMeasurer{readings: []int64{20000, 20000, 20000}}).measure,
+			LeaseSpec:       LeaseSpec{VRAMMB: 3244},
+			Measurer:        (&fakeMeasurer{readings: []int64{20000, 20000, 20000}}).measure,
 			MeasureReporter: rep,
 		})
 		w.baseVRAMMB.Store(10000)
@@ -121,8 +121,8 @@ func TestMeasureFirstRun(t *testing.T) {
 		rep := &fakeReporter{ch: make(chan Measurement, 1)}
 		w := New(Config{
 			Cap: "image.describe", Name: "image-describe@gpu", Location: "gpu",
-			LeaseSpec:         LeaseSpec{VRAMMB: 3244},
-			Measurer:          (&fakeMeasurer{readings: []int64{20000}}).measure,
+			LeaseSpec:       LeaseSpec{VRAMMB: 3244},
+			Measurer:        (&fakeMeasurer{readings: []int64{20000}}).measure,
 			MeasureReporter: rep,
 		})
 		w.baseOK.Store(false)
@@ -136,8 +136,8 @@ func TestMeasureFirstRun(t *testing.T) {
 		rep := &fakeReporter{ch: make(chan Measurement, 1)}
 		w := New(Config{
 			Cap: "image.describe", Name: "image-describe@gpu", Location: "gpu",
-			LeaseSpec:         LeaseSpec{VRAMMB: 3244},
-			Measurer:          (&fakeMeasurer{readings: []int64{16384}}).measure,
+			LeaseSpec:       LeaseSpec{VRAMMB: 3244},
+			Measurer:        (&fakeMeasurer{readings: []int64{16384}}).measure,
 			MeasureReporter: rep,
 		})
 		w.baseVRAMMB.Store(20000)
@@ -150,8 +150,8 @@ func TestMeasureFirstRun(t *testing.T) {
 		rep := &fakeReporter{ch: make(chan Measurement, 1)}
 		w := New(Config{
 			Cap: "image.describe", Name: "image-describe@gpu", Location: "gpu",
-			LeaseSpec: LeaseSpec{VRAMMB: 3244},
-			Measurer:  (&fakeMeasurer{err: errors.New("nvidia-smi: no such file")}).measure,
+			LeaseSpec:       LeaseSpec{VRAMMB: 3244},
+			Measurer:        (&fakeMeasurer{err: errors.New("nvidia-smi: no such file")}).measure,
 			MeasureReporter: rep,
 		})
 		w.baseVRAMMB.Store(16384)
@@ -169,12 +169,12 @@ func TestMeasureReload(t *testing.T) {
 		rep := &fakeReporter{ch: make(chan Measurement, 1)}
 		w := New(Config{
 			Cap: "image.describe", Name: "image-describe@gpu", Location: "gpu",
-			LeaseSpec:         LeaseSpec{VRAMMB: 3244},
-			Measurer:          (&fakeMeasurer{readings: []int64{16384, 20480}}).measure,
+			LeaseSpec:       LeaseSpec{VRAMMB: 3244},
+			Measurer:        (&fakeMeasurer{readings: []int64{16384, 20480}}).measure,
 			MeasureReporter: rep,
-			Load:              func(ctx context.Context) error { return nil },
+			Load:            func(ctx context.Context) error { return nil },
 		})
-		w.loaded = false
+		w.loaded.Store(false)
 		if err := w.ensureLoaded(context.Background()); err != nil {
 			t.Fatalf("ensureLoaded: %v", err)
 		}
@@ -188,11 +188,11 @@ func TestMeasureReload(t *testing.T) {
 		rep := &fakeReporter{ch: make(chan Measurement, 1)}
 		w := New(Config{
 			Cap: "image.describe", Name: "image-describe@gpu", Location: "gpu",
-			Measurer:          (&fakeMeasurer{err: errors.New("nvidia-smi: timeout")}).measure,
+			Measurer:        (&fakeMeasurer{err: errors.New("nvidia-smi: timeout")}).measure,
 			MeasureReporter: rep,
-			Load:              func(ctx context.Context) error { return nil },
+			Load:            func(ctx context.Context) error { return nil },
 		})
-		w.loaded = false
+		w.loaded.Store(false)
 		if err := w.ensureLoaded(context.Background()); err != nil {
 			t.Fatalf("ensureLoaded: %v", err)
 		}
@@ -203,11 +203,11 @@ func TestMeasureReload(t *testing.T) {
 		rep := &fakeReporter{ch: make(chan Measurement, 1)}
 		w := New(Config{
 			Cap: "image.describe", Name: "image-describe@gpu", Location: "gpu",
-			Measurer:          (&fakeMeasurer{readings: []int64{20480, 16384}}).measure,
+			Measurer:        (&fakeMeasurer{readings: []int64{20480, 16384}}).measure,
 			MeasureReporter: rep,
-			Load:              func(ctx context.Context) error { return nil },
+			Load:            func(ctx context.Context) error { return nil },
 		})
-		w.loaded = false
+		w.loaded.Store(false)
 		if err := w.ensureLoaded(context.Background()); err != nil {
 			t.Fatalf("ensureLoaded: %v", err)
 		}
@@ -218,11 +218,11 @@ func TestMeasureReload(t *testing.T) {
 		rep := &fakeReporter{ch: make(chan Measurement, 1)}
 		w := New(Config{
 			Cap: "image.describe", Name: "image-describe@gpu", Location: "gpu",
-			Measurer:          (&fakeMeasurer{readings: []int64{16384}}).measure,
+			Measurer:        (&fakeMeasurer{readings: []int64{16384}}).measure,
 			MeasureReporter: rep,
-			Load:              func(ctx context.Context) error { return errors.New("model load failed") },
+			Load:            func(ctx context.Context) error { return errors.New("model load failed") },
 		})
-		w.loaded = false
+		w.loaded.Store(false)
 		if err := w.ensureLoaded(context.Background()); err == nil {
 			t.Fatal("ensureLoaded should surface the Load error")
 		}

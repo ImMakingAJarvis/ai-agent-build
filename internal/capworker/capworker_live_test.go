@@ -92,10 +92,10 @@ func TestWorkerEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := New(Config{
-		Cap:    suffix,
-		Name:   "test-worker",
-		Model:  "test",
-		Conn:   c,
+		Cap:     suffix,
+		Name:    "test-worker",
+		Model:   "test",
+		Conn:    c,
 		Handler: h,
 	})
 	go w.Run(ctx)

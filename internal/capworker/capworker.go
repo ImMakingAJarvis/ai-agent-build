@@ -181,11 +181,16 @@ type Worker struct {
 	// lease is the lease state machine (plan §3.6); nil = un-gated.
 	lease *leaseManager
 
-	// loaded and the transition calls (Load/Unload) are guarded by mu:
-	// the idle watchdog runs concurrently with the delivery loop, and an
-	// unload racing a delivery would free the model mid-request.
+	// loaded is readable lock-free: the heartbeat loop and status
+	// readers call isLoaded on a timer and must not park behind a
+	// Load/Unload that holds mu (a model load can take minutes, and the
+	// gate's run-4 dump showed the heartbeat wedged on this while a
+	// hung idle unload held the lock). The transition calls (Load/
+	// Unload) and the flag updates are still serialized by mu: the idle
+	// watchdog runs concurrently with the delivery loop, and an unload
+	// racing a delivery would free the model mid-request.
 	mu     sync.Mutex
-	loaded bool
+	loaded atomic.Bool
 	// inflight is the number of deliveries being handled (0 or 1 —
 	// prefetch=1); the watchdog never unloads while one is in flight.
 	inflight atomic.Int32
@@ -239,7 +244,7 @@ func New(cfg Config) *Worker {
 	}
 	// A worker starts with its resources resident: the first idle
 	// window is measured from startup, not from the first request.
-	w.loaded = true
+	w.loaded.Store(true)
 	w.lastWork.Store(time.Now().UnixNano())
 	return w
 }
@@ -325,10 +330,10 @@ func (w *Worker) leaseTick(ctx context.Context) {
 }
 
 // isLoaded reports whether the worker's resources are currently loaded.
+// Lock-free: readers run on timers (the heartbeat loop) and must not
+// park behind a Load or Unload holding mu.
 func (w *Worker) isLoaded() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.loaded
+	return w.loaded.Load()
 }
 
 func (w *Worker) lastWorkTime() time.Time {
@@ -828,7 +833,7 @@ func (w *Worker) ensureLoaded(ctx context.Context) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.loaded {
+	if w.loaded.Load() {
 		return nil
 	}
 	w.log.Printf("capworker %s: loading resources (idle-unloaded)", w.cfg.Cap)
@@ -842,7 +847,7 @@ func (w *Worker) ensureLoaded(ctx context.Context) error {
 	if err := w.cfg.Load(ctx); err != nil {
 		return fmt.Errorf("load: %w", err)
 	}
-	w.loaded = true
+	w.loaded.Store(true)
 	w.metrics.SetLoaded(true)
 	w.workerEvent("loaded", map[string]any{"capability": w.cfg.Cap, "location": w.cfg.Location})
 	if beforeOK {
@@ -965,7 +970,7 @@ func (w *Worker) maybeUnload(ctx context.Context) {
 		return
 	}
 	w.mu.Lock()
-	if !w.loaded {
+	if !w.loaded.Load() {
 		w.mu.Unlock()
 		return
 	}
@@ -975,7 +980,7 @@ func (w *Worker) maybeUnload(ctx context.Context) {
 		w.mu.Unlock()
 		return
 	}
-	w.loaded = false
+	w.loaded.Store(false)
 	w.metrics.SetLoaded(false)
 	w.workerEvent("unloaded", map[string]any{"capability": w.cfg.Cap, "location": w.cfg.Location, "idle_s": int(idle / time.Second)})
 	w.mu.Unlock()

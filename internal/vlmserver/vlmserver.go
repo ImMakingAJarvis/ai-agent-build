@@ -82,6 +82,9 @@ type Server struct {
 	BaseURL string
 	// HealthTimeout bounds Start's wait for /health. Default 240 s.
 	HealthTimeout time.Duration
+	// StopGrace bounds Stop's SIGINT phase before the SIGKILL.
+	// Default 10 s.
+	StopGrace time.Duration
 	// HTTPTimeout bounds one Describe round trip. Default 300 s.
 	HTTPTimeout time.Duration
 	// Log; nil = the standard logger.
@@ -90,9 +93,10 @@ type Server struct {
 	mu       sync.Mutex
 	cmd      *exec.Cmd
 	waitDone chan error // set by Start after cmd.Start; its single Wait
-	// goroutine writes the exit here, and Start's health
-	// loop and Stop both wait on it (exactly one consumer
-	// claims it, under mu)
+	// goroutine (which captures this channel at spawn — it must never
+	// re-read the field, because Stop has nilled it by the time a live
+	// process exits) writes the exit here, and Start's health loop and
+	// Stop both wait on it (exactly one consumer claims it, under mu)
 	errb *bytes.Buffer // tail of the server's stderr, for Start failures
 }
 
@@ -162,6 +166,12 @@ func (s *Server) Start(ctx context.Context) error {
 		cmd = exec.Command(s.Binary, args...) // inherits the env (LD_LIBRARY_PATH for the CUDA libs)
 		cmd.Stderr = s.errb
 		cmd.Stdout = io.Discard
+		// If a grandchild inherits a stderr/stdout pipe, cmd.Wait would
+		// block on the pipe drain after the process itself exits; cap it
+		// so the reap — and therefore Stop — stays bounded. (Set before
+		// the Wait goroutine below spawns: WaitDelay is read inside
+		// cmd.Wait, and the goroutine launch is the only sync point.)
+		cmd.WaitDelay = 30 * time.Second
 		if err := cmd.Start(); err != nil {
 			s.mu.Unlock()
 			return fmt.Errorf("vlmserver: start %s: %w", s.Binary, err)
@@ -174,8 +184,19 @@ func (s *Server) Start(ctx context.Context) error {
 		// and Stop later waits on the same channel. cmd.ProcessState
 		// could never have been used for this — it is only set after
 		// Wait, and Start never Waits.
-		s.waitDone = make(chan error, 1)
-		go func() { s.waitDone <- cmd.Wait() }()
+		//
+		// The goroutine captures the channel at spawn (wd), it must never
+		// read s.waitDone at send time: for a live process the exit
+		// necessarily arrives AFTER Stop has claimed (nilled) the field,
+		// and a send to the nil field blocks forever — the claimed
+		// channel then never receives and Stop hangs on it. That is the
+		// gate's run-4 wedge: an idle unload hung in Stop, pinned the
+		// worker mutex for 26 minutes, and the next delivery never
+		// reached the handler (goroutine dump: "chan send (nil chan)" in
+		// the Wait goroutine, Stop parked on its channel receive).
+		wd := make(chan error, 1)
+		s.waitDone = wd
+		go func() { wd <- cmd.Wait() }()
 	}
 	s.cmd = cmd
 	s.mu.Unlock()
@@ -239,6 +260,7 @@ func (s *Server) Stop() error {
 		s.waitDone = nil // claim: exactly one caller reaps this process
 	}
 	s.cmd = nil
+	grace := s.stopGrace()
 	s.mu.Unlock()
 	if cmd == nil {
 		return nil
@@ -246,20 +268,34 @@ func (s *Server) Stop() error {
 	// Start's Wait goroutine owns the reap: wait for the exit, asking for
 	// a clean shutdown while the process is still running. (A second
 	// cmd.Wait — the old behavior — panics, so the channel is shared
-	// rather than started here.)
+	// rather than started here.) The goroutine captured waitDone at
+	// spawn, so the exit lands on the claimed channel even though the
+	// field is nil by the time a live process exits. Every wait below is
+	// bounded — grace, then SIGKILL, then WaitDelay — so Stop cannot pin
+	// its caller: the SDK holds the worker mutex across the Unload hook,
+	// and one unbounded wait here wedged the whole worker for 26 minutes
+	// on the gate's run-4 idle unload.
 	select {
 	case <-waitDone: // already exited (died during load)
 	default:
 		cmd.Process.Signal(os.Interrupt) // llama.cpp shuts down on SIGINT/SIGTERM
 		select {
 		case <-waitDone:
-		case <-time.After(10 * time.Second):
+		case <-time.After(grace):
 			cmd.Process.Kill()
-			<-waitDone
+			<-waitDone // bounded: the process is dead; WaitDelay caps the pipe drain
 		}
 	}
 	s.log().Printf("vlmserver: stopped (port %d)", or(s.Port, 11510))
 	return nil
+}
+
+// stopGrace is the SIGINT phase of Stop before the SIGKILL; default 10 s.
+func (s *Server) stopGrace() time.Duration {
+	if s.StopGrace > 0 {
+		return s.StopGrace
+	}
+	return 10 * time.Second
 }
 
 // healthy probes GET /health with a 3 s bound.

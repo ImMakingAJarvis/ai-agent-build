@@ -63,9 +63,9 @@ type LeaseDecision struct {
 type LeasePresence int
 
 const (
-	LeaseGone LeasePresence = iota // not active, not queued: released, denied, or a resourced restart (the ledger is in-memory)
-	LeaseInQueue                   // still waiting in the FIFO
-	LeaseActive                    // granted
+	LeaseGone    LeasePresence = iota // not active, not queued: released, denied, or a resourced restart (the ledger is in-memory)
+	LeaseInQueue                      // still waiting in the FIFO
+	LeaseActive                       // granted
 )
 
 func (p LeasePresence) String() string {
@@ -122,11 +122,11 @@ func (b *ResourcedBroker) Request(ctx context.Context, spec LeaseSpec) (LeaseDec
 		Position int    `json:"position"`
 	}
 	err := b.doJSON(ctx, http.MethodPost, "/lease", map[string]any{
-		"holder":      spec.Holder,
-		"capability":  spec.Capability,
-		"device":      spec.Device,
-		"vram_mb":     spec.VRAMMB,
-		"ram_mb":      spec.RAMMB,
+		"holder":     spec.Holder,
+		"capability": spec.Capability,
+		"device":     spec.Device,
+		"vram_mb":    spec.VRAMMB,
+		"ram_mb":     spec.RAMMB,
 	}, &resp, http.StatusCreated, http.StatusAccepted, http.StatusConflict)
 	if err != nil {
 		return LeaseDecision{}, err
@@ -282,8 +282,8 @@ type leaseManager struct {
 	mu      sync.Mutex
 	state   leaseState
 	leaseID string
-	reason  string // last deny reason (for logs)
-	askedAt time.Time // last request to the broker (rate limit)
+	reason  string        // last deny reason (for logs)
+	askedAt time.Time     // last request to the broker (rate limit)
 	lostCh  chan struct{} // closed when a held lease is lost
 }
 
