@@ -326,6 +326,105 @@ func TestStateSnapshot(t *testing.T) {
 	}
 }
 
+// TestStreamHold is rule 2 (EVB-29): while a game stream is active the
+// stream's VRAM is not in the ledger's remainder yet, so GPU requests
+// force-queue (even when they would fit) and queued GPU waiters stay
+// held — but the hold is GPU-only: RAM waiters still grant and RAM
+// requests still pass.
+func TestStreamHold(t *testing.T) {
+	l := testLedger()
+	l.RefreshBrainLease(18432) // the idle brain: 18.5 GB of the 24 GB card
+	if got := l.Request(req("w", DeviceGPU, 4096, 0)); got.Status != Granted {
+		t.Fatalf("before the hold: %v", got)
+	}
+	// A RAM waiter held by the live gate (it fits the pool, not the box).
+	l.SetLiveFreeRAM(4096)
+	if got := l.Request(req("cpu-w", DeviceCPU, 0, 8192)); got.Status != Queued {
+		t.Fatalf("RAM waiter setup: %v", got)
+	}
+	// The stream starts: the hold is on.
+	l.SetStreamActive(true)
+	if !l.StreamActive() {
+		t.Fatal("StreamActive = false, want true")
+	}
+	// A GPU request that fits the declared remainder (2048 MB left)
+	// queues anyway — the stream's own VRAM is not in the math yet.
+	if got := l.Request(req("w2", DeviceGPU, 2048, 0)); got.Status != Queued || got.Position != 2 {
+		t.Fatalf("GPU request under the hold = %+v, want queued at 2", got)
+	}
+	// Reevaluate holds the GPU waiter; the RAM waiter is still gated by
+	// the live reading, so nothing moves.
+	if outs := l.Reevaluate(); len(outs) != 0 {
+		t.Fatalf("reevaluate under the hold moved %d leases, want 0: %+v", len(outs), outs)
+	}
+	// The box frees RAM AND the stream ends: both waiters grant.
+	l.SetLiveFreeRAM(16384)
+	l.SetStreamActive(false)
+	if l.StreamActive() {
+		t.Fatal("StreamActive = true after the stream ended")
+	}
+	outs := l.Reevaluate()
+	if len(outs) != 2 {
+		t.Fatalf("reevaluate after the hold = %+v, want both waiters granted", outs)
+	}
+	if outs[0].Status != Granted || outs[0].Lease.Holder != "cpu-w" ||
+		outs[1].Status != Granted || outs[1].Lease.Holder != "w2" {
+		t.Errorf("grant order = %+v, want cpu-w then w2 (FIFO)", outs)
+	}
+}
+
+// TestRevokeGPULeases is the game watchdog's revocation: every capability
+// worker's GPU lease — granted AND queued — leaves the ledger; the brain's
+// standing lease and every CPU/iGPU lease (granted or queued) stay. The
+// returned list is id-ordered and is what the caller emits lease.released
+// events for; a second call finds nothing (idempotent).
+func TestRevokeGPULeases(t *testing.T) {
+	l := testLedger()
+	if _, created := l.RefreshBrainLease(18432); !created {
+		t.Fatal("brain setup: no standing lease")
+	}
+	if got := l.Request(req("w-a", DeviceGPU, 2048, 0)); got.Status != Granted {
+		t.Fatalf("w-a: %v", got)
+	}
+	if got := l.Request(req("w-b", DeviceGPU, 2048, 0)); got.Status != Granted {
+		t.Fatalf("w-b: %v", got)
+	}
+	if got := l.Request(req("w-cpu", DeviceCPU, 0, 4096)); got.Status != Granted {
+		t.Fatalf("w-cpu: %v", got)
+	}
+	if got := l.Request(req("w-igpu", DeviceIGPU, 0, 4096)); got.Status != Granted {
+		t.Fatalf("w-igpu: %v", got)
+	}
+	l.SetLiveFreeRAM(1024)
+	if got := l.Request(req("w-q-ram", DeviceCPU, 0, 8192)); got.Status != Queued {
+		t.Fatalf("w-q-ram: %v", got)
+	}
+	if got := l.Request(req("w-q-gpu", DeviceGPU, 12288, 0)); got.Status != Queued {
+		t.Fatalf("w-q-gpu: %v", got)
+	}
+	revoked := l.RevokeGPULeases()
+	if len(revoked) != 3 {
+		t.Fatalf("revoked = %+v, want the two granted GPU leases and the queued one", revoked)
+	}
+	if revoked[0].Holder != "w-a" || revoked[1].Holder != "w-b" || revoked[2].Holder != "w-q-gpu" {
+		t.Errorf("revoked order = %+v, want w-a, w-b, w-q-gpu (id order)", revoked)
+	}
+	active := l.ActiveLeases()
+	if len(active) != 3 {
+		t.Fatalf("active after revoke = %+v, want the brain, cpu and igpu leases", active)
+	}
+	brain := active[0]
+	if brain.Holder != BrainHolder || brain.VRAMMB != 18432 {
+		t.Errorf("the brain standing lease was touched: %+v", brain)
+	}
+	if queued := l.Queued(); len(queued) != 1 || queued[0].Holder != "w-q-ram" {
+		t.Errorf("queue after revoke = %+v, want only the RAM waiter", queued)
+	}
+	if again := l.RevokeGPULeases(); len(again) != 0 {
+		t.Errorf("second revoke = %+v, want empty (idempotent)", again)
+	}
+}
+
 // TestGrantOrdering: leases list in grant (id) order, l10 before l2.
 func TestGrantOrdering(t *testing.T) {
 	l := testLedger()

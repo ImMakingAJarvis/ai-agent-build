@@ -24,6 +24,13 @@
 // against the live free-RAM reading (SetLiveFreeRAM) in addition to the
 // pool, so the ledger never commits more than the box actually has free
 // right now.
+//
+// Game watchdog (plan §3.6 rule 2, EVB-29): while a game stream is
+// active the ledger holds the GPU — SetStreamActive(true) plus
+// RevokeGPULeases removes every capability worker's GPU lease (the
+// brain's standing lease is exempt) and blocks new GPU grants until the
+// stream ends; CPU and iGPU leases keep running. The service
+// (cmd/resourced) runs the streamwatcher and drives both.
 package resources
 
 import (
@@ -105,11 +112,14 @@ type Device struct {
 }
 
 // State is the GET /state payload: the devices, the active leases
-// (including the brain's standing lease) and the wait queue.
+// (including the brain's standing lease), the wait queue and the
+// game-stream hold (EVB-29: 1 while a game stream is active and the
+// GPU queue is held).
 type State struct {
-	Devices []Device `json:"devices"`
-	Leases  []Lease  `json:"leases"`
-	Queued  []Lease  `json:"queued"`
+	Devices      []Device `json:"devices"`
+	Leases       []Lease  `json:"leases"`
+	Queued       []Lease  `json:"queued"`
+	StreamActive bool     `json:"stream_active"`
 }
 
 // Ledger is the in-memory lease ledger. All methods are safe for
@@ -125,6 +135,13 @@ type Ledger struct {
 	// 0 = no reading yet (or unreadable): RAM fits are judged on the pool
 	// minus leases alone.
 	liveFreeRAMMB int64
+	// streamActive is the game-watchdog hold (plan §3.6 rule 2, EVB-29):
+	// while a game stream is active the game's VRAM is not (yet) in the
+	// ledger's free-remainder math, so GPU leases are revoked and no new
+	// GPU lease may be granted — the stream owns the 4090. CPU and iGPU
+	// leases are untouched (the rule is GPU-only; a game does not eat the
+	// box's RAM pool).
+	streamActive bool
 }
 
 // New builds an empty ledger over the given devices.
@@ -185,6 +202,13 @@ func (l *Ledger) Devices() []Device {
 // here, with no window. RAM requests are checked against the pool too —
 // denied when bigger than the box, queued (not granted) until the live
 // free-RAM reading (SetLiveFreeRAM) has room.
+//
+// Game stream (rule 2, EVB-29): while streamActive is set, a GPU
+// request is always queued — never granted — because the stream's own
+// VRAM is not in the remainder yet (it appears in the next measured
+// refresh at the latest), and granting a worker into the headroom would
+// put it in the game's way. CPU/iGPU requests (RAM only) go through the
+// normal path: a game does not touch the RAM pool.
 func (l *Ledger) Request(req Request) Outcome {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -203,6 +227,17 @@ func (l *Ledger) Request(req Request) Outcome {
 		return denied(Outcome{}, fmt.Sprintf("needs %d MB VRAM, %s has %d MB total", req.VRAMMB, req.Device, dev.VRAMTotalMB))
 	case req.RAMMB > l.ramPool():
 		return denied(Outcome{}, fmt.Sprintf("needs %d MB RAM, the box has %d MB total", req.RAMMB, l.ramPool()))
+	}
+
+	// Rule 2 (EVB-29): the game stream owns the GPU — hold the request
+	// in the queue until SetStreamActive(false) and the re-evaluation
+	// that follows it.
+	if req.VRAMMB > 0 && l.streamActive {
+		lease := l.newLeaseLocked(req)
+		lease.Since = time.Time{} // not granted yet; set on grant
+		lease.QueuedAt = time.Now().UTC()
+		l.queued = append(l.queued, lease)
+		return Outcome{Status: Queued, Lease: lease, Position: len(l.queued)}
 	}
 
 	if req.VRAMMB <= l.freeVRAMLocked() && l.ramFitsLocked(req.RAMMB) {
@@ -245,6 +280,10 @@ func (l *Ledger) Release(id string) (Lease, bool) {
 // for each. Called after every release and after every live-reading
 // refresh (the brain's standing lease changing size is the event that
 // frees the GPU).
+//
+// Game stream (rule 2, EVB-29): while streamActive is set, queued GPU
+// leases stay queued even when they would fit — the stream's VRAM is not
+// in the remainder yet. Queued CPU/iGPU leases are unaffected.
 func (l *Ledger) Reevaluate() []Outcome {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -257,6 +296,11 @@ func (l *Ledger) Reevaluate() []Outcome {
 			out = append(out, denied(Outcome{Lease: lease},
 				fmt.Sprintf("no longer fits: needs %d MB VRAM / %d MB RAM, %s has %d MB VRAM / the box %d MB RAM",
 					lease.VRAMMB, lease.RAMMB, dev.Name, dev.VRAMTotalMB, l.ramPool())))
+		case lease.VRAMMB > 0 && l.streamActive:
+			// The game stream owns the GPU — hold the GPU waiters in the
+			// queue until the stream ends (Request keeps adding them,
+			// this keeps them from jumping the hold).
+			kept = append(kept, lease)
 		case lease.VRAMMB <= l.freeVRAMLocked() && l.ramFitsLocked(lease.RAMMB):
 			lease.Since = time.Now().UTC()
 			l.active[lease.ID] = lease
@@ -313,6 +357,59 @@ func (l *Ledger) RefreshBrainLease(measuredVRAMMB int64) (Lease, bool) {
 	return lease, true
 }
 
+// SetStreamActive turns the game-stream hold on or off (plan §3.6
+// rule 2, EVB-29). On: the service revokes the capability workers' GPU
+// leases (RevokeGPULeases) and no new GPU lease is granted until the
+// stream ends — the game's VRAM is not in the ledger yet, so the
+// remainder is not trustworthy for GPU grants. Off: the caller runs
+// Reevaluate to grant the queued GPU leases that now fit (the stream's
+// VRAM is gone from the box by then). CPU and iGPU leases — RAM only —
+// are never touched by the hold (the rule is GPU-only).
+func (l *Ledger) SetStreamActive(active bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.streamActive = active
+}
+
+// StreamActive reports whether the game-stream hold is on (GET /state).
+func (l *Ledger) StreamActive() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.streamActive
+}
+
+// RevokeGPULeases is the game watchdog's revocation (plan §3.6 rule 2,
+// EVB-29): it releases every GPU lease held by a capability worker —
+// granted and queued — and returns them, in grant order, so the
+// service can emit one lease.released event per revoked lease
+// (invariant 10). The brain's standing lease is never touched (rules
+// 1 and 3: a working brain is not evicted; the window controller brings
+// the brain back through jarvis-swap, and the game waits for its VRAM
+// after). CPU and iGPU leases stay — a game stream does not compete for
+// system RAM.
+func (l *Ledger) RevokeGPULeases() []Lease {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []Lease
+	for id, lease := range l.active {
+		if lease.Device == DeviceGPU && lease.Holder != BrainHolder {
+			out = append(out, lease)
+			delete(l.active, id)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return lessID(out[i].ID, out[j].ID) })
+	var kept []Lease
+	for _, lease := range l.queued {
+		if lease.Device == DeviceGPU && lease.Holder != BrainHolder {
+			out = append(out, lease)
+		} else {
+			kept = append(kept, lease)
+		}
+	}
+	l.queued = kept
+	return out
+}
+
 // ActiveLeases returns the granted leases, including the brain's
 // standing lease, in lease-id (grant) order.
 func (l *Ledger) ActiveLeases() []Lease {
@@ -343,9 +440,10 @@ func (l *Ledger) State() State {
 	}
 	sort.Slice(leases, func(i, j int) bool { return lessID(leases[i].ID, leases[j].ID) })
 	return State{
-		Devices: l.devicesSortedLocked(),
-		Leases:  leases,
-		Queued:  append([]Lease{}, l.queued...),
+		Devices:      l.devicesSortedLocked(),
+		Leases:       leases,
+		Queued:       append([]Lease{}, l.queued...),
+		StreamActive: l.streamActive,
 	}
 }
 
