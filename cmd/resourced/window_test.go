@@ -468,7 +468,7 @@ func TestLocalJobs(t *testing.T) {
 // keys (devices/leases/queued — capworker parses them) and adds the
 // window as an extra field.
 func TestStateIncludesWindow(t *testing.T) {
-	svc, _ := newTestService()
+	svc, _, _ := newTestService(t)
 	swap := &fakeSwap{}
 	w := &world{depth: map[string]int{queue.CapQueueName("image.generate"): 1}}
 	pub := &fakePub{}

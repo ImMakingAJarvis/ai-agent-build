@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -59,15 +60,19 @@ func testLedger() *resources.Ledger {
 }
 
 // newTestService wires a service over a fresh ledger with a recording
-// publisher and a fixed presence probe.
-func newTestService() (*service, *fakePub) {
+// publisher and a fixed presence probe; it returns the measurement
+// overlay's file path (a temp dir, so tests never touch the real one).
+func newTestService(t *testing.T) (*service, *fakePub, string) {
+	t.Helper()
 	pub := &fakePub{}
-	svc := newService(testLedger(), pub, fakeReadings{}, prometheus.NewRegistry(),
-		slog.New(slog.DiscardHandler))
+	log := slog.New(slog.DiscardHandler)
+	measuredPath := filepath.Join(t.TempDir(), "cap-measurements.json")
+	svc := newService(testLedger(), pub, fakeReadings{}, newMeasurementStore(measuredPath, log),
+		prometheus.NewRegistry(), log)
 	svc.detect = func(ctx context.Context) map[placement.Location]bool {
 		return map[placement.Location]bool{placement.CPU: true, placement.GPU: true}
 	}
-	return svc, pub
+	return svc, pub, measuredPath
 }
 
 // doWith runs one request against the given handler.
@@ -93,7 +98,7 @@ func lastIs(keys []string, want string) bool {
 // queues with a position when it does not, denies (409 + reason) when it
 // never can; DELETE /lease/<id> releases and re-evaluates the queue.
 func TestLeaseAPI(t *testing.T) {
-	svc, pub := newTestService()
+	svc, pub, _ := newTestService(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /lease", svc.handleLeasePost)
 	mux.HandleFunc("DELETE /lease/", svc.handleLeaseDelete)
@@ -169,7 +174,7 @@ func TestLeaseAPI(t *testing.T) {
 // (event), resizes it in place afterwards (no event), and a swap-window
 // reading (GPU free) grants a queued lease.
 func TestRefreshBrainLease(t *testing.T) {
-	svc, pub := newTestService()
+	svc, pub, _ := newTestService(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /lease", svc.handleLeasePost)
 	mux.HandleFunc("GET /state", svc.handleState)
@@ -220,13 +225,259 @@ func TestRefreshBrainLease(t *testing.T) {
 	}
 }
 
+// TestMeasureAPI is the measured-VRAM overlay (EVB-28): a worker reports
+// its nvidia-smi delta, the store records it and emits the
+// worker.<cap@device>.measured event (over=true when the catalog
+// under-declared), GET /measured serves it, DELETE clears one entry, and
+// the overlay persists to the file between store instances.
+func TestMeasureAPI(t *testing.T) {
+	svc, pub, path := newTestService(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /measure", svc.handleMeasurePost)
+	mux.HandleFunc("GET /measured", svc.handleMeasuredGet)
+	mux.HandleFunc("DELETE /measured/", svc.handleMeasuredDelete)
+
+	// Measures what it declared: recorded, over=false, the worker event.
+	code, out := doWith(t, mux, "POST", "/measure",
+		`{"capability":"image.describe","device":"gpu","declared_mb":3244,"measured_mb":3244,"holder":"image-describe-worker"}`)
+	if code != http.StatusCreated || out["status"] != "recorded" {
+		t.Fatalf("measure: %d %v", code, out)
+	}
+	if m := out["measured"].(map[string]any); m["over"] != false {
+		t.Fatalf("over flag = %v, want false (measured == declared)", m)
+	}
+	if got := pub.keys(); !lastIs(got, "worker.image.describe@gpu.measured") {
+		t.Fatalf("events after measure = %v, want the worker.measured event", got)
+	}
+
+	// The alert case: measured bigger than declared → over=true.
+	code, out = doWith(t, mux, "POST", "/measure",
+		`{"capability":"llm.small","device":"gpu","declared_mb":5500,"measured_mb":7168,"holder":"llm-small-worker"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("over measure: %d", code)
+	}
+	if m := out["measured"].(map[string]any); m["over"] != true {
+		t.Fatalf("over flag = %v, want true (7168 > 5500)", m)
+	}
+
+	// GET /measured shows both entries.
+	_, st := doWith(t, mux, "GET", "/measured", "")
+	meas := st["measurements"].(map[string]any)
+	if len(meas) != 2 {
+		t.Fatalf("overlay = %v, want 2 entries", st["measurements"])
+	}
+	if e := meas["llm.small@gpu"].(map[string]any); e["measured_mb"] != float64(7168) || e["over"] != true {
+		t.Fatalf("llm.small entry = %v", e)
+	}
+
+	// The overlay is a file: a fresh store over the same path loads it.
+	reloaded := newMeasurementStore(path, slog.New(slog.DiscardHandler))
+	if got := reloaded.all(); len(got) != 2 {
+		t.Fatalf("reloaded overlay = %v, want the 2 persisted entries", got)
+	}
+
+	// Bad input: 400, the store is untouched.
+	if code, _ := doWith(t, mux, "POST", "/measure", `{"capability":"x","declared_mb":1,"measured_mb":1}`); code != http.StatusBadRequest {
+		t.Fatalf("missing device: %d, want 400", code)
+	}
+	if code, _ := doWith(t, mux, "POST", "/measure", `{"capability":"x","device":"gpu","declared_mb":-1,"measured_mb":1}`); code != http.StatusBadRequest {
+		t.Fatalf("negative declared: %d, want 400", code)
+	}
+
+	// DELETE clears one entry; a second DELETE of it is 404.
+	if code, _ := doWith(t, mux, "DELETE", "/measured/llm.small@gpu", ""); code != http.StatusOK {
+		t.Fatalf("delete: %d", code)
+	}
+	if code, _ := doWith(t, mux, "DELETE", "/measured/llm.small@gpu", ""); code != http.StatusNotFound {
+		t.Fatalf("delete again: %d, want 404", code)
+	}
+	_, st = doWith(t, mux, "GET", "/measured", "")
+	if len(st["measurements"].(map[string]any)) != 1 {
+		t.Fatalf("overlay after delete = %v, want 1 entry", st["measurements"])
+	}
+}
+
+// TestMeasuredBudgetBumpsLease: a capability that measured bigger than it
+// declares is charged the measured value on its next lease request (the
+// catalog under-declared, the ledger uses the truth). A measured value
+// smaller than the declaration never shrinks the budget.
+func TestMeasuredBudgetBumpsLease(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /measure", svc.handleMeasurePost)
+	mux.HandleFunc("POST /lease", svc.handleLeasePost)
+
+	doWith(t, mux, "POST", "/measure",
+		`{"capability":"llm.small","device":"gpu","declared_mb":5500,"measured_mb":7168}`)
+
+	// The worker asks for its catalog value: it is charged the measured one.
+	code, out := doWith(t, mux, "POST", "/lease",
+		`{"holder":"llm-small","capability":"llm.small","device":"gpu","vram_mb":5500}`)
+	if code != http.StatusCreated || out["status"] != "granted" {
+		t.Fatalf("lease: %d %v", code, out)
+	}
+	if l := out["lease"].(map[string]any); l["vram_mb"] != float64(7168) {
+		t.Fatalf("lease vram_mb = %v, want the measured 7168", l)
+	}
+
+	// Measured smaller than declared: the declaration stands.
+	doWith(t, mux, "POST", "/measure",
+		`{"capability":"image.describe","device":"gpu","declared_mb":3244,"measured_mb":2048}`)
+	code, out = doWith(t, mux, "POST", "/lease",
+		`{"holder":"v","capability":"image.describe","device":"gpu","vram_mb":3244}`)
+	if code != http.StatusCreated {
+		t.Fatalf("lease: %d %v", code, out)
+	}
+	if l := out["lease"].(map[string]any); l["vram_mb"] != float64(3244) {
+		t.Fatalf("lease vram_mb = %v, want the declared 3244", l)
+	}
+}
+
+// TestRefreshCoTenantSubtraction is the rule-5 refresh math (EVB-28): the
+// measured GPU usage counts the brain AND the co-tenant workers, so the
+// workers' declared leases are subtracted before sizing the brain's
+// standing lease. The invariant under test: free VRAM is exactly the
+// measured free (total − nvidia-smi used), whatever co-tenants run. The
+// second half covers the clamp — declared budgets bigger than the
+// measured usage (a window: the brain is out, the big job not loaded yet)
+// floor the standing lease at 0.
+func TestRefreshCoTenantSubtraction(t *testing.T) {
+	svc, pub, _ := newTestService(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /lease", svc.handleLeasePost)
+	mux.HandleFunc("DELETE /lease/", svc.handleLeaseDelete)
+	mux.HandleFunc("GET /state", svc.handleState)
+
+	// The small worker gets its 5500 MB lease.
+	small, out := doWith(t, mux, "POST", "/lease", `{"holder":"llm-small","capability":"llm.small","device":"gpu","vram_mb":5500}`)
+	if small != http.StatusCreated {
+		t.Fatalf("small lease: %d %v", small, out)
+	}
+
+	// The reading: 24 GB card, 2.5 GB free — 21.5 GB of which is the
+	// brain and the small worker together. Subtracting the worker's
+	// declared 5500 leaves the brain's true ~16 GB, and the free
+	// remainder is exactly the 2.5 GB nvidia-smi reports.
+	svc.readings = fakeReadings{fit.Readings{FreeVRAMGB: 2.5, TotalVRAMGB: 24, FreeRAMGB: 90, TotalRAMGB: 128}}
+	svc.refresh(context.Background())
+	_, st := doWith(t, mux, "GET", "/state", "")
+	var brainMB float64
+	for _, l := range st["leases"].([]any) {
+		if l.(map[string]any)["holder"] == "brain" {
+			brainMB = l.(map[string]any)["vram_mb"].(float64)
+		}
+	}
+	want := float64(int64((24-2.5)*1024) - 5500) // 22016 − 5500 = 16516
+	if brainMB != want {
+		t.Fatalf("brain lease = %v MB, want %v (measured 21.5 GB minus the co-tenant's 5500)", brainMB, want)
+	}
+	// The invariant: the remainder is exactly the measured free.
+	if code, _ := doWith(t, mux, "POST", "/lease", `{"holder":"fits","device":"gpu","vram_mb":2560}`); code != http.StatusCreated {
+		t.Fatalf("2560 (the true free) = %d, want granted", code)
+	}
+	if code, out := doWith(t, mux, "POST", "/lease", `{"holder":"nope","device":"gpu","vram_mb":2561}`); code != http.StatusAccepted {
+		t.Fatalf("2561 = %d %v, want queued", code, out)
+	}
+
+	// The clamp: the brain is out (a window), a 12 GB job holds a lease
+	// but has not loaded yet. nvidia-smi shows only 4 GB used (driver +
+	// the small worker) — smaller than the declared budgets. The
+	// subtraction clamps the standing lease to 0; the job's full
+	// declared budget is what the ledger reserves.
+	// Nothing free (brain 16516 + small 5500 + fits 2560 = 24576 used):
+	// the big job queues until the window reading lands.
+	if code, out := doWith(t, mux, "POST", "/lease", `{"holder":"image-gen","capability":"image.generate","device":"gpu","vram_mb":12288}`); code != http.StatusAccepted {
+		t.Fatalf("big job before the window: %d %v, want queued", code, out)
+	}
+	// Release the two smalls: the re-evaluation grants "nope" (2561)
+	// from the freed remainder; the big job (12288) still waits.
+	var ids []string
+	_, st = doWith(t, mux, "GET", "/state", "")
+	for _, l := range st["leases"].([]any) {
+		lm := l.(map[string]any)
+		if lm["holder"] == "llm-small" || lm["holder"] == "fits" {
+			ids = append(ids, lm["id"].(string))
+		}
+	}
+	for _, id := range ids {
+		if code, _ := doWith(t, mux, "DELETE", "/lease/"+id, ""); code != http.StatusOK {
+			t.Fatalf("release %s: %d", id, code)
+		}
+	}
+	// The window reading: 20 GB free of 24 (4 GB used — driver overhead,
+	// the big job granted but not loaded yet). The brain re-sizes down
+	// and the queued big job fits the remainder: granted.
+	svc.readings = fakeReadings{fit.Readings{FreeVRAMGB: 20, TotalVRAMGB: 24, FreeRAMGB: 90, TotalRAMGB: 128}}
+	svc.refresh(context.Background())
+	if got := pub.keys(); !lastIs(got, "lease.granted") {
+		t.Fatalf("events in the window = %v, want the queued big job granted", got)
+	}
+	// Now the only co-tenant is the big job (12288 declared, not loaded
+	// yet): used (4096) < declared (12288), so the subtraction clamps
+	// the standing lease to 0.
+	var nopeID string
+	_, st = doWith(t, mux, "GET", "/state", "")
+	for _, l := range st["leases"].([]any) {
+		if lm := l.(map[string]any); lm["holder"] == "nope" {
+			nopeID = lm["id"].(string)
+		}
+	}
+	if code, _ := doWith(t, mux, "DELETE", "/lease/"+nopeID, ""); code != http.StatusOK {
+		t.Fatalf("release nope: %d", code)
+	}
+	svc.refresh(context.Background())
+	_, st = doWith(t, mux, "GET", "/state", "")
+	for _, l := range st["leases"].([]any) {
+		lm := l.(map[string]any)
+		switch lm["holder"] {
+		case "brain":
+			if lm["vram_mb"] != float64(0) {
+				t.Fatalf("clamped brain lease = %v, want 0 (used 4 GB < the co-tenant's declared 12 GB)", lm["vram_mb"])
+			}
+		case "image-gen":
+			if lm["vram_mb"] != float64(12288) {
+				t.Fatalf("image-gen lease = %v, want its declared 12288", lm["vram_mb"])
+			}
+		}
+	}
+}
+
+// TestRefreshLiveRAMGate: the refresh folds the live free RAM into the
+// ledger (rule 5) — a RAM request that fits the pool but not the box
+// queues, and the next refresh with more free RAM grants it.
+func TestRefreshLiveRAMGate(t *testing.T) {
+	svc, pub, _ := newTestService(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /lease", svc.handleLeasePost)
+
+	// 128 GB total, 2 GB free right now.
+	svc.readings = fakeReadings{fit.Readings{FreeVRAMGB: 6, TotalVRAMGB: 24, FreeRAMGB: 2, TotalRAMGB: 128}}
+	svc.refresh(context.Background())
+
+	if code, out := doWith(t, mux, "POST", "/lease", `{"holder":"cpu-w","device":"cpu","ram_mb":4096}`); code != http.StatusAccepted {
+		t.Fatalf("4 GB against 2 GB live free = %d %v, want queued", code, out)
+	}
+	if code, out := doWith(t, mux, "POST", "/lease", `{"holder":"cpu-s","device":"cpu","ram_mb":1024}`); code != http.StatusCreated {
+		t.Fatalf("1 GB against 2 GB live free = %d %v, want granted", code, out)
+	}
+
+	// The box frees up: the refresh's re-evaluation grants the waiter.
+	svc.readings = fakeReadings{fit.Readings{FreeVRAMGB: 6, TotalVRAMGB: 24, FreeRAMGB: 64, TotalRAMGB: 128}}
+	svc.refresh(context.Background())
+	if got := pub.keys(); !lastIs(got, "lease.granted") {
+		t.Fatalf("events after the RAM freed = %v, want the queued grant", got)
+	}
+}
+
 // TestMetricsScrape: the /metrics handler exposes the ledger gauges and
 // the push-style decision counters.
 func TestMetricsScrape(t *testing.T) {
 	ledger := testLedger()
 	pub := &fakePub{}
 	reg := prometheus.NewRegistry()
-	svc := newService(ledger, pub, fakeReadings{}, reg, slog.New(slog.DiscardHandler))
+	log := slog.New(slog.DiscardHandler)
+	measured := newMeasurementStore(filepath.Join(t.TempDir(), "cap-measurements.json"), log)
+	svc := newService(ledger, pub, fakeReadings{}, measured, reg, log)
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("POST /lease", svc.handleLeasePost)

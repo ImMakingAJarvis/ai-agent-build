@@ -16,6 +16,11 @@
 //	                      → 201 granted | 202 queued | 409 denied (reason)
 //	DELETE /lease/<id>  → 200 released | 404 no such lease
 //	GET    /state      → devices, active leases (incl. the brain's), queue
+//	POST   /measure    {capability, device, declared_mb, measured_mb, holder}
+//	                      → 201 recorded (worker.<cap@device>.measured event;
+//	                       over=true when measured > declared — the alert)
+//	GET    /measured   → the measured-VRAM overlay (cap@device → entry)
+//	DELETE /measured/<capability@device> → 200 deleted | 404 none
 //	GET    /healthz     → 200
 //	GET    /metrics     → Prometheus
 //
@@ -27,6 +32,17 @@
 // past max_brain_wait. Every open/close publishes a window.<opened|
 // closed> event; GET /state gains a "window" field (the broker's
 // devices/leases/queued keys are unchanged).
+//
+// Since EVB-28 it co-schedules (plan §3.6, rule 5): a request is
+// granted whenever it fits the free remainder (total − leases) — a
+// small worker starts alongside a big one without a window; after a
+// grant the queue is re-evaluated immediately. The brain's standing
+// lease is measured total−free MINUS the co-tenants' declared GPU
+// leases (their usage is in both, and double-counting would never
+// leave room for the small ones). RAM requests are verified against
+// the live free RAM, not just the pool. Workers report their actual
+// VRAM footprint (POST /measure); the overlay budgets future leases
+// and alerts when measured > declared.
 //
 // Every grant/release/deny publishes a lease.<granted|released|denied>
 // event on the events exchange. Configuration (env):
@@ -48,6 +64,8 @@
 //	SWAP_CMD           the swap script. Default jarvis-swap.
 //	SWAP_STATE_FILE    the window state file jarvis-swap keeps. Default
 //	                   ~/.local/state/jarvis/swap-window.json.
+//	MEASUREMENTS_FILE  the measured-VRAM overlay (EVB-28). Default
+//	                   ~/.local/state/jarvis/cap-measurements.json.
 package main
 
 import (
@@ -60,6 +78,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -91,6 +110,7 @@ type service struct {
 	readings fit.Source
 	detect   func(ctx context.Context) map[placement.Location]bool
 	window   *windowController // nil when the capability catalog is missing
+	measured *measurementStore // the VRAM footprint overlay (EVB-28)
 	log      *slog.Logger
 
 	// Push-style metrics (decisions and waits are events, not state).
@@ -100,12 +120,13 @@ type service struct {
 	lastRef   prometheus.Gauge         // resourced_last_refresh_timestamp_seconds
 }
 
-func newService(ledger *resources.Ledger, pub Publisher, readings fit.Source, reg *prometheus.Registry, log *slog.Logger) *service {
+func newService(ledger *resources.Ledger, pub Publisher, readings fit.Source, measured *measurementStore, reg *prometheus.Registry, log *slog.Logger) *service {
 	s := &service{
 		ledger:   ledger,
 		pub:      pub,
 		readings: readings,
 		detect:   placement.Detect,
+		measured: measured,
 		log:      log,
 		decisions: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "resourced_lease_decisions_total",
@@ -161,9 +182,10 @@ func (s *service) emit(ctx context.Context, ev queue.Event) {
 }
 
 // refresh takes one live reading and folds it into the ledger: device
-// capacities, the brain's standing GPU lease (measured total−free, so a
-// swap window shows up as the lease shrinking to driver overhead), and
-// a FIFO re-evaluation of the wait queue.
+// capacities, the live free RAM (the rule-5 RAM gate), the brain's
+// standing GPU lease (measured total−free, so a swap window shows up as
+// the lease shrinking to driver overhead), and a FIFO re-evaluation of
+// the wait queue.
 func (s *service) refresh(ctx context.Context) {
 	r, err := s.readings.Readings(ctx)
 	if err != nil {
@@ -183,9 +205,31 @@ func (s *service) refresh(ctx context.Context) {
 		RAMTotalMB: ramMB, Cores: runtime.NumCPU()})
 	s.ledger.SetDevice(resources.Device{Name: resources.DeviceIGPU, Present: present[placement.IGPU],
 		RAMTotalMB: ramMB})
+	// Rule 5 (EVB-28): RAM-only workers are grantable any time,
+	// verified against the live free RAM — the ledger grants RAM leases
+	// only when this reading has room.
+	s.ledger.SetLiveFreeRAM(int64(r.FreeRAMGB * 1024))
 
 	if gpu.Present {
 		usedMB := int64((r.TotalVRAMGB - r.FreeVRAMGB) * 1024)
+		// Co-tenants (EVB-28, rule 5): nvidia-smi's used counts every
+		// model on the GPU — the brain AND every capability worker that
+		// has loaded. Their declared leases already reserve those bytes,
+		// so subtract them before sizing the brain's standing lease;
+		// otherwise the ledger double-counts co-tenant usage and can
+		// never grant a small worker while a big one runs (the 12 GB
+		// image job + 5.5 GB LLM case). Clamped at 0: when the declared
+		// budgets exceed the measured usage (workers granted but not
+		// loaded yet), the standing lease floors and the ledger errs
+		// conservative — free VRAM is never overstated.
+		for _, lease := range s.ledger.ActiveLeases() {
+			if lease.Device == resources.DeviceGPU && lease.Holder != resources.BrainHolder {
+				usedMB -= lease.VRAMMB
+			}
+		}
+		if usedMB < 0 {
+			usedMB = 0
+		}
 		lease, created := s.ledger.RefreshBrainLease(usedMB)
 		if created {
 			s.log.Info("brain standing lease created", "vram_mb", lease.VRAMMB)
@@ -214,8 +258,27 @@ func (s *service) handleLeasePost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "vram_mb and ram_mb must not be negative", http.StatusBadRequest)
 		return
 	}
+	// Measured budget (EVB-28): a capability that has run before and
+	// measured bigger than the catalog declares is charged the measured
+	// value, not the declaration.
+	if req.Capability != "" {
+		req.VRAMMB = s.measured.budget(req.Capability, req.Device, req.VRAMMB)
+	}
 	out := s.ledger.Request(req)
 	s.apply(r.Context(), out)
+	if out.Status == resources.Granted {
+		// Rule 5 (EVB-28): after a grant, recompute the free remainder
+		// (total − leases) and run the queue — the invariant is "after
+		// every request, every queued lease that fits is granted", and
+		// a grant is a request. Under the current policy a grant only
+		// shrinks the remainder, so this pass is normally empty; it
+		// keeps the invariant event-driven (immediate, not next
+		// refresh) and is where a future policy (preemption, leases
+		// that fit because another grant changed the mix) lands.
+		for _, q := range s.ledger.Reevaluate() {
+			s.apply(r.Context(), q)
+		}
+	}
 	switch out.Status {
 	case resources.Granted:
 		writeJSON(w, http.StatusCreated, map[string]any{"status": out.Status, "lease": out.Lease})
@@ -384,6 +447,16 @@ func buildWindowController(conn *queue.Conn, pub Publisher, reg *prometheus.Regi
 	)
 }
 
+// defaultMeasurementsFile is the VRAM footprint overlay's location
+// (EVB-28) — the state dir, next to the swap-window file.
+func defaultMeasurementsFile() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "cap-measurements.json"
+	}
+	return filepath.Join(home, ".local", "state", "jarvis", "cap-measurements.json")
+}
+
 // durEnv reads a duration env var, falling back to def when unset and
 // exiting on a value that cannot be a positive duration (a typo in the
 // unit file must not silently change the window policy).
@@ -436,7 +509,8 @@ func main() {
 		resources.Device{Name: resources.DeviceIGPU, Present: false},
 	)
 	reg := prometheus.NewRegistry()
-	svc := newService(ledger, pub, fit.Live{}, reg, log)
+	measured := newMeasurementStore(envOr("MEASUREMENTS_FILE", defaultMeasurementsFile()), log)
+	svc := newService(ledger, pub, fit.Live{}, measured, reg, log)
 	svc.refresh(ctx) // first pass before the API takes traffic
 
 	// The swap-window controller (EVB-27, plan §3.6 rules 3–4). It
@@ -450,6 +524,9 @@ func main() {
 	mux.HandleFunc("POST /lease", svc.handleLeasePost)
 	mux.HandleFunc("DELETE /lease/", svc.handleLeaseDelete)
 	mux.HandleFunc("GET /state", svc.handleState)
+	mux.HandleFunc("POST /measure", svc.handleMeasurePost)
+	mux.HandleFunc("GET /measured", svc.handleMeasuredGet)
+	mux.HandleFunc("DELETE /measured/", svc.handleMeasuredDelete)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
