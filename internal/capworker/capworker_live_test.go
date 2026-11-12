@@ -599,11 +599,22 @@ func TestWorkerLeaseResourced(t *testing.T) {
 	// worker's RAM lease is granted, and it answers the same queue.
 	publish(corr1)
 	waitConsumers(t, c, capQ, 1, 30*time.Second)
+	// Steady state: the gpu worker's lease is queued behind the brain's
+	// standing lease (all the VRAM is held, so it can never be granted).
+	// The worker's startup is not synchronized with the cpu consumer
+	// appearing, so wait for the request to land in the ledger.
 	inQueue := false
-	for _, q := range ledger.State().Queued {
-		if q.Holder == "lease-gpu-worker" {
-			inQueue = true
+	for deadline := time.Now().Add(10 * time.Second); !inQueue; {
+		for _, q := range ledger.State().Queued {
+			if q.Holder == "lease-gpu-worker" {
+				inQueue = true
+				break
+			}
 		}
+		if inQueue || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	if !inQueue {
 		t.Fatal("the gpu worker's lease must be queued in the ledger (the brain holds all the VRAM)")

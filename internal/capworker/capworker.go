@@ -132,6 +132,17 @@ type Config struct {
 	// IdleS is how long the worker may sit without a request before
 	// Unload is called to free its resources. 0 = never idle-unload.
 	IdleS time.Duration
+	// Measurer, when set, lets the SDK measure this worker's actual VRAM
+	// footprint (EVB-28): the used-MB delta around the first run and
+	// around every idle-reload Load, reported to the MeasureReporter.
+	// gpu workers get NewNvidiaSmiMeasurer by default in New when unset;
+	// nil (or a baseline read that fails) turns measurement off.
+	Measurer Measurer
+	// MeasureReporter receives the VRAM footprint measurements —
+	// ResourcedBroker does (POST /measure). When nil the SDK falls back
+	// to the LeaseBroker if it implements MeasurementReporter; with no
+	// reporter the measurements are logged, not sent.
+	MeasureReporter MeasurementReporter
 	// Load brings the worker's resources back after an idle unload,
 	// before the next request is handled. nil = nothing to load
 	// (resources are always resident).
@@ -180,6 +191,16 @@ type Worker struct {
 	inflight atomic.Int32
 	// lastWork is the unix time the worker last picked up a request.
 	lastWork atomic.Int64
+
+	// VRAM footprint measurement (EVB-28): the reporter (nil = log only)
+	// and the first-run baseline — the GPU's used-MB when Run started,
+	// read off the startup path in a goroutine (a slow nvidia-smi must
+	// not delay the first lease ask). The consumer-goroutine hooks below
+	// read it atomically: value first, then the ok flag.
+	measureReporter MeasurementReporter
+	baseVRAMMB      atomic.Int64
+	baseOK          atomic.Bool
+	measuredOnce    bool
 }
 
 // New fills in defaults and returns a ready-to-Run worker.
@@ -194,7 +215,21 @@ func New(cfg Config) *Worker {
 	if cfg.HeartbeatS <= 0 && cfg.Events != nil {
 		cfg.HeartbeatS = 30 * time.Second
 	}
-	w := &Worker{cfg: cfg, log: cfg.Log, metrics: NewMetrics()}
+	// VRAM footprint measurement (EVB-28): gpu workers measure their
+	// actual nvidia-smi delta by default — the catalog declares the
+	// budget, the first run checks it. The default Measurer needs
+	// nvidia-smi in the worker's container; when it is missing the
+	// baseline read fails in Run and measurement turns itself off.
+	if cfg.Measurer == nil && cfg.Location == "gpu" {
+		cfg.Measurer = NewNvidiaSmiMeasurer("")
+	}
+	rep := cfg.MeasureReporter
+	if rep == nil {
+		if r, ok := cfg.LeaseBroker.(MeasurementReporter); ok {
+			rep = r
+		}
+	}
+	w := &Worker{cfg: cfg, log: cfg.Log, metrics: NewMetrics(), measureReporter: rep}
 	if cfg.LeaseBroker != nil && cfg.LeaseSpec.Capability != "" {
 		poll := cfg.LeasePollS
 		if poll <= 0 {
@@ -336,6 +371,24 @@ func (w *Worker) Run(ctx context.Context) error {
 		go w.idleWatchdog(ctx)
 	}
 	w.log.Printf("capworker %s: consuming %s (priority %d, location %q)", w.cfg.Cap, w.QueueName(), w.effectivePriority(), w.cfg.Location)
+	// VRAM measurement baseline (EVB-28): the GPU's used-MB before the
+	// first load — the first-run delta is measured against this. Read in
+	// a goroutine: a slow nvidia-smi (a busy GPU, up to the measurer's
+	// bound) must not delay the first lease ask or the first consume
+	// session. If it has not landed by the first run, the first-run
+	// measurement is skipped (baseOK still false); the reload path
+	// brackets its own Load and is unaffected.
+	if w.cfg.Measurer != nil {
+		go func() {
+			mb, err := w.cfg.Measurer(context.Background())
+			if err != nil {
+				w.log.Printf("capworker %s: VRAM baseline: %v — first-run measurement off", w.cfg.Cap, err)
+				return
+			}
+			w.baseVRAMMB.Store(mb)
+			w.baseOK.Store(true)
+		}()
+	}
 	backoff := time.Second
 	for {
 		if err := ctx.Err(); err != nil {
@@ -551,6 +604,10 @@ func (w *Worker) handle(ctx context.Context, del amqp.Delivery) {
 		w.retryOrFail(ctx, del, req, herr)
 		return
 	}
+	// The model is in (this worker's Load hook may have run inside the
+	// handler — the coprocess workers do): measure the first run's
+	// footprint against the Run-start baseline (EVB-28).
+	w.measureFirstRun()
 	w.log.Printf("capworker %s: %s done in %s (status %s)", w.cfg.Cap, req.CorrelationID, time.Since(started).Round(time.Millisecond), res.Status)
 	res.StartedAt = started
 	w.finish(ctx, del, req, outDir, res)
@@ -775,13 +832,101 @@ func (w *Worker) ensureLoaded(ctx context.Context) error {
 		return nil
 	}
 	w.log.Printf("capworker %s: loading resources (idle-unloaded)", w.cfg.Cap)
+	var before int64
+	beforeOK := w.cfg.Measurer == nil
+	if w.cfg.Measurer != nil {
+		var err error
+		before, err = w.cfg.Measurer(ctx)
+		beforeOK = err == nil // a failed read just skips the measurement
+	}
 	if err := w.cfg.Load(ctx); err != nil {
 		return fmt.Errorf("load: %w", err)
 	}
 	w.loaded = true
 	w.metrics.SetLoaded(true)
 	w.workerEvent("loaded", map[string]any{"capability": w.cfg.Cap, "location": w.cfg.Location})
+	if beforeOK {
+		w.measureAfterLoad(before)
+	}
 	return nil
+}
+
+// measurement builds one report: the declared budget is the lease
+// spec's VRAM (what the catalog said this placement would hold).
+func (w *Worker) measurement(measuredMB int64) Measurement {
+	return Measurement{
+		Holder:     w.cfg.Name,
+		Capability: w.cfg.Cap,
+		Device:     w.cfg.Location,
+		DeclaredMB: w.cfg.LeaseSpec.VRAMMB,
+		MeasuredMB: measuredMB,
+	}
+}
+
+// reportMeasurement sends one VRAM footprint measurement to resourced
+// off the delivery loop: a slow or down resourced must not delay work.
+// A failure is logged — the next load re-measures and re-reports.
+func (w *Worker) reportMeasurement(m Measurement) {
+	if w.measureReporter == nil {
+		w.log.Printf("capworker %s: VRAM footprint %d MB (declared %d MB) — no reporter, not sent", w.cfg.Cap, m.MeasuredMB, m.DeclaredMB)
+		return
+	}
+	go func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := w.measureReporter.ReportMeasurement(rctx, m); err != nil {
+			w.log.Printf("capworker %s: VRAM footprint report (%d MB, declared %d MB): %v", w.cfg.Cap, m.MeasuredMB, m.DeclaredMB, err)
+			return
+		}
+		w.log.Printf("capworker %s: reported VRAM footprint %d MB (declared %d MB)", w.cfg.Cap, m.MeasuredMB, m.DeclaredMB)
+	}()
+}
+
+// measureFirstRun reports the first-run footprint: the GPU's used-MB
+// delta against the Run-start baseline, after the first successful
+// Handle (the model is in by then, whatever path loaded it). Runs on
+// the consumer goroutine (prefetch=1) — once, no lock.
+func (w *Worker) measureFirstRun() {
+	if w.cfg.Measurer == nil || w.measuredOnce {
+		return
+	}
+	w.measuredOnce = true
+	if !w.baseOK.Load() {
+		return
+	}
+	after, err := w.cfg.Measurer(context.Background())
+	if err != nil {
+		w.log.Printf("capworker %s: first-run VRAM read: %v — measurement skipped", w.cfg.Cap, err)
+		return
+	}
+	delta := after - w.baseVRAMMB.Load()
+	if delta <= 0 {
+		// The worker started with its resources resident (or the GPU
+		// usage moved down): the delta says nothing about the model.
+		w.log.Printf("capworker %s: VRAM used %d MB, baseline %d MB — first-run measurement skipped", w.cfg.Cap, after, w.baseVRAMMB.Load())
+		return
+	}
+	w.reportMeasurement(w.measurement(delta))
+}
+
+// measureAfterLoad reports a fresh Load's footprint: the used-MB delta
+// bracketing the Load call (the idle-reload path). Called under w.mu
+// (the nvidia-smi read is bounded, ~50 ms).
+func (w *Worker) measureAfterLoad(before int64) {
+	if w.cfg.Measurer == nil {
+		return
+	}
+	after, err := w.cfg.Measurer(context.Background())
+	if err != nil {
+		w.log.Printf("capworker %s: reload VRAM read: %v — measurement skipped", w.cfg.Cap, err)
+		return
+	}
+	delta := after - before
+	if delta < 0 {
+		w.log.Printf("capworker %s: VRAM used %d MB < pre-load %d MB — measurement skipped", w.cfg.Cap, after, before)
+		return
+	}
+	w.reportMeasurement(w.measurement(delta))
 }
 
 // idleWatchdog ticks and unloads the worker's resources after IdleS

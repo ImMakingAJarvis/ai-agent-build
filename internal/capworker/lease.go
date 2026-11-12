@@ -169,6 +169,20 @@ func (b *ResourcedBroker) State(ctx context.Context, leaseID string) (LeasePrese
 	return LeaseGone, nil
 }
 
+// ReportMeasurement reports one VRAM footprint measurement (POST
+// /measure, EVB-28): the worker's actual nvidia-smi delta against the
+// catalog's declared budget. The worker fires it off the delivery loop
+// and logs failures — the next load re-measures and re-reports.
+func (b *ResourcedBroker) ReportMeasurement(ctx context.Context, m Measurement) error {
+	return b.doJSON(ctx, http.MethodPost, "/measure", map[string]any{
+		"holder":      m.Holder,
+		"capability":  m.Capability,
+		"device":      m.Device,
+		"declared_mb": m.DeclaredMB,
+		"measured_mb": m.MeasuredMB,
+	}, nil, http.StatusCreated, http.StatusOK)
+}
+
 // doJSON runs one request against the broker. okStatuses are the
 // expected answers (a 409 deny is an answer, not a failure); anything
 // else — or a transport error — is returned for the caller to treat as
