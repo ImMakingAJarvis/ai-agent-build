@@ -38,6 +38,12 @@ func ParseTaskCard(desc string) (*Task, error) {
 	if v, ok := cardParagraph(desc, "Blocked by:"); ok {
 		t.Dependencies = splitCardList(v)
 	}
+	// Capability, when present, names the capability worker that does this
+	// task's work instead of an LLM round (plan §3.7). It is a single
+	// value (a dotted name), not a comma list.
+	if v, ok := cardParagraph(desc, "Capability:"); ok {
+		t.Capability = html.UnescapeString(strings.TrimSpace(v))
+	}
 	v, ok = cardParagraph(desc, "Acceptance check:")
 	if !ok {
 		return nil, fmt.Errorf("task card %s: no Acceptance check", id)

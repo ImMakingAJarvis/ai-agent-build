@@ -12,6 +12,7 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/placement"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 )
 
@@ -614,5 +615,258 @@ func TestJobParse(t *testing.T) {
 		if _, err := Parse([]byte(raw)); err == nil {
 			t.Errorf("Parse(%s) = nil error, want one", name)
 		}
+	}
+}
+
+// capabilityCardHTML is a card whose executor is a capability worker (plan
+// §3.7): a Capability: paragraph, no harness work. The acceptance check is
+// present because ParseTaskCard requires one, but the runner never runs it
+// on a capability card.
+func capabilityCardHTML(id, what, cap string) string {
+	base := cardHTML(id, what, "", "", "true", "S", "local-27b")
+	return strings.Replace(base,
+		"<p><strong>Acceptance check:",
+		"<p><strong>Capability:</strong> "+cap+"</p>\n<p><strong>Acceptance check:", 1)
+}
+
+// fakeCaps is a scripted CapabilityClient for the no-LLM-round path: Run
+// records what it was asked (capability, corr, input) and returns the
+// scripted Result or error.
+type fakeCaps struct {
+	mu        sync.Mutex
+	calls     int
+	lastCap   string
+	lastCorr  string
+	lastInput map[string]any
+	result    queue.Result
+	err       error
+}
+
+func (f *fakeCaps) Run(ctx context.Context, capability, corr string, input map[string]any) (queue.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lastCap = capability
+	f.lastCorr = corr
+	f.lastInput = input
+	return f.result, f.err
+}
+
+func (f *fakeCaps) snapshot() (int, string, string, map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls, f.lastCap, f.lastCorr, f.lastInput
+}
+
+// newCapabilityRunner builds a Runner wired to the scripted capability
+// client. The capability path never touches the harness, the check, or the
+// git repo, so those are placeholders.
+func newCapabilityRunner(t *testing.T, board *fakeBoard, caps CapabilityClient) *Runner {
+	t.Helper()
+	return &Runner{
+		Board:       board,
+		Registry:    testRegistry(),
+		Repo:        t.TempDir(),
+		Harness:     &fakeHarness{passAfter: 1, good: "ok", file: "x"},
+		Checks:      contentChecker{file: "x", want: "ok"},
+		Live:        testLive,
+		MaxAttempts: 3,
+		Caps:        caps,
+	}
+}
+
+// TestRunCapabilityPasses: a Ready card carrying a capability: runs end to
+// end with NO LLM round — it is submitted to cap.<cap>, the ok Result lands
+// on the card as a comment, and the card advances to Done.
+func TestRunCapabilityPasses(t *testing.T) {
+	board := newFakeBoard()
+	board.add(plane.WorkItem{ID: "epic1", Name: "describe the photos", State: "s-ready", SequenceID: 2})
+	board.add(plane.WorkItem{
+		ID: "card1", Name: "describe the batch", State: "s-ready", Parent: "epic1", SequenceID: 3,
+		DescriptionHTML: capabilityCardHTML("describe", "describe the batch of photos", "image.describe"),
+	})
+	caps := &fakeCaps{result: queue.Result{
+		CorrelationID: "card1", Status: queue.ResultOK, Summary: "3 photos described",
+		Artifacts: []string{"/artifacts/image.describe/card1/captions.json"}, Worker: "image.describe@gpu",
+	}}
+	r := newCapabilityRunner(t, board, caps)
+
+	res, err := runJob(t, r, "card1", "epic1")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Passed || res.Waiting || res.Blocked {
+		t.Fatalf("Result = %+v, want Passed", res)
+	}
+	// The capability was submitted once, to the right queue, with the card
+	// id as the correlation id and the description as the input.
+	if calls, capName, corr, input := caps.snapshot(); calls != 1 || capName != "image.describe" || corr != "card1" {
+		t.Errorf("caps called %d times, cap=%q corr=%q, want 1/image.describe/card1", calls, capName, corr)
+	} else if input["prompt"] != "describe the batch of photos" {
+		t.Errorf("input prompt = %q, want the card description", input["prompt"])
+	}
+	// No LLM round: the harness never ran.
+	if _, ok := r.Harness.(*fakeHarness); !ok {
+		t.Fatalf("harness type = %T", r.Harness)
+	}
+	if n := r.Harness.(*fakeHarness).writes; n != 0 {
+		t.Errorf("harness ran %d times on a capability card, want 0", n)
+	}
+	// The card advanced to Done and carries both the submit and the result.
+	if got := board.items["card1"].State; got != "s-done" {
+		t.Errorf("card state = %s, want s-done", got)
+	}
+	comments, _ := board.ListComments(context.Background(), "proj1", "card1")
+	var joined string
+	for _, c := range comments {
+		joined += c.CommentHTML + "\n"
+	}
+	for _, want := range []string{"submitted to cap.image.describe", "capability image.describe — ok", "captions.json"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("comments missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+// TestRunCapabilityNonOKBlocks: an error, timeout, or cancelled Result is
+// not a pass — the card is Blocked with the reason (the run did not crash:
+// the card state is settled, so the bridge does not re-trigger it).
+func TestRunCapabilityNonOKBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result queue.Result
+		want   string
+	}{
+		{"error", queue.Result{Status: queue.ResultError, Error: "boom"}, "capability image.describe ended error: boom"},
+		{"timeout", queue.Result{Status: queue.ResultTimeout, Error: "no Result on flow.card1 before the wait deadline"}, "capability image.describe ended timeout"},
+		{"cancelled", queue.Result{Status: queue.ResultCancelled, Error: "the worker was stopped"}, "capability image.describe ended cancelled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			board := newFakeBoard()
+			board.add(plane.WorkItem{ID: "epic1", Name: "describe the photos", State: "s-ready", SequenceID: 2})
+			board.add(plane.WorkItem{
+				ID: "card1", Name: "describe the batch", State: "s-ready", Parent: "epic1", SequenceID: 3,
+				DescriptionHTML: capabilityCardHTML("describe", "describe the batch of photos", "image.describe"),
+			})
+			caps := &fakeCaps{result: tc.result}
+			r := newCapabilityRunner(t, board, caps)
+
+			res, err := runJob(t, r, "card1", "epic1")
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if !res.Blocked {
+				t.Fatalf("Result = %+v, want Blocked", res)
+			}
+			if got := board.items["card1"].State; got != "s-blocked" {
+				t.Errorf("card state = %s, want s-blocked", got)
+			}
+			if n := r.Harness.(*fakeHarness).writes; n != 0 {
+				t.Errorf("harness ran %d times on a capability card, want 0", n)
+			}
+			comments, _ := board.ListComments(context.Background(), "proj1", "card1")
+			var joined string
+			for _, c := range comments {
+				joined += c.CommentHTML + "\n"
+			}
+			if !strings.Contains(joined, tc.want) {
+				t.Errorf("comments missing %q:\n%s", tc.want, joined)
+			}
+		})
+	}
+}
+
+// TestRunCapabilityNoClientBlocks: a capability card on a Runner with no
+// capability client wired (broker not configured) is Blocked, not run. A
+// normal card on the same runner is unaffected.
+func TestRunCapabilityNoClientBlocks(t *testing.T) {
+	board := newFakeBoard()
+	board.add(plane.WorkItem{ID: "epic1", Name: "describe the photos", State: "s-ready", SequenceID: 2})
+	board.add(plane.WorkItem{
+		ID: "card1", Name: "describe the batch", State: "s-ready", Parent: "epic1", SequenceID: 3,
+		DescriptionHTML: capabilityCardHTML("describe", "describe the batch of photos", "image.describe"),
+	})
+	r := newCapabilityRunner(t, board, nil) // Caps is nil
+
+	res, err := runJob(t, r, "card1", "epic1")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Blocked {
+		t.Fatalf("Result = %+v, want Blocked", res)
+	}
+	if got := board.items["card1"].State; got != "s-blocked" {
+		t.Errorf("card state = %s, want s-blocked", got)
+	}
+	comments, _ := board.ListComments(context.Background(), "proj1", "card1")
+	var joined string
+	for _, c := range comments {
+		joined += c.CommentHTML + "\n"
+	}
+	if !strings.Contains(joined, "no capability client is wired") {
+		t.Errorf("comments missing the no-client reason:\n%s", joined)
+	}
+}
+
+// TestRunCapabilityInvalidNameBlocks: a card whose Capability: value is not
+// a valid capability name is Blocked before anything is submitted.
+func TestRunCapabilityInvalidNameBlocks(t *testing.T) {
+	board := newFakeBoard()
+	board.add(plane.WorkItem{ID: "epic1", Name: "describe the photos", State: "s-ready", SequenceID: 2})
+	board.add(plane.WorkItem{
+		ID: "card1", Name: "describe the batch", State: "s-ready", Parent: "epic1", SequenceID: 3,
+		DescriptionHTML: capabilityCardHTML("describe", "describe the batch of photos", "Bad-Name"),
+	})
+	caps := &fakeCaps{result: queue.Result{Status: queue.ResultOK}}
+	r := newCapabilityRunner(t, board, caps)
+
+	res, err := runJob(t, r, "card1", "epic1")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Blocked {
+		t.Fatalf("Result = %+v, want Blocked", res)
+	}
+	if calls, _, _, _ := caps.snapshot(); calls != 0 {
+		t.Errorf("capability was submitted %d times on an invalid name, want 0", calls)
+	}
+	if got := board.items["card1"].State; got != "s-blocked" {
+		t.Errorf("card state = %s, want s-blocked", got)
+	}
+}
+
+// TestRunNormalCardUnaffected: a card with no capability: still runs an LLM
+// round (the harness runs, the check gates the pass) — the capability path
+// must not have swallowed the normal path.
+func TestRunNormalCardUnaffected(t *testing.T) {
+	board := newFakeBoard()
+	board.add(plane.WorkItem{ID: "epic1", Name: "Add a /health endpoint", State: "s-ready", SequenceID: 2})
+	board.add(plane.WorkItem{
+		ID: "card1", Name: "health endpoint", State: "s-ready", Parent: "epic1", SequenceID: 3,
+		DescriptionHTML: cardHTML("health", "add a /health endpoint", "health.py", "", "test -f health.py", "S", "local-27b"),
+	})
+	harness := &fakeHarness{passAfter: 1, good: "print('ok')", bad: "bad", file: "health.py"}
+	r := &Runner{
+		Board: board, Registry: testRegistry(), Repo: newRepo(t),
+		Harness: harness, Checks: contentChecker{file: "health.py", want: "ok"},
+		Live: testLive, MaxAttempts: 3,
+		Caps: &fakeCaps{result: queue.Result{Status: queue.ResultOK}}, // wired, but must be ignored
+	}
+
+	res, err := runJob(t, r, "card1", "epic1", "model:local-27b")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Passed {
+		t.Fatalf("Result = %+v, want Passed", res)
+	}
+	if harness.writes != 1 {
+		t.Errorf("harness ran %d times on a normal card, want 1", harness.writes)
+	}
+	if calls, _, _, _ := r.Caps.(*fakeCaps).snapshot(); calls != 0 {
+		t.Errorf("capability was submitted %d times for a normal card, want 0", calls)
+	}
+	if got := board.items["card1"].State; got != "s-done" {
+		t.Errorf("card state = %s, want s-done", got)
 	}
 }

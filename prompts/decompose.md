@@ -9,6 +9,13 @@ Available executor models (use one of these registry ids verbatim for every
 task's `executor_model`):
 {{EXECUTOR_MODELS}}
 
+Available capabilities (a capability does the work by itself — no LLM
+round — when the task is exactly one capability call, e.g. "generate an
+image of X", "describe this photo", "transcribe this recording"). Use the
+capability's name verbatim in the task's `capability` field only when the
+task's whole job is that one call:
+{{CAPABILITIES}}
+
 ## Plan
 
 {{PLAN}}
@@ -42,6 +49,12 @@ Each `<task>` is an object with exactly these fields — no others:
   "the build passes".
 - `size` (string): "S" or "M" only.
 - `executor_model` (string): one of the ids listed above.
+- `capability` (string, optional): one of the capabilities listed above,
+  when — and only when — the task is exactly one capability call. Omit it
+  (do not send an empty string) for a normal model-executed task. When set,
+  put the input the capability needs (what to generate, the file to
+  describe, the clip to transcribe) in `description`; the executor is the
+  capability worker, not an LLM round.
 
 Sizing rules — these are hard:
 - S is one focused change in roughly one file; M is a change that touches a
