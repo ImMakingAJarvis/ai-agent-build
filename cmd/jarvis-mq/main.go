@@ -1009,18 +1009,6 @@ func (i *inputFlag) Set(v string) error {
 	return nil
 }
 
-// parseDeadline parses --deadline: an absolute RFC3339 time, or a duration
-// taken from now ("2h").
-func parseDeadline(s string) (time.Time, error) {
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
-	}
-	if d, err := time.ParseDuration(s); err == nil && d > 0 {
-		return time.Now().UTC().Add(d), nil
-	}
-	return time.Time{}, fmt.Errorf("parse %q as RFC3339 or a duration from now (2h)", s)
-}
-
 // submitParams is everything `submit` takes from the command line, so the
 // envelope build is testable without a broker.
 type submitParams struct {
@@ -1077,37 +1065,19 @@ func buildSubmitMessage(p submitParams) (queue.Message, error) {
 	return m, nil
 }
 
-// validCapabilityName reports whether s is acceptable as a `submit`
-// capability. The convention is a dotted path (image.generate,
-// audio.transcribe); a single word is allowed too, because the cap.echo test
-// worker (EVB-17) is single-word and the Phase-2 gate submits to it.
-// Segments are lowercase alphanumeric. A message to a capability with no
-// worker simply waits on its durable queue until the request's deadline, so a
+// Capability-name validation and deadline parsing are thin aliases over the
+// queue package (queue.ValidCapabilityName / queue.ParseDeadline) so every
+// submitter — this CLI, the superagent's rabbitmq tool, Hermes's
+// submit_capability — shares one definition (plan task EVB-32). A capability
+// name is a dotted path (image.generate, audio.transcribe) or a single word
+// (echo), lowercase alphanumeric segments. It is checked here but not
+// required to be in the catalog: a message to a capability with no worker
+// simply waits on its durable queue until the request's deadline, so a
 // misspelling degrades to the designed timeout path rather than being dropped
 // at submit time.
-func validCapabilityName(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, seg := range strings.Split(s, ".") {
-		if !isCapSegment(seg) {
-			return false
-		}
-	}
-	return true
-}
+func validCapabilityName(s string) bool { return queue.ValidCapabilityName(s) }
 
-func isCapSegment(seg string) bool {
-	if seg == "" {
-		return false
-	}
-	for _, r := range seg {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
-			return false
-		}
-	}
-	return true
-}
+func parseDeadline(s string) (time.Time, error) { return queue.ParseDeadline(s) }
 
 // runSubmit publishes an envelope-v2 request to cap.<capability> (plan
 // §3.2 step 3). Consumer priorities do the placement — the message goes to
