@@ -469,6 +469,18 @@ func (s *Store) Recover() error {
 	return nil
 }
 
+// DepsMet reports whether every job in j.DependsOn is done — the gate
+// Next and PhotoReady apply before offering a job. A dependency that is
+// missing (no status entry) or not done blocks: the job cannot run yet.
+func DepsMet(j Job, status map[string]string) bool {
+	for _, d := range j.DependsOn {
+		if status[d] != Done {
+			return false
+		}
+	}
+	return true
+}
+
 // Next returns the next ready job whose dependencies are all done, or nil.
 // Next returns the next runnable job: ready, dependencies done.
 func (s *Store) Next() (*Job, error) { return s.NextExcluding(nil) }

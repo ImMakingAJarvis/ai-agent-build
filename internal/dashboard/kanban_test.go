@@ -235,3 +235,92 @@ func TestKanbanNightlyTagAPISet(t *testing.T) {
 		t.Fatalf("task lost nightly tag after an unrelated patch: %+v", stillTagged)
 	}
 }
+
+// TestKanbanCommentRoundTrip is the API-level round trip: POST creates,
+// GET lists oldest first, DELETE removes (204, then 404 on the list).
+func TestKanbanCommentRoundTrip(t *testing.T) {
+	s := newTestServer(t)
+	w := kanbanDo(t, s, "POST", "/api/kanban/epics", `{"title":"E","description":""}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create epic: %d %s", w.Code, w.Body.String())
+	}
+	var ep kanban.Epic
+	if err := json.Unmarshal(w.Body.Bytes(), &ep); err != nil {
+		t.Fatal(err)
+	}
+	w = kanbanDo(t, s, "POST", "/api/kanban/tasks",
+		`{"epic_id":"`+ep.ID+`","title":"T","content":"","priority":5}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create task: %d %s", w.Code, w.Body.String())
+	}
+	var tk kanban.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &tk); err != nil {
+		t.Fatal(err)
+	}
+
+	// POST onto a missing task is 404.
+	w = kanbanDo(t, s, "POST", "/api/kanban/comments",
+		`{"task_id":"nope","author":"nathan","body":"hi"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("comment on missing task = %d, want 404", w.Code)
+	}
+
+	// Two comments; empty list for the task is [].
+	if got := kanbanGet(t, s, "/api/kanban/comments?task_id="+tk.ID); strings.TrimSpace(string(got)) != "[]" {
+		t.Fatalf("empty comment list = %s, want []", got)
+	}
+	w = kanbanDo(t, s, "POST", "/api/kanban/comments",
+		`{"task_id":"`+tk.ID+`","author":"nathan","body":"first"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create comment: %d %s", w.Code, w.Body.String())
+	}
+	var c1 kanban.Comment
+	if err := json.Unmarshal(w.Body.Bytes(), &c1); err != nil {
+		t.Fatal(err)
+	}
+	if c1.ID == "" || c1.TaskID != tk.ID || c1.Author != "nathan" || c1.Body != "first" {
+		t.Errorf("created comment = %+v", c1)
+	}
+	// No author in the body -> defaults to nathan.
+	w = kanbanDo(t, s, "POST", "/api/kanban/comments",
+		`{"task_id":"`+tk.ID+`","body":"second"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create comment 2: %d %s", w.Code, w.Body.String())
+	}
+	var c2 kanban.Comment
+	if err := json.Unmarshal(w.Body.Bytes(), &c2); err != nil {
+		t.Fatal(err)
+	}
+	if c2.Author != "nathan" {
+		t.Errorf("default author = %q, want nathan", c2.Author)
+	}
+
+	// GET: oldest first.
+	got := kanbanGet(t, s, "/api/kanban/comments?task_id="+tk.ID)
+	var list []kanban.Comment
+	if err := json.Unmarshal(got, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].ID != c1.ID || list[1].Body != "second" {
+		t.Errorf("comment list = %+v, want [first second] oldest first", list)
+	}
+
+	// DELETE removes; second delete is 404.
+	w = kanbanDo(t, s, "DELETE", "/api/kanban/comments/"+c1.ID, "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete comment = %d, want 204", w.Code)
+	}
+	w = kanbanDo(t, s, "DELETE", "/api/kanban/comments/"+c1.ID, "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("delete missing comment = %d, want 404", w.Code)
+	}
+	if got := kanbanGet(t, s, "/api/kanban/comments?task_id="+tk.ID); len(json.RawMessage(got)) > 0 {
+		var after []kanban.Comment
+		if err := json.Unmarshal(got, &after); err != nil {
+			t.Fatal(err)
+		}
+		if len(after) != 1 || after[0].ID != c2.ID {
+			t.Errorf("after delete list = %+v, want only second", after)
+		}
+	}
+}

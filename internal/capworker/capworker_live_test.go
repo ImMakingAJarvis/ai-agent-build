@@ -1,16 +1,22 @@
 package capworker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/resources"
 )
 
 // waitResult polls a flow queue (consuming, like the woken round does)
@@ -86,10 +92,10 @@ func TestWorkerEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := New(Config{
-		Cap:    suffix,
-		Name:   "test-worker",
-		Model:  "test",
-		Conn:   c,
+		Cap:     suffix,
+		Name:    "test-worker",
+		Model:   "test",
+		Conn:    c,
 		Handler: h,
 	})
 	go w.Run(ctx)
@@ -302,11 +308,49 @@ func (b blockingHandler) Handle(ctx context.Context, req queue.Message) (queue.R
 	return queue.Result{Status: queue.ResultOK, Summary: "blocked done"}, nil
 }
 
-// TestWorkerLeaseGate is a live test of the plan §3.6 lease hook: while
-// the worker's lease is denied it must NOT consume — the message waits
-// on the durable queue (for a lower-priority placement of the same
-// capability) — and once granted, the same message is picked up and
-// answered.
+// gateBroker is the lease state machine's fake broker: it grants or
+// denies on the test's flag, and its State answers the same way —
+// flipping the flag to false is the revocation (the lease is gone from
+// the ledger).
+type gateBroker struct {
+	granted atomic.Bool
+}
+
+func (g *gateBroker) Request(ctx context.Context, spec LeaseSpec) (LeaseDecision, error) {
+	if g.granted.Load() {
+		return LeaseDecision{Status: LeaseGranted, LeaseID: "l-gate"}, nil
+	}
+	return LeaseDecision{Status: LeaseDenied, Reason: "denied by the test"}, nil
+}
+
+func (g *gateBroker) Release(ctx context.Context, leaseID string) error { return nil }
+
+func (g *gateBroker) State(ctx context.Context, leaseID string) (LeasePresence, error) {
+	if g.granted.Load() {
+		return LeaseActive, nil
+	}
+	return LeaseGone, nil
+}
+
+// downBroker is a broker that never answers (resourced is down).
+type downBroker struct{}
+
+func (downBroker) Request(ctx context.Context, spec LeaseSpec) (LeaseDecision, error) {
+	return LeaseDecision{}, errors.New("resourced down (test)")
+}
+
+func (downBroker) Release(ctx context.Context, leaseID string) error { return nil }
+
+func (downBroker) State(ctx context.Context, leaseID string) (LeasePresence, error) {
+	return LeaseGone, nil
+}
+
+// TestWorkerLeaseGate is a live test of the plan §3.6 lease state
+// machine: while the worker's lease is denied it must NOT consume (the
+// message waits on the durable queue, for a lower-priority placement of
+// the same capability); once granted, the worker consumes; a revocation
+// mid-delivery drains the in-flight request and then cancels the
+// consumer; and a re-grant re-consumes.
 func TestWorkerLeaseGate(t *testing.T) {
 	c, err := queue.NewConn()
 	if err != nil {
@@ -317,28 +361,124 @@ func TestWorkerLeaseGate(t *testing.T) {
 	suffix := fmt.Sprintf("capwl-%d", time.Now().UnixNano())
 	capQ := queue.CapQueueName(suffix)
 	flowQ := queue.FlowQueueName(suffix)
-	corr := "corr-" + suffix
-	granted := &atomic.Bool{} // denied until the test flips it
+	corr1 := "corr1-" + suffix
+	corr2 := "corr2-" + suffix
+	corr3 := "corr3-" + suffix
+	g := &gateBroker{} // denied until the test flips it
 
+	var logBuf bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := New(Config{
-		Cap:    suffix,
-		Name:   "lease-worker",
-		Model:  "test",
-		Conn:   c,
-		Handler: okHandler{},
-		Lease: func(ctx context.Context) error {
-			if granted.Load() {
-				return nil
-			}
-			return errors.New("lease denied (test)")
-		},
+		Cap:         suffix,
+		Name:        "lease-worker",
+		Model:       "test",
+		Conn:        c,
+		Handler:     blockingHandler{block: 3 * time.Second}, // long deliveries: the revoke lands mid-delivery
+		LeaseBroker: g,
+		LeaseSpec:   LeaseSpec{Holder: "lease-worker", Capability: suffix, Device: "cpu"},
+		LeasePollS:  time.Second,
+		Log:         log.New(&logBuf, "", 0),
 	})
 	go w.Run(ctx)
 
 	// Make the queues exist before publishing: a message routed to a queue
 	// that does not exist yet is unroutable and dropped.
+	if err := c.EnsureCapQueue(capQ); err != nil {
+		t.Fatalf("ensure cap: %v", err)
+	}
+	if err := c.EnsureFlowQueue(flowQ); err != nil {
+		t.Fatalf("ensure flow: %v", err)
+	}
+	defer deleteQueue(t, c, flowQ)
+	defer deleteQueue(t, c, capQ)
+
+	publish := func(corr string) {
+		t.Helper()
+		req := queue.Message{
+			ID: "req-" + corr, Type: "capability", Capability: suffix,
+			CorrelationID: corr, ReplyTo: flowQ, SchemaVersion: 2,
+		}
+		if err := c.Publish(req, capQ+".default"); err != nil {
+			t.Fatalf("publish %s: %v", corr, err)
+		}
+	}
+
+	// Phase 1: the lease is denied → the worker must not consume; the
+	// message waits on the durable queue.
+	publish(corr1)
+	time.Sleep(2 * time.Second)
+	if d, derr := c.QueueDepth(capQ); derr != nil {
+		t.Fatalf("depth: %v", derr)
+	} else if d != 1 {
+		t.Fatalf("queue depth while the lease is denied = %d, want 1 (the worker must not consume)", d)
+	}
+	if !strings.Contains(logBuf.String(), "denied") {
+		t.Errorf("the deny was not logged: %q", logBuf.String())
+	}
+
+	// Phase 2: the lease is granted → the worker consumes and answers.
+	g.granted.Store(true)
+	res := waitResult(t, c, flowQ, corr1, 30*time.Second)
+	if res.Status != queue.ResultOK {
+		t.Errorf("status = %q, want ok", res.Status)
+	}
+	if res.Worker != "lease-worker" {
+		t.Errorf("worker = %q, want lease-worker", res.Worker)
+	}
+
+	// Phase 3: the lease is revoked mid-delivery → the in-flight request
+	// drains to completion (not requeued), then the consumer cancels.
+	publish(corr2)
+	time.Sleep(time.Second) // the worker is now holding corr2 (a 3 s delivery)
+	g.granted.Store(false)
+	res = waitResult(t, c, flowQ, corr2, 30*time.Second)
+	if res.Status != queue.ResultOK {
+		t.Errorf("status = %q, want ok (the in-flight request drains to completion)", res.Status)
+	}
+	waitNoConsumers(t, c, capQ, 30*time.Second)
+
+	// Phase 4: the lease is granted again → the worker re-consumes.
+	g.granted.Store(true)
+	waitConsumers(t, c, capQ, 1, 30*time.Second)
+	publish(corr3)
+	res = waitResult(t, c, flowQ, corr3, 30*time.Second)
+	if res.Worker != "lease-worker" {
+		t.Errorf("worker = %q, want lease-worker", res.Worker)
+	}
+}
+
+// TestWorkerLeaseFailOpen is a live test of the resourced-down
+// acceptance: a worker whose broker never answers still consumes — it
+// fails open to the pre-lease behavior — and logs the warning.
+func TestWorkerLeaseFailOpen(t *testing.T) {
+	c, err := queue.NewConn()
+	if err != nil {
+		t.Skipf("RabbitMQ unavailable: %v", err)
+	}
+	defer c.Close()
+
+	suffix := fmt.Sprintf("capwf-%d", time.Now().UnixNano())
+	capQ := queue.CapQueueName(suffix)
+	flowQ := queue.FlowQueueName(suffix)
+	corr := "corr-" + suffix
+
+	var logBuf bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := New(Config{
+		Cap:         suffix,
+		Name:        "failopen-worker",
+		Model:       "test",
+		Conn:        c,
+		Handler:     okHandler{},
+		LeaseBroker: downBroker{},
+		LeaseSpec:   LeaseSpec{Holder: "failopen-worker", Capability: suffix, Device: "cpu"},
+		LeasePollS:  time.Second,
+		Log:         log.New(&logBuf, "", 0),
+	})
+	go w.Run(ctx)
+
 	if err := c.EnsureCapQueue(capQ); err != nil {
 		t.Fatalf("ensure cap: %v", err)
 	}
@@ -355,20 +495,183 @@ func TestWorkerLeaseGate(t *testing.T) {
 	if err := c.Publish(req, capQ+".default"); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	time.Sleep(2 * time.Second)
-	if d, derr := c.QueueDepth(capQ); derr != nil {
-		t.Fatalf("depth: %v", derr)
-	} else if d != 1 {
-		t.Fatalf("queue depth while the lease is denied = %d, want 1 (the worker must not consume)", d)
+
+	res := waitResult(t, c, flowQ, corr, 30*time.Second)
+	if res.Status != queue.ResultOK {
+		t.Errorf("status = %q, want ok (resourced down must not idle the worker)", res.Status)
+	}
+	if res.Worker != "failopen-worker" {
+		t.Errorf("worker = %q, want failopen-worker", res.Worker)
+	}
+	if !strings.Contains(logBuf.String(), "failing open") {
+		t.Errorf("the fail-open warning was not logged: %q", logBuf.String())
+	}
+}
+
+// TestWorkerLeaseResourced is a live test of the plan §3.6 acceptance
+// against a fake resourced (the real HTTP API over a real ledger): with
+// the brain's standing lease holding all the VRAM, the gpu worker's
+// lease is queued — it holds no lease and must not consume — while the
+// cpu worker's RAM lease is granted and it answers the same queue; when
+// the brain lease leaves the ledger (the swap window) the gpu worker's
+// queued lease is granted and it re-consumes, its priority-10 consumer
+// taking the next request.
+func TestWorkerLeaseResourced(t *testing.T) {
+	c, err := queue.NewConn()
+	if err != nil {
+		t.Skipf("RabbitMQ unavailable: %v", err)
+	}
+	defer c.Close()
+
+	suffix := fmt.Sprintf("capws-%d", time.Now().UnixNano())
+	capQ := queue.CapQueueName(suffix)
+	flowQ := queue.FlowQueueName(suffix)
+	corr1 := "corr1-" + suffix
+	corr2 := "corr2-" + suffix
+
+	// The box: an 8 GB GPU and 128 GB of RAM, the brain's standing lease
+	// holding all the VRAM (the conversation case).
+	ledger := resources.New(
+		resources.Device{Name: resources.DeviceGPU, Present: true, VRAMTotalMB: 8192},
+		resources.Device{Name: resources.DeviceCPU, Present: true, RAMTotalMB: 128 * 1024},
+	)
+	if _, created := ledger.RefreshBrainLease(8192); !created {
+		t.Fatal("the brain's standing lease must be created")
+	}
+	srv := httptest.NewServer(newFakeResourced(ledger))
+	defer srv.Close() // last defer to run: after the workers have shut down
+	broker := NewResourcedBroker(srv.URL)
+
+	gpuDone := make(chan struct{})
+	cpuDone := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	// Join the workers after cancel and before srv.Close(): their
+	// release-on-exit must reach the fake while it is still serving.
+	defer func() { <-gpuDone; <-cpuDone }()
+	defer cancel()
+	gpuW := New(Config{
+		Cap:         suffix,
+		Name:        "lease-gpu-worker",
+		Model:       "test",
+		Location:    "gpu", // consumer priority 10
+		Conn:        c,
+		Handler:     okHandler{},
+		LeaseBroker: broker,
+		LeaseSpec:   LeaseSpec{Holder: "lease-gpu-worker", Capability: suffix, Device: resources.DeviceGPU, VRAMMB: 4096},
+		LeasePollS:  time.Second,
+	})
+	cpuW := New(Config{
+		Cap:         suffix,
+		Name:        "lease-cpu-worker",
+		Model:       "test",
+		Location:    "cpu", // consumer priority 1
+		Conn:        c,
+		Handler:     okHandler{},
+		LeaseBroker: broker,
+		LeaseSpec:   LeaseSpec{Holder: "lease-cpu-worker", Capability: suffix, Device: resources.DeviceCPU, RAMMB: 1024},
+		LeasePollS:  time.Second,
+	})
+	go func() { defer close(gpuDone); gpuW.Run(ctx) }()
+	go func() { defer close(cpuDone); cpuW.Run(ctx) }()
+
+	if err := c.EnsureCapQueue(capQ); err != nil {
+		t.Fatalf("ensure cap: %v", err)
+	}
+	if err := c.EnsureFlowQueue(flowQ); err != nil {
+		t.Fatalf("ensure flow: %v", err)
+	}
+	defer deleteQueue(t, c, flowQ)
+	defer deleteQueue(t, c, capQ)
+
+	publish := func(corr string) {
+		t.Helper()
+		req := queue.Message{
+			ID: "req-" + corr, Type: "capability", Capability: suffix,
+			CorrelationID: corr, ReplyTo: flowQ, SchemaVersion: 2,
+		}
+		if err := c.Publish(req, capQ+".default"); err != nil {
+			t.Fatalf("publish %s: %v", corr, err)
+		}
 	}
 
-	granted.Store(true)
-	res := waitResult(t, c, flowQ, corr, 30*time.Second)
+	// Phase 1: the gpu worker's VRAM lease is queued behind the brain's
+	// standing lease — it holds no lease and must not consume. The cpu
+	// worker's RAM lease is granted, and it answers the same queue.
+	publish(corr1)
+	waitConsumers(t, c, capQ, 1, 30*time.Second)
+	// Steady state: the gpu worker's lease is queued behind the brain's
+	// standing lease (all the VRAM is held, so it can never be granted).
+	// The worker's startup is not synchronized with the cpu consumer
+	// appearing, so wait for the request to land in the ledger.
+	inQueue := false
+	for deadline := time.Now().Add(10 * time.Second); !inQueue; {
+		for _, q := range ledger.State().Queued {
+			if q.Holder == "lease-gpu-worker" {
+				inQueue = true
+				break
+			}
+		}
+		if inQueue || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !inQueue {
+		t.Fatal("the gpu worker's lease must be queued in the ledger (the brain holds all the VRAM)")
+	}
+	ch, err := c.NewChannel()
+	if err != nil {
+		t.Fatalf("channel: %v", err)
+	}
+	if q, ierr := ch.QueueInspect(capQ); ierr != nil {
+		t.Fatalf("inspect: %v", ierr)
+	} else if q.Consumers != 1 {
+		t.Fatalf("consumers while the gpu lease is queued = %d, want 1 (only the cpu worker)", q.Consumers)
+	}
+	ch.Close()
+	// The result itself is the acceptance: the one message on the queue
+	// must have been answered by the cpu worker — the only placement with
+	// a lease. (If the gpu worker had consumed it, the worker would be
+	// "lease-gpu-worker".)
+	res := waitResult(t, c, flowQ, corr1, 30*time.Second)
 	if res.Status != queue.ResultOK {
 		t.Errorf("status = %q, want ok", res.Status)
 	}
-	if res.Worker != "lease-worker" {
-		t.Errorf("worker = %q, want lease-worker", res.Worker)
+	if res.Worker != "lease-cpu-worker" {
+		t.Errorf("worker = %q, want lease-cpu-worker (the only placement with a lease)", res.Worker)
+	}
+
+	// Phase 2: the swap window — the brain's standing lease leaves the
+	// ledger. The resourced handler re-evaluates the queue and grants the
+	// gpu worker's queued lease; it re-consumes, and its priority-10
+	// consumer takes the next request.
+	var brainID string
+	for _, l := range ledger.State().Leases {
+		if l.Holder == resources.BrainHolder {
+			brainID = l.ID
+		}
+	}
+	if brainID == "" {
+		t.Fatal("the brain's standing lease is not in the ledger")
+	}
+	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/lease/"+brainID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("release the brain lease: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("release the brain lease: status %d", resp.StatusCode)
+	}
+
+	waitConsumers(t, c, capQ, 2, 30*time.Second)
+	publish(corr2)
+	res = waitResult(t, c, flowQ, corr2, 30*time.Second)
+	if res.Worker != "lease-gpu-worker" {
+		t.Errorf("worker = %q, want lease-gpu-worker (priority 10 beats 1 once it has a lease)", res.Worker)
 	}
 }
 
@@ -635,4 +938,27 @@ func waitConsumers(t *testing.T, c *queue.Conn, name string, n int, timeout time
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("queue %s: %d consumers not attached within %v (last seen: %d)", name, n, timeout, last)
+}
+
+// waitNoConsumers polls the queue until it has no consumers (the worker
+// cancelled), failing after the timeout. A 404 (queue deleted) is fine.
+func waitNoConsumers(t *testing.T, c *queue.Conn, name string, timeout time.Duration) {
+	t.Helper()
+	ch, err := c.NewChannel()
+	if err != nil {
+		t.Fatalf("channel: %v", err)
+	}
+	defer ch.Close()
+	deadline := time.Now().Add(timeout)
+	last := -1
+	for time.Now().Before(deadline) {
+		if q, ierr := ch.QueueInspect(name); ierr == nil {
+			last = q.Consumers
+			if q.Consumers == 0 {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("queue %s still has consumers after %v (last seen: %d)", name, timeout, last)
 }

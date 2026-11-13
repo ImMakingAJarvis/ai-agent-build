@@ -40,30 +40,39 @@ Before starting a job whose title references a kanban entry (a kanban ID
 in the title — an 8-char hex task ID like `4546f229`, or a full UUID),
 check the board:
 
-    ls ~/.local/share/jarvis/kanban/tasks/<id>*.json
+    jarvis-kanban show <id>
 
-If the entry exists, read it all before building:
-- the task JSON — `title`, `content` (detailed instructions /
-  acceptance criteria), `status`, `priority`, `branch`, `model`
-- its epic — `epic_id` →
-  `~/.local/share/jarvis/kanban/epics/<epic_id>.json` (theme,
-  description, sibling tasks)
-- any comments on the task (see below)
+That prints the task JSON, its epic, its subtasks, and all of its
+comments in one go (it accepts a full UUID or a unique prefix). If
+`jarvis-kanban` is not installed, read the files directly:
+`~/.local/share/jarvis/kanban/tasks/<id>*.json` (the task — `title`,
+`content` (detailed instructions / acceptance criteria), `status`,
+`priority`, `branch`, `model`), its epic at
+`~/.local/share/jarvis/kanban/epics/<epic_id>.json` (theme, description,
+sibling tasks), and its comments at
+`~/.local/share/jarvis/kanban/comments/` (files whose `task_id` matches).
 
 The board is a file store; the dashboard also serves it at
 `http://localhost:8080/api/kanban/tasks` and `/api/kanban/epics`. If no
 task file matches the ID in the title, the job stands on its own —
 build from the job's instructions.
 
-### Comments (not implemented yet)
+### Comments
 
-As of 2026-10-27 the kanban has no comment system: task JSONs carry no
-comments, and the store/API have no comment endpoints. Adding it is
-queued as job `kanban-comments` (Nathan's ask, job
-chat-1793163063-9121). When it ships, update this section: list the
-task's comments in the read step above, and add that the worker may add
-comments to a kanban task when it has questions while building — post
-the question as a comment rather than blocking the round on it.
+Every task has a comment thread — JSON files under
+`~/.local/share/jarvis/kanban/comments/`, served by the dashboard
+(`POST /api/kanban/comments`, `GET /api/kanban/comments?task_id=...`,
+`DELETE /api/kanban/comments/{id}`; the task detail page shows and adds
+comments). The worker can drive it with `jarvis-kanban`:
+
+    jarvis-kanban show <id>                  # thread with the task
+    jarvis-kanban comment <id> "question"    # post a comment (author: agent)
+
+When the worker has a question while building, it may add a comment to
+the task — post the question as a comment rather than blocking the round
+on it; Nathan reads the thread on the board (it is also searchable in
+the vector graph). Comments are ordered oldest first and are deleted
+with their task.
 
 ## Work board (Plane)
 

@@ -538,6 +538,8 @@ _worker_busy_cache = {"at": 0.0, "val": False}
 WORKER_BUSY_TTL = 5.0
 _fallback_up_cache = {"at": 0.0, "val": False}
 FALLBACK_UP_TTL = 15.0
+_brain_up_cache = {"at": 0.0, "val": True}
+BRAIN_UP_TTL = 15.0
 _last_route = {"key": None}
 
 
@@ -582,6 +584,29 @@ async def fallback_engine_up() -> bool:
     return val
 
 
+async def brain_up() -> bool:
+    """Probe the brain engine's llama.cpp /health, cached.
+
+    True by default: while the brain is simply busy (a job is running) we
+    must not treat it as down — only a genuinely unreachable engine (the
+    swap window has stopped it) routes voice to the fallback. A dead brain
+    must not slow voice turns with a full timeout on every call, hence the
+    cache.
+    """
+    now = time.monotonic()
+    if now - _brain_up_cache["at"] <= BRAIN_UP_TTL:
+        return _brain_up_cache["val"]
+    val = True
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(f"{OLLAMA_URL}/health")
+            val = resp.status_code == 200
+    except Exception:
+        val = False
+    _brain_up_cache.update(at=now, val=val)
+    return val
+
+
 def _log_route(key: str, detail: str) -> None:
     """Log a routing decision once, and again only when it changes."""
     if _last_route["key"] != key:
@@ -594,10 +619,11 @@ async def resolve_llm(model: str | None) -> tuple[str, str]:
 
     An explicit `model` (the app's model picker) always wins: ids naming
     the fallback model go to the fallback engine, everything else to the
-    brain. Otherwise, while the worker is deep in a job and the fallback
-    engine is up, the call goes to the small fallback model so voice stays
-    responsive; if the fallback is down the brain is used (voice must not
-    break because the helper model is down).
+    brain. Otherwise, while the worker is deep in a job OR the brain engine
+    itself is down (a swap window has stopped it to free VRAM), and the
+    fallback engine is up, the call goes to the small fallback model so
+    voice stays responsive; if the fallback is down the brain is used (voice
+    must not break because the helper model is down).
     """
     if model:
         if FALLBACK_MODEL and FALLBACK_MODEL in model:
@@ -605,7 +631,29 @@ async def resolve_llm(model: str | None) -> tuple[str, str]:
             return FALLBACK_OLLAMA_URL, model
         _log_route("picked-brain", f"model picker -> {model} @ {OLLAMA_URL}")
         return OLLAMA_URL, model
-    if FALLBACK_OLLAMA_URL and FALLBACK_MODEL and await worker_busy():
+    if not (FALLBACK_OLLAMA_URL and FALLBACK_MODEL):
+        _log_route("brain", f"brain {LOCAL_MODEL} @ {OLLAMA_URL}")
+        return OLLAMA_URL, LOCAL_MODEL
+    # Two independent triggers for the fallback: the worker is mid-job, or
+    # the brain engine is unreachable. During a swap window the job is
+    # `waiting` (not `running`) so worker_busy() is False — the brain probe
+    # is what catches it. Probe the brain first; a down brain makes the
+    # busy scan pointless.
+    brain = await brain_up()
+    if not brain:
+        if await fallback_engine_up():
+            _log_route(
+                "brain-down-fallback",
+                f"brain down -> fallback {FALLBACK_MODEL} @ {FALLBACK_OLLAMA_URL}",
+            )
+            return FALLBACK_OLLAMA_URL, FALLBACK_MODEL
+        logger.warning(
+            "brain engine down but fallback also down at %s — using the brain",
+            FALLBACK_OLLAMA_URL,
+        )
+        _log_route("brain", f"brain {LOCAL_MODEL} @ {OLLAMA_URL}")
+        return OLLAMA_URL, LOCAL_MODEL
+    if await worker_busy():
         if await fallback_engine_up():
             _log_route(
                 "busy-fallback",
@@ -944,8 +992,10 @@ async def health():
     except Exception:
         pass
 
-    # Fallback (small) engine + worker-busy state: diagnostics for the
-    # "voice is on the iGPU model right now" behavior.
+    # Fallback (small) engine + worker-busy + brain-up state: diagnostics
+    # for the "voice is on the iGPU model right now" behavior. brain_up is
+    # what routes voice to the fallback during a swap window (the job is
+    # `waiting`, not `running`, so worker_busy alone would not catch it).
     fb = None
     if FALLBACK_OLLAMA_URL and FALLBACK_MODEL:
         fb = {
@@ -953,6 +1003,7 @@ async def health():
             "model": FALLBACK_MODEL,
             "up": await fallback_engine_up(),
             "worker_busy": await worker_busy(),
+            "brain_up": await brain_up(),
         }
 
     status = "ok" if (whisper_ready and llm_ok) else "degraded"
