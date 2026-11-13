@@ -101,6 +101,59 @@ next` skips jobs whose engine is down, so local jobs wait through the
 window (photo jobs are exempt — they run as code, gated only by the
 swap window itself).
 
+## Think in events — submit what you cannot do in-round
+
+The capability workers (`cap.*` queues) do the work that needs a model or
+a device that is not you: image generation, transcription, VLM
+description, batch LLM sub-tasks, benchmarks. The round preamble carries
+the catalog (`jarvis-mq caps`): one line per capability — where it runs,
+the cost, queue depth, typical runtime. Full mechanics:
+docs/event-driven.md.
+
+**When to submit vs do it yourself.** If the work fits in this round on
+your own context (minutes of your time, no other model or device needed),
+do it. If it needs a capability — the catalog names it — submit it: the
+worker is purpose-built, and the result comes back to you with its
+artifacts.
+
+**The 4-command pattern** (one round, this order — listen first, so a fast
+result can never outrun its listener):
+1. `jarvis-mq listen flow.$JARVIS_JOB_ID --wake $JARVIS_JOB_ID` — the
+   switchboard wakes this job when a Result lands (no `--corr` = claims
+   every message on the queue).
+2. `jarvis-mq submit <cap> --reply-to flow.$JARVIS_JOB_ID --corr <id>
+   [--input k=v ...] [--input-ref P ...] [--out-dir D]` — one short corr
+   id per request (`img1`, `tr-1`).
+3. `jarvis-jobs yield $JARVIS_JOB_ID --wait-on <id> --note "..."
+   --in-flight "..." --next "..."` — the continuation is the precondition
+   (invariant 8): the CLI reads it back and refuses a yield whose
+   "In flight" or "Next steps" is empty.
+4. End the round. The job sits in `waiting`; the switchboard wakes it when
+   every `--wait-on` corr is recorded (deadline default 2h — a timeout
+   wake marks its results PARTIAL in the prompt).
+
+**Resume** (the woken round): the prompt carries a CONTINUATION block —
+read it, then `jarvis-mq results flow.$JARVIS_JOB_ID` (the full Result
+messages: payloads, artifacts, errors), verify the artifacts exist and are
+sane, do "Next steps", continue the job. Resume, don't re-plan.
+
+**Cost model** (the preamble repeats it): a `needs brain out` capability
+runs in your swap window — the window bracket (brain out → back) costs
+~2 min and is shared, so if you will need several GPU capabilities, submit
+them ALL in this round before yielding: one window, one wake. A capability
+that "runs alongside you" (cpu / igpu / spare VRAM) costs no window —
+prefer it when it is good enough.
+
+**Fan-out**: N independent sub-tasks = N submits with N corr ids in one
+round, then `yield --wait-on c1,c2,...` on all of them — one park, one
+wake, every result in the same round.
+
+**Hard rules**: never stop the brain yourself (invariant 1) — the swap
+window is opened and closed by the stack (resourced / the watcher) between
+rounds, and it never opens while your round is running; never yield
+without a filled continuation; a Result is not done until you have read it
+and verified its artifacts.
+
 ## The vector graph — more data than the repo
 
 The **Jarvis Memory Service** (`jarvis-memory` systemd unit,

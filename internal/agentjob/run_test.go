@@ -76,7 +76,7 @@ func TestPromptContinuation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &Runner{Store: s, Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
+	r := &Runner{Store: s, Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }, Capabilities: func() string { return "" }}
 	p := r.Prompt(j, "local", "")
 
 	for _, w := range []string{
@@ -118,7 +118,7 @@ func TestPromptContinuationTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &Runner{Store: s, Brief: func(string) string { return "" }, StackStatus: func() string { return "" }}
+	r := &Runner{Store: s, Brief: func(string) string { return "" }, StackStatus: func() string { return "" }, Capabilities: func() string { return "" }}
 	p := r.Prompt(j, "local", "")
 	for _, w := range []string{
 		"- w1-img-1: /tmp/photos/img1.png",
@@ -141,10 +141,47 @@ func TestPromptFreshNoContinuation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &Runner{Store: s, Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
+	r := &Runner{Store: s, Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }, Capabilities: func() string { return "" }}
 	p := r.Prompt(j, "local", "")
 	if strings.Contains(p, "CONTINUATION") {
 		t.Errorf("fresh prompt must not carry a continuation block:\n%s", p)
+	}
+}
+
+// TestPromptCapabilities: the round preamble carries the event toolbox
+// (acceptance 2, EVB-31) — the catalog lines from the Capabilities hook
+// under the CAPABILITIES header, followed by the cost-model heuristic, and
+// the block sits before the job text. An empty catalog omits the block.
+func TestPromptCapabilities(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	s := newStore(t)
+	ingest(t, s, Spec{ID: "c1", Title: "c", Instructions: "do the thing", Priority: 5, CreatedAt: time.Now().UTC()})
+	j, err := s.Get("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Store: s, Brief: func(string) string { return "" },
+		StackStatus: func() string { return "" },
+		Capabilities: func() string { return "image.generate\twhere=gpu\tcost=needs brain out\tdepth=0\ttypical~45s" }}
+	p := r.Prompt(j, "local", "")
+	for _, w := range []string{
+		"CAPABILITIES (jarvis-mq caps",
+		"image.generate",
+		"needs brain out",
+		"Cost model:",
+		"submit them all before yielding",
+	} {
+		if !strings.Contains(p, w) {
+			t.Errorf("prompt missing %q:\n%s", w, p)
+		}
+	}
+	capsIdx, jobIdx := strings.Index(p, "CAPABILITIES"), strings.Index(p, "YOUR JOB THIS ROUND")
+	if capsIdx < 0 || jobIdx < 0 || capsIdx > jobIdx {
+		t.Errorf("catalog block must precede the job text (caps=%d job=%d):\n%s", capsIdx, jobIdx, p)
+	}
+	r.Capabilities = func() string { return "" }
+	if p := r.Prompt(j, "local", ""); strings.Contains(p, "CAPABILITIES") {
+		t.Errorf("empty catalog must omit the block:\n%s", p)
 	}
 }
 
