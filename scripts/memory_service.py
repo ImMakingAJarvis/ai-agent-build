@@ -172,12 +172,16 @@ class MemoryStore:
         # Cached vector matrix for fast search; invalidated on writes.
         self._vec_cache: np.ndarray | None = None
         self._id_cache: list[int] = []
+        # (source, path) of every doc upserted since the last clear —
+        # reindex prunes each source against the paths its indexer saw.
+        self.indexed_paths: set[tuple[str, str]] = set()
 
     def _invalidate(self):
         self._vec_cache = None
 
     def upsert_doc(self, source: str, path: str, title: str, text: str,
                    meta: dict, embedder: Embedder) -> int:
+        self.indexed_paths.add((source, path))
         h = doc_hash(source, path, text)
         row = self.db.execute(
             "SELECT id, hash FROM docs WHERE source=? AND path=?", (source, path)
@@ -220,14 +224,14 @@ class MemoryStore:
         self._invalidate()
         return len(ids)
 
-    def forget_missing(self, source: str, keep: set[tuple[str, str, str]]):
-        """Drop docs of this source whose (path, hash) are not in keep."""
+    def forget_missing(self, source: str, keep_paths: set[str]):
+        """Drop docs of this source whose path was not indexed this pass."""
         rows = self.db.execute(
-            "SELECT id, path, hash FROM docs WHERE source=?", (source,)
+            "SELECT id, path FROM docs WHERE source=?", (source,)
         ).fetchall()
         n = 0
-        for doc_id, path, h in rows:
-            if (path, h) not in keep:
+        for doc_id, path in rows:
+            if path not in keep_paths:
                 self.db.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
                 self.db.execute("DELETE FROM docs WHERE id=?", (doc_id,))
                 n += 1
@@ -360,7 +364,7 @@ def index_queue(store: MemoryStore, embedder: Embedder) -> int:
 
 
 def index_kanban(store: MemoryStore, embedder: Embedder) -> int:
-    """Epics and tasks — the scheduling board."""
+    """Epics, tasks, and task comments — the scheduling board + its discussion."""
     root = os.path.join(DATA_DIR, "kanban")
     n = 0
     for sub, src in (("epics", "kanban"), ("tasks", "kanban")):
@@ -384,6 +388,36 @@ def index_kanban(store: MemoryStore, embedder: Embedder) -> int:
                  "model": meta.get("model", ""), "priority": meta.get("priority", 0)},
                 embedder,
             ) or 1
+    # Task comments: index each with its task's title in the text, so
+    # questions and answers on a task are findable by the task's topic.
+    d = os.path.join(root, "comments")
+    if os.path.isdir(d):
+        for name in os.listdir(d):
+            text = read_capped(os.path.join(d, name), cap=64 << 10)
+            if not text:
+                continue
+            try:
+                c = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            task = {}
+            tf = os.path.join(root, "tasks", c.get("task_id", "") + ".json")
+            raw = read_capped(tf, cap=64 << 10)
+            if raw:
+                try:
+                    task = json.loads(raw)
+                except json.JSONDecodeError:
+                    task = {}
+            task_title = task.get("title") or c.get("task_id", "?")
+            n += store.upsert_doc(
+                "kanban", f"comments/{name}", f"comment on {task_title}",
+                f"task: {task_title}\nauthor: {c.get('author', '?')}\n"
+                f"when: {c.get('created_at', '?')}\n{c.get('body', '')}",
+                {"kind": "comment", "task_id": c.get("task_id", ""),
+                 "author": c.get("author", ""),
+                 "status": task.get("status", "")},
+                embedder,
+            ) or 1
     return n
 
 
@@ -391,7 +425,9 @@ def index_repo_docs(store: MemoryStore, embedder: Embedder) -> int:
     """READMEs and text docs in the repo (worker outputs, design notes)."""
     n = 0
     for dirpath, dirnames, filenames in os.walk(REPO_DIR):
-        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "__pycache__")]
+        # .worktrees holds branch copies of this repo — indexing them would
+        # duplicate every doc under a second path.
+        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "__pycache__", ".worktrees")]
         for fn in filenames:
             if not fn.lower().endswith((".md", ".txt")):
                 continue
@@ -418,19 +454,27 @@ def reindex(store: MemoryStore, embedder: Embedder) -> dict:
     t0 = time.time()
     summary = {}
     for source, fn in INDEXERS:
-        # Index everything first, then drop what vanished.
-        keep: set[tuple[str, str, str]] = set()
+        # Index everything first, then drop what vanished from disk.
+        keep: set[str] | None = None
         count = 0
         try:
+            store.indexed_paths.clear()
             count = fn(store, embedder)
+            keep = {p for s, p in store.indexed_paths if s == source}
         except Exception:
             log.exception("reindex: source %s failed", source)
-        for path, h in store.db.execute(
-            "SELECT path, hash FROM docs WHERE source=?", (source,)
-        ).fetchall():
-            keep.add((path, h))
-        stale = store.forget_missing(source, keep)
-        summary[source] = {"docs": len(keep), "new_or_changed": count, "stale_removed": stale}
+        # Prune only when the indexer completed AND found something. A pass
+        # that sees zero files must not drop the docs a fuller environment
+        # indexed earlier — inside the container the repo dir and dashboard
+        # are not visible, so repo-doc/queue legitimately index 0 there.
+        if keep is not None and keep:
+            stale = store.forget_missing(source, keep)
+        else:
+            stale = 0
+        docs = store.db.execute(
+            "SELECT count(*) FROM docs WHERE source=?", (source,)
+        ).fetchone()[0]
+        summary[source] = {"docs": docs, "new_or_changed": count, "stale_removed": stale}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     store.db.execute(
         "INSERT INTO kv(k,v) VALUES('last_reindex',?) "

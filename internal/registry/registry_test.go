@@ -33,8 +33,8 @@ func TestLoadRealRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(f.Models) != 9 {
-		t.Fatalf("got %d models, want 9", len(f.Models))
+	if len(f.Models) != 10 {
+		t.Fatalf("got %d models, want 10", len(f.Models))
 	}
 	byID := make(map[string]Model, len(f.Models))
 	for _, m := range f.Models {
@@ -45,9 +45,10 @@ func TestLoadRealRegistry(t *testing.T) {
 	}
 
 	// The image.describe VLMs (EVB-21), the audio.transcribe ASR model
-	// (EVB-22) and the llm.small instruct model (EVB-23) are capability
-	// resources, hidden from the model selector.
-	for _, id := range []string{"qwen3-vl-2b", "qwen3-vl-8b", "whisper-small", "qwen2.5-7b-instruct"} {
+	// (EVB-22), the llm.small instruct model (EVB-23) and the bench.run
+	// benchmark tool (EVB-24) are capability resources, hidden from the
+	// model selector.
+	for _, id := range []string{"qwen3-vl-2b", "qwen3-vl-8b", "whisper-small", "qwen2.5-7b-instruct", "llama-bench"} {
 		m, ok := byID[id]
 		if !ok {
 			t.Fatalf("missing %s entry", id)

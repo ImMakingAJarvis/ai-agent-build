@@ -46,9 +46,9 @@ func TestNewDefaults(t *testing.T) {
 	if !w.isLoaded() {
 		t.Error("a worker starts loaded")
 	}
-	// The lease stub: nil hook = granted.
-	if err := w.lease(nil); err != nil {
-		t.Errorf("default lease = %v, want nil (stub assumes granted)", err)
+	// No lease broker = un-gated: the worker never asks for a lease.
+	if w.lease != nil {
+		t.Error("a worker without a lease broker must have no lease manager (un-gated)")
 	}
 	// Heartbeats are on by default only when an events publisher exists.
 	if w.cfg.HeartbeatS != 0 {
