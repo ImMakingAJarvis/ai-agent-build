@@ -385,7 +385,10 @@ services:
       HOME: /home/agent
       LISTEN_PORT: "8100"
       WHISPER_MODEL: small
-      JARVIS_VOICE: glados
+      # jarvis = natural conversational persona (en-US-GuyNeural, +0% rate,
+      # voice_prompts/jarvis.txt) — Nathan's voice-natural-tts ask. glados is
+      # the sarcastic GLaDOS persona (EmmaNeural, -10% rate) — kept as a profile.
+      JARVIS_VOICE: jarvis
       OLLAMA_URL: http://engine:11434
       MEMORY_URL: http://memory:8101
       # While the worker is deep in a job the 4090 brain is saturated, so
