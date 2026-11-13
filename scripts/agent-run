@@ -23,15 +23,14 @@
 #     checkpoint button), when the failure only notifies — and manual
 #     rounds are never blocked by the feature.
 #
-#   Photo window: jobs tagged `photo` (jarvis-jobs photo-ready lists them)
-#     need the 4090 without the brain. Before the first one runs the loop
-#     opens a brain-swap window (jarvis-swap out: brain out, art+bench up,
-#     batch flipped to priority 1000); when the ready batch drains it
-#     closes it (jarvis-swap in: brain back). Photo jobs run as code —
-#     the jarvis-photo executor, no model round (not even the iGPU
-#     helper). The loop only closes windows it opened itself
-#     ($CONF/photo-window marker) — see docs/brain-swap.md and
-#     docs/agent-run.md.
+#   Photo window: jobs tagged `photo` need the 4090 without the brain.
+#     The loop no longer opens or closes the window: resourced's window
+#     controller (EVB-27) watches the cap.image.generate queue depth and
+#     brackets the brain swap around the batch — the loop's only job is
+#     to dispatch a ready photo job as code (the jarvis-photo executor,
+#     no model round, not even the iGPU helper), which publishes the
+#     image.generate request and blocks for the Result. See
+#     docs/brain-swap.md and docs/agent-run.md.
 #
 #   agent-run                         first run, or carry on after "Stop"
 #   agent-run --resume REASON [GPU]   after a reboot (called by agent-resume)
@@ -278,29 +277,16 @@ start_watcher() {
   discord_watcher_pid=$!
 }
 
-# ---- Brain-swap photo window (docs/brain-swap.md) -------------------------
+# ---- Photo jobs (docs/brain-swap.md, EVB-27) ------------------------------
 # Photo-tagged jobs (the `photo` tag, set by image-queue ingestion or
-# `jarvis-jobs add -tags photo`) need the 4090 without the brain: the
-# art+bench services wait for ~12 GB free before generating. The loop
-# brackets the whole ready batch with a swap window:
-#   before the first photo job runs -> jarvis-swap out --jobs <batch>
-#   when the batch drains           -> jarvis-swap in
-# `out` is idempotent: re-run on an open window it re-flips the batch to
-# igpu@1000 and extends the watchdog maintenance window, so photo jobs
-# that arrive mid-window are picked up on the next pull. The $CONF/photo-window
-# marker keeps the loop from closing a window it didn't open — a manual
-# window for non-photo work (e.g. a VRAM sweep, docs/brain-swap.md) never
-# gets a marker, so the loop leaves it alone. jarvis-swap notifies Discord
-# on both out and in; the loop only speaks up on failure (once per failure
-# stretch, photo_swap_warn).
-swap_window_open() {
-  jarvis-watchdog maintain status 2>/dev/null | grep -q 'maintenance active'
-}
-
-photo_batch() {  # comma-separated ids of the ready photo-tagged jobs, in run order
-  jarvis-jobs photo-ready 2>/dev/null
-}
-
+# `jarvis-jobs add -tags photo`) need the 4090 without the brain. The loop
+# no longer opens or closes the swap window: resourced's window controller
+# watches the cap.image.generate queue depth and brackets the batch with
+# jarvis-swap out/in on its own. The loop's part is to dispatch a ready
+# photo job as CODE (the jarvis-photo executor — no model round, not the
+# iGPU helper); the executor publishes the image.generate request to the
+# capability queue and blocks for the Result, which is what the window
+# controller sees as depth.
 is_photo_job() {
   jarvis-jobs show "$1" 2>/dev/null | sed -n 's/^tags: //p' \
     | tr ',' '\n' | grep -q '^[[:space:]]*photo[[:space:]]*$'
@@ -308,7 +294,6 @@ is_photo_job() {
 
 msg="${checkpoint:-$(summary "$(cat "$DRIVER" 2>/dev/null || echo agent)" "${status:-?}")}"
 round=0
-photo_swap_warn=0   # 1 once the loop has notified about a swap failure (reset on success)
 while :; do
   # NoBrakes (2/6): read the Redis auto_mode flag on every iteration.
   # When it is on and today's nightly window is unprocessed, parked
@@ -316,21 +301,6 @@ while :; do
   # or when Redis is unreachable, nothing changes — the check logs a
   # warning and exits 0, so it can never stall or kill the loop.
   jarvis-jobs nightly || true
-
-  # Photo window, drained: the loop opened it (marker) and no ready
-  # photo jobs are left — close it and put the brain back before pulling
-  # anything else. A window without the marker is manual and stays the
-  # owner's to close.
-  if [[ -f "$CONF/photo-window" ]] && [[ -z "$(photo_batch)" ]]; then
-    if jarvis-swap in --reason "photo window drained (queue watcher)"; then
-      rm -f "$CONF/photo-window"
-      photo_swap_warn=0
-    elif (( photo_swap_warn == 0 )); then
-      notify "Photo batch is empty but the window wouldn't close (jarvis-swap in failed) — retrying; the watchdog deadline re-arms the brain either way."
-      photo_swap_warn=1
-    fi
-    continue
-  fi
 
   job_id=""; job_title=""
   if next=$(jarvis-jobs next 2>/dev/null); then
@@ -368,16 +338,17 @@ while :; do
     auto_run=1
     notify "Full auto: running ${job_title} (${job_id}) on ${d}."
   else
-    # Photo-tagged jobs have no driver choice: the photo check below opens
-    # the swap window and runs the job as CODE (the jarvis-photo executor —
-    # no model round, not the iGPU helper), so "who runs it?" is a question
-    # whose answer changes nothing (the only useful reply was Skip — the
-    # owner can still skip a photo job from the queue). Dispatch them
-    # straight away instead of asking.
+    # Photo-tagged jobs have no driver choice: the photo check below runs
+    # the job as CODE (the jarvis-photo executor — no model round, not the
+    # iGPU helper), so "who runs it?" is a question whose answer changes
+    # nothing (the only useful reply was Skip — the owner can still skip a
+    # photo job from the queue). Dispatch them straight away instead of
+    # asking. The swap window itself is driven by resourced: the executor's
+    # image.generate request is what opens it (EVB-27).
     if [[ -n "$job_id" ]] && is_photo_job "$job_id"; then
       d=igpu
       note=""
-      notify "Photo job ${job_title} (${job_id}): opening the swap window; the photo runs as code (jarvis-photo), no model round."
+      notify "Photo job ${job_title} (${job_id}): running as code (jarvis-photo), no model round; resourced opens the swap window for it."
     else
       if [[ -n "$job_id" ]]; then
         q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
@@ -456,42 +427,15 @@ $q"); then
     continue
   fi
 
-  # Photo window, first run: the pulled job is photo-tagged, so it runs
-  # with the brain out of the 4090 (art+bench hold the VRAM; the photo
-  # itself runs as code — the jarvis-photo executor, no model round).
-  # Open the window for the whole ready batch first; if one is already
-  # open (the loop's or a manual one), re-flip the batch so it keeps
-  # front-of-band priority and the maintenance window extends as long as
-  # there is work.
+  # Photo jobs run as code (the jarvis-photo executor, no model round —
+  # not even the iGPU helper). The swap window itself is driven by
+  # resourced (EVB-27): the executor's image.generate request lands on
+  # cap.image.generate, and resourced's window controller opens the
+  # window around the batch and closes it when it drains. The executor
+  # blocks for the Result, so there is nothing to open here — just
+  # dispatch.
   if is_photo_job "$job_id"; then
-    ids=$(photo_batch); [[ -n "$ids" ]] || ids="$job_id"
-    if swap_window_open; then
-      # Best-effort: even if the flip fails the job can still run (art is
-      # up) — swap.log has the why.
-      if jarvis-swap out --jobs "$ids" --force \
-          --reason "photo batch re-flip (queue watcher)"; then
-        echo "$(date '+%F %T') batch: ${ids//,/ }" > "$CONF/photo-window"
-        photo_swap_warn=0
-      fi
-    elif jarvis-swap out --jobs "$ids" --force \
-        --reason "queue watcher: photo batch ${ids//,/ }"; then
-      echo "$(date '+%F %T') batch: ${ids//,/ }" > "$CONF/photo-window"
-      photo_swap_warn=0
-    else
-      # The window wouldn't open (e.g. brain down without a maintenance
-      # window — the 2026-11-04 failure mode the watchdog owns). Back off
-      # so the watchdog can re-arm the brain; notify once per failure
-      # stretch, not once per retry.
-      if (( photo_swap_warn == 0 )); then
-        notify "Photo job ${job_id} is next but the swap window wouldn't open (see swap.log) — retrying in 60 s."
-        photo_swap_warn=1
-      fi
-      sleep 60
-      continue
-    fi
-    # The brain is (or just got) out: the photo runs as code (jarvis-photo),
-    # not a model round — the driver label is vestigial for photo jobs.
-    d=igpu
+    d=igpu   # vestigial: photos run as code, not a model round
   fi
 
   echo "$d" > "$DRIVER"

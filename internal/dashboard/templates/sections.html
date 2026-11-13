@@ -63,7 +63,68 @@
     <div class="machine-card">
       <div class="name">VRAM (4090)</div>
       <div class="model">{{ if .VRAM }}{{ divGB .VRAM.FreeMB }} / {{ divGB .VRAM.TotalMB }}{{ else }}—{{ end }}</div>
-      <div class="label">{{ if .VRAM }}free / total GB{{ else }}exporter down{{ end }}</div>
+      <div class="label">{{ if .VRAM }}free / total GB · {{ printf "%.0f" .VRAM.PowerW }} W{{ else }}exporter down{{ end }}</div>
+    </div>
+    {{- if .Window }}
+    <div class="machine-card machine-window{{ if .Window.Open }} machine-window-open{{ end }}">
+      <div class="name">Swap window</div>
+      <div class="model">{{ if .Window.Open }}open{{ if .Window.Age }} ({{ .Window.Age }}){{ end }}{{ else }}closed{{ end }}</div>
+      <div class="label">
+        {{- if .Window.Open }}
+        {{- if .Window.For }} for {{ range $i, $c := .Window.For }}{{ if $i }}, {{ end }}{{ $c }}{{ end }}{{ end }}
+        {{- if .Window.Reason }} · {{ .Window.Reason }}{{ end }}
+        {{- else }}no window{{ if .Window.Reason }} · last: {{ .Window.Reason }}{{ end }}{{ end }}
+      </div>
+    </div>
+    {{- end }}
+    {{- if .Leases }}
+    <div class="machine-card">
+      <div class="name">Leases</div>
+      <div class="meas-list">
+        {{- range .Leases }}
+        <div class="meas"><b>{{ .Device }}</b>:
+          {{- range $i, $l := .Leases }}{{ if $i }}<br>&nbsp;&nbsp;{{ end }}{{ $l.Holder }}{{ if $l.Capability }} ({{ $l.Capability }}){{ end }} · {{ divGB $l.VRAMMB }} GB · since {{ $l.Since }}{{ end }}
+        </div>
+        {{- end }}
+      </div>
+      <div class="label">holder (capability) · VRAM · since</div>
+    </div>
+    {{- end }}
+    {{- if .CapDepths }}
+    <div class="machine-card">
+      <div class="name">Capability queues</div>
+      <div class="meas-list">
+        {{- range .CapDepths }}
+        <div class="meas{{ if .Depth }} meas-over{{ end }}">{{ .Cap }}: {{ .Depth }}</div>
+        {{- end }}
+      </div>
+      <div class="label">ready + in-flight (broker snapshot)</div>
+    </div>
+    {{- end }}
+    {{- if .Waiting }}
+    <div class="machine-card">
+      <div class="name">Waiting brain jobs</div>
+      <div class="meas-list">
+        {{- range .Waiting }}
+        <div class="meas">{{ .ID }} · waited {{ .WaitAge }} — for {{ range $i, $c := .WaitOn }}{{ if $i }}, {{ end }}{{ $c }}{{ end }}</div>
+        {{- end }}
+      </div>
+      <div class="label">job · wait age · waiting on (corr id)</div>
+    </div>
+    {{- end }}
+    <div class="machine-card">
+      <div class="name">Measured VRAM</div>
+      {{- if .Measured }}
+      <div class="meas-list">
+        {{- range .Measured }}
+        <div class="meas{{ if .Over }} meas-over{{ end }}">{{ .Cap }}: {{ divGB .DeclaredMB }} → {{ divGB .MeasuredMB }}</div>
+        {{- end }}
+      </div>
+      <div class="label">declared → measured GB</div>
+      {{- else }}
+      <div class="model">—</div>
+      <div class="label">none measured yet</div>
+      {{- end }}
     </div>
     <div class="machine-card">
       <div class="name">On hold</div>

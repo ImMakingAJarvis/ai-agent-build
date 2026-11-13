@@ -106,6 +106,42 @@
       "arguments": {}
     },
     {
+      "name": "sched.hourly",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "jarvis.dlx"
+      }
+    },
+    {
+      "name": "sched.daily",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "jarvis.dlx"
+      }
+    },
+    {
+      "name": "sched.weekly",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "jarvis.dlx"
+      }
+    },
+    {
+      "name": "sched.monthly",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "jarvis.dlx"
+      }
+    },
+    {
       "name": "dead",
       "vhost": "/",
       "durable": true,
@@ -185,6 +221,38 @@
       "destination": "jobs.igpu",
       "destination_type": "queue",
       "routing_key": "jobs.igpu.#",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "/",
+      "destination": "sched.hourly",
+      "destination_type": "queue",
+      "routing_key": "sched.hourly.#",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "/",
+      "destination": "sched.daily",
+      "destination_type": "queue",
+      "routing_key": "sched.daily.#",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "/",
+      "destination": "sched.weekly",
+      "destination_type": "queue",
+      "routing_key": "sched.weekly.#",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "/",
+      "destination": "sched.monthly",
+      "destination_type": "queue",
+      "routing_key": "sched.monthly.#",
       "arguments": {}
     },
     {

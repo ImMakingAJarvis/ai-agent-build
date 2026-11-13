@@ -37,6 +37,8 @@ const (
 	WindowKind = "window" // window.<state>
 	LeaseKind  = "lease"  // lease.<state>
 	WorkerKind = "worker" // worker.<worker-id>.<state>
+	SchedKind  = "sched"  // sched.<cadence>.<state>
+	StreamKind = "stream" // stream.<state> — the game/stream watchdog (EVB-29)
 )
 
 // Event is one lifecycle event. Kind/Subject/State are the routing key's
@@ -94,6 +96,14 @@ func LeaseEvent(state string, data map[string]any) Event {
 	return Event{Kind: LeaseKind, State: state, At: time.Now().UTC(), Data: data}
 }
 
+// StreamEvent builds a stream.<state> event (started/stopped — the
+// game/stream watchdog, EVB-29). Data carries which stream ("sunshine"
+// / "steam-remote-play") and, for started, what it did (revoked leases,
+// window closed).
+func StreamEvent(state string, data map[string]any) Event {
+	return Event{Kind: StreamKind, State: state, At: time.Now().UTC(), Data: data}
+}
+
 // WorkerEvent builds a worker.<worker-id>.<state> event (the capworker
 // SDK's heartbeat and loaded/unloaded transitions). The worker id may
 // contain "/" (e.g. "echo@cpu/cap-echo") — only "." is special in a
@@ -103,20 +113,20 @@ func WorkerEvent(workerID, state string, data map[string]any) Event {
 }
 
 // ParseEventRoutingKey splits a routing key into its kind, subject and
-// state segments. Only window.* and lease.* keys have no subject;
-// job.* and agent.* need all three segments.
+// state segments. Only window.*, lease.* and stream.* keys have no
+// subject; job.* and agent.* need all three segments.
 func ParseEventRoutingKey(key string) (kind, subject, state string, err error) {
 	parts := strings.Split(key, ".")
 	switch len(parts) {
 	case 3:
 		return parts[0], parts[1], parts[2], nil
 	case 2:
-		if parts[0] != WindowKind && parts[0] != LeaseKind {
+		if parts[0] != WindowKind && parts[0] != LeaseKind && parts[0] != StreamKind {
 			return "", "", "", fmt.Errorf("events: routing key %q: %s events need a subject (job.<cap>.<state> or agent.<job-id>.<state>)", key, parts[0])
 		}
 		return parts[0], "", parts[1], nil
 	}
-	return "", "", "", fmt.Errorf("events: routing key %q: want job.<cap>.<state>, agent.<job-id>.<state>, window.<state> or lease.<state>", key)
+	return "", "", "", fmt.Errorf("events: routing key %q: want job.<cap>.<state>, agent.<job-id>.<state>, window.<state>, lease.<state> or stream.<state>", key)
 }
 
 // DecodeEvent parses an event body (for subscribers and jarvis-mq tail).
