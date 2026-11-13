@@ -51,6 +51,11 @@ type Runner struct {
 	// StackStatus returns the machine snapshot included in the round
 	// prompt (default: runs jarvis-stack-status). Return "" to omit it.
 	StackStatus func() string
+	// Capabilities returns the capability catalog included in the round
+	// prompt (default: runs `jarvis-mq caps` — the event toolbox: where
+	// each capability runs, what it costs, queue depth, typical runtime).
+	// Return "" to omit it.
+	Capabilities func() string
 	// Tee, if set, also receives the agent's output live (agent.log).
 	Tee io.Writer
 	// SignalFile, if non-empty, is polled during job execution. When it
@@ -299,6 +304,38 @@ func (r *Runner) stackStatus() string {
 	return defaultStackStatus()
 }
 
+// defaultCapabilities runs `jarvis-mq caps` and returns the catalog for the
+// round prompt: one line per capability — where it runs, the cost
+// ("needs brain out" / "runs alongside you"), the current queue depth, the
+// typical runtime. The lines are designed to be read, not parsed. Like the
+// snapshot, a non-zero exit still yields output (the depths print as "-"
+// when the broker is down); it returns "" only when the tool is missing or
+// prints no catalog, so a wedged toolbox never blocks a round.
+func defaultCapabilities() string {
+	bin := "/usr/local/bin/jarvis-mq"
+	if _, err := os.Stat(bin); err != nil {
+		bin = "jarvis-mq"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "caps").CombinedOutput()
+	s := strings.TrimSpace(string(out))
+	if ctx.Err() == context.DeadlineExceeded {
+		return "" // never block the round on a wedged catalog
+	}
+	if err != nil && !strings.Contains(s, "where=") {
+		return "" // missing tool or no catalog lines
+	}
+	return s
+}
+
+func (r *Runner) capabilities() string {
+	if r.Capabilities != nil {
+		return r.Capabilities()
+	}
+	return defaultCapabilities()
+}
+
 // continuationBlock renders the resume context for a woken round (plan
 // §3.5, EVB-16): the job's continuation.md — what it was doing, what is in
 // flight, the exact next step, written by the yielding round — plus the
@@ -368,14 +405,30 @@ func (r *Runner) continuationBlock(j Job) string {
 	return b.String()
 }
 
-// Prompt is the stage-3 rules, the machine snapshot, and the job text
-// (plus any typed note). A woken round additionally gets its continuation
-// (continuationBlock) between the branch line and the instructions.
+// capsCostModel is the cost heuristic in the round prompt (plan §3.7,
+// EVB-31): the swap bracket is the expensive part, and one window is
+// shared by everything submitted before the yield — so batch the GPU
+// requests. The ~2 min figure is measured, not guessed (2026-11-12
+// Phase 4 gate run: window open → brain back, image included —
+// docs/e2e-event-flow-gate-2026-11-12.md).
+const capsCostModel = "Cost model: submitting a capability that is \"needs brain out\" costs ~2 min of swap (the window bracket, shared); batch requests — if you will need several such capabilities, submit them all before yielding (one window, one wake). Capabilities that \"run alongside you\" cost no window; prefer a cpu/igpu placement when it is good enough."
+
+// Prompt is the stage-3 rules, the machine snapshot, the capability
+// catalog (the event toolbox), and the job text (plus any typed note). A
+// woken round additionally gets its continuation (continuationBlock)
+// between the branch line and the instructions.
 func (r *Runner) Prompt(j Job, driver, note string) string {
 	var b strings.Builder
 	b.WriteString(r.brief(driver))
 	if snap := r.stackStatus(); snap != "" {
 		fmt.Fprintf(&b, "\nMACHINE SNAPSHOT at round start (jarvis-stack-status):\n%s\nTreat this as the current state of the machine: containers, loaded engines + VRAM, services, job queue, swap window. Do not re-discover the layout (systemctl list-units, ss -tlnp, docker ps, curl to engine ports). Probe deeper only when the job's evidence contradicts this snapshot, or while debugging a specific failure.\n", snap)
+	}
+	// The event toolbox (plan §3.7, EVB-31): the brain sees its
+	// capabilities and their cost every round, so it reaches for the
+	// architecture instead of doing the work itself. Omitted when the
+	// catalog is empty (tool missing or the hook returns "").
+	if caps := r.capabilities(); caps != "" {
+		fmt.Fprintf(&b, "\nCAPABILITIES (jarvis-mq caps — the event toolbox; submit with `jarvis-mq submit <cap>`, the Result lands on $JARVIS_REPLY_QUEUE):\n%s\n%s\n", caps, capsCostModel)
 	}
 	fmt.Fprintf(&b, "\n=== YOUR JOB THIS ROUND: %s — %s ===\n", j.ID, j.Title)
 	if j.Branch != "" {
