@@ -40,6 +40,11 @@ var (
 	// negationRe: "don't turn on full auto" is advice, not a request —
 	// ambiguous enough that the LLM should read it.
 	negationRe = regexp.MustCompile(`\b(don'?t|do\s+not|never|no|without)\b`)
+	// capabilityVerbRe: a leading verb that names capability work (the
+	// catalog's capabilities: image.describe, audio.transcribe,
+	// image.generate). Such messages go to the LLM, which has the catalog
+	// and can fill in submit_capability's parameters.
+	capabilityVerbRe = regexp.MustCompile(`(?i)^(please\s+)?(describe|transcribe|caption|generate|render)\b`)
 )
 
 // actionPattern pairs an action key with its matching regex.
@@ -125,6 +130,14 @@ func fastClassify(content string) (fastClassifyResult, string, map[string]string
 	// 4. Action keywords → action
 	if actionMatch := matchActionPatterns(lower); actionMatch != "" {
 		return fastAction, actionMatch, nil
+	}
+
+	// 4b. Capability work requests → the LLM. "describe the photos in folder
+	//     X" is work, not conversation, but the fast path cannot extract its
+	//     parameters (which capability, which path), so it only defers them;
+	//     the LLM routes them to submit_capability with the right parameters.
+	if capabilityVerbRe.MatchString(lower) {
+		return fastUnknown, "", nil
 	}
 
 	// 5. Short statements without action keywords → chat
