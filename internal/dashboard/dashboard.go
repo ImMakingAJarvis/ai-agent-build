@@ -258,6 +258,7 @@ type Server struct {
 	kanban       *kanbanState
 	redis        *redis.Client // live job streams (nil = file-tail fallback)
 	plans        *plansState
+	secrets      *secretsState
 
 	// Machine panel (machine.go): the endpoints the panel probes for the
 	// loaded models, VRAM and the swap-window state file.
@@ -375,6 +376,7 @@ func New() *Server {
 		kanban:       initKanban(historyDir),
 		redis:        redisClient,
 		plans:        initPlans(historyDir),
+		secrets:      initSecrets(historyDir),
 		engineURL:    engineURL,
 		igpuURL:      igpuURL,
 		artURL:       artURL,
@@ -487,6 +489,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/jobs/{id}/live", s.handleJobLive)
 
 	// Kanban board routes.
+	mux.HandleFunc("GET /secrets", s.secrets.handleSecretsPage(s))
+	mux.HandleFunc("GET /api/secrets", s.secrets.handleSecretsList)
+	mux.HandleFunc("POST /api/secrets", s.secrets.handleSecretsAdd)
+	mux.HandleFunc("DELETE /api/secrets/{name}", s.secrets.handleSecretsRemove)
 	mux.HandleFunc("GET /kanban", s.kanban.handleKanbanBoardPage(s))
 	mux.HandleFunc("POST /api/kanban/epics", s.kanban.apiCreateEpic)
 	mux.HandleFunc("GET /api/kanban/epics", s.kanban.apiListEpics)
