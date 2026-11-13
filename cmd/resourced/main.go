@@ -44,17 +44,29 @@
 // VRAM footprint (POST /measure); the overlay budgets future leases
 // and alerts when measured > declared.
 //
-// Since EVB-29 it runs the game/stream watchdog (plan §3.6 rule 2):
-// while a game stream (Sunshine / Steam Remote Play, via the same
-// internal/streamwatcher the host watchdogs use) is active, the ledger
-// revokes every capability worker's GPU lease — granted AND queued, the
-// brain's standing lease exempt — and holds the GPU queue, and an open
-// swap window closes so the brain comes back BEFORE the game gets its
-// VRAM. The revoked workers run their task-26 drain; on stream end the
-// hold clears and the queued GPU leases grant again. CPU and iGPU
-// leases are never touched (the rule is GPU-only). stream.started /
-// stream.stopped events on the events exchange; the resourced_stream_
-// active gauge; GET /state gains a "stream_active" field.
+// Since EVB-29 it runs the game/stream watchdog (plan §3.6 rule 2). The
+// stream types (via the same internal/streamwatcher the host watchdogs
+// use) split in two:
+//
+//   - A GAME (a Steam game running locally — detected by the game's
+//     install path in argv — or Steam Remote Play) evicts the brain: the
+//     ledger holds the GPU queue and revokes every capability worker's
+//     GPU lease (granted AND queued, the brain's standing lease exempt),
+//     and resourced stops the brain itself — jarvis-swap out --game
+//     (the for:["game"] window: no photo services, just the VRAM freed,
+//     re-armed by a 60s keepalive so long sessions outlive the 4h
+//     maintenance deadline). On game end the brain comes back. resourced
+//     owns this because it runs on the host; the worker container has no
+//     docker socket and no view of the host's /proc.
+//   - A Sunshine desktop stream takes NO GPU action (NVENC only, a few
+//     hundred MB — it coexists with the brain and the workers); it only
+//     logs, bumps the gauge, and publishes the event with game:false.
+//
+// The revoked workers run their task-26 drain; on game end the hold
+// clears and the queued GPU leases grant again. CPU and iGPU leases are
+// never touched (the rule is GPU-only). stream.started / stream.stopped
+// events on the events exchange; the resourced_stream_active gauge;
+// GET /state gains a "stream_active" field.
 //
 // Every grant/release/deny publishes a lease.<granted|released|denied>
 // event on the events exchange. Configuration (env):
@@ -82,6 +94,13 @@
 //	                   Optional — the NVENC fallback needs no endpoint.
 //	STEAM_ENDPOINT     Steam in-home streaming status page (EVB-29).
 //	                   Optional, likewise.
+//	STEAM_GAME_EXCLUDES  comma-separated command-line substrings that opt
+//	                   a game out of the brain stop (EVB-29). Empty =
+//	                   every Steam game counts.
+//	BRAIN_URL            the brain engine the game keepalive probes (is
+//	                   the brain back after a re-arm?). Default
+//	                   http://127.0.0.1:11434.
+//	SUNSHINE_STREAM_PORT the Sunshine video UDP port. Default 48010.
 package main
 
 import (
@@ -568,11 +587,13 @@ func main() {
 		go windowTickLoop(ctx, svc.window, windowInterval)
 	}
 
-	// The game/stream watchdog (EVB-29, plan §3.6 rule 2): while a game
-	// stream is active the ledger revokes the capability workers' GPU
-	// leases and holds the GPU queue, and an open window closes (the
-	// brain comes back first). Its own goroutine — the window close
-	// blocks for the model load.
+	// The game/stream watchdog (EVB-29, plan §3.6 rule 2): while a GAME
+	// is active the ledger revokes the capability workers' GPU leases,
+	// holds the GPU queue, and resourced stops the brain (jarvis-swap
+	// out --game; the 60s keepalive re-arms the maintenance window and
+	// retries the brain stop past the round guard). A desktop stream
+	// takes no GPU action. Its own goroutine — the window operations
+	// block for the model loads.
 	go newStreamController(svc, reg, log).Run(ctx)
 
 	ticker := time.NewTicker(interval)

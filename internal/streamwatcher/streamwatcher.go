@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +45,12 @@ type Config struct {
 	// SteamEndpoint is the HTTP API base URL for the Steam in-home streaming
 	// status page. If empty, the watcher falls back to /proc-based detection.
 	SteamEndpoint string
+
+	// SteamGameExcludes is a list of command-line substrings that opt a
+	// process out of the game detection (STEAM_GAME_EXCLUDES,
+	// comma-separated): a light game the owner does not want to evict the
+	// brain for. Empty (default) = every Steam game counts.
+	SteamGameExcludes []string
 }
 
 func (c *Config) applyDefaults() {
@@ -68,6 +75,7 @@ const (
 	NoStream StreamType = iota
 	SunshineStream
 	SteamRemotePlay
+	SteamGame
 )
 
 func (s StreamType) String() string {
@@ -76,9 +84,22 @@ func (s StreamType) String() string {
 		return "sunshine"
 	case SteamRemotePlay:
 		return "steam-remote-play"
+	case SteamGame:
+		return "steam-game"
 	default:
 		return "none"
 	}
+}
+
+// IsGame reports whether the stream is one a game tenant is behind: a
+// local Steam game, or Steam Remote Play (the game runs on this host,
+// the other side just watches). A Sunshine stream is NOT a game: on
+// this box Sunshine is used for plain desktop streaming, which needs
+// only NVENC (a few hundred MB of VRAM) and coexists with the brain
+// and the capability workers — so the GPU actions (lease revocation,
+// the GPU hold, the brain stop) fire only for the game kinds.
+func (s StreamType) IsGame() bool {
+	return s == SteamGame || s == SteamRemotePlay
 }
 
 // StateChange is emitted whenever the streaming state transitions.
@@ -161,6 +182,13 @@ func (w *Watcher) loop(ch chan<- StateChange) {
 
 // detect runs all checks and returns the most specific active stream type.
 func (w *Watcher) detect() StreamType {
+	// A running Steam game is the strongest signal — its process tree
+	// carries the install path in argv — and it is the state that stops
+	// the brain, so it is checked first (a game streamed to a Moonlight
+	// client would otherwise read as a Sunshine stream).
+	if w.steam && steamGameRunning(w.cfg.SteamGameExcludes) {
+		return SteamGame
+	}
 	// Sunshine UDP stream connections are the most reliable indicator.
 	if sunshineStreaming(w.cfg.SunshineUser, w.cfg.SunshineStreamPort) {
 		return SunshineStream
@@ -209,6 +237,71 @@ func sunshineStreaming(user string, streamPort int) bool {
 func steamInstalled() bool {
 	_, err := exec.LookPath("steam")
 	return err == nil
+}
+
+// steamGameRunning reports whether a Steam game is running on the host:
+// some process's command line points into a game install directory
+// (…/steamapps/common/<Game>/…).
+//
+// It reads /proc/<pid>/cmdline — world-readable, so it works from
+// resourced (the agent user, no ptrace rights over other users'
+// processes) where the exe-link and socket-scoped checks are limited.
+// Native and Proton launches both carry the install path in argv: Proton
+// runs …/steamapps/common/Proton X-Y/proton with the game path among its
+// arguments, and a native game's own binary sits at
+// …/steamapps/common/<Game>/. Every library root contains the same
+// marker — the default ~/.local/share/Steam, the snap install's
+// /home/<user>/snap/steam/common/.local/share/Steam, and extra
+// libraries — so the check does not depend on where Steam lives.
+// The Steam client itself never matches: it runs from …/ubuntu12_32/
+// and its helpers from …/config/, …/logs/ and shader-cache paths, none
+// of which contain "steamapps/common/".
+//
+// SteamLinuxRuntime (depot/install tooling) lives in the same tree but
+// is not a game and is always excluded; excludes adds further
+// substring opt-outs (Config.SteamGameExcludes) for games the owner
+// does not want to evict the brain for.
+func steamGameRunning(excludes []string) bool {
+	return procGameRunning("/proc", excludes)
+}
+
+// procGameRunning is the /proc walk behind steamGameRunning, split out
+// so the tests can point it at a fixture directory.
+func procGameRunning(root string, excludes []string) bool {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !isPID(e.Name()) {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(root, e.Name(), "cmdline"))
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		if len(b) > 65536 {
+			b = b[:65536] // a pathologically long argument list is not a game
+		}
+		cl := strings.ReplaceAll(string(b), "\x00", " ")
+		if !strings.Contains(cl, "steamapps/common/") {
+			continue
+		}
+		if strings.Contains(cl, "steamapps/common/SteamLinuxRuntime") {
+			continue
+		}
+		skipped := false
+		for _, x := range excludes {
+			if x != "" && strings.Contains(cl, x) {
+				skipped = true
+				break
+			}
+		}
+		if !skipped {
+			return true
+		}
+	}
+	return false
 }
 
 // steamRemotePlayActive checks whether the steam process has established
