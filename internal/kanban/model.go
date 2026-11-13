@@ -59,3 +59,13 @@ type SubTask struct {
 	Completed bool      `json:"completed"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// Comment is a discussion entry on a task — a question from the worker while
+// building, or a reply from Nathan. One JSON file per comment.
+type Comment struct {
+	ID        string    `json:"id"`
+	TaskID    string    `json:"task_id"`
+	Author    string    `json:"author"` // "agent", "nathan", ...
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+}

@@ -24,6 +24,9 @@ func TestConfigApplyDefaults(t *testing.T) {
 	if cfg.SunshineUser != "nathan" {
 		t.Errorf("SunshineUser = %q; want %q", cfg.SunshineUser, "nathan")
 	}
+	if cfg.SunshineStreamPort != 48010 {
+		t.Errorf("SunshineStreamPort = %d; want 48010", cfg.SunshineStreamPort)
+	}
 }
 
 func TestConfigPreservesExplicitValues(t *testing.T) {
@@ -87,35 +90,39 @@ func TestIsPID(t *testing.T) {
 	}
 }
 
-// ---------- hasEstablishedUDPSockets (with synthetic data) ----------
+// ---------- isStreamSocket (port-scoped UDP check) ----------
 
-func TestHasEstablishedUDPSockets(t *testing.T) {
-	tmpDir := t.TempDir()
+// The namespace-wide /proc/<pid>/net/udp table must not fire on any
+// connected UDP socket — only on the Sunshine stream port. Sunshine's
+// default stream port is 48010 = 0xBB8A; the DHCP client on this box
+// keeps a connected socket on ports 68/67 (0x0044/0x0043) at all times.
+func TestIsStreamSocket(t *testing.T) {
+	// Connected client socket to 127.0.0.1:48010 (the S3 simulation /
+	// a local Moonlight client).
+	client := "   1: 0100007F:C000 0100007F:BB8A 01 00000000:00000000 00:00000000 00000000     0        0 67890"
+	// Sunshine's own unconnected listener on the stream port.
+	listener := "   1: 00000000:BB8A 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 12345"
+	// The DHCP client's connected socket (the live false positive).
+	dhcp := "   1: 1B02016F:0044 0102016F:0043 01 00000000:00000000 00:00000000 00000000     0        0 11111"
+	// A connected socket on an unrelated port.
+	other := "   1: 0100007F:C001 0A0000AC:1F90 01 00000000:00000000 00:00000000 00000000     0        0 22222"
 
-	// Create a synthetic /proc/<pid>/net/udp file with an established socket.
-	udpFile := filepath.Join(tmpDir, "net/udp")
-	if err := os.MkdirAll(filepath.Dir(udpFile), 0755); err != nil {
-		t.Fatal(err)
+	if !isStreamSocket(strings.Fields(client), 48010) {
+		t.Error("connected client socket on the stream port must count")
 	}
-	os.WriteFile(udpFile, []byte(
-		" sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"+
-			"   1: 00000000:1F90 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 12345\n"+
-			"   1: 0100007F:1F90 080800AC:9E77 01 00000000:00000000 00:00000000 00000000     0        0 67890\n",
-	), 0644)
-
-	// We can't call hasEstablishedUDPSockets directly with a fake path,
-	// but we can test the scanner logic inline.
-	data, _ := os.ReadFile(udpFile)
-	found := false
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 4 && fields[3] == "01" {
-			found = true
-		}
+	// Also matched when the stream port is on the local end.
+	local := "   1: 0100007F:BB8A 0100007F:C002 01 00000000:00000000 00:00000000 00000000     0        0 33333"
+	if !isStreamSocket(strings.Fields(local), 48010) {
+		t.Error("connected socket with the stream port on the local end must count")
 	}
-	if !found {
-		t.Error("expected to find established UDP socket in synthetic data")
+	if isStreamSocket(strings.Fields(listener), 48010) {
+		t.Error("Sunshine's own unconnected listener (st 07) must not count")
+	}
+	if isStreamSocket(strings.Fields(dhcp), 48010) {
+		t.Error("a connected DHCP socket must not look like a game stream")
+	}
+	if isStreamSocket(strings.Fields(other), 48010) {
+		t.Error("a connected socket on another port must not count")
 	}
 }
 
@@ -158,11 +165,67 @@ func TestSteamRemotePlayPortParsing(t *testing.T) {
 // ---------- nvidiaEncoderActive returns false when nvidia-smi fails ----------
 
 func TestNvidiaEncoderActiveFailsGracefully(t *testing.T) {
-	// On this test machine nvidia-smi likely doesn't exist or returns an error.
-	// The function should return false without panicking.
-	result := nvidiaEncoderActive(1)
-	// We just verify it doesn't crash; the result depends on the environment.
-	_ = result
+	// With no nvidia-smi on PATH every query fails and the watcher reports
+	// no stream (a missing tool must not look like a game).
+	old := os.Getenv("PATH")
+	t.Setenv("PATH", t.TempDir())
+	if got := nvidiaEncoderActive(1); got != false {
+		t.Errorf("nvidiaEncoderActive = %v, want false with no nvidia-smi", got)
+	}
+	_ = old
+}
+
+// TestEncoderFieldActiveFakeSMI drives encoderFieldActive with a fake
+// nvidia-smi that answers per field, covering the driver-595+ names
+// (utilization.encoder / encoder.stats.sessionCount) and the legacy name
+// (encoder.utilization), including a driver that rejects an unknown field
+// (the whole query must fail, not parse garbage).
+func TestEncoderFieldActiveFakeSMI(t *testing.T) {
+	d := t.TempDir()
+	script := `#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    --query-gpu=utilization.encoder) echo "7"; exit 0;;
+    --query-gpu=encoder.utilization) echo 'Field "encoder.utilization" is not a valid field to query.'; exit 0;;
+    --query-gpu=encoder.stats.sessionCount) echo "1"; exit 0;;
+  esac
+done
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(d, "nvidia-smi"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", d)
+
+	if !encoderFieldActive("utilization.encoder", 1) {
+		t.Error("utilization.encoder=7 should exceed threshold 1")
+	}
+	if encoderFieldActive("utilization.encoder", 99) {
+		t.Error("utilization.encoder=7 must not exceed threshold 99")
+	}
+	if encoderFieldActive("encoder.utilization", 0) {
+		t.Error("a driver-rejected field must read as inactive, not garbage")
+	}
+	if !encoderFieldActive("encoder.stats.sessionCount", 0) {
+		t.Error("one encoder session must count as active")
+	}
+	if got := nvidiaEncoderActive(1); got != true {
+		t.Errorf("nvidiaEncoderActive = %v, want true (utilization 7 > 1)", got)
+	}
+}
+
+// ---------- procName ----------
+
+func TestProcNameFallsBackWhenGone(t *testing.T) {
+	// A dead pid has no comm and no exe: the name must come back empty,
+	// not an error path.
+	if got := procName("99999999"); got != "" {
+		t.Errorf("procName(dead pid) = %q; want %q", got, "")
+	}
+	// Our own pid must resolve to a non-empty command name.
+	if got := procName(strconv.Itoa(os.Getpid())); got == "" {
+		t.Error("procName(self) must be non-empty")
+	}
 }
 
 // ---------- Watcher Start/Stop ----------

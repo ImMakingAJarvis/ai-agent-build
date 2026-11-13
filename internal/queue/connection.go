@@ -28,12 +28,19 @@ type Conn struct {
 	closed    bool
 }
 
+// AMQPURL is the effective broker URL: RABBITMQ_URL or the default.
+// Exported so a caller can derive companion endpoints (the management
+// API on the same host, port 15672) from the same source NewConn uses.
+func AMQPURL() string {
+	if u := os.Getenv("RABBITMQ_URL"); u != "" {
+		return u
+	}
+	return defaultAMQPURL
+}
+
 // NewConn creates a connection to RabbitMQ and declares the exchange.
 func NewConn() (*Conn, error) {
-	url := os.Getenv("RABBITMQ_URL")
-	if url == "" {
-		url = defaultAMQPURL
-	}
+	url := AMQPURL()
 	c := &Conn{url: url, exchange: defaultExchange}
 	if err := c.connect(); err != nil {
 		return nil, fmt.Errorf("queue: connect: %w", err)

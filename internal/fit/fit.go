@@ -33,10 +33,14 @@ const (
 	TooBig Outcome = "too_big"
 )
 
-// Readings is a snapshot of live free memory, in GiB.
+// Readings is a snapshot of live memory, in GiB. Free* are what is
+// available right now; Total* are the box's capacities (read live, so a
+// machine swap is picked up without a code change).
 type Readings struct {
-	FreeVRAMGB float64
-	FreeRAMGB  float64
+	FreeVRAMGB  float64
+	FreeRAMGB   float64
+	TotalVRAMGB float64
+	TotalRAMGB  float64
 }
 
 // Source reads a live free-memory snapshot.
@@ -76,65 +80,83 @@ func (l Live) Readings(ctx context.Context) (Readings, error) {
 		bin = "nvidia-smi"
 	}
 	out, err := exec.CommandContext(ctx, bin,
-		"--query-gpu=memory.free", "--format=csv,noheader,nounits").Output()
+		"--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits").Output()
 	if err != nil {
 		return Readings{}, fmt.Errorf("fit: nvidia-smi: %w", err)
 	}
-	vram, err := parseGPUFree(string(out))
+	freeVRAM, totalVRAM, err := parseGPUMem(string(out))
 	if err != nil {
 		return Readings{}, err
 	}
-	ram, err := l.freeRAM()
+	freeRAM, totalRAM, err := l.ram()
 	if err != nil {
 		return Readings{}, err
 	}
-	return Readings{FreeVRAMGB: vram, FreeRAMGB: ram}, nil
+	return Readings{FreeVRAMGB: freeVRAM, FreeRAMGB: freeRAM, TotalVRAMGB: totalVRAM, TotalRAMGB: totalRAM}, nil
 }
 
-// freeRAM reads MemAvailable from the (overridable) meminfo path.
-func (l Live) freeRAM() (float64, error) {
+// ram reads MemAvailable and MemTotal from the (overridable) meminfo
+// path.
+func (l Live) ram() (free, total float64, err error) {
 	path := l.MemInfo
 	if path == "" {
 		path = "/proc/meminfo"
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, fmt.Errorf("fit: reading meminfo: %w", err)
+		return 0, 0, fmt.Errorf("fit: reading meminfo: %w", err)
 	}
-	return parseMemAvailable(data)
+	free, err = parseMemField(data, "MemAvailable:")
+	if err != nil {
+		return 0, 0, err
+	}
+	total, err = parseMemField(data, "MemTotal:")
+	return free, total, err
 }
 
-// parseGPUFree parses nvidia-smi memory.free output (MiB, one line per
-// GPU) and returns the emptiest GPU's free VRAM in GiB — a model is
-// placed on a single GPU, so that is the box's usable free VRAM.
-func parseGPUFree(output string) (float64, error) {
-	var bestMiB float64
+// parseGPUMem parses nvidia-smi memory.free,memory.total output (MiB,
+// "free, total" per line, one line per GPU) and returns the emptiest
+// GPU's free and total VRAM in GiB — a model is placed on a single GPU,
+// so that GPU is the box's usable VRAM.
+func parseGPUMem(output string) (free, total float64, err error) {
+	var bestFreeMiB float64
 	var sawLine bool
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		mib, err := strconv.ParseFloat(line, 64)
-		if err != nil {
-			return 0, fmt.Errorf("fit: parsing nvidia-smi free memory %q: %w", line, err)
+		parts := strings.Split(line, ",")
+		if len(parts) != 2 {
+			return 0, 0, fmt.Errorf("fit: parsing nvidia-smi memory %q: want \"free, total\"", line)
 		}
-		if !sawLine || mib > bestMiB {
-			bestMiB = mib
+		freeMiB, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("fit: parsing nvidia-smi free memory %q: %w", parts[0], err)
+		}
+		totalMiB, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("fit: parsing nvidia-smi total memory %q: %w", parts[1], err)
+		}
+		if !sawLine || freeMiB > bestFreeMiB {
+			bestFreeMiB = freeMiB
+			free = freeMiB / 1024
+			total = totalMiB / 1024
 			sawLine = true
 		}
 	}
 	if !sawLine {
-		return 0, fmt.Errorf("fit: nvidia-smi reported no GPUs")
+		return 0, 0, fmt.Errorf("fit: nvidia-smi reported no GPUs")
 	}
-	return bestMiB / 1024, nil
+	return free, total, nil
 }
 
-// parseMemAvailable parses /proc/meminfo and returns MemAvailable in GiB
-// (the kernel's estimate of RAM actually usable, after caches and slab).
-func parseMemAvailable(meminfo []byte) (float64, error) {
+// parseMemField parses one "Name: <kB> kB" line from /proc/meminfo and
+// returns the value in GiB. MemAvailable is the kernel's estimate of RAM
+// actually usable (after caches and slab); MemTotal is the whole pool.
+func parseMemField(meminfo []byte, field string) (float64, error) {
 	for _, line := range strings.Split(string(meminfo), "\n") {
-		if !strings.HasPrefix(line, "MemAvailable:") {
+		if !strings.HasPrefix(line, field) {
 			continue
 		}
 		fields := strings.Fields(line)
@@ -143,11 +165,11 @@ func parseMemAvailable(meminfo []byte) (float64, error) {
 		}
 		kb, err := strconv.ParseFloat(fields[1], 64)
 		if err != nil {
-			return 0, fmt.Errorf("fit: parsing MemAvailable %q: %w", fields[1], err)
+			return 0, fmt.Errorf("fit: parsing %s %q: %w", strings.TrimSuffix(field, ":"), fields[1], err)
 		}
 		return kb / 1024 / 1024, nil
 	}
-	return 0, fmt.Errorf("fit: MemAvailable not found in meminfo")
+	return 0, fmt.Errorf("fit: %s not found in meminfo", strings.TrimSuffix(field, ":"))
 }
 
 // Comment is the Plane comment (HTML) for a fit verdict: the model, the

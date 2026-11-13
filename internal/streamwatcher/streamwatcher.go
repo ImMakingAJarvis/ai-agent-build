@@ -30,6 +30,12 @@ type Config struct {
 	// Default: "nathan".
 	SunshineUser string
 
+	// SunshineStreamPort is the UDP port Sunshine listens on for its
+	// video stream. A connected (st 01) UDP socket touching this port —
+	// either end — is treated as an active stream client.
+	// Default: 48010 (Sunshine's default).
+	SunshineStreamPort int
+
 	// SunshineEndpoint is the HTTP API base URL for Sunshine.
 	// e.g. "http://127.0.0.1:8080/api/v2". If empty, the watcher falls
 	// back to /proc-based detection.
@@ -49,6 +55,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.SunshineUser == "" {
 		c.SunshineUser = "nathan"
+	}
+	if c.SunshineStreamPort == 0 {
+		c.SunshineStreamPort = 48010
 	}
 }
 
@@ -153,7 +162,7 @@ func (w *Watcher) loop(ch chan<- StateChange) {
 // detect runs all checks and returns the most specific active stream type.
 func (w *Watcher) detect() StreamType {
 	// Sunshine UDP stream connections are the most reliable indicator.
-	if sunshineStreaming(w.cfg.SunshineUser) {
+	if sunshineStreaming(w.cfg.SunshineUser, w.cfg.SunshineStreamPort) {
 		return SunshineStream
 	}
 	// Steam remote-play established connections.
@@ -171,16 +180,24 @@ func (w *Watcher) detect() StreamType {
 
 // ---------- Sunshine detection ----------
 
-// sunshineStreaming checks whether the Sunshine process has established
-// UDP connections (st 01 in /proc/<pid>/net/udp), which indicate an
-// active remote-desktop stream.
-func sunshineStreaming(user string) bool {
+// sunshineStreaming reports whether a Sunshine process owned by user has
+// a connected (st 01) UDP socket touching the stream port.
+//
+// /proc/<pid>/net/udp is the whole network namespace, not the process's
+// own sockets, so the state-01 check must be scoped to Sunshine's stream
+// port: any other connected UDP socket on the box (DHCP, mDNS, an
+// unrelated client) is not a game and would otherwise hold the GPU
+// forever. Sunshine keeps its own socket unconnected while it waits for
+// clients, so the connected socket we see is the client side of a stream
+// — Moonlight connects to the video port the moment a session starts,
+// which is what a local (or relaying) client does on this host.
+func sunshineStreaming(user string, streamPort int) bool {
 	pids := getPIDsByUser(user, "sunshine")
 	if len(pids) == 0 {
 		return false
 	}
 	for _, pid := range pids {
-		if hasEstablishedUDPSockets(pid) {
+		if hasEstablishedUDPOnPort(pid, streamPort) {
 			return true
 		}
 	}
@@ -211,23 +228,43 @@ func steamRemotePlayActive() bool {
 
 // ---------- NVIDIA encoder detection ----------
 
-// nvidiaEncoderActive queries nvidia-smi for NVENC utilization and
-// returns true when it exceeds the configured threshold.
+// nvidiaEncoderActive queries nvidia-smi for NVENC activity and returns
+// true when the encoder engine utilization exceeds the configured
+// threshold or an encoder session exists.
+//
+// The field names moved between driver generations: older drivers expose
+// "encoder.utilization"; driver 595+ exposes "utilization.encoder" (and
+// "encoder.stats.sessionCount" for active sessions). A query naming a
+// field the driver does not know fails as a whole, so each field gets its
+// own query and the results are unioned — the query the driver understands
+// wins, the others are skipped.
 func nvidiaEncoderActive(threshold int) bool {
+	for _, field := range []string{"utilization.encoder", "encoder.utilization"} {
+		if encoderFieldActive(field, threshold) {
+			return true
+		}
+	}
+	return encoderFieldActive("encoder.stats.sessionCount", 0) // any session
+}
+
+// encoderFieldActive queries one gpu-scope field and reports whether any
+// GPU's value is above min. Unparseable lines (the driver rejected the
+// field) are skipped.
+func encoderFieldActive(field string, min int) bool {
 	out, err := exec.Command(
 		"nvidia-smi",
-		"--query-gpu=encoder.utilization",
+		"--query-gpu="+field,
 		"--format=csv,noheader,nounits",
 	).Output()
 	if err != nil {
 		return false
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), ",") {
-		util, err := strconv.Atoi(strings.TrimSpace(line))
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		v, err := strconv.Atoi(strings.TrimSpace(line))
 		if err != nil {
 			continue
 		}
-		if util > threshold {
+		if v > min {
 			return true
 		}
 	}
@@ -252,6 +289,11 @@ func getPIDs(name string) []int {
 
 // filterPIDs walks /proc and returns PIDs matching the predicate.
 // If user is non-empty it additionally filters by owner.
+//
+// Matching uses the process name (see procName), not the exe path:
+// reading /proc/<pid>/exe is ptrace-gated, so an unprivileged daemon
+// (resourced runs as agent) cannot see processes owned by other users
+// via exe and the check would silently match nothing.
 func filterPIDs(user string, matchFn func(string) bool) []int {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -269,13 +311,24 @@ func filterPIDs(user string, matchFn func(string) bool) []int {
 				continue
 			}
 		}
-		exe := getProcExe("/proc/" + e.Name() + "/exe")
-		if matchFn(exe) {
+		if matchFn(procName(e.Name())) {
 			pid, _ := strconv.Atoi(e.Name())
 			pids = append(pids, pid)
 		}
 	}
 	return pids
+}
+
+// procName returns the process command name from /proc/<pid>/comm
+// (world-readable, truncated to 15 characters — plenty for "sunshine"
+// and "steam"), falling back to the exe link target if comm is gone.
+func procName(pidStr string) string {
+	if data, err := os.ReadFile("/proc/" + pidStr + "/comm"); err == nil {
+		if name := strings.TrimSpace(string(data)); name != "" {
+			return name
+		}
+	}
+	return getProcExe("/proc/" + pidStr + "/exe")
 }
 
 func isPID(s string) bool {
@@ -328,9 +381,9 @@ func getProcExe(linkPath string) string {
 	return target
 }
 
-// hasEstablishedUDPSockets returns true if the process has any UDP
-// sockets in state 01 (ESTABLISHED).
-func hasEstablishedUDPSockets(pid int) bool {
+// hasEstablishedUDPOnPort reports whether the UDP table seen from pid
+// contains a connected (st 01) socket touching port on either end.
+func hasEstablishedUDPOnPort(pid, port int) bool {
 	path := fmt.Sprintf("/proc/%d/net/udp", pid)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -338,8 +391,27 @@ func hasEstablishedUDPSockets(pid int) bool {
 	}
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 4 && fields[3] == "01" {
+		if isStreamSocket(strings.Fields(scanner.Text()), port) {
+			return true
+		}
+	}
+	return false
+}
+
+// isStreamSocket reports whether one /proc/net/udp line is a connected
+// (st 01) UDP socket touching port. Line fields: sl local_address
+// rem_address st ...; addresses are hex IP:PORT.
+func isStreamSocket(fields []string, port int) bool {
+	if len(fields) < 4 || fields[3] != "01" {
+		return false
+	}
+	for _, addr := range []string{fields[1], fields[2]} {
+		colon := strings.LastIndex(addr, ":")
+		if colon == -1 {
+			continue
+		}
+		p, err := strconv.ParseInt(addr[colon+1:], 16, 32)
+		if err == nil && int(p) == port {
 			return true
 		}
 	}
