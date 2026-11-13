@@ -13,11 +13,11 @@
 // so the best free worker takes the request — and needs_brain_out: the
 // 4090's VRAM must be free of the brain, so in practice requests arrive
 // during the brain's swap window (docs/brain-swap.md), when the art
-// container is up and the model is loaded. Until the resourced broker
-// (task 26) arbitrates this, the worker behaves like today's art gate: it
-// waits for the model (bounded) and the art service itself waits for free
-// VRAM before generating, 503'ing — and the SDK's retry budget — when it
-// cannot.
+// container is up and the model is loaded. A resourced lease (plan §3.6)
+// makes that window explicit: the worker's 12 GB VRAM lease is granted
+// only once the brain's standing lease has left the ledger (the swap
+// window), held while the model is loaded, and released on unload — so
+// the worker consumes only when the 4090 is actually free.
 //
 // Request input (envelope v2, Input map):
 //
@@ -43,6 +43,11 @@
 //	IMAGEGEN_OUT_DIR     artifact root for requests without an OutDir.
 //	                     Default ~/.local/share/jarvis/artifacts.
 //	IMAGEGEN_METRICS_ADDR serve Prometheus /metrics here. Default: off.
+//	RESOURCED_URL        the resourced lease broker (plan §3.6); the
+//	                     worker gates its consuming on a lease from it.
+//	                     Default: off (un-gated, the pre-lease behavior).
+//	CAPABILITIES_FILE    the capability catalog the lease's memory spec
+//	                     comes from. Needed when RESOURCED_URL is set.
 package main
 
 import (
@@ -165,33 +170,45 @@ func (h handler) Handle(ctx context.Context, req queue.Message) (queue.Result, e
 }
 
 // ensureArt makes sure the art service is up and its model loaded before a
-// generation: it probes GET /health and, when the service is up but the
-// model is still loading, waits (bounded by artWait) — the same wait the
-// old jarvis-photo did. A service that is down is an error for this
-// attempt: it comes up with the swap window, and if it is not there the
-// SDK burns an attempt (retry, then the message dead-letters with a
-// reason) rather than this worker blocking forever.
+// generation: it probes GET /health and waits (bounded by artWait) while
+// the service is down or the model is still loading. The down case is a
+// wait, not an immediate error, because the message that triggered the
+// swap window is the reason the art service is about to come up: the
+// worker holds its lease and consumes the trigger the moment it lands,
+// which is BEFORE the window opens and `jarvis-swap out` has started the
+// art container (EVB-30 gate: the trigger message was dead-lettered in
+// three same-second attempts against a stopped art service, and the
+// window that followed had no work to do). If the service is not there
+// after artWait the SDK burns an attempt (retry, then the message
+// dead-letters with a reason) rather than this worker blocking forever.
 func (h handler) ensureArt(ctx context.Context) error {
-	loaded, err := h.health()
-	if err != nil {
-		return &art.ErrUnavailable{Detail: "art service not reachable (is the swap window open?)"}
-	}
-	if loaded {
-		return nil
-	}
 	deadline := time.Now().Add(h.artWait)
-	log.Printf("image-gen-worker: art service is up, model not loaded — waiting (up to %s)", h.artWait)
-	for time.Now().Before(deadline) {
+	loading := false
+	for {
+		loaded, err := h.health()
+		if err == nil && loaded {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return &art.ErrUnavailable{Detail: fmt.Sprintf("art service not reachable after %s (is the swap window open?)", h.artWait)}
+			}
+			return &art.ErrUnavailable{Detail: fmt.Sprintf("art model not loaded after %s", h.artWait)}
+		}
+		if !loading {
+			if err != nil {
+				log.Printf("image-gen-worker: art service down — waiting for the swap window (up to %s)", h.artWait)
+			} else {
+				log.Printf("image-gen-worker: art service is up, model not loaded — waiting (up to %s)", h.artWait)
+			}
+			loading = true
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
-		if loaded, err := h.health(); err == nil && loaded {
-			return nil
-		}
 	}
-	return &art.ErrUnavailable{Detail: fmt.Sprintf("art model not loaded after %s", h.artWait)}
 }
 
 // health probes the art service's /health (10s bound) and reports whether
@@ -253,6 +270,18 @@ func main() {
 		defer events.Close()
 	}
 
+	// Lease gating (plan §3.6): the gpu placement's lease is the
+	// needs_brain_out story made explicit — 12 GB of VRAM is granted
+	// only while the brain's standing lease is out of the ledger (the
+	// swap window). No broker (RESOURCED_URL unset) or a catalog problem
+	// = un-gated, the pre-lease behavior.
+	leaseBroker, leaseSpec, lerr := capworker.LeaseFor(
+		os.Getenv("RESOURCED_URL"), os.Getenv("CAPABILITIES_FILE"),
+		capability, "gpu", workerName)
+	if lerr != nil {
+		log.Printf("image-gen-worker: lease: %v (running un-gated)", lerr)
+	}
+
 	w := capworker.New(capworker.Config{
 		Cap:         capability,
 		Name:        workerName,
@@ -260,6 +289,8 @@ func main() {
 		Location:    "gpu", // consumer priority 10: the best free worker takes the request
 		Conn:        conn,
 		Events:      events,
+		LeaseBroker: leaseBroker,
+		LeaseSpec:   leaseSpec,
 		MetricsAddr: os.Getenv("IMAGEGEN_METRICS_ADDR"),
 		Handler:     handler{art: art.New(), artWait: artWait()},
 		OutDirBase:  envOr("IMAGEGEN_OUT_DIR", filepath.Join(os.Getenv("HOME"), ".local", "share", "jarvis", "artifacts")),
