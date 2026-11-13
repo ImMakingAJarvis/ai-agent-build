@@ -139,6 +139,29 @@ models:
     home_location: cpu
     fallback_location: none
 
+  # llama-bench — the benchmark tool behind the bench.run capability
+  # (EVB-24). A tool, not a model: the bench-worker runs the pinned Vulkan
+  # build at /opt/jarvis-igpu/bin/llama-bench over the model under test,
+  # which is per-request input (a GGUF path under /opt/jarvis-igpu or an
+  # Ollama name resolved through the mounted host store), so the entry's
+  # own context/VRAM fields are nominal. endpoint is the tool path by
+  # convention (like whisper-small's model dir). enabled: false keeps it
+  # out of the model selector.
+  - id: llama-bench
+    display_name: llama-bench (bench tool)
+    location: local
+    engine: llama.cpp
+    endpoint: /opt/jarvis-igpu/bin/llama-bench
+    roles: [executor]
+    context_tokens: 4096  # nominal — the bench's own workload is per-request
+    vram_gb: 0
+    ram_gb: 2
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: false
+    home_location: igpu
+    fallback_location: cpu
+
   # Qwen2.5-7B-Instruct (llm.small capability, EVB-23). A capability
   # resource, not a conversational model: the llm-small worker runs it as
   # its own llama-server coprocess (internal/vlmserver), unloading it
