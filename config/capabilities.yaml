@@ -83,3 +83,116 @@ capabilities:
         stop: "docker compose stop art"
         typical_runtime: 45s
         idle_s: 300      # the model reload is expensive — hold it 5 min
+
+  audio.transcribe:
+    description: "audio/video clip(s) -> text transcript (Whisper small on CPU — faster-whisper/CT2 int8, bench-picked over whisper.cpp: 3.6x faster at equal WER); one JSON + txt per clip plus an index file"
+    workers:
+      - location: cpu
+        model: whisper-small
+        vram_mb: 0
+        ram_mb: 800     # measured peak RSS, faster-whisper small int8 (bench)
+        needs_brain_out: false  # CPU only — the first "alongside the brain,
+                                # no window" capability; the worker's lease
+                                # checks host RAM per consume session
+        start: ""
+        stop: ""
+        typical_runtime: 30s  # bench RTF ~= 0.14: a ~160 s clip takes ~23 s
+                              # plus ~2 s model load; camera clips are shorter
+        idle_s: 0             # per-request subprocess: no resident model to unload
+
+  llm.small:
+    # BOUNDARY (plan §4, Phase 3): this capability is for BATCH sub-tasks
+    # only (summarise / classify / extract over files). The iGPU helper
+    # (Qwen2.5-3B on :11435) remains the CONVERSATION fallback during the
+    # brain's swap windows — do not point conversational traffic here.
+    #
+    # GPU placement (EVB-23): Qwen2.5-7B-Instruct Q4_K_M fully on the
+    # 4090's SPARE VRAM. Measured ~5.4 GB (bench: docs/benchmarks/
+    # llm-small-model-benchmark.md — 16/28 layers = 3339 MiB delta,
+    # extrapolated to 28). The worker's lease requires 6.5 GB free, i.e.
+    # it only runs in the plan's co-scheduling window (the brain out for
+    # a 12 GB image job leaves ~10 GB). With the idle brain (~3.7 GB
+    # free) the gpu session is refused per consume and the cpu placement
+    # takes the request — a routing decision, never an OOM (the coprocess
+    # starts only after the lease grants).
+    #
+    # CPU fallback: the same 7B in host RAM (--n-gpu-layers 0; residual
+    # CUDA-context VRAM ~630 MiB measured, the binary always inits the
+    # CUDA backend). Slower (~2 tok/s at 16 threads, bench) — the
+    # fallback, not the fast path.
+    description: "text file(s) -> a structured sub-task result (task: summarise | classify | extract | custom verb + optional instructions); the result in Data plus a result.json artifact"
+    workers:
+      - location: gpu
+        model: qwen2.5-7b-instruct
+        vram_mb: 5500   # measured ~5.4 GB, 7B Q4_K_M + 8K ctx (bench)
+        ram_mb: 512
+        needs_brain_out: false  # fits the co-scheduling window's spare;
+                                # the worker's lease checks free VRAM per
+                                # session and refuses below 6.5 GB
+        start: ""
+        stop: ""
+        typical_runtime: 30s  # coprocess load (~10 s) + a few hundred
+                              # tokens at ~20-30 tok/s on the 4090
+        idle_s: 300      # the coprocess is unloaded after 5 min idle
+      - location: cpu
+        model: qwen2.5-7b-instruct
+        vram_mb: 658    # measured residual CUDA-context floor
+                        # (--n-gpu-layers 0; the 2B VLM's was 488)
+        ram_mb: 5120    # 7B Q4 weights (mmap-backed) + 8K KV + buffers
+        needs_brain_out: false
+        start: ""
+        stop: ""
+        typical_runtime: 240s  # bench ~2 tok/s at 16 threads: a few
+                               # hundred tokens of reply is minutes;
+                               # plus ~10 s coprocess load
+        idle_s: 300
+
+  bench.run:
+    # The benchmark capability (EVB-24, the last Phase 3 worker): the
+    # existing benchmark tooling behind one queue — the worker is a thin
+    # adapter (docs/event-driven.md, "bench.run"). Input: which bench —
+    # llama-bench over a model (default), or the live script against a
+    # serving engine (bench: live, base_url) — plus the workload
+    # (prompt/gen token counts, run count); output: the scores in the
+    # Result's Data + a report.md / index.json artifact under the
+    # request's OutDir. The Result goes to the requester's flow queue;
+    # no ad-hoc result files for new runs.
+    #
+    # iGPU placement: llama-bench on the Ryzen iGPU (Vulkan0 in the worker
+    # container, /dev/dri; the container carries no NVIDIA ICD, so the
+    # 4090 is unreachable from here — a 4090 bench is the Phase 4
+    # resourced story). The model under test is per-request input (a GGUF
+    # path under /opt/jarvis-igpu or an Ollama name resolved through the
+    # mounted host store), so the worker's own footprint is small. Runs
+    # alongside the brain: the iGPU is its own device and the weights
+    # stream through host RAM (the worker leases MemAvailable headroom
+    # per session). A `bench: live` run drives whatever engine base_url
+    # names (default: the brain container) — submit those when the engine
+    # is free, or point them at the iGPU helper for a cheap full-path test.
+    #
+    # CPU placement: the same worker with -ngl 0 (RAM-resident) — the slow
+    # fallback when the iGPU is busy with the helper.
+    description: "model/workload -> benchmark scores (llama-bench pp/tg tok/s, or live prompt/decode tok/s + correctness tasks) in Data, plus a report.md + index.json artifact under the request's OutDir"
+    workers:
+      - location: igpu
+        model: llama-bench
+        vram_mb: 0        # iGPU is UMA — the weights stream through RAM
+        ram_mb: 2048      # a 1-4B Q4 model under test + the tool
+        needs_brain_out: false  # the iGPU never touches the 4090 — no
+                                # window, runs alongside the brain
+        start: ""
+        stop: ""
+        typical_runtime: 2m   # llama-bench pp512/tg512 x3 on a ~3B model
+                              # (the iGPU does ~100 pp t/s); bigger models
+                              # scale with size — the deadline bounds it
+        idle_s: 0             # per-request subprocess: nothing resident
+      - location: cpu
+        model: llama-bench
+        vram_mb: 0
+        ram_mb: 4096
+        needs_brain_out: false
+        start: ""
+        stop: ""
+        typical_runtime: 10m  # CPU pp/tg is ~10x slower than the iGPU for
+                              # a 1-4B model — the deadline bounds it
+        idle_s: 0

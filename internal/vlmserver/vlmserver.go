@@ -1,14 +1,17 @@
 // Package vlmserver manages one llama.cpp llama-server coprocess for a
-// vision model (a GGUF plus its --mmproj projector) and asks it to
-// describe images through the OpenAI-compatible chat API.
+// model (a vision GGUF plus its optional --mmproj projector) and asks it
+// for work through the OpenAI-compatible chat API: image descriptions
+// (Describe) and plain text completions (Chat).
 //
 // It exists for the capability workers that own their model process
 // (plan §3.5): the image.describe worker (EVB-21) starts the server with
 // Load, asks it for a caption/prompt/tags per image in Handle, and hands
-// the GPU back with Unload after the idle window. The server is a child
-// of the worker process — no separate container to stop, and the VRAM it
-// holds is exactly the measured vram_mb of its capability entry while it
-// is up.
+// the GPU back with Unload after the idle window; the llm.small worker
+// (EVB-23) runs a text-only instruct model through the same manager
+// (no mmproj) and asks it for summaries, classifications and extractions
+// with Chat. The server is a child of the worker process — no separate
+// container to stop, and the VRAM it holds is exactly the measured
+// vram_mb of its capability entry while it is up.
 package vlmserver
 
 import (
@@ -51,8 +54,10 @@ const Prompt = "Describe this image. Respond with JSON only, no markdown: " +
 type Server struct {
 	// Binary is the llama-server executable. Required.
 	Binary string
-	// Model and MMProj are the vision GGUF and its projector. Required.
-	Model  string
+	// Model is the GGUF. Required.
+	Model string
+	// MMProj is the vision projector (optional — empty for text-only
+	// models, which start without --mmproj).
 	MMProj string
 	// Port is the listen port inside the worker's own network namespace
 	// (the server is never exposed to the host). Default 11510.
@@ -77,13 +82,21 @@ type Server struct {
 	BaseURL string
 	// HealthTimeout bounds Start's wait for /health. Default 240 s.
 	HealthTimeout time.Duration
+	// StopGrace bounds Stop's SIGINT phase before the SIGKILL.
+	// Default 10 s.
+	StopGrace time.Duration
 	// HTTPTimeout bounds one Describe round trip. Default 300 s.
 	HTTPTimeout time.Duration
 	// Log; nil = the standard logger.
 	Log *log.Logger
 
-	mu   sync.Mutex
-	cmd  *exec.Cmd
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	waitDone chan error // set by Start after cmd.Start; its single Wait
+	// goroutine (which captures this channel at spawn — it must never
+	// re-read the field, because Stop has nilled it by the time a live
+	// process exits) writes the exit here, and Start's health loop and
+	// Stop both wait on it (exactly one consumer claims it, under mu)
 	errb *bytes.Buffer // tail of the server's stderr, for Start failures
 }
 
@@ -125,18 +138,20 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return nil
 	}
-	if s.BaseURL == "" && (s.Binary == "" || s.Model == "" || s.MMProj == "") {
+	if s.BaseURL == "" && (s.Binary == "" || s.Model == "") {
 		s.mu.Unlock()
-		return errors.New("vlmserver: Binary, Model and MMProj are required")
+		return errors.New("vlmserver: Binary and Model are required")
 	}
-	args := []string{
-		"--model", s.Model,
-		"--mmproj", s.MMProj,
+	args := []string{"--model", s.Model}
+	if s.MMProj != "" {
+		args = append(args, "--mmproj", s.MMProj)
+	}
+	args = append(args,
 		"--host", "127.0.0.1",
 		"--port", strconv.Itoa(or(s.Port, 11510)),
 		"--ctx-size", strconv.Itoa(or(s.CtxSize, 4096)),
 		"--n-gpu-layers", strconv.Itoa(s.NGL),
-	}
+	)
 	if s.NoMMProjOffload {
 		args = append(args, "--no-mmproj-offload")
 	}
@@ -151,10 +166,37 @@ func (s *Server) Start(ctx context.Context) error {
 		cmd = exec.Command(s.Binary, args...) // inherits the env (LD_LIBRARY_PATH for the CUDA libs)
 		cmd.Stderr = s.errb
 		cmd.Stdout = io.Discard
+		// If a grandchild inherits a stderr/stdout pipe, cmd.Wait would
+		// block on the pipe drain after the process itself exits; cap it
+		// so the reap — and therefore Stop — stays bounded. (Set before
+		// the Wait goroutine below spawns: WaitDelay is read inside
+		// cmd.Wait, and the goroutine launch is the only sync point.)
+		cmd.WaitDelay = 30 * time.Second
 		if err := cmd.Start(); err != nil {
 			s.mu.Unlock()
 			return fmt.Errorf("vlmserver: start %s: %w", s.Binary, err)
 		}
+		// One Wait goroutine owns the reap (EVB-30 gate): Start's health
+		// loop watches its channel so a process that dies during load
+		// fails immediately instead of waiting out the full health
+		// timeout (a 7B that cannot reserve VRAM cost 240 s per attempt,
+		// and three attempts burned the request's whole retry budget),
+		// and Stop later waits on the same channel. cmd.ProcessState
+		// could never have been used for this — it is only set after
+		// Wait, and Start never Waits.
+		//
+		// The goroutine captures the channel at spawn (wd), it must never
+		// read s.waitDone at send time: for a live process the exit
+		// necessarily arrives AFTER Stop has claimed (nilled) the field,
+		// and a send to the nil field blocks forever — the claimed
+		// channel then never receives and Stop hangs on it. That is the
+		// gate's run-4 wedge: an idle unload hung in Stop, pinned the
+		// worker mutex for 26 minutes, and the next delivery never
+		// reached the handler (goroutine dump: "chan send (nil chan)" in
+		// the Wait goroutine, Stop parked on its channel receive).
+		wd := make(chan error, 1)
+		s.waitDone = wd
+		go func() { wd <- cmd.Wait() }()
 	}
 	s.cmd = cmd
 	s.mu.Unlock()
@@ -175,20 +217,30 @@ func (s *Server) Start(ctx context.Context) error {
 			s.log().Printf("vlmserver: up (port %d, ngl %d, %s)", or(s.Port, 11510), s.NGL, filepath.Base(s.Model))
 			return nil
 		}
-		// The process died while loading (bad model, OOM): stop waiting.
+		// The process died while loading (bad model, OOM, VRAM reservation
+		// failed): stop waiting. The receive and the claim happen under
+		// one lock so a concurrent Stop cannot also take the channel.
 		s.mu.Lock()
-		dead := s.cmd != nil && s.cmd.ProcessState != nil
-		s.mu.Unlock()
+		var werr error
+		dead := false
+		if s.waitDone != nil {
+			select {
+			case werr = <-s.waitDone:
+				dead = true
+				s.waitDone = nil
+			default:
+			}
+		}
 		if dead {
+			s.cmd = nil
+			s.mu.Unlock()
 			tail := s.errb.String()
 			if len(tail) > 512 {
 				tail = tail[len(tail)-512:]
 			}
-			s.mu.Lock()
-			s.cmd = nil
-			s.mu.Unlock()
-			return fmt.Errorf("vlmserver: process exited during load: %s", strings.TrimSpace(tail))
+			return fmt.Errorf("vlmserver: process exited during load (%v): %s", werr, strings.TrimSpace(tail))
 		}
+		s.mu.Unlock()
 	}
 	s.Stop()
 	tail := s.errb.String()
@@ -203,22 +255,47 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Stop() error {
 	s.mu.Lock()
 	cmd := s.cmd
+	waitDone := s.waitDone
+	if waitDone != nil {
+		s.waitDone = nil // claim: exactly one caller reaps this process
+	}
 	s.cmd = nil
+	grace := s.stopGrace()
 	s.mu.Unlock()
-	if cmd == nil || cmd.ProcessState != nil {
+	if cmd == nil {
 		return nil
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	cmd.Process.Signal(os.Interrupt) // llama.cpp shuts down on SIGINT/SIGTERM
+	// Start's Wait goroutine owns the reap: wait for the exit, asking for
+	// a clean shutdown while the process is still running. (A second
+	// cmd.Wait — the old behavior — panics, so the channel is shared
+	// rather than started here.) The goroutine captured waitDone at
+	// spawn, so the exit lands on the claimed channel even though the
+	// field is nil by the time a live process exits. Every wait below is
+	// bounded — grace, then SIGKILL, then WaitDelay — so Stop cannot pin
+	// its caller: the SDK holds the worker mutex across the Unload hook,
+	// and one unbounded wait here wedged the whole worker for 26 minutes
+	// on the gate's run-4 idle unload.
 	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		cmd.Process.Kill()
-		<-done
+	case <-waitDone: // already exited (died during load)
+	default:
+		cmd.Process.Signal(os.Interrupt) // llama.cpp shuts down on SIGINT/SIGTERM
+		select {
+		case <-waitDone:
+		case <-time.After(grace):
+			cmd.Process.Kill()
+			<-waitDone // bounded: the process is dead; WaitDelay caps the pipe drain
+		}
 	}
 	s.log().Printf("vlmserver: stopped (port %d)", or(s.Port, 11510))
 	return nil
+}
+
+// stopGrace is the SIGINT phase of Stop before the SIGKILL; default 10 s.
+func (s *Server) stopGrace() time.Duration {
+	if s.StopGrace > 0 {
+		return s.StopGrace
+	}
+	return 10 * time.Second
 }
 
 // healthy probes GET /health with a 3 s bound.
@@ -237,6 +314,85 @@ func (s *Server) healthy() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// chatRoundTrip posts one OpenAI-compatible chat completion and returns
+// the assistant's message content. Shared by Describe (image content)
+// and Chat (text content); the payload is the full request body.
+func (s *Server) chatRoundTrip(ctx context.Context, what string, payload any) (string, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	timeout := s.HTTPTimeout
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, "POST", s.base()+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", what, err)
+	}
+	defer resp.Body.Close()
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s: server %d: %.300s", what, resp.StatusCode, rb)
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(rb, &out); err != nil || len(out.Choices) == 0 {
+		return "", fmt.Errorf("%s: unparsable reply: %.200s", what, rb)
+	}
+	return out.Choices[0].Message.Content, nil
+}
+
+// ChatMessage is one turn of a Chat conversation.
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// Chat sends a text-only conversation to the server and returns the
+// assistant's reply. (Images go through Describe; this path sends plain
+// string content only.) The worker's structured tasks (summarise,
+// classify, extract) are one user turn each; the method is
+// conversation-shaped so a caller can add a system turn with task
+// instructions.
+func (s *Server) Chat(ctx context.Context, messages []ChatMessage, maxTokens int, temperature float64) (string, error) {
+	if len(messages) == 0 {
+		return "", errors.New("vlmserver: Chat with no messages")
+	}
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+	if temperature < 0 {
+		temperature = 0.2
+	}
+	msgs := make([]map[string]any, len(messages))
+	for i, m := range messages {
+		msgs[i] = map[string]any{"role": m.Role, "content": m.Content}
+	}
+	return s.chatRoundTrip(ctx, "chat", map[string]any{
+		"model":       filepath.Base(s.Model),
+		"messages":    msgs,
+		"max_tokens":  maxTokens,
+		"temperature": temperature,
+		"stream":      false,
+	})
+}
+
 // Describe sends one image to the server and returns its parsed
 // description. The image is inlined as a base64 data URI (llama.cpp's
 // OpenAI endpoint accepts data: URLs); the input ref itself never moves.
@@ -245,7 +401,7 @@ func (s *Server) Describe(ctx context.Context, imgPath string) (Description, err
 	if err != nil {
 		return Description{}, fmt.Errorf("read image: %w", err)
 	}
-	body, err := json.Marshal(map[string]any{
+	content, err := s.chatRoundTrip(ctx, "describe "+filepath.Base(imgPath), map[string]any{
 		"model": filepath.Base(s.Model),
 		"messages": []map[string]any{{
 			"role": "user",
@@ -263,40 +419,7 @@ func (s *Server) Describe(ctx context.Context, imgPath string) (Description, err
 	if err != nil {
 		return Description{}, err
 	}
-	timeout := s.HTTPTimeout
-	if timeout <= 0 {
-		timeout = 300 * time.Second
-	}
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, "POST", s.base()+"/v1/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return Description{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return Description{}, fmt.Errorf("describe %s: %w", filepath.Base(imgPath), err)
-	}
-	defer resp.Body.Close()
-	rb, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return Description{}, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return Description{}, fmt.Errorf("describe %s: server %d: %.300s", filepath.Base(imgPath), resp.StatusCode, rb)
-	}
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(rb, &out); err != nil || len(out.Choices) == 0 {
-		return Description{}, fmt.Errorf("describe %s: unparsable reply: %.200s", filepath.Base(imgPath), rb)
-	}
-	return ParseDescription(out.Choices[0].Message.Content)
+	return ParseDescription(content)
 }
 
 // extMIME maps the image extension to its MIME type for the data URI.
@@ -392,4 +515,49 @@ func ParseDescription(content string) (Description, error) {
 	// Strict parse failed (truncated JSON, or an empty caption): recover
 	// what the model actually wrote.
 	return lenientParse(s)
+}
+
+// ExtractJSONObject recovers a JSON object from a model reply: strict
+// parse first, then a markdown fence stripped, then the outermost {...}
+// (models sometimes wrap the object in a sentence). It is the
+// structured-task counterpart of ParseDescription, which recovers fields
+// from truncated JSON; here the whole object must be intact, so a reply
+// that yields no object is an error (the caller decides the fallback).
+func ExtractJSONObject(s string) (map[string]any, error) {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return nil, errors.New("empty model reply")
+	}
+	if m, err := tryObject(t); err == nil {
+		return m, nil
+	}
+	// Strip a markdown fence, if present.
+	if strings.HasPrefix(t, "```") {
+		t = strings.TrimPrefix(t, "```")
+		if i := strings.Index(t, "\n"); i >= 0 {
+			head := strings.TrimSpace(t[:i])
+			if head == "" || head == "json" {
+				t = t[i+1:]
+			}
+		}
+		t = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(t), "```"))
+		if m, err := tryObject(t); err == nil {
+			return m, nil
+		}
+	}
+	start, end := strings.Index(t, "{"), strings.LastIndex(t, "}")
+	if start >= 0 && end > start {
+		if m, err := tryObject(t[start : end+1]); err == nil {
+			return m, nil
+		}
+	}
+	return nil, fmt.Errorf("no JSON object in model reply: %.120s", s)
+}
+
+func tryObject(s string) (map[string]any, error) {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }

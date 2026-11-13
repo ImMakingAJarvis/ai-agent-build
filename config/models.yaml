@@ -7,6 +7,8 @@
 #   display_name       shown in the selector
 #   location           local | cloud — groups the dropdown
 #   engine             ollama | llama.cpp | vllm | anthropic | openai-compatible
+#                      | whisper (ASR models the audio-transcribe worker
+#                      runs through faster-whisper — not a serving engine)
 #   endpoint           base URL the worker calls
 #   roles              any of: planner, executor, reviewer
 #   context_tokens     caps what the planner packs in
@@ -114,6 +116,82 @@ models:
     home_location: cpu
     fallback_location: cpu
 
+  # Whisper small (ASR) behind the audio.transcribe capability (EVB-22).
+  # A capability resource, not a conversational model: the
+  # audio-transcribe worker runs it through faster-whisper (CT2 int8 on
+  # CPU) as a per-request subprocess — there is no serving endpoint, so
+  # the field names the model dir the subprocess loads (compose mounts
+  # /opt/jarvis-whisper read-only; the CT2 files are
+  # Systran/faster-whisper-small). context_tokens is Whisper's actual text
+  # context (448). enabled: false keeps it out of the model selector.
+  - id: whisper-small
+    display_name: Whisper small (ASR)
+    location: local
+    engine: whisper
+    endpoint: /opt/jarvis-whisper/models/small
+    roles: [executor]
+    context_tokens: 448
+    vram_gb: 0
+    ram_gb: 1
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: false
+    home_location: cpu
+    fallback_location: none
+
+  # llama-bench — the benchmark tool behind the bench.run capability
+  # (EVB-24). A tool, not a model: the bench-worker runs the pinned Vulkan
+  # build at /opt/jarvis-igpu/bin/llama-bench over the model under test,
+  # which is per-request input (a GGUF path under /opt/jarvis-igpu or an
+  # Ollama name resolved through the mounted host store), so the entry's
+  # own context/VRAM fields are nominal. endpoint is the tool path by
+  # convention (like whisper-small's model dir). enabled: false keeps it
+  # out of the model selector.
+  - id: llama-bench
+    display_name: llama-bench (bench tool)
+    location: local
+    engine: llama.cpp
+    endpoint: /opt/jarvis-igpu/bin/llama-bench
+    roles: [executor]
+    context_tokens: 4096  # nominal — the bench's own workload is per-request
+    vram_gb: 0
+    ram_gb: 2
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: false
+    home_location: igpu
+    fallback_location: cpu
+
+  # Qwen2.5-7B-Instruct (llm.small capability, EVB-23). A capability
+  # resource, not a conversational model: the llm-small worker runs it as
+  # its own llama-server coprocess (internal/vlmserver), unloading it
+  # after the idle window. The endpoint is the coprocess's in-container
+  # API port (LMS_PORT, default 11520) while it is up; enabled: false
+  # keeps it out of the model selector. BOUNDARY: the iGPU helper
+  # (Qwen2.5-3B on :11435) stays the CONVERSATION fallback during
+  # windows — llm.small is for batch sub-tasks only.
+  #
+  # Sourcing: huggingface.co is IP-blocked from this box (401), so the
+  # official Qwen GGUF was pulled from ModelScope (Qwen/
+  # Qwen2.5-7B-Instruct-GGUF) — split Q4_K_M file under
+  # /opt/jarvis-llm-small/models. Measured: ~5.4 GB VRAM on the 4090
+  # (28/28 layers, 8K ctx) or ~630 MiB residual VRAM on CPU (bench doc
+  # docs/benchmarks/llm-small-model-benchmark.md).
+  - id: qwen2.5-7b-instruct
+    display_name: Qwen 2.5 7B Instruct (llm.small)
+    location: local
+    engine: llama.cpp
+    endpoint: http://127.0.0.1:11520/v1
+    roles: [executor]
+    context_tokens: 8192
+    vram_gb: 5.4
+    ram_gb: 5
+    thinking: ""
+    cost_per_mtok: 0
+    enabled: false
+    home_location: gpu
+    fallback_location: cpu
+
   # Cloud planner and reviewer for big or stuck epics.
   - id: claude-sonnet-5-5
     display_name: Claude Sonnet (cloud)
@@ -126,6 +204,31 @@ models:
     ram_gb: 0
     thinking: "thinking.budget_tokens:16384"
     cost_per_mtok: 3
+    enabled: true
+    home_location: cloud
+    fallback_location: none
+
+  # Claude Fable 5.1 (cloud) — the most capable widely released model;
+  # the top cloud planner for big epics. Planner-only by design
+  # (job chat-1794348211-f033): it appears in the plan: selector and runs
+  # an epic only when that epic is explicitly labelled plan:claude-fable-5-1
+  # — never as a default or fallback for the local planner, and not as an
+  # executor or reviewer.
+  # thinking: "" — the Fable family always thinks and REJECTS the
+  # budget_tokens form (400), so the worker must omit the thinking param
+  # entirely; adaptive thinking is the API default.
+  # cost_per_mtok is the input price ($10 in / $50 out per MTok).
+  - id: claude-fable-5-1
+    display_name: Claude Fable (cloud)
+    location: cloud
+    engine: anthropic
+    endpoint: https://api.anthropic.com/v1
+    roles: [planner]
+    context_tokens: 1000000
+    vram_gb: 0
+    ram_gb: 0
+    thinking: ""
+    cost_per_mtok: 10
     enabled: true
     home_location: cloud
     fallback_location: none

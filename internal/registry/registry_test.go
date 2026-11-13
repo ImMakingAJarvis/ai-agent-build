@@ -33,8 +33,8 @@ func TestLoadRealRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(f.Models) != 6 {
-		t.Fatalf("got %d models, want 6", len(f.Models))
+	if len(f.Models) != 10 {
+		t.Fatalf("got %d models, want 10", len(f.Models))
 	}
 	byID := make(map[string]Model, len(f.Models))
 	for _, m := range f.Models {
@@ -44,9 +44,11 @@ func TestLoadRealRegistry(t *testing.T) {
 		t.Fatal("registry contains duplicate ids")
 	}
 
-	// The image.describe VLMs (EVB-21) are capability resources, hidden
-	// from the model selector.
-	for _, id := range []string{"qwen3-vl-2b", "qwen3-vl-8b"} {
+	// The image.describe VLMs (EVB-21), the audio.transcribe ASR model
+	// (EVB-22), the llm.small instruct model (EVB-23) and the bench.run
+	// benchmark tool (EVB-24) are capability resources, hidden from the
+	// model selector.
+	for _, id := range []string{"qwen3-vl-2b", "qwen3-vl-8b", "whisper-small", "qwen2.5-7b-instruct", "llama-bench"} {
 		m, ok := byID[id]
 		if !ok {
 			t.Fatalf("missing %s entry", id)
@@ -130,6 +132,38 @@ func TestLoadRealRegistry(t *testing.T) {
 		}
 		if m.FallbackLocation != "none" {
 			t.Errorf("fallback_location = %s, want none", m.FallbackLocation)
+		}
+		if m.CostPerMTok <= 0 {
+			t.Error("a cloud model must carry a cost")
+		}
+	})
+
+	t.Run("claude-fable-5-1", func(t *testing.T) {
+		m, ok := byID["claude-fable-5-1"]
+		if !ok {
+			t.Fatal("missing claude-fable-5-1 entry")
+		}
+		if !m.Enabled {
+			t.Error("claude-fable-5-1 should be enabled")
+		}
+		// Planner-only by design: offered in the plan: selector, and used
+		// only when an epic is explicitly labelled plan:claude-fable-5-1.
+		if len(m.Roles) != 1 || m.Roles[0] != "planner" {
+			t.Errorf("roles = %v, want [planner]", m.Roles)
+		}
+		if m.Location != "cloud" || m.Engine != "anthropic" {
+			t.Errorf("location/engine = %s/%s, want cloud/anthropic", m.Location, m.Engine)
+		}
+		if m.HomeLocation != "cloud" || m.FallbackLocation != "none" {
+			t.Errorf("home/fallback = %s/%s, want cloud/none", m.HomeLocation, m.FallbackLocation)
+		}
+		// The Fable family rejects the budget_tokens thinking form (400);
+		// the worker must omit the param, so the entry declares none.
+		if m.Thinking != "" {
+			t.Errorf("thinking = %q, want \"\" (budget_tokens 400s on Fable)", m.Thinking)
+		}
+		if m.ContextTokens != 1000000 {
+			t.Errorf("context_tokens = %d, want 1000000", m.ContextTokens)
 		}
 		if m.CostPerMTok <= 0 {
 			t.Error("a cloud model must carry a cost")
@@ -303,8 +337,9 @@ func TestByRoleRealRegistry(t *testing.T) {
 		want []string
 	}{
 		// qwen3.8-flash-next and glm5.3-flash are planners but disabled,
-		// so they must not appear.
-		{"planner", []string{"qwen3.8-27b", "claude-sonnet-5-5"}},
+		// so they must not appear. claude-fable-5-1 is an enabled
+		// planner-only entry (opt-in cloud planner, chat-1794348211-f033).
+		{"planner", []string{"qwen3.8-27b", "claude-sonnet-5-5", "claude-fable-5-1"}},
 		{"executor", []string{"qwen3.8-27b"}},
 		{"reviewer", []string{"claude-sonnet-5-5"}},
 	}
