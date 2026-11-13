@@ -351,8 +351,43 @@ of a capability queue (`cap.*`).
 ## In-process (superagent)
 
 The superagent executor has a `rabbitmq` tool — the same operations as the
-CLI (`publish|consume|peek|depth` with the same message fields) — so a
-running agent can hand work to another model mid-run without shelling out.
+CLI (`publish|consume|peek|depth` with the same message fields, plus
+`caps|submit|listen|yield`) — so a running agent can hand work to another
+model mid-run without shelling out:
+
+- `caps` — the capability catalog (the same lines as `jarvis-mq caps`:
+  name, where, cost, live queue depth, typical runtime).
+- `submit` — posts an envelope-v2 request to `cap.<capability>`; the reply
+  queue defaults to the run's own flow queue (`flow.$JARVIS_JOB_ID`) so the
+  Result lands where the run will wake.
+- `listen` — attaches a durable switchboard listener (wake / forward /
+  notify) exactly like `jarvis-mq listen`.
+- `yield` (job-backed runs only) — records the wait on the agent job and
+  parks the run; the agent loop ends with `YIELDED` (exit 0), the
+  switchboard's wake resumes the job, and the woken run consumes the Result
+  from its flow queue with `consume`.
+
+The 4-command pattern (listen first, then submit, then yield, then park)
+works in-process exactly as it does from the CLI.
+
+## Hermes (submit_capability)
+
+Chat becomes a capability job. In a full-access Hermes conversation,
+"describe the photos in folder X" is classified to `submit_capability`
+(the LLM path — the fast classifier defers capability-verb messages it
+cannot parameterize), which publishes an envelope-v2 request to
+`cap.<capability>` with the reply-to on `flow.hermes`
+(`hermes.CapReplyQueue`, durable, Hermes-owned). The jarvis-chat daemon
+runs `hermes.WatchCapResults`, a durable consumer on that queue: when the
+Result lands, the daemon replies on Discord with `hermes.FormatCapResult`
+— for image.describe that is one line per image (caption + tags) from the
+job's index.json artifact, otherwise the summary and the data line.
+
+Full access only (`RequiresFullAccess`): a capability job spends owner
+money on the workers, and a limited bot must not be able to start one.
+The reply path is a consumer rather than a switchboard notify listener
+because a notify listener can only send its static text — the result body
+(the captions) has to travel with the reply.
 
 ## Code
 
@@ -367,14 +402,20 @@ running agent can hand work to another model mid-run without shelling out.
   `PopFlow`, `PeekFlow`, `PurgeFlow`, `DeleteFlow`.
 - `internal/queue/cap.go` — `CapQueueName`, `IsCapQueue`, `EnsureCapQueue`
   (on-demand declare + bind, DLX args — the request side of the v2
-  envelope).
+  envelope), `ValidCapabilityName`, `ParseDeadline`.
 - `internal/queue/events.go` — the `events` exchange: `Event`, the
   `JobEvent`/`AgentEvent`/`WindowEvent`/`LeaseEvent` builders, and the
   fire-and-forget `EventPublisher`.
 - `internal/queue/dlx.go` — `EnsureDLX`, the `dead` queue, the
   `x-attempts` delivery budget, and `ListDead`/`RequeueDead`/`DropDead`.
 - `cmd/jarvis-mq/main.go` — the CLI above.
-- `internal/superagent/tools.go` — `runMQ`, the in-process tool.
+- `internal/superagent/tools.go` — `runMQ`, the in-process tool
+  (`publish|consume|peek|depth` plus the capability operations
+  `caps|submit|listen|yield`).
+- `internal/hermes/capability_action.go` — the `submit_capability` action
+  (full access only), `CapReplyQueue`, `WatchCapResults` (the durable
+  consumer the jarvis-chat daemon runs), and `FormatCapResult` (the
+  Discord reply; per-image for image.describe).
 - `internal/agentjob/continuation.go` — the continuation sidecar:
   `Continuation`, `RenderContinuationMD`/`ParseContinuationMD`, the
   invariant-8 `ContinuationMDFilled` check, `WriteContinuation`/
