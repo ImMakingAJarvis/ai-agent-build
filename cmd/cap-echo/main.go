@@ -20,6 +20,11 @@
 //	                     Default ~/.local/share/jarvis/artifacts.
 //	ECHO_METRICS_ADDR    serve Prometheus /metrics here (e.g. 127.0.0.1:9115).
 //	                     Default: off.
+//	RESOURCED_URL        the resourced lease broker (plan §3.6); the
+//	                     worker gates its consuming on a lease from it.
+//	                     Default: off (un-gated, the pre-lease behavior).
+//	CAPABILITIES_FILE    the capability catalog the lease's memory spec
+//	                     comes from. Needed when RESOURCED_URL is set.
 package main
 
 import (
@@ -139,6 +144,17 @@ func main() {
 		defer events.Close()
 	}
 
+	// Lease gating (plan §3.6): resourced decides whether this placement
+	// may consume (the lease carries the catalog's cpu RAM footprint).
+	// No broker (RESOURCED_URL unset) or a catalog problem = un-gated,
+	// the pre-lease behavior.
+	leaseBroker, leaseSpec, lerr := capworker.LeaseFor(
+		os.Getenv("RESOURCED_URL"), os.Getenv("CAPABILITIES_FILE"),
+		capability, "cpu", workerName)
+	if lerr != nil {
+		log.Printf("cap-echo: lease: %v (running un-gated)", lerr)
+	}
+
 	w := capworker.New(capworker.Config{
 		Cap:         capability,
 		Name:        workerName,
@@ -146,6 +162,8 @@ func main() {
 		Location:    "cpu", // consumer priority 1 (LocationPriority); no behavior change — the gate submits at priority 1
 		Conn:        conn,
 		Events:      events,
+		LeaseBroker: leaseBroker,
+		LeaseSpec:   leaseSpec,
 		MetricsAddr: os.Getenv("ECHO_METRICS_ADDR"),
 		Handler:     handler{delay: envDuration("ECHO_DELAY", "30s")},
 		OutDirBase:  envOr("ECHO_OUT_DIR", filepath.Join(os.Getenv("HOME"), ".local", "share", "jarvis", "artifacts")),

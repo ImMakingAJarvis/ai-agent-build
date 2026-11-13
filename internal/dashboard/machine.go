@@ -2,7 +2,7 @@
 //
 // The queue section shows the work, but not the machine it runs on. This
 // panel answers the four things the queue cannot: which model is loaded on
-// the GPU (brain, iGPU helper, art), whether a brain-swap photo window is in
+// the GPU (brain, iGPU helper, art), whether a brain-swap window is in
 // flight ("any changes happening"), how much VRAM is free ("what's in ram"),
 // and what is on hold for the GPU ("what's on hold" — the photo batch plus
 // the rest of the ready queue).
@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	"sort"
+
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 )
@@ -34,10 +36,23 @@ type machineEngine struct {
 	Model string `json:"model,omitempty"`
 }
 
-// machineVRAM is the 4090's video memory from the nvidia exporter.
+// machineVRAM is the 4090's video memory and power from the nvidia
+// exporter.
 type machineVRAM struct {
-	UsedMB  int64 `json:"used_mb"`
-	TotalMB int64 `json:"total_mb"`
+	UsedMB  int64   `json:"used_mb"`
+	TotalMB int64   `json:"total_mb"`
+	PowerW  float64 `json:"power_w"`
+}
+
+// machineMeasured is one entry of resourced's measured-VRAM overlay
+// (EVB-28): what the capability declared in the catalog and what its
+// first run actually took off the GPU. Over = the alert case (the
+// catalog under-declared).
+type machineMeasured struct {
+	Cap        string `json:"cap"` // capability@device
+	DeclaredMB int64  `json:"declared_mb"`
+	MeasuredMB int64  `json:"measured_mb"`
+	Over       bool   `json:"over"`
 }
 
 // FreeMB is what a photo job could take from the GPU.
@@ -51,15 +66,68 @@ type machineHold struct {
 	Failed  int `json:"failed"`  // failed rounds still in the store
 }
 
+// machineLease is one active ledger lease (resourced GET /state): who
+// holds which device's memory, and since when.
+type machineLease struct {
+	Holder     string `json:"holder"`
+	Capability string `json:"capability,omitempty"`
+	VRAMMB     int64  `json:"vram_mb"`
+	Since      string `json:"since"` // time of day, container local
+}
+
+// machineDeviceLeases is the lease card's one device row (EVB-30: the
+// spec asks for leases per device).
+type machineDeviceLeases struct {
+	Device string         `json:"device"`
+	Leases []machineLease `json:"leases"`
+}
+
+// machineWindow is the broker's view of the swap window (resourced
+// GET /state "window" — richer than the state file the panel already
+// reads: the last decision's reason and the tick's depth snapshot).
+type machineWindow struct {
+	Open   bool     `json:"open"`
+	For    []string `json:"for,omitempty"`
+	Age    string   `json:"age,omitempty"`    // "45s" / "12m" while open
+	Reason string   `json:"reason,omitempty"` // last decision's reason
+	Up     bool     `json:"up"`               // /state was reachable
+}
+
+// machineCapDepth is one capability's queue depth from the broker's
+// snapshot: ready count plus the in-flight (unacked) deliveries.
+type machineCapDepth struct {
+	Cap   string `json:"cap"`
+	Depth int    `json:"depth"`
+}
+
+// machineWaiting is a brain job in the waiting status: what it waits on
+// (the continuation's correlation ids), how long, and the note its
+// round left.
+type machineWaiting struct {
+	ID            string   `json:"id"`
+	Title         string   `json:"title,omitempty"`
+	WaitOn        []string `json:"wait_on"`
+	WaitNote      string   `json:"wait_note,omitempty"`
+	WaitAge       string   `json:"wait_age"`
+	WaitRemaining string   `json:"wait_remaining,omitempty"`
+}
+
 // MachineState is the body of the machine section (GET /html/machine).
 type MachineState struct {
-	Swap       string          `json:"swap"`        // "brain running" | "photo window open" | "brain down"
-	SwapTone   string          `json:"swap_tone"`   // ok | warn | bad
-	SwapDetail string          `json:"swap_detail,omitempty"`
-	Engines    []machineEngine `json:"engines"`
-	VRAM       *machineVRAM    `json:"vram,omitempty"`
-	Hold       machineHold     `json:"hold"`
-	LastSwap   string          `json:"last_swap,omitempty"`
+	Swap       string            `json:"swap"`        // "brain running" | "swap window open" | "brain down"
+	SwapTone   string            `json:"swap_tone"`   // ok | warn | bad
+	SwapDetail string            `json:"swap_detail,omitempty"`
+	Engines    []machineEngine   `json:"engines"`
+	VRAM       *machineVRAM      `json:"vram,omitempty"`
+	Measured   []machineMeasured `json:"measured,omitempty"` // resourced's VRAM overlay (EVB-28)
+	Hold       machineHold       `json:"hold"`
+	LastSwap   string            `json:"last_swap,omitempty"`
+	// The event-driven-broker half of the Machine view (EVB-30): the
+	// window and queue state resourced owns, not just the swap file.
+	Window    *machineWindow        `json:"window,omitempty"`
+	Leases    []machineDeviceLeases `json:"leases,omitempty"`
+	CapDepths []machineCapDepth     `json:"cap_depths,omitempty"`
+	Waiting   []machineWaiting      `json:"waiting,omitempty"`
 }
 
 // probeTimeout bounds one machine probe: the section refreshes every 5 s, so
@@ -79,15 +147,15 @@ func swapState(brainUp, windowOpen bool, windowDetail, artModel string) (label, 
 		return "brain running", "ok", ""
 	case windowOpen:
 		if windowDetail == "" {
-			windowDetail = "brain paused for the photo batch"
+			windowDetail = "brain paused for GPU work"
 		}
 		if artModel != "" {
 			windowDetail += " — " + artModel + " on the 4090"
 		}
-		return "photo window open", "warn", windowDetail
+		return "swap window open", "warn", windowDetail
 	default:
 		return "brain down", "bad",
-			"no photo window open — the watchdog re-arms the brain at the deadline"
+			"no swap window open — the watchdog re-arms the brain at the deadline"
 	}
 }
 
@@ -109,32 +177,47 @@ func modelDisplayName(name string) string {
 	return strings.TrimSuffix(filepath.Base(name), ".gguf")
 }
 
-// parseVRAMMetrics extracts the first GPU's used/total VRAM from the nvidia
-// exporter's Prometheus text format; nil when the metrics are absent.
+// parseVRAMMetrics extracts the first GPU's used/total VRAM and power
+// draw from the nvidia exporter's Prometheus text format; nil when the
+// metrics are absent.
 func parseVRAMMetrics(body string) *machineVRAM {
 	var used, total int64
+	var power float64
 	for _, line := range strings.Split(body, "\n") {
 		switch {
 		case strings.HasPrefix(line, "nvidia_gpu_mem_used_mb "):
 			used = metricValue(line)
 		case strings.HasPrefix(line, "nvidia_gpu_mem_total_mb "):
 			total = metricValue(line)
+		case strings.HasPrefix(line, "nvidia_gpu_power_w "):
+			power = metricValueF(line)
 		}
 	}
 	if total <= 0 {
 		return nil
 	}
-	return &machineVRAM{UsedMB: used, TotalMB: total}
+	return &machineVRAM{UsedMB: used, TotalMB: total, PowerW: power}
 }
 
 // metricValue is the last field of a Prometheus sample line.
 func metricValue(line string) int64 {
+	v, _ := strconv.ParseInt(metricValueFStr(line), 10, 64)
+	return v
+}
+
+// metricValueF is the last field of a Prometheus sample line as a float
+// (the power sample is not integral).
+func metricValueF(line string) float64 {
+	v, _ := strconv.ParseFloat(metricValueFStr(line), 64)
+	return v
+}
+
+func metricValueFStr(line string) string {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
-		return 0
+		return "0"
 	}
-	v, _ := strconv.ParseInt(fields[len(fields)-1], 10, 64)
-	return v
+	return fields[len(fields)-1]
 }
 
 // swapEventDetail pulls the human detail out of a swap event line: the
@@ -198,32 +281,34 @@ func parseSwapLog(path string) string {
 	return ""
 }
 
-// windowMarker reads the $JARVIS_CONF/photo-window marker the queue watcher
-// writes when it opens the photo window: "<date time> batch: <ids>". It
-// reports whether the window is open and a one-line detail.
-func windowMarker(path string) (open bool, detail string) {
+// swapWindowState reads the state file jarvis-swap writes next to
+// swap.log when a window is open: {"for":[...],"reason":"...","opened_at":
+// "RFC3339"} (EVB-27 — the window is driven by resourced, not the
+// queue watcher's old $CONF/photo-window marker). It reports whether the
+// window is open and a one-line detail (when it opened, and the
+// capabilities it serves). A file that exists but does not parse still
+// counts as open: it was written early by `out`, and a truncated read
+// should read "window", not "brain down".
+func swapWindowState(path string) (open bool, detail string) {
 	b, err := os.ReadFile(path)
-	if err != nil {
+	if err != nil || len(bytes.TrimSpace(b)) == 0 {
 		return false, ""
 	}
-	line := strings.TrimSpace(string(b))
-	if line == "" {
-		return false, ""
+	var st struct {
+		For      []string `json:"for"`
+		OpenedAt string   `json:"opened_at"`
 	}
-	fields := strings.Fields(line)
-	var when string
-	if len(fields) >= 2 && len(fields[1]) >= 5 {
-		when = fields[0] + " " + fields[1][:5] // "YYYY-MM-DD HH:MM"
+	if err := json.Unmarshal(b, &st); err != nil {
+		return true, ""
 	}
-	ids := ""
-	if i := strings.Index(line, "batch: "); i >= 0 {
-		ids = strings.TrimSpace(line[i+len("batch: "):])
+	if t, err := time.Parse(time.RFC3339, st.OpenedAt); err == nil {
+		detail = t.Format("2006-01-02 15:04")
 	}
-	switch {
-	case when != "" && ids != "":
-		detail = when + " — batch " + ids
-	case ids != "":
-		detail = "batch " + ids
+	if len(st.For) > 0 {
+		if detail != "" {
+			detail += " — "
+		}
+		detail += "for " + strings.Join(st.For, ", ")
 	}
 	return true, detail
 }
@@ -317,6 +402,139 @@ func (s *Server) probeVRAM() *machineVRAM {
 	return parseVRAMMetrics(body)
 }
 
+// probeMeasured reads resourced's measured-VRAM overlay (EVB-28): the
+// capabilities whose first run has measured their actual GPU footprint,
+// in stable (key) order. Nil when resourced is down or has none yet.
+func (s *Server) probeMeasured() []machineMeasured {
+	body, err := s.getBody(s.resourcedURL + "/measured")
+	if err != nil {
+		return nil
+	}
+	var out struct {
+		Measurements map[string]machineMeasured `json:"measurements"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil || len(out.Measurements) == 0 {
+		return nil
+	}
+	rows := make([]machineMeasured, 0, len(out.Measurements))
+	for key, m := range out.Measurements {
+		m.Cap = key
+		rows = append(rows, m)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Cap < rows[j].Cap })
+	return rows
+}
+
+// resourcedProbe is what the Machine view needs from the broker's
+// GET /state (EVB-30): the leases grouped per device, the window state
+// and the per-capability queue-depth snapshot.
+type resourcedProbe struct {
+	Window    machineWindow
+	Leases    []machineDeviceLeases
+	CapDepths []machineCapDepth
+}
+
+// probeResourced reads the broker's /state (EVB-30). Nil when resourced
+// is down — the panel degrades to the swap-file view it had before.
+func (s *Server) probeResourced() *resourcedProbe {
+	body, err := s.getBody(s.resourcedURL + "/state")
+	if err != nil {
+		return nil
+	}
+	var out struct {
+		Leases []struct {
+			Holder     string    `json:"holder"`
+			Capability string    `json:"capability"`
+			Device     string    `json:"device"`
+			VRAMMB     int64     `json:"vram_mb"`
+			Since      time.Time `json:"since"`
+		} `json:"leases"`
+		Window struct {
+			Open      bool          `json:"open"`
+			For       []string      `json:"for"`
+			OpenedAt  time.Time     `json:"opened_at"`
+			Reason    string        `json:"reason"`
+			CapDepths map[string]int `json:"cap_depths"` // the tick's depth snapshot (EVB-30)
+		} `json:"window"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		return nil
+	}
+	p := &resourcedProbe{}
+	if out.Window.Open {
+		p.Window = machineWindow{Open: true, For: out.Window.For, Reason: out.Window.Reason, Up: true}
+		if !out.Window.OpenedAt.IsZero() {
+			p.Window.Age = shortDur(time.Since(out.Window.OpenedAt))
+		}
+	} else {
+		p.Window = machineWindow{Reason: out.Window.Reason, Up: true}
+	}
+	byDev := map[string]*machineDeviceLeases{}
+	var order []string
+	for _, l := range out.Leases {
+		d, ok := byDev[l.Device]
+		if !ok {
+			d = &machineDeviceLeases{Device: l.Device}
+			byDev[l.Device] = d
+			order = append(order, l.Device)
+		}
+		d.Leases = append(d.Leases, machineLease{
+			Holder: l.Holder, Capability: l.Capability, VRAMMB: l.VRAMMB,
+			Since: l.Since.Local().Format("15:04"),
+		})
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	for _, d := range order {
+		p.Leases = append(p.Leases, *byDev[d])
+	}
+	// The depth snapshot rides the window field (the controller's tick
+	// writes both together); absent = no tick has run yet.
+	var depths []machineCapDepth
+	for cap, n := range out.Window.CapDepths {
+		depths = append(depths, machineCapDepth{Cap: cap, Depth: n})
+	}
+	sort.Slice(depths, func(i, j int) bool { return depths[i].Cap < depths[j].Cap })
+	p.CapDepths = depths
+	return p
+}
+
+// shortDur renders a duration as the panel's short form: "45s", "12m",
+// "2h3m" (the same buckets as the waiting rows).
+func shortDur(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+}
+
+// waitingBrainJobs picks the waiting (yielded) local jobs out of the
+// cached job list — the ones a window serves and the panel must show
+// waiting, with what each waits on.
+func waitingBrainJobs(jobs []agentjob.Job, now time.Time) []machineWaiting {
+	var out []machineWaiting
+	for _, j := range jobs {
+		if j.Status != agentjob.Waiting || (j.Driver != "" && j.Driver != "local") {
+			continue
+		}
+		w := machineWaiting{
+			ID: j.ID, Title: j.Title, WaitOn: j.WaitOn, WaitNote: j.WaitNote,
+			WaitAge:       agentjob.WaitAge(j, now),
+			WaitRemaining: agentjob.WaitRemaining(j, now),
+		}
+		if len(w.WaitOn) == 0 {
+			w.WaitOn = []string{"—"}
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
 // gatherMachine collects the machine panel. Every probe runs in parallel
 // with its own timeout, and a dead endpoint degrades to a "down"/"—" card
 // rather than failing the section.
@@ -324,19 +542,38 @@ func (s *Server) gatherMachine() MachineState {
 	var st MachineState
 	var brainUp, igpuUp, artUp bool
 	var brainModel, igpuModel, artModel string
+	var rsProbe *resourcedProbe
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(6)
 	go func() { defer wg.Done(); brainUp, brainModel = s.probeEngine(s.engineURL) }()
 	go func() { defer wg.Done(); igpuUp, igpuModel = s.probeEngine(s.igpuURL) }()
 	go func() { defer wg.Done(); artUp, artModel = s.probeArt() }()
 	go func() { defer wg.Done(); st.VRAM = s.probeVRAM() }()
+	go func() { defer wg.Done(); st.Measured = s.probeMeasured() }()
+	go func() { defer wg.Done(); rsProbe = s.probeResourced() }()
 	wg.Wait()
 
-	// The window is open when the watcher's marker exists; art being up with
-	// no marker is the closing edge (marker removed, art still loading out).
-	windowOpen, windowDetail := windowMarker(s.windowPath)
+	// The window is open when jarvis-swap's state file exists; art being up
+	// with no state file is the closing edge (file removed, art still
+	// loading out).
+	windowOpen, windowDetail := swapWindowState(s.windowPath)
 	if !windowOpen && artUp {
 		windowOpen = true
+	}
+	// The broker's view is the controller's — when it is reachable it
+	// wins (it also carries the reason and the depth snapshot).
+	if rsProbe != nil && rsProbe.Window.Up {
+		st.Window = &rsProbe.Window
+		st.Leases = rsProbe.Leases
+		st.CapDepths = rsProbe.CapDepths
+		windowOpen = windowOpen || rsProbe.Window.Open
+		if rsProbe.Window.Open {
+			d := "for " + strings.Join(rsProbe.Window.For, ", ")
+			if rsProbe.Window.Reason != "" {
+				d += " — " + rsProbe.Window.Reason
+			}
+			windowDetail = d
+		}
 	}
 
 	label, tone, detail := swapState(brainUp, windowOpen, windowDetail, artModel)
@@ -352,7 +589,9 @@ func (s *Server) gatherMachine() MachineState {
 		st.Engines = append(st.Engines, machineEngine{Name: "Art (4090)", State: "idle"})
 	}
 
-	st.Hold = holdCounts(s.getCachedJobData().agentJobs)
+	jobs := s.getCachedJobData().agentJobs
+	st.Hold = holdCounts(jobs)
+	st.Waiting = waitingBrainJobs(jobs, time.Now())
 	st.LastSwap = parseSwapLog(s.swapLog)
 	return st
 }
