@@ -146,3 +146,53 @@ capabilities:
                                # hundred tokens of reply is minutes;
                                # plus ~10 s coprocess load
         idle_s: 300
+
+  bench.run:
+    # The benchmark capability (EVB-24, the last Phase 3 worker): the
+    # existing benchmark tooling behind one queue — the worker is a thin
+    # adapter (docs/event-driven.md, "bench.run"). Input: which bench —
+    # llama-bench over a model (default), or the live script against a
+    # serving engine (bench: live, base_url) — plus the workload
+    # (prompt/gen token counts, run count); output: the scores in the
+    # Result's Data + a report.md / index.json artifact under the
+    # request's OutDir. The Result goes to the requester's flow queue;
+    # no ad-hoc result files for new runs.
+    #
+    # iGPU placement: llama-bench on the Ryzen iGPU (Vulkan0 in the worker
+    # container, /dev/dri; the container carries no NVIDIA ICD, so the
+    # 4090 is unreachable from here — a 4090 bench is the Phase 4
+    # resourced story). The model under test is per-request input (a GGUF
+    # path under /opt/jarvis-igpu or an Ollama name resolved through the
+    # mounted host store), so the worker's own footprint is small. Runs
+    # alongside the brain: the iGPU is its own device and the weights
+    # stream through host RAM (the worker leases MemAvailable headroom
+    # per session). A `bench: live` run drives whatever engine base_url
+    # names (default: the brain container) — submit those when the engine
+    # is free, or point them at the iGPU helper for a cheap full-path test.
+    #
+    # CPU placement: the same worker with -ngl 0 (RAM-resident) — the slow
+    # fallback when the iGPU is busy with the helper.
+    description: "model/workload -> benchmark scores (llama-bench pp/tg tok/s, or live prompt/decode tok/s + correctness tasks) in Data, plus a report.md + index.json artifact under the request's OutDir"
+    workers:
+      - location: igpu
+        model: llama-bench
+        vram_mb: 0        # iGPU is UMA — the weights stream through RAM
+        ram_mb: 2048      # a 1-4B Q4 model under test + the tool
+        needs_brain_out: false  # the iGPU never touches the 4090 — no
+                                # window, runs alongside the brain
+        start: ""
+        stop: ""
+        typical_runtime: 2m   # llama-bench pp512/tg512 x3 on a ~3B model
+                              # (the iGPU does ~100 pp t/s); bigger models
+                              # scale with size — the deadline bounds it
+        idle_s: 0             # per-request subprocess: nothing resident
+      - location: cpu
+        model: llama-bench
+        vram_mb: 0
+        ram_mb: 4096
+        needs_brain_out: false
+        start: ""
+        stop: ""
+        typical_runtime: 10m  # CPU pp/tg is ~10x slower than the iGPU for
+                              # a 1-4B model — the deadline bounds it
+        idle_s: 0

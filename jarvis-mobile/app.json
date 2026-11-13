@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "Jarvis Chat",
+    "slug": "jarvis-chat",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "jarvischat",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0b0f14",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b0f14"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ai.immaking.jarvis.chat"
+    },
+    "android": {
+      "package": "ai.immaking.jarvis.chat",
+      "adaptiveIcon": {
+        "backgroundColor": "#0b0f14",
+        "foregroundImage": "./assets/android-icon-foreground.png"
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "name": "Jarvis Chat",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-audio"
+    ]
+  }
+}
