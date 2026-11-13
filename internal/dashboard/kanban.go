@@ -45,6 +45,12 @@ type createSubTaskReq struct {
 	Title  string `json:"title"`
 }
 
+type createCommentReq struct {
+	TaskID string `json:"task_id"`
+	Author string `json:"author"`
+	Body   string `json:"body"`
+}
+
 type updateTaskReq struct {
 	Status   string `json:"status,omitempty"`
 	Priority *int   `json:"priority,omitempty"`
@@ -278,6 +284,53 @@ func (ks *kanbanState) apiListSubTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, subtasks)
+}
+
+// --- Comment API ---
+
+func (ks *kanbanState) apiCreateComment(w http.ResponseWriter, r *http.Request) {
+	var req createCommentReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.TaskID == "" || req.Body == "" {
+		http.Error(w, "task_id and body are required", http.StatusBadRequest)
+		return
+	}
+	author := req.Author
+	if author == "" {
+		author = "nathan" // dashboard UI default
+	}
+	c, err := ks.store.AddComment(req.TaskID, author, req.Body)
+	if err != nil {
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
+	}
+	respondJSON(w, c)
+}
+
+func (ks *kanbanState) apiListComments(w http.ResponseWriter, r *http.Request) {
+	taskID := r.URL.Query().Get("task_id")
+	if taskID == "" {
+		http.Error(w, "task_id query param required", http.StatusBadRequest)
+		return
+	}
+	comments, err := ks.store.ListComments(taskID)
+	if err != nil {
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	respondJSON(w, comments)
+}
+
+func (ks *kanbanState) apiDeleteComment(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := ks.store.DeleteComment(id); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- Helper ---

@@ -19,12 +19,18 @@ import (
 //	<root>/epics/<epic-id>.json
 //	<root>/tasks/<task-id>.json
 //	<root>/subtasks/<subtask-id>.json
+//	<root>/comments/<comment-id>.json
 //
 // All mutations are protected by a mutex and written atomically
 // (write to .tmp, then rename).
 type Store struct {
 	mu   sync.Mutex
 	root string
+}
+
+// Root returns the kanban root directory (<DataDir>/kanban).
+func (s *Store) Root() string {
+	return s.root
 }
 
 // DataDir returns JARVIS_DATA_DIR or ~/.local/share/jarvis.
@@ -42,7 +48,7 @@ func DataDir() string {
 // Open creates (or loads) a store under the kanban/ subdirectory of dir.
 func Open(dir string) (*Store, error) {
 	root := filepath.Join(dir, "kanban")
-	for _, sub := range []string{"epics", "tasks", "subtasks"} {
+	for _, sub := range []string{"epics", "tasks", "subtasks", "comments"} {
 		if err := os.MkdirAll(filepath.Join(root, sub), 0o755); err != nil {
 			return nil, fmt.Errorf("kanban: mkdir %s: %w", sub, err)
 		}
@@ -155,6 +161,13 @@ func (s *Store) DeleteEpic(id string) error {
 		for _, st := range sts {
 			if taskIDs[st.TaskID] {
 				os.Remove(filepath.Join(s.root, "subtasks", st.ID+".json"))
+			}
+		}
+	}
+	if cs, err := s.unlockedListComments(); err == nil {
+		for _, c := range cs {
+			if taskIDs[c.TaskID] {
+				os.Remove(filepath.Join(s.root, "comments", c.ID+".json"))
 			}
 		}
 	}
@@ -394,6 +407,13 @@ func (s *Store) DeleteTask(id string) error {
 			}
 		}
 	}
+	if cs, err := s.unlockedListComments(); err == nil {
+		for _, c := range cs {
+			if c.TaskID == id {
+				os.Remove(filepath.Join(s.root, "comments", c.ID+".json"))
+			}
+		}
+	}
 	if err := os.Remove(path); err != nil {
 		return err
 	}
@@ -495,4 +515,96 @@ func (s *Store) unlockedGetEpic(id string) (Epic, error) {
 		return ep, err
 	}
 	return ep, json.Unmarshal(b, &ep)
+}
+
+// --- Comments ---
+
+// AddComment appends a comment to a task. The task must exist, so a comment
+// can never orphan onto a missing task.
+func (s *Store) AddComment(taskID, author, body string) (Comment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := os.Stat(filepath.Join(s.root, "tasks", taskID+".json")); err != nil {
+		return Comment{}, fmt.Errorf("kanban: task %s not found: %w", taskID, err)
+	}
+	c := Comment{
+		ID:        uuid.New().String(),
+		TaskID:    taskID,
+		Author:    author,
+		Body:      body,
+		CreatedAt: time.Now().UTC(),
+	}
+	path := filepath.Join(s.root, "comments", c.ID+".json")
+	if err := writeJSON(path, c); err != nil {
+		return Comment{}, fmt.Errorf("kanban: write comment: %w", err)
+	}
+	return c, nil
+}
+
+// GetComment loads a comment by ID.
+func (s *Store) GetComment(id string) (Comment, error) {
+	var c Comment
+	b, err := os.ReadFile(filepath.Join(s.root, "comments", id+".json"))
+	if err != nil {
+		return c, err
+	}
+	return c, json.Unmarshal(b, &c)
+}
+
+// ListComments returns a task's comments oldest first.
+func (s *Store) ListComments(taskID string) ([]Comment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all, err := s.unlockedListComments()
+	if err != nil {
+		return nil, err
+	}
+	comments := make([]Comment, 0, len(all))
+	for _, c := range all {
+		if c.TaskID == taskID {
+			comments = append(comments, c)
+		}
+	}
+	sort.Slice(comments, func(i, j int) bool {
+		if comments[i].CreatedAt.Equal(comments[j].CreatedAt) {
+			return comments[i].ID < comments[j].ID
+		}
+		return comments[i].CreatedAt.Before(comments[j].CreatedAt)
+	})
+	return comments, nil
+}
+
+// DeleteComment removes a comment file.
+func (s *Store) DeleteComment(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Read first so a missing comment is an error, not a silent no-op.
+	if _, err := os.Stat(filepath.Join(s.root, "comments", id+".json")); err != nil {
+		return err
+	}
+	return os.Remove(filepath.Join(s.root, "comments", id+".json"))
+}
+
+// unlockedListComments loads every comment without locking (caller must
+// hold s.mu).
+func (s *Store) unlockedListComments() ([]Comment, error) {
+	ents, err := os.ReadDir(filepath.Join(s.root, "comments"))
+	if err != nil {
+		return nil, err
+	}
+	comments := make([]Comment, 0, len(ents))
+	for _, e := range ents {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+			b, err := os.ReadFile(filepath.Join(s.root, "comments", e.Name()))
+			if err != nil {
+				continue
+			}
+			var c Comment
+			if err := json.Unmarshal(b, &c); err != nil {
+				continue
+			}
+			comments = append(comments, c)
+		}
+	}
+	return comments, nil
 }

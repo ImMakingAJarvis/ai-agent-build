@@ -499,6 +499,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/kanban/subtasks", s.kanban.apiCreateSubTask)
 	mux.HandleFunc("PATCH /api/kanban/subtasks/{id}", s.kanban.apiToggleSubTask)
 	mux.HandleFunc("GET /api/kanban/subtasks", s.kanban.apiListSubTasks)
+	mux.HandleFunc("POST /api/kanban/comments", s.kanban.apiCreateComment)
+	mux.HandleFunc("GET /api/kanban/comments", s.kanban.apiListComments)
+	mux.HandleFunc("DELETE /api/kanban/comments/{id}", s.kanban.apiDeleteComment)
 	mux.HandleFunc("GET /api/kanban/models", s.kanban.apiListModels)
 	mux.HandleFunc("GET /api/nobrakes/audit", s.handleNobrakesAudit)
 
