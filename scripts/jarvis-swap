@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# jarvis-swap — swap the Jarvis brain out of the 4090 for photo work and
-# back again. Runbook: docs/brain-swap.md. The brain holds ~17.6 GB of the
-# 4090's 24.5 GB; the art/bench services wait for 12 GB free before
-# generating, so photo work cannot run while the brain is loaded.
+# jarvis-swap — swap the Jarvis brain out of the 4090 for GPU capability
+# work and back again. Runbook: docs/brain-swap.md. The brain holds
+# ~17.6 GB of the 4090's 24.5 GB; needs_brain_out capability workers (the
+# art/bench services) wait for 12 GB free before running, so such work
+# cannot run while the brain is loaded.
 #
-# The swap is a window bracketed by two iGPU-driver jobs (agent-run honours
-# a job's spec driver, scripts/agent-run):
-#
-#   swap-out (fix, driver igpu):  jarvis-swap out --jobs <photo ids>
-#   photo jobs (flipped to igpu by `out`; they run as code — the
-#   jarvis-photo executor, no model round — while the brain is off)
-#   swap-in  (fix, driver igpu, depends_on the photo jobs):  jarvis-swap in
+# Since EVB-27 the window is driven by resourced — the VRAM/RAM ledger's
+# window controller (plan §3.6, rules 3–4): it opens the window when
+# queued GPU-needing capability work exists and no local (brain) round is
+# running, and closes it when the capability queues drain (or at the
+# max_window / max_brain_wait limits). The old agent-run photo bracket is
+# gone: photo jobs are just image.generate work that runs as code (the
+# jarvis-photo executor, no model round) inside the window, and resourced
+# watches their cap queue like any other client.
 #
 # Failsafe: `out` opens a `jarvis-watchdog maintain` window. If anything in
-# the window dies (a photo run fails, a photo job is stuck, swap-in never
-# runs), the watchdog re-arms the brain at the deadline and says so on
-# Discord — the brain is never stranded off.
+# the window dies (a generation fails, the window never drains), the
+# watchdog re-arms the brain at the deadline and says so on Discord — the
+# brain is never stranded off.
 #
 # What this script touches:
 #   brain   docker container jarvis-engine (compose service `engine`, serving
@@ -26,27 +28,37 @@
 #
 # Commands:
 #   jarvis-swap status                          one-screen state report
-#   jarvis-swap out [--maintain 4h] [--jobs a,b] [--bump 1000] [--reason TEXT] [--job ID] [--force]
+#   jarvis-swap out [--for CAPS] [--maintain 4h] [--jobs a,b] [--bump 1000]
+#                 [--reason TEXT] [--job ID] [--force]
+#       --for       comma-separated capabilities the window serves (recorded
+#                   in the state file, shown by `status`; resourced passes
+#                   the queued brain-out capabilities it saw when opening)
 #       --maintain  watchdog window length (default 4h; 45s|30m|2h|seconds)
-#       --jobs      comma-separated queued photo job ids to flip to the igpu
+#       --jobs      comma-separated queued job ids to flip to the igpu
 #                   driver (jarvis-jobs requeue -driver igpu -priority N <id>)
 #       --bump      priority the flipped jobs get (default 1000): they must
 #                   outrun every other job in their band during the window
 #       --job       the swap job's own id (verifies it is the only round running)
-#       --force     allow a manual run with no round running (kills the brain)
+#       --force     allow a run with NO round running (manual, or resourced's
+#                   automated open). Never bypasses a running round —
+#                   invariant 1: the brain never stops itself mid-round.
 #   jarvis-swap in [--reason TEXT]
 #   jarvis-swap handoff                         write notes/brain-handoff.md
 #       scaffold (queue snapshot auto-filled; the brain fills in its context)
 #   all take --dry-run.
 #
-# Log: ~/.local/state/jarvis/swap.log. State: none (idempotent re-runs:
-# `out` while the window is open re-flips jobs; `in` while the brain is up
-# just closes the maintenance window).
+# Log: ~/.local/state/jarvis/swap.log. State: swap-window.json next to it —
+# the open window's for-list, reason and opened_at. Written early by `out`
+# (before the long swap steps) and cleared by a successful `in`; resourced
+# reads it to know the window is open. Idempotent re-runs: `out` while the
+# window is open re-records the marker and re-flips jobs; `in` while the
+# brain is up just closes the maintenance window and clears the marker.
 set -u
 
 REPO="${SWAP_REPO:-/home/agent/ai-agent-build}"
 STATE="$HOME/.local/state/jarvis"
 LOG="$STATE/swap.log"
+WINDOW_STATE="${SWAP_WINDOW_STATE:-$STATE/swap-window.json}"
 BRAIN_URL="${SWAP_BRAIN_URL:-http://127.0.0.1:11434}"
 BRAIN_UNIT="${SWAP_BRAIN_UNIT:-jarvis-engine}"
 BRAIN_START_CMD="${SWAP_BRAIN_START_CMD:-docker start}"
@@ -189,6 +201,67 @@ parse_dur() {
 
 brain_up() { [[ "$(http_probe "$BRAIN_URL")" != "000" ]]; }
 
+# window_state_write <caps> <reason> — record the open window (for-list,
+# reason, opened_at) in $WINDOW_STATE. Written EARLY in `out` (before the
+# watchdog/stop/load steps) so a concurrent resourced tick sees the window
+# as open while the swap is in flight and does not try to open a second
+# one. Kept on every failure path (the window really is half-open then);
+# cleared only by a successful `in`. An idempotent re-run preserves the
+# original opened_at (it is not a new window).
+window_state_write() {
+  local caps="$1" reason="$2" ts items cap
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [[ -f "$WINDOW_STATE" ]]; then
+    local old
+    old=$(sed -n 's/.*"opened_at":"\([^"]*\)".*/\1/p' "$WINDOW_STATE")
+    [[ -n "$old" ]] && ts="$old"
+  fi
+  items=""
+  IFS=',' read -ra carr <<< "${caps// /}"
+  for cap in "${carr[@]}"; do
+    [[ -z "$cap" ]] && continue
+    items="${items:+$items,}\"$cap\""
+  done
+  if [[ "$DRY_RUN" == 1 ]]; then
+    log "[DRY-RUN] would write $WINDOW_STATE (for: ${caps:-none}, opened $ts)"
+    return 0
+  fi
+  printf '{"for":[%s],"reason":"%s","opened_at":"%s"}\n' \
+    "$items" "$reason" "$ts" > "$WINDOW_STATE"
+  log "window state: $WINDOW_STATE (for: ${caps:-none}, opened $ts)"
+}
+
+# window_state_clear — a successful `in` closed the window; drop the marker.
+window_state_clear() {
+  [[ -f "$WINDOW_STATE" ]] || return 0
+  if [[ "$DRY_RUN" == 1 ]]; then
+    log "[DRY-RUN] would remove $WINDOW_STATE"
+    return 0
+  fi
+  rm -f "$WINDOW_STATE"
+  log "window state cleared"
+}
+
+# window_state_line — one line for `status`: the open window's for-list,
+# age and reason (or none).
+window_state_line() {
+  if [[ ! -f "$WINDOW_STATE" ]]; then
+    echo "  window       none"
+    return 0
+  fi
+  local body since for_list reason since_s age
+  body=$(cat "$WINDOW_STATE")
+  since=$(printf '%s' "$body" | sed -n 's/.*"opened_at":"\([^"]*\)".*/\1/p')
+  for_list=$(printf '%s' "$body" | sed -n 's/.*"for":\[\([^]]*\)\].*/\1/p' | tr -d '"')
+  reason=$(printf '%s' "$body" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')
+  if since_s=$(date -d "$since" +%s 2>/dev/null); then
+    age=$(( $(date +%s) - since_s ))
+    echo "  window       open for: ${for_list:-?} (${age} s) — ${reason:-no reason}"
+  else
+    echo "  window       open for: ${for_list:-?} (opened ${since:-?}) — ${reason:-no reason}"
+  fi
+}
+
 ########################################
 # status
 ########################################
@@ -201,6 +274,7 @@ cmd_status() {
   echo "  art (8120)   $(http_probe "$ART_URL")  $(curl -s -m 3 "$ART_URL/health" 2>/dev/null | head -c 120)"
   echo "  bench (8121) $(http_probe "$BENCH_URL")  $(curl -s -m 3 "$BENCH_URL/health" 2>/dev/null | head -c 120)"
   echo "  maintenance  $(jarvis-watchdog maintain status 2>/dev/null)"
+  window_state_line
   local hf="$REPO/notes/brain-handoff.md"
   if [[ -f "$hf" ]]; then
     local age=$(( $(date +%s) - $(stat -c %Y "$hf") ))
@@ -216,9 +290,10 @@ cmd_status() {
 # out
 ########################################
 cmd_out() {
-  local maintain="$MAINTAIN_DEFAULT" jobs="" reason="photo work" job="" force=0 bump="$SWAP_PRIORITY_DEFAULT"
+  local maintain="$MAINTAIN_DEFAULT" forcaps="" jobs="" reason="GPU capability work" job="" force=0 bump="$SWAP_PRIORITY_DEFAULT"
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --for) forcaps="$2"; shift 2 ;;
       --maintain) maintain="$2"; shift 2 ;;
       --jobs) jobs="$2"; shift 2 ;;
       --reason) reason="$2"; shift 2 ;;
@@ -230,12 +305,15 @@ cmd_out() {
     esac
   done
 
-  log "=== swap OUT (maintain=${maintain} jobs=${jobs:-none} reason=${reason}) ==="
+  log "=== swap OUT (for=${forcaps:-none} maintain=${maintain} jobs=${jobs:-none} reason=${reason}) ==="
 
   # Round guard: this must run BETWEEN brain rounds, never under one. When
-  # the worker dispatches the swap job it is the only running job; a manual
-  # run (none running) needs --force because it kills the brain out from
-  # under anyone using it.
+  # a swap job is dispatched as a round it is the only running job; a
+  # manual run (none running) — or resourced's automated open — needs
+  # --force because it kills the brain out from under anyone using it.
+  # --force only covers the "no round running" case: with ANY round in
+  # flight and no matching --job, the answer is always no (invariant 1 —
+  # the brain never stops itself mid-round, not even on automation's say-so).
   # jarvis-jobs list prints "<status>  <id>  <text>" lines plus a "# N jobs:"
   # footer — take only real running lines, ids in column 2.
   local running
@@ -248,8 +326,9 @@ cmd_out() {
     notify "swap OUT aborted: $n rounds running (see $LOG)"
     return 1
   fi
-  if [[ "$n" -eq 1 && -n "$job" && "$running" != "$job" ]]; then
-    log "ABORT: running job is ${running}, not this swap job (${job})"
+  if [[ "$n" -eq 1 && ( -z "$job" || "$running" != "$job" ) ]]; then
+    log "ABORT: round ${running} is in flight and this is not it (job=${job:-none}) — --force does not bypass a running round"
+    notify "swap OUT aborted: round ${running} is in flight (see $LOG)"
     return 1
   fi
   if [[ "$n" -eq 0 && "$force" -ne 1 ]]; then
@@ -268,16 +347,23 @@ cmd_out() {
     fi
   fi
 
+  # Record the window EARLY, before the long steps below (VRAM drain and
+  # the art model load can take minutes): a concurrent resourced tick must
+  # see the window as open while the swap is in flight, or it would try to
+  # open a second one. The marker is kept on every failure path — the
+  # window really is half-open then; only a successful `in` clears it.
+  window_state_write "$forcaps" "$reason"
+
   # 1. Open the failsafe BEFORE touching the brain: while the window is
   #    unexpired the watchdog will not restart the brain mid-swap, and at
   #    the deadline it re-arms the brain no matter what died below.
   if [[ "$DRY_RUN" == 0 ]]; then
-    jarvis-watchdog maintain "$maintain" "photo swap window: $reason" || {
+    jarvis-watchdog maintain "$maintain" "capability swap window: $reason" || {
       log "ERROR: could not open the watchdog maintenance window — aborting before touching the brain"
       return 1
     }
   else
-    log "[DRY-RUN] would run: jarvis-watchdog maintain $maintain \"photo swap window: $reason\""
+    log "[DRY-RUN] would run: jarvis-watchdog maintain $maintain \"capability swap window: $reason\""
   fi
 
   # 2. Unload the brain (the docker container serving 11434).
@@ -308,14 +394,16 @@ cmd_out() {
   wait_art_loaded || return 1
   wait_health "$BENCH_URL" "bench" 120 || return 1
 
-  # 5. Flip the queued photo jobs to the iGPU driver AND push them to the
-  #    front of their band. Photo jobs run as code (the jarvis-photo
-  #    executor — no model round), so the driver label is vestigial for
-  #    them; the flip exists for band priority and for the swap bracket's
-  #    own jobs. The priority bump also keeps unrelated jobs (e.g. sonnet
-  #    VRAM sweeps) out of the window: while the brain is down, jarvis-jobs
-  #    next skips local jobs, so the only things that run are the bumped
-  #    photo jobs and whatever already outran them.
+  # 5. Flip the queued jobs to the iGPU driver AND push them to the front
+  #    of their band. Jobs run as code when tagged (e.g. photo jobs — the
+  #    jarvis-photo executor, no model round), so the driver label is
+  #    vestigial for them; the flip exists for band priority and for the
+  #    swap bracket's own jobs. The priority bump also keeps unrelated jobs
+  #    (e.g. sonnet VRAM sweeps) out of the window: while the brain is
+  #    down, jarvis-jobs next skips local jobs, so the only things that run
+  #    are the bumped jobs and whatever already outran them. resourced's
+  #    automated windows pass no --jobs: photo-tagged jobs already bypass
+  #    the engine gate in jarvis-jobs next.
   local flipped="" id st
   IFS=',' read -ra jarr <<< "${jobs// /}"
   for id in "${jarr[@]}"; do
@@ -343,7 +431,7 @@ cmd_out() {
   # 6. Tell the house.
   local until
   until=$(jarvis-watchdog maintain status 2>/dev/null | sed -n 's/maintenance active: brain restarts skipped until \([^ (]*\).*/\1/p')
-  notify "brain swap OUT: brain paused for photo work ($reason). Photos: art+bench on the 4090, photo jobs run as code (jarvis-photo — no model round), window until ${until:-?}. I pick up from notes/brain-handoff.md when I am back. Flipped: ${flipped:-none}."
+  notify "brain swap OUT: brain paused for GPU capability work ($reason; window serves ${forcaps:-?}). art+bench on the 4090; capability jobs run as code (no model round), window until ${until:-?}. I pick up from notes/brain-handoff.md when I am back. Flipped: ${flipped:-none}."
   log "=== swap OUT complete ==="
   return 0
 }
@@ -364,9 +452,16 @@ cmd_in() {
   log "=== swap IN (reason=${reason:-none}) ==="
 
   # Idempotent: if the brain is already serving (the watchdog re-armed it at
-  # the deadline, or a round started it), just close the window.
+  # the deadline, or a round started it), just close the window. Closing it
+  # matters even with the brain up: a live maintenance window would keep the
+  # watchdog from restarting the brain if it died before the deadline.
   if brain_up; then
     log "brain already serving — only closing the maintenance window"
+    if [[ "$DRY_RUN" == 0 ]]; then
+      jarvis-watchdog maintain off || log "WARNING: 'jarvis-watchdog maintain off' failed"
+    else
+      log "[DRY-RUN] would run: jarvis-watchdog maintain off"
+    fi
   else
     # 1. Close the failsafe first: from here on the watchdog may restart the
     #    brain on its own if our own start below goes wrong.
@@ -410,7 +505,12 @@ cmd_in() {
     }
   fi
 
-  notify "brain swap IN: brain is back on :11434, photo window closed. ${reason:+($reason)}"
+  # The window is closed: drop the marker (resourced's State() reads it).
+  # Reached only on success — the failure paths above return before this,
+  # leaving the marker in place for a retry.
+  window_state_clear
+
+  notify "brain swap IN: brain is back on :11434, capability window closed. ${reason:+($reason)}"
   log "=== swap IN complete ==="
   return 0
 }

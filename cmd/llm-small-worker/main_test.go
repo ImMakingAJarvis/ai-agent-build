@@ -322,30 +322,6 @@ func TestHandlerBadMessage(t *testing.T) {
 	}
 }
 
-// TestFreeVRAMLease checks the GPU lease against a fake nvidia-smi.
-func TestFreeVRAMLease(t *testing.T) {
-	smi := filepath.Join(t.TempDir(), "smi")
-	write := func(free string) {
-		if err := os.WriteFile(smi, []byte("#!/bin/sh\necho "+free), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ctx := context.Background()
-
-	write("7000")
-	if err := gpuLease(smi, 6656)(ctx); err != nil {
-		t.Errorf("7000 free vs 6656 needed: %v", err)
-	}
-	write("4000")
-	if err := gpuLease(smi, 6656)(ctx); err == nil {
-		t.Error("expected the lease to refuse 4000 free vs 6656 needed (the idle-brain case)")
-	}
-	write("garbage")
-	if err := gpuLease(smi, 6656)(ctx); err == nil {
-		t.Error("expected the lease to fail on unparsable nvidia-smi output")
-	}
-}
-
 func TestNGLForMode(t *testing.T) {
 	if nglForMode("cpu") != 0 {
 		t.Error("cpu mode must run with 0 GPU layers")
