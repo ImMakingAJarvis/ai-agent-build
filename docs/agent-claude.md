@@ -182,6 +182,29 @@ It can also be driven as a CLI
 (`python3 scripts/memory_service.py --search "..." | --stats | --reindex`).
 If the service is down, run `sudo systemctl restart jarvis-memory`.
 
+## Secrets — write-only, for keys Nathan gives the agent
+
+Nathan stores secrets (API keys, tokens, passwords) in the dashboard's
+**Secrets** page (`/secrets` on :8080, linked from the dashboard shell). It
+is write-only by design: he can add and remove a secret and see its name,
+size and update time, but no endpoint — dashboard or otherwise — returns
+the value. To change a secret he removes it and re-adds it under the same
+name.
+
+Storage is one file per secret under `~/.local/share/jarvis/secrets/`
+(dir 0700, files 0600, atomic writes; Go store in `internal/secrets`).
+The dashboard container and this host both see that directory.
+
+The agent reads them with the local CLI (values from stdin, never argv):
+
+    jarvis-secrets list                 # names only
+    echo "the-value" | jarvis-secrets add some-key
+    jarvis-secrets get some-key         # value to stdout
+    jarvis-secrets rm some-key
+
+`get` is the only read path and it is local to this machine — do not wire
+it into anything that runs as another user or exposes a port.
+
 ## Keep notes — things done, the system, what Nathan asked
 
 Besides the per-run conversation notes (`notes/conversations/agent-<date>.md`),
