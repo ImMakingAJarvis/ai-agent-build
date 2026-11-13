@@ -240,31 +240,55 @@ close-of-the-old-connection SIGSEGV'd the switchboard. `Reconnect` and
 
 ## The game watchdog (streams and GPU leases)
 
-A game stream (Sunshine or Steam Remote Play) wants the whole 4090.
-Plan §3.6 rule 2: **the game watchdog wins — when a stream is active,
-revoke all GPU leases** (capability workers drain / unload). The rule is
-GPU-only: a game does not compete for the box's RAM, so CPU and iGPU
-leases are never touched. The stream is detected by
-`internal/streamwatcher` (Sunshine over /proc or its API, Steam over
-/proc, NVENC encoder utilization via `nvidia-smi` as the fallback that
-works from any host service). Three components react to it:
+A running game wants the whole 4090. Plan §3.6 rule 2: **the game
+watchdog wins — while a game is active, revoke all GPU leases**
+(capability workers drain / unload) and free the brain's VRAM. The rule
+is GPU-only: a game does not compete for the box's RAM, so CPU and iGPU
+leases are never touched.
 
-- **The worker** (the old, brain-side half, unchanged): its own
-  streamwatcher stops the brain engine on stream start and starts it on
-  stream end. The task-runner's game-pause gate still pauses/resumes
-  `jobs.gpu` (the brain jobs' queue).
-- **resourced** (EVB-29, the capability-worker half): it runs its own
-  streamwatcher. On a stream start it (1) turns on the ledger's GPU
-  hold — no new GPU lease may be granted while the stream's own VRAM is
-  not in the ledger's measured remainder yet — (2) revokes every
-  capability worker's GPU lease, granted *and* queued (the brain's
-  standing lease is exempt: a working brain is never evicted), each as a
-  `lease.released` event, and (3) closes an open swap window
-  (`window.closed`) so the brain comes back *before* the game gets its
-  VRAM. On a stream end the hold clears and the queued GPU leases grant
-  again. `stream.started` / `stream.stopped` events carry the stream
-  type and what the start did (`resourced_stream_active` gauge,
-  `stream_active` in `GET /state`).
+The streams are detected by `internal/streamwatcher` and split in two,
+because on this box they are different tenants:
+
+- **A game** — a Steam game running locally, or Steam Remote Play.
+  Detected by a /proc-cmdline scan for the install path
+  `…/steamapps/common/` (native and Proton both carry it in argv; every
+  Steam library root has the same marker; the Steam client and
+  SteamLinuxRuntime never match) plus Steam's Remote-Play connections.
+  `STEAM_GAME_EXCLUDES` (comma-separated substrings) opts a light game
+  out — any game counts by default.
+- **A desktop stream** — Sunshine, used here for plain desktop
+  streaming. NVENC only (a few hundred MB), it coexists with the brain
+  and the capability workers, so it takes **no GPU action at all**: no
+  lease revocation, no hold, no brain stop — it only logs, bumps the
+  gauge and publishes `stream.started` with `game:false`.
+
+The components that react to a game:
+
+- **resourced** (EVB-29, owns both halves — the brain stop and the
+  capability-worker side, because it runs on the host): on a game start
+  it (1) turns on the ledger's GPU hold — no new GPU lease may be
+  granted while the game's own VRAM is not in the ledger's measured
+  remainder yet — (2) revokes every capability worker's GPU lease,
+  granted *and* queued (each as a `lease.released` event), and (3) stops
+  the brain — `jarvis-swap out --game` opens a `for:["game"]` window:
+  brain out, **no photo services loaded** (the 4090's VRAM is the
+  game's), state file marked so the window controller's tick policy
+  (drained/max/brain-wait) never closes it. A 60 s keepalive retries the
+  brain stop past the round guard and re-arms the watchdog's 4 h
+  maintenance window, so a long session outlives the deadline. On a game
+  end it releases the window (`jarvis-swap in`, only when the window is
+  the game's — a photo window left open is the queue policy's) and the
+  hold clears, so the queued GPU leases grant again. `stream.started` /
+  `stream.stopped` events carry the stream type and what the start did
+  (`resourced_stream_active` gauge, `stream_active` in `GET /state`).
+  The worker's old brain-side half was dead as deployed (the container
+  has no docker socket and no view of the host's /proc) and was removed
+  with EVB-29's rework; while the brain is out, the worker's
+  `ollama.Healthcheck()` simply reports the local model unavailable and
+  jobs route to the API.
+- **The task-runner** (the brain-jobs side): its streamwatcher pauses
+  `jobs.gpu` (the brain jobs' queue) while a game is active and resumes
+  on game end; a desktop stream leaves the lane open.
 - **The revoked cap workers** (no code of their own — the task-26 drain
   does it): their `/state` poll (≤ 30 s) sees the lease gone, finishes
   the in-flight delivery, cancels the consumer and takes no new work —

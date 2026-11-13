@@ -227,11 +227,17 @@ func run(log *slog.Logger) error {
 	}
 	defer lw.Stop()
 
-	// Game watchdog for the queue lane (the worker container stops the
-	// engine to free VRAM; the task-runner pauses the GPU location queue,
-	// so GPU jobs wait in the lane while a game holds the GPU). The
-	// watcher always runs — Sunshine/Steam are detected via /proc with
-	// NVENC utilization as a fallback; the endpoints are optional extras.
+	// Game watchdog for the queue lane: a GAME stream (a Steam game
+	// running on this host, locally or via Remote Play) pauses the GPU
+	// location queue — GPU jobs wait in the lane while the game holds
+	// the 4090. The brain stop itself is resourced's, not the
+	// task-runner's. A Sunshine stream on this box is plain desktop
+	// streaming (NVENC only, a few hundred MB) and coexists with the
+	// GPU work, so it pauses nothing. Pause/Resume are no-ops when the
+	// queue is not in the expected state, so the transitions can never
+	// wedge the lane. The watcher always runs — Steam games are
+	// detected via a /proc-cmdline scan, Sunshine over /proc or its API,
+	// NVENC utilization the fallback; the endpoints are optional extras.
 	streamCh := make(chan streamwatcher.StateChange, 1)
 	streamWatcher := streamwatcher.New(streamwatcher.Config{
 		SunshineEndpoint: os.Getenv("SUNSHINE_ENDPOINT"),
@@ -240,10 +246,13 @@ func run(log *slog.Logger) error {
 	streamWatcher.Start(streamCh)
 	go func() {
 		for change := range streamCh {
-			if change.Stream != streamwatcher.NoStream {
-				log.Info("stream started — pausing the GPU location queue", "stream", change.Stream)
+			switch {
+			case change.Stream.IsGame():
+				log.Info("game stream started — pausing the GPU location queue", "stream", change.Stream)
 				lw.Pause(queue.JobsGPUQueue)
-			} else {
+			case change.Stream != streamwatcher.NoStream:
+				log.Info("desktop stream started — the GPU location queue stays open (NVENC only)", "stream", change.Stream)
+			default:
 				log.Info("stream ended — resuming the GPU location queue")
 				lw.Resume(queue.JobsGPUQueue)
 			}

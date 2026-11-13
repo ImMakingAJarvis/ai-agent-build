@@ -27,16 +27,19 @@ import (
 
 // fakeSwap records the controller's swap actions and serves a state.
 type fakeSwap struct {
-	mu         sync.Mutex
-	open       bool
-	forCaps    []string
-	openedAt   time.Time
-	openCalls  int
-	closeCalls int
-	lastOpen   string // "caps | reason"
-	lastClose  string
-	failOpen   error
-	failClose  error
+	mu            sync.Mutex
+	open          bool
+	forCaps       []string
+	openedAt      time.Time
+	openCalls     int
+	closeCalls    int
+	openGameCalls int
+	lastOpen      string // "caps | reason"
+	lastClose     string
+	lastOpenGame  string
+	failOpen      error
+	failClose     error
+	failOpenGame  error
 }
 
 func (f *fakeSwap) Open(ctx context.Context, forCaps []string, reason string) error {
@@ -67,6 +70,20 @@ func (f *fakeSwap) Close(ctx context.Context, reason string) error {
 	return nil
 }
 
+func (f *fakeSwap) OpenGame(ctx context.Context, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.openGameCalls++
+	if f.failOpenGame != nil {
+		return f.failOpenGame
+	}
+	f.open = true
+	f.forCaps = []string{"game"}
+	f.openedAt = time.Now()
+	f.lastOpenGame = reason
+	return nil
+}
+
 func (f *fakeSwap) State() (bool, []string, time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -79,6 +96,26 @@ func (f *fakeSwap) backdate(d time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.openedAt = f.openedAt.Add(-d)
+}
+
+// openAsGame opens the fake window as if `jarvis-swap out --game` had
+// already run (the stream controller's marker).
+func (f *fakeSwap) openAsGame() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.open = true
+	f.forCaps = []string{"game"}
+	f.openedAt = time.Now()
+}
+
+// openAsPhoto opens the fake window as a queue-triggered photo window
+// (the state a tick would have left).
+func (f *fakeSwap) openAsPhoto() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.open = true
+	f.forCaps = []string{"image.generate"}
+	f.openedAt = time.Now()
 }
 
 // world is the tick's external facts: queue depths, the management
@@ -115,7 +152,7 @@ func (w *world) setUnacked(m map[string]int) {
 // catalog capability, EVB-30).
 func newTestWindowController(t *testing.T, swap *fakeSwap, w *world, pub Publisher) *windowController {
 	t.Helper()
-	return newWindowController(
+	wc := newWindowController(
 		resources.DefaultWindowConfig(),
 		swap,
 		[]string{"image.generate", "video.render"},
@@ -158,6 +195,10 @@ func newTestWindowController(t *testing.T, swap *fakeSwap, w *world, pub Publish
 		prometheus.NewRegistry(),
 		slog.New(slog.DiscardHandler),
 	)
+	// Deterministic steady-state probe: the production default probes the
+	// real engine (httpBrainUp); the tests decide the brain's fate.
+	wc.brainUp = func(ctx context.Context) bool { return true }
+	return wc
 }
 
 // lastRevoked returns the cap set of the most recent revoke call (nil
@@ -436,6 +477,141 @@ func TestWindowSwapFailuresRetry(t *testing.T) {
 	wc.tick(ctx)
 	if swap.open || swap.closeCalls != 2 {
 		t.Fatalf("close retry: open=%v calls=%d", swap.open, swap.closeCalls)
+	}
+}
+
+// TestWindowTickHoldsGameWindow: a window opened for the game
+// (for:["game"]) belongs to the stream controller — the tick's queue
+// policy (drained / max / brain wait) must not run against it, or a
+// drained or maxed-out decision would close the window under a running
+// game. The failsafe is the 4 h watchdog-maintenance deadline the
+// keepalive re-arms, not the tick.
+func TestWindowTickHoldsGameWindow(t *testing.T) {
+	swap := &fakeSwap{}
+	swap.openAsGame()
+	w := &world{depth: map[string]int{}} // fully drained
+	pub := &fakePub{}
+	wc := newTestWindowController(t, swap, w, pub)
+	ctx := context.Background()
+
+	swap.backdate(3 * time.Hour) // past max_window — the queue policy would close
+	wc.tick(ctx)
+	if !swap.open || swap.closeCalls != 0 || swap.openGameCalls != 0 {
+		t.Fatalf("game window: open=%v closes=%d openGame=%d, want untouched by the tick",
+			swap.open, swap.closeCalls, swap.openGameCalls)
+	}
+	st := wc.State()
+	if !st.Open || st.Reason != "held for the active game (the stream controller owns it)" {
+		t.Fatalf("window state = %+v, want held for the game", st)
+	}
+	if got := pub.keys(); len(got) != 0 {
+		t.Fatalf("events = %v, want none (no close, no reopen)", got)
+	}
+}
+
+// TestAcquireForGame: the game watchdog's open path.
+//   - window closed, brain up → jarvis-swap out --game (window.opened)
+//   - steady state (open for the game, brain down) → a no-op, no event
+//   - a photo window open → converted in place to the game window
+//   - a failed swap (the round guard) → error, no window.opened
+func TestAcquireForGame(t *testing.T) {
+	ctx := context.Background()
+
+	swap := &fakeSwap{}
+	pub := &fakePub{}
+	wc := newTestWindowController(t, swap, &world{}, pub)
+	if err := wc.AcquireForGame(ctx, "steam game active (steam-game)"); err != nil {
+		t.Fatalf("AcquireForGame: %v", err)
+	}
+	if swap.openGameCalls != 1 || !swap.open || len(swap.forCaps) != 1 || swap.forCaps[0] != "game" {
+		t.Fatalf("acquire: openGame=%d open=%v for=%v, want one open --game for [game]",
+			swap.openGameCalls, swap.open, swap.forCaps)
+	}
+	if swap.lastOpenGame != "steam game active (steam-game)" {
+		t.Fatalf("open reason = %q", swap.lastOpenGame)
+	}
+	if got := pub.keys(); !lastIs(got, "window.opened") {
+		t.Fatalf("events = %v, want last window.opened", got)
+	}
+
+	// Steady state: open for the game, brain down → no new call, no event.
+	wc.brainUp = func(context.Context) bool { return false }
+	if err := wc.AcquireForGame(ctx, "steam game active (keepalive)"); err != nil {
+		t.Fatalf("steady state: %v", err)
+	}
+	if swap.openGameCalls != 1 || len(pub.keys()) != 1 {
+		t.Fatalf("steady state: openGame=%d events=%v, want no new call or event", swap.openGameCalls, pub.keys())
+	}
+
+	// A photo window open → converted to the game window.
+	swap2 := &fakeSwap{}
+	swap2.openAsPhoto()
+	pub2 := &fakePub{}
+	wc2 := newTestWindowController(t, swap2, &world{}, pub2)
+	if err := wc2.AcquireForGame(ctx, "steam game active (steam-game)"); err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if swap2.openGameCalls != 1 || !swap2.open || len(swap2.forCaps) != 1 || swap2.forCaps[0] != "game" {
+		t.Fatalf("convert: openGame=%d open=%v for=%v, want the game window",
+			swap2.openGameCalls, swap2.open, swap2.forCaps)
+	}
+
+	// A failed swap: the error comes back, nothing is published.
+	swap3 := &fakeSwap{failOpenGame: errors.New("round running")}
+	pub3 := &fakePub{}
+	wc3 := newTestWindowController(t, swap3, &world{}, pub3)
+	if err := wc3.AcquireForGame(ctx, "steam game active (steam-game)"); err == nil {
+		t.Fatal("a failed jarvis-swap must return its error")
+	}
+	if got := pub3.keys(); len(got) != 0 {
+		t.Fatalf("a failed acquire must not publish: %v", got)
+	}
+}
+
+// TestReleaseFromGame: the game-end path.
+//   - window closed → a no-op
+//   - open but a PHOTO window → left for the queue policy (no close, no event)
+//   - open for the game → jarvis-swap in, with the window.closed event
+func TestReleaseFromGame(t *testing.T) {
+	ctx := context.Background()
+
+	swap := &fakeSwap{}
+	pub := &fakePub{}
+	wc := newTestWindowController(t, swap, &world{}, pub)
+	if err := wc.ReleaseFromGame(ctx, "steam game ended"); err != nil {
+		t.Fatalf("closed: %v", err)
+	}
+	if swap.closeCalls != 0 || len(pub.keys()) != 0 {
+		t.Fatalf("closed: closes=%d events=%v, want a no-op", swap.closeCalls, pub.keys())
+	}
+
+	// Open but not the game's → left alone.
+	swap2 := &fakeSwap{}
+	swap2.openAsPhoto()
+	pub2 := &fakePub{}
+	wc2 := newTestWindowController(t, swap2, &world{}, pub2)
+	if err := wc2.ReleaseFromGame(ctx, "steam game ended"); err != nil {
+		t.Fatalf("photo window: %v", err)
+	}
+	if !swap2.open || swap2.closeCalls != 0 || len(pub2.keys()) != 0 {
+		t.Fatalf("photo window: open=%v closes=%d events=%v, want left for the queue policy",
+			swap2.open, swap2.closeCalls, pub2.keys())
+	}
+
+	// Open for the game → closed.
+	swap3 := &fakeSwap{}
+	swap3.openAsGame()
+	pub3 := &fakePub{}
+	wc3 := newTestWindowController(t, swap3, &world{}, pub3)
+	if err := wc3.ReleaseFromGame(ctx, "steam game ended"); err != nil {
+		t.Fatalf("game window: %v", err)
+	}
+	if swap3.open || swap3.closeCalls != 1 || swap3.lastClose != "steam game ended" {
+		t.Fatalf("game window: open=%v closes=%d last=%q, want closed once",
+			swap3.open, swap3.closeCalls, swap3.lastClose)
+	}
+	if got := pub3.keys(); !lastIs(got, "window.closed") {
+		t.Fatalf("events = %v, want last window.closed", got)
 	}
 }
 
