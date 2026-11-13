@@ -170,6 +170,7 @@
 - 2026-11-10T11:22Z [plan-glm53-flash-vram-sweep-p-1793859678-1] GLM 5.3 flash model pulled (UD-IQ2_XXS) + provenance (PR #223)
 - 2026-11-10T12:51Z [plan-glm53-flash-vram-sweep-p-1793859678-4] GLM 5.3 flash sweep pt 3/6 (200 MB): engine loads but serves nothing — KDA autotune needs 256 MiB (PR #223)
 - 2026-11-10T13:39Z [chat-1794313175-cda3] iGPU worker down fixed: dashboard+chat containers kept stale host.docker.internal:11435 URLs from before the iGPU container move (9734d81); recreated both (machine panel back up) and jarvis-stack-status now flags engine-URL env drift vs compose (PR #224)
+- 2026-11-11T04:43Z [moe-bench-250] moe-bench-250: Flash-Next VRAM sweep 4/4 at 250MB free (PR #237)
 - 2026-11-11T00:56Z [plan-plan-event-driven-brain-1794016330-24] bench.run capability worker (EVB-24, Phase 3 last worker): llama-bench + live bench as thin cap-worker handler, scores in Data on the flow queue + report artifacts under OutDir; Phase 3 gate all three pass on the box while the brain ran (PR #231)
 - 2026-11-11T02:45Z [plan-plan-event-driven-brain-1794016330-25] resourced: VRAM/RAM ledger + lease API (EVB-25) (PR #233)
 - 2026-11-11T03:56Z [chat-1794362317-f034] Scheduled-work cadence queues (hourly/daily/weekly/monthly on the events exchange) + sched-tick cron publisher + sched-audit weekly brain notes-audit subscriber (PR #235)
