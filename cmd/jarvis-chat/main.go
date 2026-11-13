@@ -48,6 +48,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/photomind"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
 
@@ -335,6 +336,44 @@ func main() {
 		log.Fatal("jarvis-chat: no bots could be started")
 	}
 
+	// Capability replies (EVB-32): submit_capability Results land on the
+	// Hermes-owned flow queue; this durable consumer turns each one into a
+	// Discord reply on the primary bot (the same notifier the switchboard
+	// uses). Best-effort: no broker = no replies, the chat itself is
+	// unaffected. The queue is durable, so a Result that arrives while the
+	// daemon is down is answered on the next start.
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	go func() {
+		replyBot := bots[0]
+		for {
+			conn, err := queue.NewConn()
+			if err != nil {
+				log.Printf("jarvis-chat: capability replies: broker: %v (retrying in 30s)", err)
+				select {
+				case <-watchCtx.Done():
+					return
+				case <-time.After(30 * time.Second):
+				}
+				continue
+			}
+			err = hermes.WatchCapResults(watchCtx, conn, func(r queue.Result) {
+				nctx, ncancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer ncancel()
+				if err := replyBot.Notify(nctx, hermes.FormatCapResult(r)); err != nil {
+					log.Printf("jarvis-chat: capability reply: %v", err)
+				} else {
+					log.Printf("jarvis-chat: capability reply sent (%s, corr %s)", r.Capability, r.CorrelationID)
+				}
+			}, log.Printf)
+			conn.Close()
+			if watchCtx.Err() != nil {
+				return
+			}
+			log.Printf("jarvis-chat: capability replies: consumer stopped: %v (reconnecting in 5s)", err)
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
 	// Open all gateway connections.
 	for _, d := range bots {
 		if err := d.Listen(); err != nil {
@@ -353,6 +392,7 @@ func main() {
 	}
 
 	// Cleanup.
+	cancelWatch()
 	for _, d := range bots {
 		d.Close()
 	}
