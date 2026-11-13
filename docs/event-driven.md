@@ -25,7 +25,7 @@ temporary auto-delete ones the CLI creates to `tail` an exchange.
 | `flow.<name>` | event-driven handoff between models across rounds (The pattern below); created on demand, one per flow | the round that created it — read with `jarvis-mq peek` / `consume` | — | `jarvis.dlx` |
 | `cap.<capability>` | request channel for a capability — v2 messages, e.g. `cap.image.generate`; created on demand; the result goes to the request's `reply_to`, not here | the capability's worker (capworker SDK; `cap-echo` consumes `cap.echo`, the Phase 2 gate's test worker) | 10 | `jarvis.dlx` |
 | `dead` | dead letters from `flow.*`/`cap.*`: rejected (nack without requeue after the `MaxAttempts` budget) or expired (TTL), each carrying an `x-death` header (reason, queue, count, time) | nobody consumes it — the dashboard's Dead Letters section reads it and offers requeue / drop | — | — |
-| `events` (topic) | lifecycle events: `job.<capability>.<started\|progress\|done\|failed>`, `agent.<job-id>.<yielded\|woken\|resumed>`, `window.<opened\|closed>`, `lease.<granted\|released\|denied>` | publishers: worker (the jobs it runs), task-runner (`job.run_task.*`), agent-run (`agent.*`); declared by `definitions.json` + `EventPublisher` | — | — |
+| `events` (topic) | lifecycle events: `job.<capability>.<started\|progress\|done\|failed>`, `agent.<job-id>.<yielded\|woken\|resumed>`, `window.<opened\|closed>`, `lease.<granted\|released\|denied>`, `stream.<started\|stopped>` | publishers: worker (the jobs it runs), task-runner (`job.run_task.*`), agent-run (`agent.*`), resourced (`window.*`, `lease.*`, `stream.*`); declared by `definitions.json` + `EventPublisher` | — | — |
 | `jarvis.dlx` (fanout) | the dead-letter exchange — fanout, so every dead letter lands on its single bound queue, `dead` | `EnsureDLX` (called from every `flow.*`/`cap.*` declare and dead-letter operation) | — | — |
 
 Notes:
@@ -237,6 +237,53 @@ run (2026-11-09) caught a real bug: while the broker was down,
 failed Dial left the connection nil, and the second attempt's
 close-of-the-old-connection SIGSEGV'd the switchboard. `Reconnect` and
 `Close` now tolerate a nil conn/channel.
+
+## The game watchdog (streams and GPU leases)
+
+A game stream (Sunshine or Steam Remote Play) wants the whole 4090.
+Plan §3.6 rule 2: **the game watchdog wins — when a stream is active,
+revoke all GPU leases** (capability workers drain / unload). The rule is
+GPU-only: a game does not compete for the box's RAM, so CPU and iGPU
+leases are never touched. The stream is detected by
+`internal/streamwatcher` (Sunshine over /proc or its API, Steam over
+/proc, NVENC encoder utilization via `nvidia-smi` as the fallback that
+works from any host service). Three components react to it:
+
+- **The worker** (the old, brain-side half, unchanged): its own
+  streamwatcher stops the brain engine on stream start and starts it on
+  stream end. The task-runner's game-pause gate still pauses/resumes
+  `jobs.gpu` (the brain jobs' queue).
+- **resourced** (EVB-29, the capability-worker half): it runs its own
+  streamwatcher. On a stream start it (1) turns on the ledger's GPU
+  hold — no new GPU lease may be granted while the stream's own VRAM is
+  not in the ledger's measured remainder yet — (2) revokes every
+  capability worker's GPU lease, granted *and* queued (the brain's
+  standing lease is exempt: a working brain is never evicted), each as a
+  `lease.released` event, and (3) closes an open swap window
+  (`window.closed`) so the brain comes back *before* the game gets its
+  VRAM. On a stream end the hold clears and the queued GPU leases grant
+  again. `stream.started` / `stream.stopped` events carry the stream
+  type and what the start did (`resourced_stream_active` gauge,
+  `stream_active` in `GET /state`).
+- **The revoked cap workers** (no code of their own — the task-26 drain
+  does it): their `/state` poll (≤ 30 s) sees the lease gone, finishes
+  the in-flight delivery, cancels the consumer and takes no new work —
+  no half-written artifacts, no lost messages (invariant 9). Their
+  models unload on the idle timer, so the game's VRAM lands within a
+  minute or two of the last in-flight job.
+
+**Defense in depth — the art service's VRAM gate.** Photo generation
+(`scripts/art_service.py`) blocks a new `/generate` until
+`ART_MIN_FREE_MB` (default 12 GB) of the 4090 is free, waiting at most
+`ART_VRAM_WAIT_S` (default 90 s, then 503). It does not know about
+streams or leases — it only measures what is free — so it is the catch
+for the one gap the ledger can have: between the stream starting and the
+ledger's next measured refresh (≤ 30 s) a generation could still be
+mid-flight or newly started into the headroom the game is about to take.
+The gate keeps it from *starting* into that headroom and lets the
+in-flight one finish. It is deliberately left as-is (not replaced by
+lease logic): it protects the game, the window and a plain full card the
+same way, and it costs nothing when VRAM is free.
 
 ## CLI
 

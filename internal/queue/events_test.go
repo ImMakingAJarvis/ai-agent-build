@@ -19,6 +19,7 @@ func TestEventRoutingKey(t *testing.T) {
 		{"agent", AgentEvent("plan-x-1", "resumed", nil), "agent.plan-x-1.resumed"},
 		{"window", WindowEvent("opened", nil), "window.opened"},
 		{"lease", LeaseEvent("denied", nil), "lease.denied"},
+		{"stream", StreamEvent("started", nil), "stream.started"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -41,6 +42,8 @@ func TestParseEventRoutingKey(t *testing.T) {
 		{"agent.plan-x-1.resumed", "agent", "plan-x-1", "resumed", false},
 		{"window.opened", "window", "", "opened", false},
 		{"lease.denied", "lease", "", "denied", false},
+		{"stream.started", "stream", "", "started", false},
+		{"stream.stopped", "stream", "", "stopped", false},
 		{"job.photo", "", "", "", true},
 		{"not-dotted", "", "", "", true},
 		{"a.b.c.d", "", "", "", true},
