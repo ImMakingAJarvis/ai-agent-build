@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 )
 
 // fakeModel replays scripted replies, one per Chat call.
@@ -199,5 +201,58 @@ func TestRunTurnBudgetExhaustsStep(t *testing.T) {
 	}
 	if !strings.Contains(res.Summary, "step never completed") {
 		t.Fatalf("summary = %q", res.Summary)
+	}
+}
+
+// TestRunYield covers the capability park (EVB-32): a rabbitmq op=yield on a
+// job-backed run ends the whole run as YIELDED (OK, parked) — there is no
+// finish turn; the switchboard's wake is the continuation.
+func TestRunYield(t *testing.T) {
+	dir := t.TempDir()
+	// A real job in an isolated store, so the yield op succeeds end to end.
+	data := t.TempDir()
+	t.Setenv("JARVIS_DATA_DIR", data)
+	st, err := agentjob.Open(data)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	jobID := "evb32-run-yield"
+	if _, err := st.Ingest(agentjob.Spec{ID: jobID, Title: "evb32 yield"}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if _, err := st.Claim(jobID, "r1", "test"); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := st.SetStatus(jobID, agentjob.State{Status: agentjob.Running, RanWith: "test", Round: "r1"}); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	t.Setenv("JARVIS_JOB_ID", jobID)
+
+	replies := []string{
+		`{"steps": ["submit the work and wait for it"], "done_criteria": "the result is consumed"}`,
+		actionOf("rabbitmq", map[string]any{"op": "yield", "wait-on": "c1", "note": "consume the result and finish"}),
+	}
+	fm := &fakeModel{replies: replies}
+	a := New(fm, testTools(t, dir))
+	a.Log = nil
+	res, err := a.Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Yielded || !res.OK {
+		t.Fatalf("res = %+v, want Yielded and OK", res)
+	}
+	if !strings.Contains(res.Summary, "consume the result and finish") {
+		t.Fatalf("summary = %q", res.Summary)
+	}
+	if fm.calls != 2 {
+		t.Fatalf("model calls = %d, want 2 (plan + yield)", fm.calls)
+	}
+	j, err := st.Get(jobID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if j.Status != agentjob.Waiting {
+		t.Fatalf("job status = %q, want waiting", j.Status)
 	}
 }

@@ -53,6 +53,17 @@ func argStr(args json.RawMessage, key, def string) string {
 	return def
 }
 
+// argRaw returns args[key] as its decoded JSON value, or ok=false when the
+// key is absent (or the args are not an object).
+func argRaw(args json.RawMessage, key string) (any, bool) {
+	var m map[string]any
+	if err := json.Unmarshal(args, &m); err != nil {
+		return nil, false
+	}
+	v, ok := m[key]
+	return v, ok
+}
+
 // argInt returns args[key] as an int, or fallback when absent or not numeric.
 func argInt(args json.RawMessage, key string, fallback int) int {
 	var m map[string]any
