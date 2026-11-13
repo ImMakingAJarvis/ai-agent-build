@@ -118,3 +118,6 @@
 
 - 2026-11-10T09:19Z Nathan queued the GLM 5.3 flash VRAM cache sweep plan (dashboard upload 2026-11-10) — GLM joins the MoE benchmark list with its own Plane project GLM and 6 cache points
 - 2026-11-11T03:56Z Nathan: add RabbitMQ cadence queues (hourly/daily/weekly/monthly) + a Dockerized cron publisher + a weekly subscriber that has the brain audit its notes/files and report still-needed / could-change / should-remove (chat-1794362317-f034, PR #235)
+- 2026-11-10T22:24Z Nathan wants Claude Fable (claude-fable-5-1) available as a planner but strictly opt-in: plan work only, only when he explicitly picks it as the planner — never a default or fallback for the local planner
+- 2026-11-10T21:05Z audio.transcribe clip source (EVB-22): 'use a downloaded clip for now' — real UniFi camera-clip E2E pending a Protect API token / NAS share
+- 2026-11-12T12:17Z Nathan (10-27): make voice sound natural/conversational, not a bad GLaDOS imitation; 11-12 asked via Discord (timed out, away until ~11-19): give agent SSH to HA box / fix Piper add-on options himself / leave queued — he chooses the Piper access path

@@ -22,13 +22,14 @@
 // One binary, two placements (LMS_MODE), same model file in both:
 //
 //	gpu  location gpu — consumer priority 10; the 7B fully on the 4090's
-//	     SPARE VRAM (measured ~5.4 GB, bench doc). The Lease checks
-//	     nvidia-smi free VRAM before every consume session and requires
-//	     6.5 GB free — the plan's co-scheduling scenario (the brain out
-//	     for a 12 GB image job leaves ~10 GB). While the brain's
-//	     conversation has eaten the spare, the worker refuses the session
-//	     and the broker delivers the request to the cpu placement instead
-//	     (consumer priority 1). A refusal is a routing decision, never an
+//	     SPARE VRAM (measured ~5.4 GB, bench doc). A resourced lease
+//	     (plan §3.6) gates every consume session on the 5.5 GB catalog
+//	     footprint — the plan's co-scheduling scenario (the brain out
+//	     for a 12 GB image job leaves ~10 GB free in the ledger). While
+//	     the brain's conversation has eaten the spare (its standing
+//	     lease), the worker holds no lease, does not consume, and the
+//	     broker delivers the request to the cpu placement instead
+//	     (consumer priority 1). A denial is a routing decision, never an
 //	     OOM: the coprocess is only started after the lease granted.
 //	cpu  location cpu — consumer priority 1; the same 7B fully in host
 //	     RAM (--n-gpu-layers 0; measured residual CUDA-context VRAM ~630
@@ -67,8 +68,11 @@
 //	LMS_PORT                the coprocess port (in-container). Default 11520.
 //	LMS_CTX                 --ctx-size. Default 8192.
 //	LMS_THREADS             --threads (0 = llama.cpp's default).
-//	LMS_MIN_FREE_MB         GPU lease: minimum free VRAM (MiB). Default 6656.
-//	LMS_SMI                 nvidia-smi binary for the lease. Default nvidia-smi.
+//	RESOURCED_URL           the resourced lease broker (plan §3.6); the
+//	                          worker gates its consuming on a lease from it.
+//	                          Default: off (un-gated, the pre-lease behavior).
+//	CAPABILITIES_FILE       the capability catalog the lease's memory spec
+//	                          comes from. Needed when RESOURCED_URL is set.
 //	LMS_MAX_TOKENS          completion budget. Default 1024.
 //	LMS_TEMPERATURE         sampling temperature. Default 0.2.
 //	LMS_OUT_DIR             artifact root for requests without an OutDir.
@@ -83,7 +87,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -167,38 +170,6 @@ func connectWithRetry(ctx context.Context) (*queue.Conn, error) {
 		if backoff < 30*time.Second {
 			backoff *= 2
 		}
-	}
-}
-
-// freeVRAMMB reads the first GPU's free memory (MiB) from nvidia-smi.
-func freeVRAMMB(smi string) (int, error) {
-	out, err := exec.Command(smi, "--query-gpu=memory.free", "--format=csv,noheader,nounits").Output()
-	if err != nil {
-		return 0, fmt.Errorf("nvidia-smi: %w", err)
-	}
-	line := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
-	n, err := strconv.Atoi(line)
-	if err != nil {
-		return 0, fmt.Errorf("nvidia-smi free VRAM %q: %w", line, err)
-	}
-	return n, nil
-}
-
-// gpuLease is the GPU placement's Lease: it grants only when the 4090 has
-// at least minFree MiB free — i.e. only in the co-scheduling window the
-// plan describes (brain out for a 12 GB image job → ~10 GB free). When
-// it refuses, the SDK backs off and the message stays available for the
-// lower-priority CPU placement (consumer priority routing).
-func gpuLease(smi string, minFree int) func(context.Context) error {
-	return func(ctx context.Context) error {
-		free, err := freeVRAMMB(smi)
-		if err != nil {
-			return err
-		}
-		if free < minFree {
-			return fmt.Errorf("insufficient free VRAM: %d MiB free, %d MiB needed (brain in use?)", free, minFree)
-		}
-		return nil
 	}
 }
 
@@ -454,6 +425,18 @@ func main() {
 		Log:     log.Default(),
 	}
 
+	// Lease gating (plan §3.6): resourced decides whether this placement
+	// may consume — the gpu placement on free 4090 VRAM, the cpu
+	// placement on the shared RAM pool (the catalog footprints). No
+	// broker (RESOURCED_URL unset) or a catalog problem = un-gated, the
+	// pre-lease behavior.
+	leaseBroker, leaseSpec, lerr := capworker.LeaseFor(
+		os.Getenv("RESOURCED_URL"), os.Getenv("CAPABILITIES_FILE"),
+		capability, mode, fmt.Sprintf(workerName, mode))
+	if lerr != nil {
+		log.Printf("llm-small-worker: lease: %v (running un-gated)", lerr)
+	}
+
 	cfg := capworker.Config{
 		Cap:         capability,
 		Name:        fmt.Sprintf(workerName, mode),
@@ -461,6 +444,8 @@ func main() {
 		Location:    mode, // gpu → consumer priority 10, cpu → 1
 		Conn:        conn,
 		Events:      events,
+		LeaseBroker: leaseBroker,
+		LeaseSpec:   leaseSpec,
 		MetricsAddr: os.Getenv("LMS_METRICS_ADDR"),
 		IdleS:       300 * time.Second, // unload the model 5 min after the last request
 		Load:        srv.Start,
@@ -471,11 +456,6 @@ func main() {
 		},
 		OutDirBase: envOr("LMS_OUT_DIR", filepath.Join(os.Getenv("HOME"), ".local", "share", "jarvis", "artifacts")),
 		Log:        log.Default(),
-	}
-	if mode == "gpu" {
-		// ~5.4 GB measured footprint + headroom: the lease grants only
-		// in the plan's co-scheduling window (bench doc has the math).
-		cfg.Lease = gpuLease(envOr("LMS_SMI", "nvidia-smi"), envInt("LMS_MIN_FREE_MB", 6656))
 	}
 
 	if err := capworker.New(cfg).Run(ctx); err != nil && err != context.Canceled {

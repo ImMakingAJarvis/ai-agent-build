@@ -31,11 +31,18 @@
 //     §3.5). A capability that may run in several places runs one worker
 //     per placement; while the GPU worker is busy or has no lease, its
 //     messages fall to the cheaper placement.
-//   - a lease hook (plan §3.6): called before every consume session; an
-//     error means "not granted now" and the worker backs off instead of
-//     consuming (its messages stay on the queue for a lower-priority
-//     placement). The default stub assumes granted — the resourced
-//     broker integration lands in task 26.
+//   - a resourced lease (plan §3.6, lease.go): before every consume
+//     session the worker requests a lease from the resourced broker
+//     (LeaseBroker) — holder the worker identity, capability, device its
+//     location, memory the catalog's entry for the placement. No lease
+//     means it does not consume (its messages stay on the queue for a
+//     lower-priority placement — the fallback emerges from the consumer
+//     priorities, no router); a grant while it waits means it
+//     re-consumes; a lost lease (revocation) drains the in-flight
+//     delivery, then cancels the consumer. When resourced is unreachable
+//     the worker fails open to the pre-lease behavior (assumes granted,
+//     warning logged) and re-syncs on its poll tick. No broker
+//     (LeaseBroker nil) = un-gated.
 //   - idle unload: after IdleS without a request the worker calls Unload
 //     to free its resources (model weights, a GPU process) and calls
 //     Load again before the next request it has to handle.
@@ -101,17 +108,41 @@ type Config struct {
 	// Priority overrides the location-derived consumer priority; 0 =
 	// derive it from Location.
 	Priority int
-	// Lease acquires this worker's resource lease before it consumes
-	// (plan §3.6). It is called at the start of every consume session;
-	// an error means "not granted now" — the worker backs off and
-	// retries, and its messages stay on the queue for a lower-priority
-	// placement of the same capability (the resourced broker integration,
-	// which cancels the consumer on lease loss, lands in task 26). nil =
-	// the stub that assumes granted.
-	Lease func(ctx context.Context) error
+	// LeaseBroker gates this worker's consuming on a resourced lease
+	// (plan §3.6): the worker requests the spec's lease before every
+	// consume session and holds it while it consumes — released on idle
+	// unload (the resources are free again) and on shutdown. No lease
+	// means no consuming: the messages fall to a lower-priority
+	// placement of the same capability. A queued lease is re-checked on
+	// the poll interval; when it is granted the worker re-consumes. A
+	// lost lease (revoked by the window controller) drains the in-flight
+	// delivery, then cancels the consumer. When the broker is unreachable
+	// the worker fails open (assumes granted, warning logged) and
+	// re-syncs on the poll tick. nil = un-gated (the pre-lease behavior).
+	LeaseBroker LeaseBroker
+	// LeaseSpec is what the worker requests from the broker: holder (the
+	// worker identity), capability, device (its location) and the memory
+	// footprints — the capability catalog's entry for the placement
+	// (LeaseFor builds it). Used only when LeaseBroker is set.
+	LeaseSpec LeaseSpec
+	// LeasePollS is the lease state machine's poll interval: re-ask a
+	// denied lease, check a queued one for its grant, a held one for a
+	// revocation. 0 = default 30 s (minimum 1 s).
+	LeasePollS time.Duration
 	// IdleS is how long the worker may sit without a request before
 	// Unload is called to free its resources. 0 = never idle-unload.
 	IdleS time.Duration
+	// Measurer, when set, lets the SDK measure this worker's actual VRAM
+	// footprint (EVB-28): the used-MB delta around the first run and
+	// around every idle-reload Load, reported to the MeasureReporter.
+	// gpu workers get NewNvidiaSmiMeasurer by default in New when unset;
+	// nil (or a baseline read that fails) turns measurement off.
+	Measurer Measurer
+	// MeasureReporter receives the VRAM footprint measurements —
+	// ResourcedBroker does (POST /measure). When nil the SDK falls back
+	// to the LeaseBroker if it implements MeasurementReporter; with no
+	// reporter the measurements are logged, not sent.
+	MeasureReporter MeasurementReporter
 	// Load brings the worker's resources back after an idle unload,
 	// before the next request is handled. nil = nothing to load
 	// (resources are always resident).
@@ -147,17 +178,34 @@ type Worker struct {
 	cfg     Config
 	log     *log.Logger
 	metrics *Metrics
+	// lease is the lease state machine (plan §3.6); nil = un-gated.
+	lease *leaseManager
 
-	// loaded and the transition calls (Load/Unload) are guarded by mu:
-	// the idle watchdog runs concurrently with the delivery loop, and an
-	// unload racing a delivery would free the model mid-request.
+	// loaded is readable lock-free: the heartbeat loop and status
+	// readers call isLoaded on a timer and must not park behind a
+	// Load/Unload that holds mu (a model load can take minutes, and the
+	// gate's run-4 dump showed the heartbeat wedged on this while a
+	// hung idle unload held the lock). The transition calls (Load/
+	// Unload) and the flag updates are still serialized by mu: the idle
+	// watchdog runs concurrently with the delivery loop, and an unload
+	// racing a delivery would free the model mid-request.
 	mu     sync.Mutex
-	loaded bool
+	loaded atomic.Bool
 	// inflight is the number of deliveries being handled (0 or 1 —
 	// prefetch=1); the watchdog never unloads while one is in flight.
 	inflight atomic.Int32
 	// lastWork is the unix time the worker last picked up a request.
 	lastWork atomic.Int64
+
+	// VRAM footprint measurement (EVB-28): the reporter (nil = log only)
+	// and the first-run baseline — the GPU's used-MB when Run started,
+	// read off the startup path in a goroutine (a slow nvidia-smi must
+	// not delay the first lease ask). The consumer-goroutine hooks below
+	// read it atomically: value first, then the ok flag.
+	measureReporter MeasurementReporter
+	baseVRAMMB      atomic.Int64
+	baseOK          atomic.Bool
+	measuredOnce    bool
 }
 
 // New fills in defaults and returns a ready-to-Run worker.
@@ -172,10 +220,31 @@ func New(cfg Config) *Worker {
 	if cfg.HeartbeatS <= 0 && cfg.Events != nil {
 		cfg.HeartbeatS = 30 * time.Second
 	}
-	w := &Worker{cfg: cfg, log: cfg.Log, metrics: NewMetrics()}
+	// VRAM footprint measurement (EVB-28): gpu workers measure their
+	// actual nvidia-smi delta by default — the catalog declares the
+	// budget, the first run checks it. The default Measurer needs
+	// nvidia-smi in the worker's container; when it is missing the
+	// baseline read fails in Run and measurement turns itself off.
+	if cfg.Measurer == nil && cfg.Location == "gpu" {
+		cfg.Measurer = NewNvidiaSmiMeasurer("")
+	}
+	rep := cfg.MeasureReporter
+	if rep == nil {
+		if r, ok := cfg.LeaseBroker.(MeasurementReporter); ok {
+			rep = r
+		}
+	}
+	w := &Worker{cfg: cfg, log: cfg.Log, metrics: NewMetrics(), measureReporter: rep}
+	if cfg.LeaseBroker != nil && cfg.LeaseSpec.Capability != "" {
+		poll := cfg.LeasePollS
+		if poll <= 0 {
+			poll = 30 * time.Second
+		}
+		w.lease = newLeaseManager(cfg.LeaseBroker, cfg.LeaseSpec, poll, cfg.Log)
+	}
 	// A worker starts with its resources resident: the first idle
 	// window is measured from startup, not from the first request.
-	w.loaded = true
+	w.loaded.Store(true)
 	w.lastWork.Store(time.Now().UnixNano())
 	return w
 }
@@ -214,21 +283,57 @@ func (w *Worker) effectivePriority() int {
 	return LocationPriority(w.cfg.Location)
 }
 
-// lease asks for this worker's resource lease (plan §3.6). The nil hook
-// is the task-19 stub: it assumes granted, and task 26 replaces it with
-// the resourced broker's grant.
-func (w *Worker) lease(ctx context.Context) error {
-	if w.cfg.Lease == nil {
-		return nil
+// ensureLease moves the lease state machine forward and reports whether
+// the worker may consume (plan §3.6): a granted lease, or a fail-open
+// assumption while resourced is unreachable. A worker without a broker
+// is un-gated: it always may (the pre-lease behavior).
+func (w *Worker) ensureLease(ctx context.Context) bool {
+	if w.lease == nil {
+		return true
 	}
-	return w.cfg.Lease(ctx)
+	return w.lease.ensureLease(ctx)
+}
+
+// releaseLease gives a held lease back (the idle-unload path: the
+// worker's resources are free, so the ledger's remainder is real again).
+// A no-op without a broker.
+func (w *Worker) releaseLease(ctx context.Context) {
+	if w.lease == nil {
+		return
+	}
+	w.lease.releaseHeld(ctx)
+}
+
+// leaseTick advances the lease state machine on the poll interval: a
+// denied or lost lease is re-asked, a queued one checked for its grant,
+// a held one for a revocation (the window controller's task-29 path),
+// and a fail-open one re-requested so the decision becomes real when
+// resourced answers again.
+func (w *Worker) leaseTick(ctx context.Context) {
+	interval := w.cfg.LeasePollS
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if interval < time.Second {
+		interval = time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			w.lease.tick(ctx)
+		}
+	}
 }
 
 // isLoaded reports whether the worker's resources are currently loaded.
+// Lock-free: readers run on timers (the heartbeat loop) and must not
+// park behind a Load or Unload holding mu.
 func (w *Worker) isLoaded() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.loaded
+	return w.loaded.Load()
 }
 
 func (w *Worker) lastWorkTime() time.Time {
@@ -246,6 +351,18 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.cfg.Cap == "" {
 		return errors.New("capworker: Cap is required")
 	}
+	if w.lease != nil {
+		defer func() {
+			// Release on exit: the ledger is in-memory with no TTL, so an
+			// orphaned lease (held or queued) would block this worker's
+			// fresh request after a restart. A fresh context — ctx is
+			// cancelled here.
+			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			w.lease.release(rctx)
+		}()
+		go w.leaseTick(ctx)
+	}
 	if err := w.cfg.Conn.EnsureCapQueue(w.QueueName()); err != nil {
 		return fmt.Errorf("capworker: declare %s: %w", w.QueueName(), err)
 	}
@@ -259,6 +376,24 @@ func (w *Worker) Run(ctx context.Context) error {
 		go w.idleWatchdog(ctx)
 	}
 	w.log.Printf("capworker %s: consuming %s (priority %d, location %q)", w.cfg.Cap, w.QueueName(), w.effectivePriority(), w.cfg.Location)
+	// VRAM measurement baseline (EVB-28): the GPU's used-MB before the
+	// first load — the first-run delta is measured against this. Read in
+	// a goroutine: a slow nvidia-smi (a busy GPU, up to the measurer's
+	// bound) must not delay the first lease ask or the first consume
+	// session. If it has not landed by the first run, the first-run
+	// measurement is skipped (baseOK still false); the reload path
+	// brackets its own Load and is unaffected.
+	if w.cfg.Measurer != nil {
+		go func() {
+			mb, err := w.cfg.Measurer(context.Background())
+			if err != nil {
+				w.log.Printf("capworker %s: VRAM baseline: %v — first-run measurement off", w.cfg.Cap, err)
+				return
+			}
+			w.baseVRAMMB.Store(mb)
+			w.baseOK.Store(true)
+		}()
+	}
 	backoff := time.Second
 	for {
 		if err := ctx.Err(); err != nil {
@@ -280,11 +415,12 @@ func (w *Worker) Run(ctx context.Context) error {
 			backoff = time.Second
 			w.log.Printf("capworker %s: reconnected, resuming %s", w.cfg.Cap, w.QueueName())
 		}
-		if err := w.lease(ctx); err != nil {
+		if !w.ensureLease(ctx) {
 			// No lease (plan §3.6): do not consume. The messages stay on
 			// the durable queue, and a lower-priority consumer of the same
-			// capability can still take them. Back off and re-ask.
-			w.log.Printf("capworker %s: no lease, not consuming: %v", w.cfg.Cap, err)
+			// capability can still take them. The state machine re-asks on
+			// its own poll interval (and logs the denial reason per ask);
+			// back off here so a denied worker does not spin.
 			select {
 			case <-ctx.Done():
 				return nil
@@ -316,7 +452,10 @@ func (w *Worker) Run(ctx context.Context) error {
 // prefetch=1 (one in-flight request — a slow capability must not queue up
 // behind itself), a consumer priority per location (x-priority — the
 // broker delivers each message to the best free worker, plan §3.5), and
-// one delivery at a time.
+// one delivery at a time. The consumer carries a named tag: when the
+// worker's lease is lost (revoked) it cancels the consumer — unacked
+// deliveries requeue — so the queue falls to a lower-priority placement
+// (plan §3.6).
 func (w *Worker) consume(ctx context.Context) error {
 	ch, err := w.cfg.Conn.NewChannel()
 	if err != nil {
@@ -326,19 +465,47 @@ func (w *Worker) consume(ctx context.Context) error {
 	if err := ch.Qos(1, 0, true); err != nil {
 		return fmt.Errorf("qos: %w", err)
 	}
-	dels, err := ch.Consume(w.QueueName(), "", false, false, false, false, amqp.Table{"x-priority": w.effectivePriority()})
+	tag := fmt.Sprintf("%s-%d", w.cfg.Name, time.Now().UnixNano())
+	dels, err := ch.Consume(w.QueueName(), tag, false, false, false, false, amqp.Table{"x-priority": w.effectivePriority()})
 	if err != nil {
 		return err
+	}
+	// The lease-loss channel (nil without a broker): closed when the held
+	// lease is lost — revoked by the window controller, a fail-open
+	// re-sync that comes back denied, or an idle unload's release.
+	var lost <-chan struct{}
+	if w.lease != nil {
+		lost = w.lease.lost()
 	}
 	for {
 		select {
 		case <-ctx.Done():
+			return nil
+		case <-lost:
+			// The lease is gone: cancel the consumer and let the Run loop
+			// re-ask (the in-flight delivery, if any, was handled before
+			// the loss — prefetch=1, one delivery at a time).
+			w.log.Printf("capworker %s: lease lost, cancelling consumer", w.cfg.Cap)
+			if cerr := ch.Cancel(tag, true); cerr != nil {
+				w.log.Printf("capworker %s: cancel consumer: %v", w.cfg.Cap, cerr)
+			}
 			return nil
 		case del, ok := <-dels:
 			if !ok {
 				return errors.New("delivery channel closed")
 			}
 			w.handle(ctx, del)
+			if lost != nil && !w.lease.holding() {
+				// The lease was lost while this delivery was handled
+				// (select picked the delivery over the closed loss
+				// channel): the current request is drained — cancel so
+				// the queue falls to the next placement (plan §3.6).
+				w.log.Printf("capworker %s: lease lost after delivery, cancelling consumer", w.cfg.Cap)
+				if cerr := ch.Cancel(tag, true); cerr != nil {
+					w.log.Printf("capworker %s: cancel consumer: %v", w.cfg.Cap, cerr)
+				}
+				return nil
+			}
 		}
 	}
 }
@@ -363,6 +530,17 @@ func (w *Worker) handle(ctx context.Context, del amqp.Delivery) {
 		w.log.Printf("capworker %s: message without correlation_id, dead-lettering", w.cfg.Cap)
 		w.emit(req, "failed", map[string]any{"error": "no correlation_id"})
 		del.Nack(false, false)
+		return
+	}
+
+	// The lease is gone (revoked, or a fail-open re-sync that came back
+	// denied): this delivery may have arrived before the consumer's
+	// cancel landed. Requeue it — the work goes to a placement that
+	// holds a lease (plan §3.6). The consume loop cancels the consumer
+	// right after.
+	if w.lease != nil && !w.lease.holding() {
+		w.log.Printf("capworker %s: %s: lease not held, requeueing", w.cfg.Cap, req.CorrelationID)
+		del.Nack(false, true)
 		return
 	}
 
@@ -431,6 +609,10 @@ func (w *Worker) handle(ctx context.Context, del amqp.Delivery) {
 		w.retryOrFail(ctx, del, req, herr)
 		return
 	}
+	// The model is in (this worker's Load hook may have run inside the
+	// handler — the coprocess workers do): measure the first run's
+	// footprint against the Run-start baseline (EVB-28).
+	w.measureFirstRun()
 	w.log.Printf("capworker %s: %s done in %s (status %s)", w.cfg.Cap, req.CorrelationID, time.Since(started).Round(time.Millisecond), res.Status)
 	res.StartedAt = started
 	w.finish(ctx, del, req, outDir, res)
@@ -651,17 +833,105 @@ func (w *Worker) ensureLoaded(ctx context.Context) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.loaded {
+	if w.loaded.Load() {
 		return nil
 	}
 	w.log.Printf("capworker %s: loading resources (idle-unloaded)", w.cfg.Cap)
+	var before int64
+	beforeOK := w.cfg.Measurer == nil
+	if w.cfg.Measurer != nil {
+		var err error
+		before, err = w.cfg.Measurer(ctx)
+		beforeOK = err == nil // a failed read just skips the measurement
+	}
 	if err := w.cfg.Load(ctx); err != nil {
 		return fmt.Errorf("load: %w", err)
 	}
-	w.loaded = true
+	w.loaded.Store(true)
 	w.metrics.SetLoaded(true)
 	w.workerEvent("loaded", map[string]any{"capability": w.cfg.Cap, "location": w.cfg.Location})
+	if beforeOK {
+		w.measureAfterLoad(before)
+	}
 	return nil
+}
+
+// measurement builds one report: the declared budget is the lease
+// spec's VRAM (what the catalog said this placement would hold).
+func (w *Worker) measurement(measuredMB int64) Measurement {
+	return Measurement{
+		Holder:     w.cfg.Name,
+		Capability: w.cfg.Cap,
+		Device:     w.cfg.Location,
+		DeclaredMB: w.cfg.LeaseSpec.VRAMMB,
+		MeasuredMB: measuredMB,
+	}
+}
+
+// reportMeasurement sends one VRAM footprint measurement to resourced
+// off the delivery loop: a slow or down resourced must not delay work.
+// A failure is logged — the next load re-measures and re-reports.
+func (w *Worker) reportMeasurement(m Measurement) {
+	if w.measureReporter == nil {
+		w.log.Printf("capworker %s: VRAM footprint %d MB (declared %d MB) — no reporter, not sent", w.cfg.Cap, m.MeasuredMB, m.DeclaredMB)
+		return
+	}
+	go func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := w.measureReporter.ReportMeasurement(rctx, m); err != nil {
+			w.log.Printf("capworker %s: VRAM footprint report (%d MB, declared %d MB): %v", w.cfg.Cap, m.MeasuredMB, m.DeclaredMB, err)
+			return
+		}
+		w.log.Printf("capworker %s: reported VRAM footprint %d MB (declared %d MB)", w.cfg.Cap, m.MeasuredMB, m.DeclaredMB)
+	}()
+}
+
+// measureFirstRun reports the first-run footprint: the GPU's used-MB
+// delta against the Run-start baseline, after the first successful
+// Handle (the model is in by then, whatever path loaded it). Runs on
+// the consumer goroutine (prefetch=1) — once, no lock.
+func (w *Worker) measureFirstRun() {
+	if w.cfg.Measurer == nil || w.measuredOnce {
+		return
+	}
+	w.measuredOnce = true
+	if !w.baseOK.Load() {
+		return
+	}
+	after, err := w.cfg.Measurer(context.Background())
+	if err != nil {
+		w.log.Printf("capworker %s: first-run VRAM read: %v — measurement skipped", w.cfg.Cap, err)
+		return
+	}
+	delta := after - w.baseVRAMMB.Load()
+	if delta <= 0 {
+		// The worker started with its resources resident (or the GPU
+		// usage moved down): the delta says nothing about the model.
+		w.log.Printf("capworker %s: VRAM used %d MB, baseline %d MB — first-run measurement skipped", w.cfg.Cap, after, w.baseVRAMMB.Load())
+		return
+	}
+	w.reportMeasurement(w.measurement(delta))
+}
+
+// measureAfterLoad reports a fresh Load's footprint: the used-MB delta
+// bracketing the Load call (the idle-reload path). Called under w.mu
+// (the nvidia-smi read is bounded, ~50 ms).
+func (w *Worker) measureAfterLoad(before int64) {
+	if w.cfg.Measurer == nil {
+		return
+	}
+	after, err := w.cfg.Measurer(context.Background())
+	if err != nil {
+		w.log.Printf("capworker %s: reload VRAM read: %v — measurement skipped", w.cfg.Cap, err)
+		return
+	}
+	delta := after - before
+	if delta < 0 {
+		w.log.Printf("capworker %s: VRAM used %d MB < pre-load %d MB — measurement skipped", w.cfg.Cap, after, before)
+		return
+	}
+	w.reportMeasurement(w.measurement(delta))
 }
 
 // idleWatchdog ticks and unloads the worker's resources after IdleS
@@ -700,18 +970,26 @@ func (w *Worker) maybeUnload(ctx context.Context) {
 		return
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.loaded {
+	if !w.loaded.Load() {
+		w.mu.Unlock()
 		return
 	}
 	w.log.Printf("capworker %s: idle for %s, unloading", w.cfg.Cap, idle.Round(time.Second))
 	if err := w.cfg.Unload(ctx); err != nil {
 		w.log.Printf("capworker %s: unload failed, staying loaded: %v", w.cfg.Cap, err)
+		w.mu.Unlock()
 		return
 	}
-	w.loaded = false
+	w.loaded.Store(false)
 	w.metrics.SetLoaded(false)
 	w.workerEvent("unloaded", map[string]any{"capability": w.cfg.Cap, "location": w.cfg.Location, "idle_s": int(idle / time.Second)})
+	w.mu.Unlock()
+	// The resources are free: give the lease back so the ledger's
+	// remainder is real again (plan §3.6). Outside the critical section —
+	// the release is an HTTP round-trip to resourced. The worker re-asks
+	// on the Run loop's next pass (deferred by a poll interval) before it
+	// consumes again.
+	w.releaseLease(ctx)
 }
 
 // heartbeatLoop emits one worker.<name>.heartbeat event every
