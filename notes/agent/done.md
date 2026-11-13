@@ -193,3 +193,4 @@
 - 2026-11-13T01:40Z [chat-1794516948-ff41] Merged all 17 open PRs: event-driven brain EVB-24..30 (#231), sched cadence queues (#235, events.go union fix), bench 250 (#237), voice TTS (#244), kanban comments (#247), 11 notes PRs (job chat-1794516948-ff41)
 - 2026-11-13T07:47Z [plan-plan-event-driven-brain-1794016330-30] EVB-30: Phase 4 gate PASS 3/3 in 5m09s, unattended (co-lease 12288+3244+5500 MB, voice→iGPU fallback, game drain) — transcript PR #249, code landed via #231
 - 2026-11-13T10:47Z [plan-plan-event-driven-brain-1794016330-31] EVB-31: 'Think in events' section in agent CLAUDE.md + jarvis-mq caps catalog and cost model in the round preamble; binaries deployed (PR #249, with EVB-30)
+- 2026-11-13T19:23Z [chat-1794567713-a417] Steam game stops the brain, Sunshine desktop stream is a no-op — EVB-29, PR #251 (resourced owns the game window: hold + revoke + jarvis-swap out --game; 60 s keepalive)
