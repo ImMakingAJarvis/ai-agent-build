@@ -37,6 +37,7 @@ const (
 	WindowKind = "window" // window.<state>
 	LeaseKind  = "lease"  // lease.<state>
 	WorkerKind = "worker" // worker.<worker-id>.<state>
+	SchedKind  = "sched"  // sched.<cadence>.<state>
 	StreamKind = "stream" // stream.<state> — the game/stream watchdog (EVB-29)
 )
 
