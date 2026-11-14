@@ -19,6 +19,14 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/resources"
 )
 
+// deadPeekMax is how far into the dead queue the dead-letter tests look.
+// It must be well above ListDead's default (50, the dashboard's window):
+// the production dead queue legitimately holds a backlog of real dead
+// letters, and a freshly dead-lettered test message lands at the TAIL —
+// beyond the 50 window the test could not see it (the queue package's
+// dlx_live_test.go hit this in EVB-35, 2026-11-13; this test was missed).
+const deadPeekMax = 500
+
 // waitResult polls a flow queue (consuming, like the woken round does)
 // until a Result with the given correlation id arrives or the budget runs
 // out.
@@ -264,7 +272,7 @@ func TestWorkerRetriesThenDeadLetters(t *testing.T) {
 
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		dead, err := c.ListDead(50)
+		dead, err := c.ListDead(deadPeekMax)
 		if err != nil {
 			t.Fatalf("list dead: %v", err)
 		}

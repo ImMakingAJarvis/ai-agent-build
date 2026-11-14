@@ -64,6 +64,11 @@
           "type": "string",
           "minLength": 1,
           "description": "The registry id of the suggested executor model (one of the ids given in the prompt)."
+        },
+        "capability": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(\\.[a-z0-9]+)*$",
+          "description": "Optional. When set, the task is executed by a capability worker (cap.<capability>) instead of an LLM round: the name is one of the capabilities given in the prompt (e.g. image.describe, echo). Leave out for a normal model-executed task. The description should carry the input the capability needs (what to generate/describe/inspect)."
         }
       }
     }

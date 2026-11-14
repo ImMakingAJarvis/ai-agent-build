@@ -5,7 +5,9 @@ move *jobs* from the scheduler to a model. **Flow queues** (`flow.<name>`)
 are the event-driven channel between models *across rounds*: one round
 publishes a job to a flow queue, finishes; another model does the work and
 publishes the result back; the first model's next round consumes it and
-continues. [Queues](#queues) is the full topology in one place.
+continues. **Mailboxes** (`agent.<name>.inbox`) are the direct-message
+channel between agent identities ([Mailboxes](#mailboxes-agent-to-agent)).
+[Queues](#queues) is the full topology in one place.
 
 ## Queues
 
@@ -24,6 +26,7 @@ temporary auto-delete ones the CLI creates to `tail` an exchange.
 | `jobs.gpu` / `jobs.cpu` / `jobs.igpu` | execution jobs placed by `internal/placement` from free VRAM/RAM | task-runner (LocationWorkers); publishers: plane-bridge (board `run_task` jobs) and the worker's LocationPublisher | — | — |
 | `flow.<name>` | event-driven handoff between models across rounds (The pattern below); created on demand, one per flow | the round that created it — read with `jarvis-mq peek` / `consume` | — | `jarvis.dlx` |
 | `cap.<capability>` | request channel for a capability — v2 messages, e.g. `cap.image.generate`; created on demand; the result goes to the request's `reply_to`, not here | the capability's worker (capworker SDK; `cap-echo` consumes `cap.echo`, the Phase 2 gate's test worker) | 10 | `jarvis.dlx` |
+| `agent.<name>.inbox` | agent mailbox (EVB-35): direct mail between identities — `question`/`answer`/`fyi`/`handoff`/`review_request` envelopes; a question's `wake_job` wakes when the answer lands. Identities: `brain`, `igpu-helper`, `sonnet`, `planner` (+ `remote-<n>` when it lands) | the round that sends — read with `jarvis-mq inbox` / `take`; sent with `ask` / `tell` / `answer` | — | `jarvis.dlx` |
 | `dead` | dead letters from `flow.*`/`cap.*`: rejected (nack without requeue after the `MaxAttempts` budget) or expired (TTL), each carrying an `x-death` header (reason, queue, count, time) | nobody consumes it — the dashboard's Dead Letters section reads it and offers requeue / drop | — | — |
 | `events` (topic) | lifecycle events: `job.<capability>.<started\|progress\|done\|failed>`, `agent.<job-id>.<yielded\|woken\|resumed>`, `window.<opened\|closed>`, `lease.<granted\|released\|denied>`, `stream.<started\|stopped>` | publishers: worker (the jobs it runs), task-runner (`job.run_task.*`), agent-run (`agent.*`), resourced (`window.*`, `lease.*`, `stream.*`); declared by `definitions.json` + `EventPublisher` | — | — |
 | `jarvis.dlx` (fanout) | the dead-letter exchange — fanout, so every dead letter lands on its single bound queue, `dead` | `EnsureDLX` (called from every `flow.*`/`cap.*` declare and dead-letter operation) | — | — |
@@ -137,6 +140,98 @@ continuation's `result_refs` in step with `results.json`.
   time); the dashboard's Dead Letters section lists them and can requeue
   one back to its original queue (recreated if it is gone) or drop it.
   A message is either processed, dead-lettered with a reason, or requeued.
+
+## Mailboxes (agent to agent)
+
+Mailboxes are the direct agent-to-agent message channel (plan §3.8, EVB-35).
+Flow queues move *job events* between rounds; mailboxes carry *messages*
+between agent identities — the brain asks the iGPU helper a question, one
+agent hands work off to another, a review request goes to a reviewer.
+
+- **One queue per identity**: `agent.<name>.inbox` — durable, persistent,
+  dead-lettered to `jarvis.dlx` exactly like `flow.*`/`cap.*` (the same
+  declare + bind + routing-key conventions, so `RequeueDead` round-trips a
+  dead mailbox message). Identities are validated names: `brain`,
+  `igpu-helper`, `sonnet`, `planner` — and `remote-<n>` when a remote
+  agent lands.
+- **The envelope** (`queue.MailboxMessage`): `kind`
+  (`question` | `answer` | `fyi` | `handoff` | `review_request`), `from`,
+  `to`, `subject`, `body`, and optional `corr`, `wake_job`, `board_ref`.
+- **ask = question + wake**: `jarvis-mq ask B --wake JOB --from A "subject"`
+  publishes the question to `agent.B.inbox` **and** attaches a corr-filtered
+  wake listener on `agent.A.inbox` — the answer (kind `answer`, same `corr`)
+  lands on the QUESTIONER's inbox, and the switchboard wakes JOB when it
+  arrives (within its poll interval). The round still parks itself with
+  `jarvis-jobs yield JOB --wait-on <corr>`; `ask` is the mailbox version of
+  the 4-command pattern (the listener is the `listen`, `ask` is the
+  `submit`).
+- **tell = message without a wake**: `jarvis-mq tell` (default kind `fyi`;
+  `handoff` / `review_request` via `--kind`) just puts a message in the
+  recipient's inbox. Nothing drains a mailbox automatically — the recipient
+  reads it in its own next round (`jarvis-mq inbox <agent>` peeks, `take`
+  pops). The one exception is `--kind review_request --wake JOB` (EVB-36):
+  a review request *does* attach a corr-filtered wake listener on the
+  SENDER's inbox — the reviewer's `answer` (same `corr`) is the wake. fyi
+  and handoff stay fire-and-forget (no reply is expected, nothing to wake
+  on); a question's wake lives in `ask`.
+- **answer finds its target**: `jarvis-mq answer A --corr c "subject"`
+  (A = the one who asked) publishes kind `answer` to `agent.A.inbox`.
+  Without an explicit `--board`, it peeks the ANSWERER's (`--from`) inbox
+  for the question (or review_request — EVB-36) with corr `c` and copies
+  its `board_ref` / `wake_job` — the question sits with the side that was
+  asked — so the reply mirrors to the same board item without the answering
+  side having to know about it.
+- **Plane mirroring**: a message with a board ref (`--board EVB-37` on
+  ask/tell/answer, or copied from the question) also posts a
+  model-prefixed Plane comment on that item (`<from>: <subject> — <body>`);
+  the reply mirrors to the same item. Best-effort: Plane being down logs
+  and keeps the mail — the queue is the source of truth.
+- **The switchboard knows the envelope**: `decodeArrival` recognises a
+  mailbox body (a valid mail kind with a recipient) before the generic
+  `Message` decode, so corr-filtered listeners, wake/forward/notify actions
+  and the "wake always keeps its message" rule all work on an inbox exactly
+  as on a flow queue.
+
+### Reviewer flow (EVB-36)
+
+The first real agent-to-agent loop (plan §3.8): the brain finishes a PR and
+hands it to another model for review, then parks until the review lands.
+
+**Reviewer pick rule** (the documented simple one): `sonnet` for code PRs
+(a `claude` session that can read the diff and run the go gate in a
+throwaway worktree); `planner` (opus driver) for docs/plan-only PRs (no
+code to test — the planning review is the better fit). Default: sonnet.
+
+**The loop**, one command per side:
+
+1. **Request** (sender, the brain's round):
+   `jarvis-review request <PR> [--reviewer sonnet|planner] [--board REF]
+   [--summary ...]` — posts a `review_request` (PR link + summary) to the
+   reviewer's inbox with a wake attached (the answer, same `corr`, wakes
+   the sender's job), enqueues the reviewer job (driver sonnet/opus, class
+   `fix`, priority 100 so the loop pulls it right after the sender yields),
+   and mirrors the request onto the board item.
+2. **Yield** (sender): `jarvis-jobs yield $JARVIS_JOB_ID --wait-on <corr>
+   ...` and end the round.
+3. **Review** (the reviewer's round — a fresh sonnet/opus session): its
+   round prompt carries its own inbox (the **mailbox drain step**: the
+   driver's identity — local→`brain`, igpu→`igpu-helper`, sonnet→`sonnet`,
+   opus→`planner` — peeks its inbox and, if there is mail, the prompt
+   gains a `MAILBOX` section between the capabilities and the job line).
+   It reads the `review_request`, reviews the PR (diff + the go gate in a
+   detached worktree, never the brain's shared tree), and answers:
+   `jarvis-mq answer brain --from <reviewer> --corr <corr> --board REF
+   "<approve|request_changes>: ..." --body "<findings>"`.
+4. **Wake** (switchboard): the answer lands on `agent.brain.inbox` carrying
+   the `corr` — the corr-filtered wake listener fires, the parked job
+   wakes, and the message is kept for the woken round.
+5. **Address** (sender, the woken round): `jarvis-mq inbox brain` (then
+   `take`) reads the review; the brain fixes the findings, re-runs the
+   gate, `gh-pr-wait <PR>` exits 0, notifies, and finishes.
+
+Both the request and the review mirror to the board item, so the whole
+exchange is readable on Plane. The `corr` is the single join key — the
+listener, the answer, and the Plane mirror all carry it.
 
 ## Capability envelope (v2)
 
@@ -343,16 +438,89 @@ them; `-n N` to cap, `--json` for the raw bodies):
     jarvis-mq results flow.job-42
     jarvis-mq caps    # capability catalog — lands in task EVB-19
 
-Guards: publishing to a queue that is neither `flow.*`, `cap.*` nor a known
-queue is refused (the topic exchange would silently drop it), as is `delete`
-of a worker-owned queue (voice, fix, coding, background, jobs.*, image) or
-of a capability queue (`cap.*`).
+Mailboxes (plan §3.8): `ask` is a question with an optional wake (the
+answer wakes the job on the questioner's inbox), `tell` is a message
+without a wake (except `review_request --wake`, the reviewer flow), and
+`answer` replies with the question's corr:
+
+    jarvis-mq ask igpu-helper --body "before the photo window" \
+        --wake job-42 --corr q1 "how hot is the engine"
+    jarvis-mq tell planner --kind handoff "photo window opens at 14:00"
+    # the reply goes to the QUESTIONER's inbox (brain asked, so answer brain)
+    jarvis-mq answer brain --from igpu-helper --corr q1 --body "headroom ok" "61C, fine"
+    jarvis-mq inbox igpu-helper        # peek (keeps the messages; -n, --json)
+    jarvis-mq take igpu-helper         # pop (removes; -n, --json)
+
+Reviewer flow (EVB-36) — the brain hands a finished PR to a reviewer and
+parks until the review lands. `jarvis-review` is the sender-side one-shot
+(request + reviewer job + yield hint); the raw pieces are:
+
+    jarvis-review request 253 --reviewer sonnet --board EVB-38 \
+        --summary "mailbox wake + reviewer flow"
+    # posts review_request to agent.sonnet.inbox (wake on the answer),
+    # enqueues the sonnet reviewer job, prints the corr + the yield command
+    jarvis-jobs yield $JARVIS_JOB_ID --wait-on <corr> ...   # then end the round
+    # ...the reviewer reviews and answers (same corr); the wake fires...
+    jarvis-mq inbox brain        # the woken round reads the review (then take)
+
+Arg order, like `publish <queue> [flags]`: the agent is the first
+positional, then the flags, then the subject (Go's flag package stops at
+the first non-flag). `ask`/`tell`/`answer` take `--from` (default `brain`),
+`--body`, `--corr` (default `mq-<unix>-<hex>`), and `--board <REF>` for
+Plane mirroring; `ask` takes `--wake <JOB>` and `--timeout` (listener
+deadline, default 2h), and `tell --kind review_request` takes the same
+`--wake`/`--timeout` (the reviewer's answer is the wake). `answer` requires
+`--corr` and mirrors the question's (or review_request's) board ref when
+`--board` is left empty.
+
+Guards: publishing to a queue that is neither `flow.*`, `cap.*`, an agent
+mailbox nor a known queue is refused (the topic exchange would silently
+drop it), as is `delete` of a worker-owned queue (voice, fix, coding,
+background, jobs.*, image) or of a capability queue (`cap.*`). `publish`
+to an `agent.*.inbox` is refused too — mailboxes accept only the
+envelope (kind, from, to, subject ride in the body), via `ask` / `tell` /
+`answer`.
 
 ## In-process (superagent)
 
 The superagent executor has a `rabbitmq` tool — the same operations as the
-CLI (`publish|consume|peek|depth` with the same message fields) — so a
-running agent can hand work to another model mid-run without shelling out.
+CLI (`publish|consume|peek|depth` with the same message fields, plus
+`caps|submit|listen|yield`) — so a running agent can hand work to another
+model mid-run without shelling out:
+
+- `caps` — the capability catalog (the same lines as `jarvis-mq caps`:
+  name, where, cost, live queue depth, typical runtime).
+- `submit` — posts an envelope-v2 request to `cap.<capability>`; the reply
+  queue defaults to the run's own flow queue (`flow.$JARVIS_JOB_ID`) so the
+  Result lands where the run will wake.
+- `listen` — attaches a durable switchboard listener (wake / forward /
+  notify) exactly like `jarvis-mq listen`.
+- `yield` (job-backed runs only) — records the wait on the agent job and
+  parks the run; the agent loop ends with `YIELDED` (exit 0), the
+  switchboard's wake resumes the job, and the woken run consumes the Result
+  from its flow queue with `consume`.
+
+The 4-command pattern (listen first, then submit, then yield, then park)
+works in-process exactly as it does from the CLI.
+
+## Hermes (submit_capability)
+
+Chat becomes a capability job. In a full-access Hermes conversation,
+"describe the photos in folder X" is classified to `submit_capability`
+(the LLM path — the fast classifier defers capability-verb messages it
+cannot parameterize), which publishes an envelope-v2 request to
+`cap.<capability>` with the reply-to on `flow.hermes`
+(`hermes.CapReplyQueue`, durable, Hermes-owned). The jarvis-chat daemon
+runs `hermes.WatchCapResults`, a durable consumer on that queue: when the
+Result lands, the daemon replies on Discord with `hermes.FormatCapResult`
+— for image.describe that is one line per image (caption + tags) from the
+job's index.json artifact, otherwise the summary and the data line.
+
+Full access only (`RequiresFullAccess`): a capability job spends owner
+money on the workers, and a limited bot must not be able to start one.
+The reply path is a consumer rather than a switchboard notify listener
+because a notify listener can only send its static text — the result body
+(the captions) has to travel with the reply.
 
 ## Code
 
@@ -367,14 +535,30 @@ running agent can hand work to another model mid-run without shelling out.
   `PopFlow`, `PeekFlow`, `PurgeFlow`, `DeleteFlow`.
 - `internal/queue/cap.go` — `CapQueueName`, `IsCapQueue`, `EnsureCapQueue`
   (on-demand declare + bind, DLX args — the request side of the v2
-  envelope).
+  envelope), `ValidCapabilityName`, `ParseDeadline`.
+- `internal/queue/mailbox.go` — the agent mailboxes (EVB-35):
+  `MailboxQueueName`/`IsMailboxQueue`/`ValidMailboxAgent`, the
+  `MailboxMessage` envelope (kind/from/to/subject/body + corr/wake_job/
+  board_ref), `EnsureMailboxQueue`, `PublishMailbox` (confirm mode),
+  `PeekMailbox`/`PopMailbox`, and `IsMailboxBody` (the switchboard's
+  decode discriminator).
 - `internal/queue/events.go` — the `events` exchange: `Event`, the
   `JobEvent`/`AgentEvent`/`WindowEvent`/`LeaseEvent` builders, and the
   fire-and-forget `EventPublisher`.
 - `internal/queue/dlx.go` — `EnsureDLX`, the `dead` queue, the
   `x-attempts` delivery budget, and `ListDead`/`RequeueDead`/`DropDead`.
-- `cmd/jarvis-mq/main.go` — the CLI above.
-- `internal/superagent/tools.go` — `runMQ`, the in-process tool.
+- `cmd/jarvis-mq/main.go` — the CLI above (including `ask`/`tell`/`answer`/
+  `inbox`/`take` and `tell --kind review_request --wake`).
+- `scripts/jarvis-review.sh` — the reviewer-flow sender one-shot (EVB-36):
+  posts the `review_request` (with wake), enqueues the reviewer job,
+  prints the corr + the yield command.
+- `internal/superagent/tools.go` — `runMQ`, the in-process tool
+  (`publish|consume|peek|depth` plus the capability operations
+  `caps|submit|listen|yield`).
+- `internal/hermes/capability_action.go` — the `submit_capability` action
+  (full access only), `CapReplyQueue`, `WatchCapResults` (the durable
+  consumer the jarvis-chat daemon runs), and `FormatCapResult` (the
+  Discord reply; per-image for image.describe).
 - `internal/agentjob/continuation.go` — the continuation sidecar:
   `Continuation`, `RenderContinuationMD`/`ParseContinuationMD`, the
   invariant-8 `ContinuationMDFilled` check, `WriteContinuation`/

@@ -276,3 +276,22 @@ func TestSubmitPublishesEnvelopeV2(t *testing.T) {
 		t.Errorf("out_dir/deadline = %q / %v", got.OutDir, got.Deadline)
 	}
 }
+
+// TestValidateTell pins the tell kind/wake rule (plan §3.8, EVB-36): a
+// wake is a listener-wake pair, and only review_request carries one — fyi/
+// handoff are fire and forget, and a question's wake belongs to `ask`.
+func TestValidateTell(t *testing.T) {
+	if err := validateTell(queue.MailKindReviewRequest, "job-1"); err != nil {
+		t.Errorf("review_request + wake = %v, want ok", err)
+	}
+	for _, kind := range []string{queue.MailKindFYI, queue.MailKindHandoff, queue.MailKindQuestion, ""} {
+		if err := validateTell(kind, ""); err != nil {
+			t.Errorf("%s without wake = %v, want ok", kind, err)
+		}
+	}
+	for _, kind := range []string{queue.MailKindFYI, queue.MailKindHandoff, queue.MailKindQuestion, ""} {
+		if err := validateTell(kind, "job-1"); err == nil {
+			t.Errorf("%s + wake: want an error, got nil", kind)
+		}
+	}
+}

@@ -92,9 +92,15 @@ func main() {
 	if res.OK {
 		word = "DONE"
 	}
+	if res.Yielded {
+		word = "YIELDED"
+	}
 	fmt.Printf("\nsuperagent: %s in %s (%d steps, %d model calls)\nsummary: %s\n",
 		word, res.Duration.Round(time.Second), res.Steps, res.Turns, res.Summary)
-	if !res.OK {
+	// A yield is not a failure: the run is parked (the job is Waiting, the
+	// switchboard's wake is the continuation). Exit 0 so the agentjob
+	// runner's finish() leaves the job Waiting rather than marking it done.
+	if !res.OK && !res.Yielded {
 		os.Exit(1)
 	}
 }

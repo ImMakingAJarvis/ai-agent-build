@@ -53,7 +53,7 @@ const (
 
 func newTestPipeline(t *testing.T, repoRoot string) *Pipeline {
 	t.Helper()
-	p, err := NewPipeline(filepath.Join("..", "..", "prompts"), repoRoot, testFile(t))
+	p, err := NewPipeline(filepath.Join("..", "..", "prompts"), repoRoot, testFile(t), nil)
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
