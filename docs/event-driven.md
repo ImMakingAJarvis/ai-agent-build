@@ -169,13 +169,18 @@ agent hands work off to another, a review request goes to a reviewer.
   `handoff` / `review_request` via `--kind`) just puts a message in the
   recipient's inbox. Nothing drains a mailbox automatically — the recipient
   reads it in its own next round (`jarvis-mq inbox <agent>` peeks, `take`
-  pops).
+  pops). The one exception is `--kind review_request --wake JOB` (EVB-36):
+  a review request *does* attach a corr-filtered wake listener on the
+  SENDER's inbox — the reviewer's `answer` (same `corr`) is the wake. fyi
+  and handoff stay fire-and-forget (no reply is expected, nothing to wake
+  on); a question's wake lives in `ask`.
 - **answer finds its target**: `jarvis-mq answer A --corr c "subject"`
   (A = the one who asked) publishes kind `answer` to `agent.A.inbox`.
   Without an explicit `--board`, it peeks the ANSWERER's (`--from`) inbox
-  for the question with corr `c` and copies its `board_ref` / `wake_job` —
-  the question sits with the side that was asked — so the reply mirrors to
-  the same board item without the answering side having to know about it.
+  for the question (or review_request — EVB-36) with corr `c` and copies
+  its `board_ref` / `wake_job` — the question sits with the side that was
+  asked — so the reply mirrors to the same board item without the answering
+  side having to know about it.
 - **Plane mirroring**: a message with a board ref (`--board EVB-37` on
   ask/tell/answer, or copied from the question) also posts a
   model-prefixed Plane comment on that item (`<from>: <subject> — <body>`);
@@ -186,6 +191,47 @@ agent hands work off to another, a review request goes to a reviewer.
   `Message` decode, so corr-filtered listeners, wake/forward/notify actions
   and the "wake always keeps its message" rule all work on an inbox exactly
   as on a flow queue.
+
+### Reviewer flow (EVB-36)
+
+The first real agent-to-agent loop (plan §3.8): the brain finishes a PR and
+hands it to another model for review, then parks until the review lands.
+
+**Reviewer pick rule** (the documented simple one): `sonnet` for code PRs
+(a `claude` session that can read the diff and run the go gate in a
+throwaway worktree); `planner` (opus driver) for docs/plan-only PRs (no
+code to test — the planning review is the better fit). Default: sonnet.
+
+**The loop**, one command per side:
+
+1. **Request** (sender, the brain's round):
+   `jarvis-review request <PR> [--reviewer sonnet|planner] [--board REF]
+   [--summary ...]` — posts a `review_request` (PR link + summary) to the
+   reviewer's inbox with a wake attached (the answer, same `corr`, wakes
+   the sender's job), enqueues the reviewer job (driver sonnet/opus, class
+   `fix`, priority 100 so the loop pulls it right after the sender yields),
+   and mirrors the request onto the board item.
+2. **Yield** (sender): `jarvis-jobs yield $JARVIS_JOB_ID --wait-on <corr>
+   ...` and end the round.
+3. **Review** (the reviewer's round — a fresh sonnet/opus session): its
+   round prompt carries its own inbox (the **mailbox drain step**: the
+   driver's identity — local→`brain`, igpu→`igpu-helper`, sonnet→`sonnet`,
+   opus→`planner` — peeks its inbox and, if there is mail, the prompt
+   gains a `MAILBOX` section between the capabilities and the job line).
+   It reads the `review_request`, reviews the PR (diff + the go gate in a
+   detached worktree, never the brain's shared tree), and answers:
+   `jarvis-mq answer brain --from <reviewer> --corr <corr> --board REF
+   "<approve|request_changes>: ..." --body "<findings>"`.
+4. **Wake** (switchboard): the answer lands on `agent.brain.inbox` carrying
+   the `corr` — the corr-filtered wake listener fires, the parked job
+   wakes, and the message is kept for the woken round.
+5. **Address** (sender, the woken round): `jarvis-mq inbox brain` (then
+   `take`) reads the review; the brain fixes the findings, re-runs the
+   gate, `gh-pr-wait <PR>` exits 0, notifies, and finishes.
+
+Both the request and the review mirror to the board item, so the whole
+exchange is readable on Plane. The `corr` is the single join key — the
+listener, the answer, and the Plane mirror all carry it.
 
 ## Capability envelope (v2)
 
@@ -394,7 +440,8 @@ them; `-n N` to cap, `--json` for the raw bodies):
 
 Mailboxes (plan §3.8): `ask` is a question with an optional wake (the
 answer wakes the job on the questioner's inbox), `tell` is a message
-without a wake, `answer` replies with the question's corr:
+without a wake (except `review_request --wake`, the reviewer flow), and
+`answer` replies with the question's corr:
 
     jarvis-mq ask igpu-helper --body "before the photo window" \
         --wake job-42 --corr q1 "how hot is the engine"
@@ -404,13 +451,27 @@ without a wake, `answer` replies with the question's corr:
     jarvis-mq inbox igpu-helper        # peek (keeps the messages; -n, --json)
     jarvis-mq take igpu-helper         # pop (removes; -n, --json)
 
+Reviewer flow (EVB-36) — the brain hands a finished PR to a reviewer and
+parks until the review lands. `jarvis-review` is the sender-side one-shot
+(request + reviewer job + yield hint); the raw pieces are:
+
+    jarvis-review request 253 --reviewer sonnet --board EVB-38 \
+        --summary "mailbox wake + reviewer flow"
+    # posts review_request to agent.sonnet.inbox (wake on the answer),
+    # enqueues the sonnet reviewer job, prints the corr + the yield command
+    jarvis-jobs yield $JARVIS_JOB_ID --wait-on <corr> ...   # then end the round
+    # ...the reviewer reviews and answers (same corr); the wake fires...
+    jarvis-mq inbox brain        # the woken round reads the review (then take)
+
 Arg order, like `publish <queue> [flags]`: the agent is the first
 positional, then the flags, then the subject (Go's flag package stops at
 the first non-flag). `ask`/`tell`/`answer` take `--from` (default `brain`),
 `--body`, `--corr` (default `mq-<unix>-<hex>`), and `--board <REF>` for
 Plane mirroring; `ask` takes `--wake <JOB>` and `--timeout` (listener
-deadline, default 2h). `answer` requires `--corr` and mirrors the
-question's board ref when `--board` is left empty.
+deadline, default 2h), and `tell --kind review_request` takes the same
+`--wake`/`--timeout` (the reviewer's answer is the wake). `answer` requires
+`--corr` and mirrors the question's (or review_request's) board ref when
+`--board` is left empty.
 
 Guards: publishing to a queue that is neither `flow.*`, `cap.*`, an agent
 mailbox nor a known queue is refused (the topic exchange would silently
@@ -486,7 +547,11 @@ because a notify listener can only send its static text — the result body
   fire-and-forget `EventPublisher`.
 - `internal/queue/dlx.go` — `EnsureDLX`, the `dead` queue, the
   `x-attempts` delivery budget, and `ListDead`/`RequeueDead`/`DropDead`.
-- `cmd/jarvis-mq/main.go` — the CLI above.
+- `cmd/jarvis-mq/main.go` — the CLI above (including `ask`/`tell`/`answer`/
+  `inbox`/`take` and `tell --kind review_request --wake`).
+- `scripts/jarvis-review.sh` — the reviewer-flow sender one-shot (EVB-36):
+  posts the `review_request` (with wake), enqueues the reviewer job,
+  prints the corr + the yield command.
 - `internal/superagent/tools.go` — `runMQ`, the in-process tool
   (`publish|consume|peek|depth` plus the capability operations
   `caps|submit|listen|yield`).

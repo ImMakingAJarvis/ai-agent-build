@@ -154,6 +154,35 @@ rounds, and it never opens while your round is running; never yield
 without a filled continuation; a Result is not done until you have read it
 and verified its artifacts.
 
+## Reviewer flow — get a finished PR reviewed (EVB-36)
+
+When a round finishes a PR and wants a second pair of eyes from another
+model, hand it to a reviewer and park (plan §3.8). One command:
+
+    jarvis-review request <PR> [--reviewer sonnet|planner] [--board REF] \
+        [--summary "what the PR does"]
+
+It posts a `review_request` to the reviewer's inbox (with a wake on the
+answer), enqueues the reviewer job (it jumps the queue — class fix,
+priority 100), and prints the corr + the yield command. Reviewer rule:
+`sonnet` for code PRs (it can run the go gate), `planner` (opus) for
+docs/plan-only PRs; default sonnet. Then:
+
+    jarvis-jobs yield $JARVIS_JOB_ID --wait-on <corr> \
+        --note "..." --in-flight "PR #N open, review requested" \
+        --next "read the review (jarvis-mq inbox brain, then take), address
+                the findings, gh-pr-wait N exit 0, notify, finish"
+
+…and end the round. The reviewer (a fresh sonnet/opus session) sees the
+request in its own round prompt (the `MAILBOX` section — every round now
+peeks its identity's inbox: local→brain, igpu→igpu-helper, sonnet→sonnet,
+opus→planner), reviews the PR in a throwaway worktree, and answers with
+`approve` / `request_changes` + findings. The answer lands on your inbox
+and wakes you; the woken round reads it (`jarvis-mq inbox brain`), fixes
+the findings, and finishes the normal PR workflow. Both the request and
+the review mirror to the `--board` Plane item. Full mechanics:
+docs/event-driven.md, "Reviewer flow".
+
 ## The vector graph — more data than the repo
 
 The **Jarvis Memory Service** (`jarvis-memory` systemd unit,
