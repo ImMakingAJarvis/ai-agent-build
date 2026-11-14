@@ -58,6 +58,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/boardnote"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/catalog"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/switchboard"
@@ -101,6 +102,16 @@ func main() {
 		err = runResults(os.Args[2:])
 	case "caps":
 		err = runCaps(os.Args[2:])
+	case "ask":
+		err = runAsk(os.Args[2:])
+	case "tell":
+		err = runTell(os.Args[2:])
+	case "answer":
+		err = runAnswer(os.Args[2:])
+	case "inbox":
+		err = runInbox(os.Args[2:])
+	case "take":
+		err = runTake(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -133,6 +144,13 @@ func usage() {
   caps [--file PATH]          the capability catalog, one line per capability:
                               where it runs, the cost, current queue depth,
                               typical runtime (readable by the model as-is)
+  ask <agent> <subject...>    a question to agent.<agent>.inbox; with --wake JOB
+                              the round's job wakes when the answer lands
+  tell <agent> <subject...>   an fyi/handoff/review_request (no wake)
+  answer <agent> [flags] <subject...> the reply to a question, to the
+                                       questioner's inbox (--corr = the question's)
+  inbox <agent> [-n N]        show the inbox without removing messages
+  take <agent> [-n N]         pop up to N inbox messages (acks them)
 
 listen flags:
   --wake JOB                wake agentjob JOB when a message lands (default action)
@@ -156,6 +174,19 @@ submit flags:
   --parent-job J            id of the job that submitted this one
 results flags:
   -n N                      max messages to pop (default 100: drain what has arrived)
+  --json                    raw JSON bodies, one per line
+mailbox flags (ask / tell / answer):
+  --body B                  details (the subject positional is the one-line summary)
+  --from A                  sender identity (default brain; the helper uses igpu-helper)
+  --wake JOB                ask: agentjob to wake when the answer lands (a
+                            listener on the sender's inbox, filtered on the corr)
+  --timeout D               ask: listener give-up (default 2h)
+  --corr C                  the correlation id (ask: default fresh; answer: required)
+  --kind K                  tell: fyi (default) | handoff | review_request
+  --board REF               Plane item (EVB-37) the message mirrors to as a comment
+                            (answer: default — the question's own board ref)
+inbox / take flags:
+  -n N                      max messages (inbox default 5, take default 1)
   --json                    raw JSON bodies, one per line
 
 event flags:
@@ -375,6 +406,9 @@ func runPublish(args []string) error {
 		fmt.Printf("published %s → %s (capability queue created on demand)\n", m.ID, q)
 		return nil
 	}
+	if queue.IsMailboxQueue(q) {
+		return fmt.Errorf("queue %q is an agent mailbox — use jarvis-mq ask / tell / answer <agent> (the mailbox envelope carries kind, from, to, subject)", q)
+	}
 	for _, wq := range workerOwnedQueues {
 		if q == wq {
 			if err := conn.Publish(m, q+".default"); err != nil {
@@ -384,7 +418,7 @@ func runPublish(args []string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("queue %q is not a flow queue (flow.*), a capability queue (cap.*), or a known queue; the exchange would drop it", q)
+	return fmt.Errorf("queue %q is not a flow queue (flow.*), a capability queue (cap.*), a mailbox (agent.*.inbox), or a known queue; the exchange would drop it", q)
 }
 
 func runConsume(args []string) error {
@@ -433,6 +467,307 @@ func runPeek(args []string) error {
 		return nil
 	}
 	return printMessages(msgs, *asJSON)
+}
+
+// ---------------------------------------------------------------- mailboxes
+//
+// Mailboxes are the machine channel between agents (plan §3.8): one durable
+// queue per agent identity, agent.<name>.inbox. ask posts a question (with an
+// optional wake: the switchboard wakes the round's job when the answer lands
+// on the SENDER's inbox, filtered on the question's corr); tell posts an
+// fyi/handoff/review_request; answer is a tell of kind answer that copies the
+// question's board ref so the reply mirrors to the same Plane item.
+
+// mailboxPositional parses "<agent> [flags] <subject...>" — the agent is the
+// first argument (like the queue in takeQueue, since Go's flag package stops
+// at the first non-flag), the subject the rest joined (free text).
+func mailboxPositional(fs *flag.FlagSet, args []string) (agent, subject string, err error) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return "", "", fmt.Errorf("the agent is the first argument: jarvis-mq %s <agent> [flags] <subject...>", fs.Name())
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return "", "", err
+	}
+	if fs.NArg() < 1 {
+		return "", "", fmt.Errorf("usage: %s <agent> [flags] <subject...>", fs.Name())
+	}
+	if !queue.ValidMailboxAgent(args[0]) {
+		return "", "", fmt.Errorf("%s: %q is not a valid agent identity (lowercase alphanumeric, hyphens: brain, igpu-helper)", fs.Name(), args[0])
+	}
+	return args[0], strings.Join(fs.Args(), " "), nil
+}
+
+// mirrorBoard posts the mailbox message on its board item as a model-prefixed
+// Plane comment, "<subject> — <body>" under the sender's name (the
+// boardnote prefix renders "<from>: ..."). Best-effort: boardnote logs its
+// own failures, and the mailbox post itself must not fail on the board
+// overlay.
+func mirrorBoard(ref, from string, m queue.MailboxMessage) {
+	msg := m.Subject
+	if m.Body != "" {
+		msg += " — " + m.Body
+	}
+	if err := boardnote.Post(ref, from, msg); err != nil {
+		log.Printf("mailbox: board mirror %s: %v", ref, err)
+	}
+}
+
+// runAsk posts a question to the recipient's inbox (plan §3.8). With --wake
+// it also attaches the switchboard's wake listener — on the SENDER's inbox,
+// filtered on the question's corr — so when the answer lands the parked job
+// wakes. The round still parks itself with jarvis-jobs yield --wait-on <corr>
+// (the ask is the "listen + submit" of the 4-command pattern; the yield is
+// the round's own).
+func runAsk(args []string) error {
+	fs := flag.NewFlagSet("ask", flag.ExitOnError)
+	body := fs.String("body", "", "details (the subject is the one-line summary)")
+	from := fs.String("from", "brain", "sender identity (the agent asking)")
+	wake := fs.String("wake", "", "agentjob to wake when the answer lands")
+	corr := fs.String("corr", "", "correlation id (default: a fresh id)")
+	board := fs.String("board", "", "Plane item (EVB-37) the message is tied to — mirrored as a comment")
+	timeout := fs.Duration("timeout", 2*time.Hour, "listener give-up (fallback when the job has no deadline)")
+	to, subject, err := mailboxPositional(fs, args)
+	if err != nil {
+		return err
+	}
+	if *corr == "" {
+		*corr = defaultID()
+	}
+	m := queue.MailboxMessage{
+		ID:        defaultID(),
+		Kind:      queue.MailKindQuestion,
+		From:      *from,
+		To:        to,
+		Subject:   subject,
+		Body:      *body,
+		Corr:      *corr,
+		WakeJob:   *wake,
+		BoardRef:  *board,
+		CreatedAt: time.Now().UTC(),
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := conn.PublishMailbox(context.Background(), m); err != nil {
+		return err
+	}
+	fmt.Printf("asked %s: %q (corr=%s id=%s queue=%s)\n", to, subject, m.Corr, m.ID, queue.MailboxQueueName(to))
+	if *wake != "" {
+		st, err := newListenerStore()
+		if err != nil {
+			return err
+		}
+		lq := queue.MailboxQueueName(*from) // the answer lands on the questioner's inbox
+		l, err := attachListener(st, lq, switchboard.ActionWake, *wake, "", "", m.Corr, *timeout)
+		if err != nil {
+			return fmt.Errorf("ask: question published to %s but the wake listener failed: %w", queue.MailboxQueueName(to), err)
+		}
+		fmt.Printf("listening on %s: wake %s (corr=%s id=%s)\n", lq, *wake, m.Corr, l.ID)
+	}
+	if *board != "" {
+		mirrorBoard(*board, m.From, m)
+	}
+	return nil
+}
+
+// runTell posts an fyi/handoff/review_request — a mailbox message with no
+// wake (the recipient sees it in its next round, or whenever it peeks).
+func runTell(args []string) error {
+	fs := flag.NewFlagSet("tell", flag.ExitOnError)
+	body := fs.String("body", "", "details (the subject is the one-line summary)")
+	from := fs.String("from", "brain", "sender identity")
+	kind := fs.String("kind", queue.MailKindFYI, "fyi | handoff | review_request")
+	corr := fs.String("corr", "", "correlation id (optional, for traceability)")
+	board := fs.String("board", "", "Plane item (EVB-37) the message is tied to — mirrored as a comment")
+	to, subject, err := mailboxPositional(fs, args)
+	if err != nil {
+		return err
+	}
+	if !queue.ValidMailKind(*kind) {
+		return fmt.Errorf("tell: kind %q is not one of fyi, handoff, review_request", *kind)
+	}
+	m := queue.MailboxMessage{
+		ID:        defaultID(),
+		Kind:      *kind,
+		From:      *from,
+		To:        to,
+		Subject:   subject,
+		Body:      *body,
+		Corr:      *corr,
+		BoardRef:  *board,
+		CreatedAt: time.Now().UTC(),
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := conn.PublishMailbox(context.Background(), m); err != nil {
+		return err
+	}
+	fmt.Printf("told %s (%s): %q (id=%s queue=%s)\n", to, m.Kind, subject, m.ID, queue.MailboxQueueName(to))
+	if *board != "" {
+		mirrorBoard(*board, m.From, m)
+	}
+	return nil
+}
+
+// runAnswer posts the reply to a question: kind answer to the questioner's
+// inbox carrying the question's corr (--corr, required). The corr is what
+// the question's wake listener filters on — the answer is the wake. The
+// question's board ref (and wake job) are copied from the question itself,
+// so the reply mirrors to the same Plane item without the answerer having to
+// know about it; --board overrides.
+func runAnswer(args []string) error {
+	fs := flag.NewFlagSet("answer", flag.ExitOnError)
+	body := fs.String("body", "", "details (the subject is the one-line summary)")
+	from := fs.String("from", "brain", "sender identity (the agent answering)")
+	corr := fs.String("corr", "", "the question's correlation id (required)")
+	board := fs.String("board", "", "Plane item — default: the question's board ref")
+	to, subject, err := mailboxPositional(fs, args)
+	if err != nil {
+		return err
+	}
+	if *corr == "" {
+		return fmt.Errorf("answer: --corr is required (the question's correlation id, from 'ask' output or inbox)")
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	m := queue.MailboxMessage{
+		ID:        defaultID(),
+		Kind:      queue.MailKindAnswer,
+		From:      *from,
+		To:        to,
+		Subject:   subject,
+		Body:      *body,
+		Corr:      *corr,
+		CreatedAt: time.Now().UTC(),
+	}
+	if *board == "" {
+		// Copy the question's board ref + wake job so the reply mirrors to
+		// the same item. The question sits in the ANSWERER's inbox (that is
+		// who was asked), not the questioner's — peek *from*. Inboxes are
+		// small; a bounded peek is cheap.
+		qs, err := conn.PeekMailbox(*from, 100)
+		if err == nil {
+			for _, q := range qs {
+				if q.Kind == queue.MailKindQuestion && q.Corr == *corr {
+					m.BoardRef = q.BoardRef
+					m.WakeJob = q.WakeJob
+					break
+				}
+			}
+		}
+	} else {
+		m.BoardRef = *board
+	}
+	if err := conn.PublishMailbox(context.Background(), m); err != nil {
+		return err
+	}
+	fmt.Printf("answered %s: %q (corr=%s id=%s queue=%s)\n", to, subject, m.Corr, m.ID, queue.MailboxQueueName(to))
+	if m.BoardRef != "" {
+		mirrorBoard(m.BoardRef, m.From, m)
+	}
+	return nil
+}
+
+// runInbox shows the agent's inbox without removing the messages (the
+// wake-listener contract: a message that woke a round stays for it).
+func runInbox(args []string) error {
+	fs := flag.NewFlagSet("inbox", flag.ExitOnError)
+	n := fs.Int("n", 5, "max messages to show")
+	asJSON := fs.Bool("json", false, "raw JSON, one message per line")
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("usage: inbox <agent> [-n N]")
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected extra argument %q", fs.Arg(0))
+	}
+	agent := args[0]
+	if !queue.ValidMailboxAgent(agent) {
+		return fmt.Errorf("inbox: %q is not a valid agent identity", agent)
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	msgs, err := conn.PeekMailbox(agent, *n)
+	if err != nil {
+		return err
+	}
+	if len(msgs) == 0 {
+		fmt.Printf("%s: empty\n", queue.MailboxQueueName(agent))
+		return nil
+	}
+	return printMailbox(msgs, *asJSON)
+}
+
+// runTake pops the agent's inbox (acking the messages) — the consuming side,
+// for the round that owns the messages (a woken round, or a recipient
+// reading its fyi/handoff mail).
+func runTake(args []string) error {
+	fs := flag.NewFlagSet("take", flag.ExitOnError)
+	n := fs.Int("n", 1, "max messages to pop")
+	asJSON := fs.Bool("json", false, "raw JSON, one message per line")
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("usage: take <agent> [-n N]")
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected extra argument %q", fs.Arg(0))
+	}
+	agent := args[0]
+	if !queue.ValidMailboxAgent(agent) {
+		return fmt.Errorf("take: %q is not a valid agent identity", agent)
+	}
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	msgs, err := conn.PopMailbox(agent, *n)
+	if err != nil {
+		return err
+	}
+	if len(msgs) == 0 {
+		fmt.Printf("%s: empty\n", queue.MailboxQueueName(agent))
+		return nil
+	}
+	return printMailbox(msgs, *asJSON)
+}
+
+func printMailbox(msgs []queue.MailboxMessage, asJSON bool) error {
+	for _, m := range msgs {
+		if asJSON {
+			b, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(b))
+			continue
+		}
+		fmt.Printf("--- %s kind=%s from=%s to=%s corr=%s %s\n",
+			m.ID, m.Kind, m.From, m.To, orDash(m.Corr), m.CreatedAt.UTC().Format(time.RFC3339))
+		fmt.Printf("subject: %s\n", m.Subject)
+		if m.Body != "" {
+			fmt.Printf("body:\n%s\n", m.Body)
+		}
+		if m.WakeJob != "" || m.BoardRef != "" {
+			fmt.Printf("wake_job=%s board=%s\n", orDash(m.WakeJob), orDash(m.BoardRef))
+		}
+	}
+	return nil
 }
 
 func printMessages(msgs []queue.Message, asJSON bool) error {
