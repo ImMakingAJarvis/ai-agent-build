@@ -5,7 +5,9 @@ move *jobs* from the scheduler to a model. **Flow queues** (`flow.<name>`)
 are the event-driven channel between models *across rounds*: one round
 publishes a job to a flow queue, finishes; another model does the work and
 publishes the result back; the first model's next round consumes it and
-continues. [Queues](#queues) is the full topology in one place.
+continues. **Mailboxes** (`agent.<name>.inbox`) are the direct-message
+channel between agent identities ([Mailboxes](#mailboxes-agent-to-agent)).
+[Queues](#queues) is the full topology in one place.
 
 ## Queues
 
@@ -24,6 +26,7 @@ temporary auto-delete ones the CLI creates to `tail` an exchange.
 | `jobs.gpu` / `jobs.cpu` / `jobs.igpu` | execution jobs placed by `internal/placement` from free VRAM/RAM | task-runner (LocationWorkers); publishers: plane-bridge (board `run_task` jobs) and the worker's LocationPublisher | — | — |
 | `flow.<name>` | event-driven handoff between models across rounds (The pattern below); created on demand, one per flow | the round that created it — read with `jarvis-mq peek` / `consume` | — | `jarvis.dlx` |
 | `cap.<capability>` | request channel for a capability — v2 messages, e.g. `cap.image.generate`; created on demand; the result goes to the request's `reply_to`, not here | the capability's worker (capworker SDK; `cap-echo` consumes `cap.echo`, the Phase 2 gate's test worker) | 10 | `jarvis.dlx` |
+| `agent.<name>.inbox` | agent mailbox (EVB-35): direct mail between identities — `question`/`answer`/`fyi`/`handoff`/`review_request` envelopes; a question's `wake_job` wakes when the answer lands. Identities: `brain`, `igpu-helper`, `sonnet`, `planner` (+ `remote-<n>` when it lands) | the round that sends — read with `jarvis-mq inbox` / `take`; sent with `ask` / `tell` / `answer` | — | `jarvis.dlx` |
 | `dead` | dead letters from `flow.*`/`cap.*`: rejected (nack without requeue after the `MaxAttempts` budget) or expired (TTL), each carrying an `x-death` header (reason, queue, count, time) | nobody consumes it — the dashboard's Dead Letters section reads it and offers requeue / drop | — | — |
 | `events` (topic) | lifecycle events: `job.<capability>.<started\|progress\|done\|failed>`, `agent.<job-id>.<yielded\|woken\|resumed>`, `window.<opened\|closed>`, `lease.<granted\|released\|denied>`, `stream.<started\|stopped>` | publishers: worker (the jobs it runs), task-runner (`job.run_task.*`), agent-run (`agent.*`), resourced (`window.*`, `lease.*`, `stream.*`); declared by `definitions.json` + `EventPublisher` | — | — |
 | `jarvis.dlx` (fanout) | the dead-letter exchange — fanout, so every dead letter lands on its single bound queue, `dead` | `EnsureDLX` (called from every `flow.*`/`cap.*` declare and dead-letter operation) | — | — |
@@ -137,6 +140,52 @@ continuation's `result_refs` in step with `results.json`.
   time); the dashboard's Dead Letters section lists them and can requeue
   one back to its original queue (recreated if it is gone) or drop it.
   A message is either processed, dead-lettered with a reason, or requeued.
+
+## Mailboxes (agent to agent)
+
+Mailboxes are the direct agent-to-agent message channel (plan §3.8, EVB-35).
+Flow queues move *job events* between rounds; mailboxes carry *messages*
+between agent identities — the brain asks the iGPU helper a question, one
+agent hands work off to another, a review request goes to a reviewer.
+
+- **One queue per identity**: `agent.<name>.inbox` — durable, persistent,
+  dead-lettered to `jarvis.dlx` exactly like `flow.*`/`cap.*` (the same
+  declare + bind + routing-key conventions, so `RequeueDead` round-trips a
+  dead mailbox message). Identities are validated names: `brain`,
+  `igpu-helper`, `sonnet`, `planner` — and `remote-<n>` when a remote
+  agent lands.
+- **The envelope** (`queue.MailboxMessage`): `kind`
+  (`question` | `answer` | `fyi` | `handoff` | `review_request`), `from`,
+  `to`, `subject`, `body`, and optional `corr`, `wake_job`, `board_ref`.
+- **ask = question + wake**: `jarvis-mq ask B --wake JOB --from A "subject"`
+  publishes the question to `agent.B.inbox` **and** attaches a corr-filtered
+  wake listener on `agent.A.inbox` — the answer (kind `answer`, same `corr`)
+  lands on the QUESTIONER's inbox, and the switchboard wakes JOB when it
+  arrives (within its poll interval). The round still parks itself with
+  `jarvis-jobs yield JOB --wait-on <corr>`; `ask` is the mailbox version of
+  the 4-command pattern (the listener is the `listen`, `ask` is the
+  `submit`).
+- **tell = message without a wake**: `jarvis-mq tell` (default kind `fyi`;
+  `handoff` / `review_request` via `--kind`) just puts a message in the
+  recipient's inbox. Nothing drains a mailbox automatically — the recipient
+  reads it in its own next round (`jarvis-mq inbox <agent>` peeks, `take`
+  pops).
+- **answer finds its target**: `jarvis-mq answer A --corr c "subject"`
+  (A = the one who asked) publishes kind `answer` to `agent.A.inbox`.
+  Without an explicit `--board`, it peeks the ANSWERER's (`--from`) inbox
+  for the question with corr `c` and copies its `board_ref` / `wake_job` —
+  the question sits with the side that was asked — so the reply mirrors to
+  the same board item without the answering side having to know about it.
+- **Plane mirroring**: a message with a board ref (`--board EVB-37` on
+  ask/tell/answer, or copied from the question) also posts a
+  model-prefixed Plane comment on that item (`<from>: <subject> — <body>`);
+  the reply mirrors to the same item. Best-effort: Plane being down logs
+  and keeps the mail — the queue is the source of truth.
+- **The switchboard knows the envelope**: `decodeArrival` recognises a
+  mailbox body (a valid mail kind with a recipient) before the generic
+  `Message` decode, so corr-filtered listeners, wake/forward/notify actions
+  and the "wake always keeps its message" rule all work on an inbox exactly
+  as on a flow queue.
 
 ## Capability envelope (v2)
 
@@ -343,10 +392,33 @@ them; `-n N` to cap, `--json` for the raw bodies):
     jarvis-mq results flow.job-42
     jarvis-mq caps    # capability catalog — lands in task EVB-19
 
-Guards: publishing to a queue that is neither `flow.*`, `cap.*` nor a known
-queue is refused (the topic exchange would silently drop it), as is `delete`
-of a worker-owned queue (voice, fix, coding, background, jobs.*, image) or
-of a capability queue (`cap.*`).
+Mailboxes (plan §3.8): `ask` is a question with an optional wake (the
+answer wakes the job on the questioner's inbox), `tell` is a message
+without a wake, `answer` replies with the question's corr:
+
+    jarvis-mq ask igpu-helper --body "before the photo window" \
+        --wake job-42 --corr q1 "how hot is the engine"
+    jarvis-mq tell planner --kind handoff "photo window opens at 14:00"
+    # the reply goes to the QUESTIONER's inbox (brain asked, so answer brain)
+    jarvis-mq answer brain --from igpu-helper --corr q1 --body "headroom ok" "61C, fine"
+    jarvis-mq inbox igpu-helper        # peek (keeps the messages; -n, --json)
+    jarvis-mq take igpu-helper         # pop (removes; -n, --json)
+
+Arg order, like `publish <queue> [flags]`: the agent is the first
+positional, then the flags, then the subject (Go's flag package stops at
+the first non-flag). `ask`/`tell`/`answer` take `--from` (default `brain`),
+`--body`, `--corr` (default `mq-<unix>-<hex>`), and `--board <REF>` for
+Plane mirroring; `ask` takes `--wake <JOB>` and `--timeout` (listener
+deadline, default 2h). `answer` requires `--corr` and mirrors the
+question's board ref when `--board` is left empty.
+
+Guards: publishing to a queue that is neither `flow.*`, `cap.*`, an agent
+mailbox nor a known queue is refused (the topic exchange would silently
+drop it), as is `delete` of a worker-owned queue (voice, fix, coding,
+background, jobs.*, image) or of a capability queue (`cap.*`). `publish`
+to an `agent.*.inbox` is refused too — mailboxes accept only the
+envelope (kind, from, to, subject ride in the body), via `ask` / `tell` /
+`answer`.
 
 ## In-process (superagent)
 
@@ -403,6 +475,12 @@ because a notify listener can only send its static text — the result body
 - `internal/queue/cap.go` — `CapQueueName`, `IsCapQueue`, `EnsureCapQueue`
   (on-demand declare + bind, DLX args — the request side of the v2
   envelope), `ValidCapabilityName`, `ParseDeadline`.
+- `internal/queue/mailbox.go` — the agent mailboxes (EVB-35):
+  `MailboxQueueName`/`IsMailboxQueue`/`ValidMailboxAgent`, the
+  `MailboxMessage` envelope (kind/from/to/subject/body + corr/wake_job/
+  board_ref), `EnsureMailboxQueue`, `PublishMailbox` (confirm mode),
+  `PeekMailbox`/`PopMailbox`, and `IsMailboxBody` (the switchboard's
+  decode discriminator).
 - `internal/queue/events.go` — the `events` exchange: `Event`, the
   `JobEvent`/`AgentEvent`/`WindowEvent`/`LeaseEvent` builders, and the
   fire-and-forget `EventPublisher`.
