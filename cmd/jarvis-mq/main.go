@@ -146,7 +146,9 @@ func usage() {
                               typical runtime (readable by the model as-is)
   ask <agent> <subject...>    a question to agent.<agent>.inbox; with --wake JOB
                               the round's job wakes when the answer lands
-  tell <agent> <subject...>   an fyi/handoff/review_request (no wake)
+  tell <agent> <subject...>   an fyi/handoff/review_request (no wake);
+                              review_request + --wake JOB wakes when the
+                              reviewer's answer lands (EVB-36)
   answer <agent> [flags] <subject...> the reply to a question, to the
                                        questioner's inbox (--corr = the question's)
   inbox <agent> [-n N]        show the inbox without removing messages
@@ -178,9 +180,10 @@ results flags:
 mailbox flags (ask / tell / answer):
   --body B                  details (the subject positional is the one-line summary)
   --from A                  sender identity (default brain; the helper uses igpu-helper)
-  --wake JOB                ask: agentjob to wake when the answer lands (a
-                            listener on the sender's inbox, filtered on the corr)
-  --timeout D               ask: listener give-up (default 2h)
+  --wake JOB                ask / tell --kind review_request: agentjob to wake
+                            when the answer lands (a listener on the sender's
+                            inbox, filtered on the corr)
+  --timeout D               ask / tell: listener give-up (default 2h)
   --corr C                  the correlation id (ask: default fresh; answer: required)
   --kind K                  tell: fyi (default) | handoff | review_request
   --board REF               Plane item (EVB-37) the message mirrors to as a comment
@@ -572,21 +575,46 @@ func runAsk(args []string) error {
 	return nil
 }
 
+// validateTell checks the tell kind/wake combination. A wake is a
+// listener-wake (the reviewer's answer — an `answer` carrying the same
+// corr — lands on the SENDER's inbox and wakes the job), and only
+// review_request gets one: a question's wake lives in `ask`, and fyi/
+// handoff are fire and forget (no reply is expected, so there is nothing
+// to wake on).
+func validateTell(kind, wake string) error {
+	if wake != "" && kind != queue.MailKindReviewRequest {
+		return fmt.Errorf("tell: --wake is only valid with --kind review_request (fyi/handoff are fire and forget; a question's wake belongs to ask)")
+	}
+	return nil
+}
+
 // runTell posts an fyi/handoff/review_request — a mailbox message with no
 // wake (the recipient sees it in its next round, or whenever it peeks).
+// With --kind review_request --wake <job> the message becomes a
+// listener-wake pair (plan §3.8, EVB-36): the reviewer replies with
+// `answer --corr <corr>`, the answer lands on the sender's inbox, and the
+// switchboard wakes the job.
 func runTell(args []string) error {
 	fs := flag.NewFlagSet("tell", flag.ExitOnError)
 	body := fs.String("body", "", "details (the subject is the one-line summary)")
 	from := fs.String("from", "brain", "sender identity")
 	kind := fs.String("kind", queue.MailKindFYI, "fyi | handoff | review_request")
-	corr := fs.String("corr", "", "correlation id (optional, for traceability)")
+	corr := fs.String("corr", "", "correlation id (optional, for traceability; review_request --wake defaults to a fresh id)")
+	wake := fs.String("wake", "", "agentjob to wake when an answer with this corr lands (review_request only)")
 	board := fs.String("board", "", "Plane item (EVB-37) the message is tied to — mirrored as a comment")
+	timeout := fs.Duration("timeout", 2*time.Hour, "listener give-up (fallback when the job has no deadline)")
 	to, subject, err := mailboxPositional(fs, args)
 	if err != nil {
 		return err
 	}
 	if !queue.ValidMailKind(*kind) {
 		return fmt.Errorf("tell: kind %q is not one of fyi, handoff, review_request", *kind)
+	}
+	if err := validateTell(*kind, *wake); err != nil {
+		return err
+	}
+	if *wake != "" && *corr == "" {
+		*corr = defaultID()
 	}
 	m := queue.MailboxMessage{
 		ID:        defaultID(),
@@ -607,19 +635,31 @@ func runTell(args []string) error {
 	if err := conn.PublishMailbox(context.Background(), m); err != nil {
 		return err
 	}
-	fmt.Printf("told %s (%s): %q (id=%s queue=%s)\n", to, m.Kind, subject, m.ID, queue.MailboxQueueName(to))
+	fmt.Printf("told %s (%s): %q (id=%s corr=%s queue=%s)\n", to, m.Kind, subject, m.ID, orDash(m.Corr), queue.MailboxQueueName(to))
+	if *wake != "" {
+		st, err := newListenerStore()
+		if err != nil {
+			return err
+		}
+		lq := queue.MailboxQueueName(*from) // the review's answer lands on the requester's inbox
+		l, err := attachListener(st, lq, switchboard.ActionWake, *wake, "", "", m.Corr, *timeout)
+		if err != nil {
+			return fmt.Errorf("tell: review_request published to %s but the wake listener failed: %w", queue.MailboxQueueName(to), err)
+		}
+		fmt.Printf("listening on %s: wake %s (corr=%s id=%s)\n", lq, *wake, m.Corr, l.ID)
+	}
 	if *board != "" {
 		mirrorBoard(*board, m.From, m)
 	}
 	return nil
 }
 
-// runAnswer posts the reply to a question: kind answer to the questioner's
-// inbox carrying the question's corr (--corr, required). The corr is what
-// the question's wake listener filters on — the answer is the wake. The
-// question's board ref (and wake job) are copied from the question itself,
-// so the reply mirrors to the same Plane item without the answerer having to
-// know about it; --board overrides.
+// runAnswer posts the reply to a question (or a review_request — EVB-36):
+// kind answer to the questioner's inbox carrying the corr (--corr,
+// required). The corr is what the question's wake listener filters on — the
+// answer is the wake. The question's board ref (and wake job) are copied
+// from the question itself, so the reply mirrors to the same Plane item
+// without the answerer having to know about it; --board overrides.
 func runAnswer(args []string) error {
 	fs := flag.NewFlagSet("answer", flag.ExitOnError)
 	body := fs.String("body", "", "details (the subject is the one-line summary)")
@@ -652,11 +692,13 @@ func runAnswer(args []string) error {
 		// Copy the question's board ref + wake job so the reply mirrors to
 		// the same item. The question sits in the ANSWERER's inbox (that is
 		// who was asked), not the questioner's — peek *from*. Inboxes are
-		// small; a bounded peek is cheap.
+		// small; a bounded peek is cheap. A review_request is answered the
+		// same way (EVB-36): it carries a board ref too, so match it.
 		qs, err := conn.PeekMailbox(*from, 100)
 		if err == nil {
 			for _, q := range qs {
-				if q.Kind == queue.MailKindQuestion && q.Corr == *corr {
+				if q.Corr == *corr &&
+					(q.Kind == queue.MailKindQuestion || q.Kind == queue.MailKindReviewRequest) {
 					m.BoardRef = q.BoardRef
 					m.WakeJob = q.WakeJob
 					break
