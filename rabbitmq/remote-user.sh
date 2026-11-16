@@ -54,7 +54,9 @@ fi
 # capability alternation: echo|transcribe
 caps_alt=""
 for c in "$@"; do
-  [ -n "$caps_alt" && caps_alt+="|" ]
+  if [ -n "$caps_alt" ]; then
+    caps_alt+="|"
+  fi
   caps_alt+=$c
 done
 
@@ -70,8 +72,10 @@ if [ -z "$PASSWORD" ]; then
 fi
 
 users_json=$(rmq list_users -p "$VHOST" --formatter json)
+EXISTS=no
 case $users_json in
   *'"'$USER'"'*)
+    EXISTS=yes
     if [ -n "${REMOTE_USER_PASSWORD:-}" ]; then
       rmq change_password -p "$VHOST" "$USER" "$PASSWORD" >/dev/null
     fi
@@ -82,19 +86,33 @@ case $users_json in
 esac
 rmq set_permissions -p "$VHOST" "$USER" "$RE_READ" "$RE_WRITE" "$RE_CONFIGURE" >/dev/null
 
+# What the node should actually use: on a re-run without
+# REMOTE_USER_PASSWORD the password is unchanged, so show a placeholder
+# instead of a fresh random one that was never applied.
+if [ "$EXISTS" = yes ] && [ -z "${REMOTE_USER_PASSWORD:-}" ]; then
+  SHOWN_PASSWORD='<unchanged>'
+  PW_LINE="  password  (existing user, unchanged — set REMOTE_USER_PASSWORD to rotate)"
+elif [ "$GENERATED" = yes ]; then
+  SHOWN_PASSWORD=$PASSWORD
+  PW_LINE="  password  $PASSWORD  (generated)"
+else
+  SHOWN_PASSWORD=$PASSWORD
+  PW_LINE="  password  (from REMOTE_USER_PASSWORD)"
+fi
+
 echo "Remote RabbitMQ user provisioned (vhost $VHOST):"
 echo "  user      $USER"
 echo "  read      $RE_READ"
 echo "  write     $RE_WRITE"
 echo "  configure $RE_CONFIGURE"
-[ "$GENERATED" = yes ] && echo "  password  $PASSWORD  (generated)" || echo "  password  (from REMOTE_USER_PASSWORD)"
+echo "$PW_LINE"
 echo
 echo "Node config for $NODE (capworker-remote.yaml; chmod 600 on the node):"
 cat <<EOF
 node: ${NODE}
 broker:
-  url: amqp://${USER}:${PASSWORD}@<BROKER-HOST>:5672/
-  # off-LAN only: url: amqps://${USER}:${PASSWORD}@<BROKER-HOST>:5671/
+  url: amqp://${USER}:${SHOWN_PASSWORD}@<BROKER-HOST>:5672/
+  # off-LAN only: url: amqps://${USER}:${SHOWN_PASSWORD}@<BROKER-HOST>:5671/
   # tls:
   #   ca_file: /etc/jarvis/ca.pem
 artifacts:
