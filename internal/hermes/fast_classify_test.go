@@ -183,6 +183,32 @@ func TestFastClassifyStatements(t *testing.T) {
 	}
 }
 
+func TestFastClassifyCapabilityWork(t *testing.T) {
+	cases := []struct {
+		input   string
+		wantRes fastClassifyResult
+	}{
+		// Capability work: the fast path cannot extract the parameters
+		// (capability, path), so it defers to the LLM — the spec's
+		// acceptance message must reach submit_capability.
+		{"describe the photos in folder /tmp/photos", fastUnknown},
+		{"please describe these photos", fastUnknown},
+		{"transcribe the audio in /tmp/recordings", fastUnknown},
+		{"Generate a picture of a cat", fastUnknown},
+		{"caption the screenshots in the build folder", fastUnknown},
+		// Control: ordinary short statements still go straight to chat.
+		{"I like coding in Go", fastChat},
+		{"That makes sense", fastChat},
+	}
+
+	for _, tc := range cases {
+		got, _, _ := classify3(t, tc.input)
+		if got != tc.wantRes {
+			t.Errorf("fastClassify(%q) = %v, want %v", tc.input, got, tc.wantRes)
+		}
+	}
+}
+
 func TestFastClassifyEmpty(t *testing.T) {
 	cases := []string{"", "   ", "\t\n"}
 	for _, input := range cases {

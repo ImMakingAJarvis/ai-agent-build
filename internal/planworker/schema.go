@@ -52,6 +52,13 @@ type Task struct {
 	Size string `json:"size"`
 	// ExecutorModel is the registry id of the suggested executor.
 	ExecutorModel string `json:"executor_model"`
+	// Capability, when set, names a capability (image.describe, echo, …)
+	// that does the task's work: the executor is a capability worker, not
+	// an LLM round (plan §3.7). Empty means a normal model-executed task.
+	// A valid capability name is a dotted lowercase-alphanumeric path
+	// (queue.ValidCapabilityName), which is also the queue it routes to
+	// (cap.<capability>).
+	Capability string `json:"capability,omitempty"`
 }
 
 // TaskSchema is a compiled task JSON schema plus the cross-field rules it

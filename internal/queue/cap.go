@@ -12,6 +12,7 @@ package queue
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -26,6 +27,41 @@ const CapMaxPriority = 10
 
 // CapQueueName returns the queue name for a capability.
 func CapQueueName(capability string) string { return CapQueuePrefix + capability }
+
+// ValidCapabilityName reports whether s is acceptable as a capability: a
+// dotted path (image.generate) or a single word (echo), lowercase
+// alphanumeric segments. The name decides the queue (cap.<cap>) and the
+// exchange binding, so it is checked at submit time by every submitter
+// (jarvis-mq, the superagent's rabbitmq tool, Hermes's submit_capability)
+// rather than in the worker.
+func ValidCapabilityName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, seg := range strings.Split(s, ".") {
+		if seg == "" {
+			return false
+		}
+		for _, r := range seg {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ParseDeadline parses a deadline: an absolute RFC3339 time, or a duration
+// taken from now ("2h").
+func ParseDeadline(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return time.Now().UTC().Add(d), nil
+	}
+	return time.Time{}, fmt.Errorf("parse %q as RFC3339 or a duration from now (2h)", s)
+}
 
 // IsCapQueue reports whether name is a capability queue.
 func IsCapQueue(name string) bool { return strings.HasPrefix(name, CapQueuePrefix) }

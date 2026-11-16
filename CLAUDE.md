@@ -59,7 +59,7 @@ build from the job's instructions.
 
 ### Comments
 
-Every task has a comment thread — JSON files under
+Every kanban task has a local comment thread — JSON files under
 `~/.local/share/jarvis/kanban/comments/`, served by the dashboard
 (`POST /api/kanban/comments`, `GET /api/kanban/comments?task_id=...`,
 `DELETE /api/kanban/comments/{id}`; the task detail page shows and adds
@@ -73,6 +73,19 @@ the task — post the question as a comment rather than blocking the round
 on it; Nathan reads the thread on the board (it is also searchable in
 the vector graph). Comments are ordered oldest first and are deleted
 with their task.
+
+Work that lives on Plane or between agents has its own channels:
+
+- **Plane items** carry a comment thread — post with
+  `jarvis-board comment <REF> "<what changed, why>"` (model-prefixed;
+  see [Work board (Plane)](#work-board-plane)). Cross-round progress on a
+  board item goes there.
+- **Agent mailboxes** are the agent-to-agent message channel:
+  `jarvis-mq ask / tell / answer <identity>` (a question with an optional
+  wake, a reply, a handoff — `docs/event-driven.md`, [Mailboxes](docs/event-driven.md#mailboxes-agent-to-agent)).
+  A mailbox message tied to a board item (`--board <REF>`) also mirrors
+  into that item's Plane comments, and a reply mirrors back to the same
+  item.
 
 ## Work board (Plane)
 

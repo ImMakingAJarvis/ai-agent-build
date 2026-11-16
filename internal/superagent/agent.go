@@ -39,6 +39,10 @@ type Result struct {
 	Turns     int      // total model calls
 	Steps     int      // steps executed
 	Duration  time.Duration
+	// Yielded is set when the run ended by yielding on capability results
+	// (rabbitmq op=yield): OK is true, the run is not failed — it is
+	// parked, and the job's wake is the continuation.
+	Yielded bool
 }
 
 // Run executes the goal and returns the result. A nil error means the
@@ -98,6 +102,13 @@ func (a *Agent) Run(ctx context.Context, goal string) (*Result, error) {
 			res.Duration = time.Since(start)
 			a.log("result: %s — %s", resultWord(res.OK), res.Summary)
 			return res, nil
+		case kindYield:
+			res.OK = true
+			res.Yielded = true
+			res.Summary = outcome.note
+			res.Duration = time.Since(start)
+			a.log("result: YIELDED — %s", res.Summary)
+			return res, nil
 		case kindStepDone:
 			res.StepNotes = append(res.StepNotes, outcome.note)
 			a.log("  step done: %s", outcome.note)
@@ -143,6 +154,7 @@ const (
 	kindStepFailed
 	kindReplan
 	kindFinish
+	kindYield // the run parks on capability results (rabbitmq op=yield)
 )
 
 type outcome struct {
@@ -222,7 +234,11 @@ Rules:
   back as "BLOCKED: ..." observations — do a different thing, never retry
   the blocked command.
 - When the whole goal is achieved, call finish with ok=true and a summary
-  of what was done. When it cannot be done, call finish with ok=false.`)
+  of what was done. When it cannot be done, call finish with ok=false.
+- Capability work that will not finish in this run: rabbitmq op=submit for
+  the request, op=listen for the wake, then op=yield with the corr ids in
+  wait-on and a note of what the woken round should do. The run ends after
+  the yield — the wake resumes it; do not call finish after a yield.`)
 	return b.String()
 }
 
@@ -267,6 +283,12 @@ func (a *Agent) runStep(ctx context.Context, goal string, plan Plan, i int, step
 			obs = "ERROR: " + err.Error()
 		}
 		a.log("  turn %d: %s %s -> %s", turns, act.Tool, shortArg(act), firstLine(obs))
+		if a.Tools.Yielded {
+			// A successful rabbitmq yield ends the whole run: the job is
+			// parked Waiting and the switchboard's wake is the continuation —
+			// there is no next turn to feed the observation into.
+			return outcome{kind: kindYield, note: strings.TrimSpace(obs)}, turns, nil
+		}
 		messages = append(messages, Message{Role: "user", Content: "OBSERVATION (" + act.Tool + "):\n" + obs})
 	}
 	return outcome{kind: kindStepFailed, note: fmt.Sprintf("no step_done within %d turns", a.MaxTurns)}, a.MaxTurns, nil

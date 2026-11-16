@@ -357,6 +357,9 @@ func taskDescriptionHTML(t Task) string {
 	if len(t.Dependencies) > 0 {
 		b.WriteString("<p><strong>Blocked by:</strong> " + html.EscapeString(strings.Join(t.Dependencies, ", ")) + "</p>\n")
 	}
+	if t.Capability != "" {
+		b.WriteString("<p><strong>Capability:</strong> " + html.EscapeString(t.Capability) + "</p>\n")
+	}
 	b.WriteString("<p><strong>Acceptance check:</strong> " + html.EscapeString(t.AcceptanceCheck) + "</p>\n")
 	b.WriteString("<p><strong>Size:</strong> " + html.EscapeString(t.Size) + " &middot; <strong>Executor:</strong> " +
 		html.EscapeString(placement.ModelLabel(t.ExecutorModel)) + "</p>")

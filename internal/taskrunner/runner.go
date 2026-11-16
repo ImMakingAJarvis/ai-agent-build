@@ -3,6 +3,7 @@ package taskrunner
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/placement"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/planworker"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 )
 
@@ -85,9 +87,25 @@ type Runner struct {
 	// MaxAttempts harness+check rounds before the card is Blocked.
 	// Zero means 3.
 	MaxAttempts int
+	// Caps submits a card's capability and waits for its Result — the
+	// no-LLM-round path for a card that carries a capability: (plan §3.7).
+	// Nil means no capability client is wired; a capability card is then
+	// Blocked (a normal card is unaffected). Production wraps the broker
+	// connection with NewQueueCapabilityClient; tests use a scripted one.
+	Caps CapabilityClient
+	// CapabilityTimeout bounds the wait for a capability's Result. Zero
+	// means DefaultCapabilityTimeout.
+	CapabilityTimeout time.Duration
 	// Log receives progress; nil is fine.
 	Log *slog.Logger
 }
+
+// DefaultCapabilityTimeout bounds how long a card waits for its
+// capability's Result before the runner settles it as a timeout and
+// Blocks the card. Capabilities are bounded (the catalog carries each one's
+// typical runtime); the bound is a safety net for a worker that dies
+// without publishing a Result.
+const DefaultCapabilityTimeout = 30 * time.Minute
 
 // Run executes one run_task job. A non-nil error is a runner/
 // infrastructure failure (no card state was relied on; the store entry
@@ -153,6 +171,15 @@ func (r *Runner) Run(ctx context.Context, job *Job) (Result, error) {
 				strings.Join(details(missing), ", ")+" (the card stays in Ready)")
 		}
 		return Result{Waiting: true, Summary: "waiting on " + strings.Join(ids, ", ")}, nil
+	}
+
+	// A capability card (plan §3.7): the executor is a capability worker,
+	// not an LLM round. No placement, no harness — submit to cap.<cap>
+	// and wait for the Result. Placed before the placement block on
+	// purpose: the broker routes the capability to a free worker by
+	// consumer priority, so the runner does not decide a location.
+	if task.Capability != "" {
+		return r.runCapability(ctx, job, card, task, inProgressID, doneID)
 	}
 
 	// Placement: the executor model from the card's model: label (the
@@ -249,6 +276,116 @@ func (r *Runner) Run(ctx context.Context, job *Job) (Result, error) {
 		"%s: blocked after %d attempts; branch %s left for inspection. Last check output:\n%s",
 		modelID, r.MaxAttempts, taskBranch, tail(prev, 1500)))
 	return Result{Blocked: true, Summary: fmt.Sprintf("failed after %d attempts", r.MaxAttempts), Error: tail(prev, 4000)}, nil
+}
+
+// runCapability executes a card whose executor is a capability (plan §3.7):
+// move it to In progress, submit it to cap.<capability> (reply-to
+// flow.<card-id>, corr = the card id), wait for the Result, and settle the
+// card from the Result's status — ok advances it to Done, anything else
+// Blocks it with the reason. No placement, no harness: the broker routes the
+// request to a free worker by consumer priority and the Result is the whole
+// handoff, so a capability card never runs an LLM round.
+func (r *Runner) runCapability(ctx context.Context, job *Job, card *plane.WorkItem, task *planworker.Task, inProgressID, doneID string) (Result, error) {
+	projectID := job.Board.ProjectID
+	if r.Caps == nil {
+		r.blockCard(ctx, projectID, card.ID, "capability "+task.Capability+" requested but no capability client is wired (broker not configured)")
+		return Result{Blocked: true, Summary: "no capability client wired"}, nil
+	}
+	if !queue.ValidCapabilityName(task.Capability) {
+		r.blockCard(ctx, projectID, card.ID, "capability name "+task.Capability+" is not valid (want a dotted lowercase-alphanumeric path)")
+		return Result{Blocked: true, Summary: "invalid capability name"}, nil
+	}
+	// Move the card to In progress before any work (the PLAN.md "state
+	// changes ... written to Plane each step" contract).
+	if err := r.setState(ctx, projectID, card.ID, inProgressID); err != nil {
+		return Result{}, fmt.Errorf("move card to %s: %w", StateInProgress, err)
+	}
+	r.comment(ctx, projectID, card.ID, "taskrunner: submitted to "+queue.CapQueueName(task.Capability)+", waiting for the Result (no LLM round)")
+	cctx, cancel := context.WithTimeout(ctx, r.capabilityTimeout())
+	defer cancel()
+	res, err := r.Caps.Run(cctx, task.Capability, card.ID, capabilityInput(task))
+	if err != nil {
+		// A shutdown (ctx cancelled) aborts the run; the store entry settles
+		// it as failed and the card is left In progress, exactly as a
+		// mid-harness crash would. A submit failure is definitive — block the
+		// card with the reason so a human can see it and reset it (Blocked ->
+		// Ready re-triggers).
+		if errors.Is(err, context.Canceled) {
+			return Result{}, err
+		}
+		r.blockCard(ctx, projectID, card.ID, "capability submit failed: "+err.Error())
+		return Result{Blocked: true, Summary: "capability submit failed", Error: err.Error()}, nil
+	}
+	if res.Status == queue.ResultOK {
+		r.comment(ctx, projectID, card.ID, capabilityResultComment(task, res))
+		// The capability's work is done; a flaky state move must not mark the
+		// run failed (mirrors finish's retry for a normal card).
+		if stateErr := r.moveToDone(ctx, projectID, card.ID, doneID); stateErr != nil {
+			r.logf("move capability card to Done: %v", stateErr)
+		}
+		return Result{Passed: true, Summary: "capability " + task.Capability + " ok: " + res.Summary}, nil
+	}
+	// error / timeout / cancelled: settle as Blocked with the reason.
+	reason := res.Error
+	if reason == "" {
+		reason = "status " + res.Status
+	}
+	r.blockCard(ctx, projectID, card.ID, fmt.Sprintf("capability %s ended %s: %s", task.Capability, res.Status, reason))
+	return Result{Blocked: true, Summary: fmt.Sprintf("capability %s %s", task.Capability, res.Status), Error: reason}, nil
+}
+
+// capabilityTimeout bounds the wait for a capability's Result, defaulting to
+// DefaultCapabilityTimeout.
+func (r *Runner) capabilityTimeout() time.Duration {
+	if r.CapabilityTimeout > 0 {
+		return r.CapabilityTimeout
+	}
+	return DefaultCapabilityTimeout
+}
+
+// capabilityInput builds the input the capability worker reads, from the
+// card's description (the decompose prompt puts the capability's input
+// there — what to generate, the file to describe, the clip to transcribe).
+// The description is passed under the keys the common capabilities read
+// (prompt for the generate family, description as the generic fallback); a
+// capability that needs a specific path or verb reads its own primary key.
+func capabilityInput(task *planworker.Task) map[string]any {
+	return map[string]any{
+		"prompt":      task.Description,
+		"description": task.Description,
+	}
+}
+
+// capabilityResultComment renders the Result as the card's "the result lands
+// on the card" comment: the status, the summary, the artifact references (not
+// the bytes — invariant 7), and the worker that produced it.
+func capabilityResultComment(task *planworker.Task, res queue.Result) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "taskrunner: capability %s — %s\n", task.Capability, res.Status)
+	if res.Summary != "" {
+		b.WriteString("summary: " + res.Summary + "\n")
+	}
+	if len(res.Artifacts) > 0 {
+		b.WriteString("artifacts: " + strings.Join(res.Artifacts, ", ") + "\n")
+	}
+	if res.Worker != "" {
+		b.WriteString("worker: " + res.Worker + "\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// moveToDone sets the card to Done, retrying a few times: the capability's
+// work is already done, so a flaky state move is retried rather than
+// surfacing as a failed run (the same reasoning as finish's Done move).
+func (r *Runner) moveToDone(ctx context.Context, projectID, itemID, doneID string) error {
+	var err error
+	for i := 0; i < 3; i++ {
+		if err = r.setState(ctx, projectID, itemID, doneID); err == nil {
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return err
 }
 
 // finish commits the task worktree, merges it into the epic branch,

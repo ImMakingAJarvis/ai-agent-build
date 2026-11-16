@@ -71,6 +71,9 @@ func DefaultActions() []Action {
 				return runDelegate(ctx, params)
 			},
 		},
+		// submit_capability (EVB-32): chat becomes a capability job. Full
+		// access only — a capability job spends owner money on the workers.
+		CapabilityAction(),
 	}
 	return append(actions, modeActions()...)
 }

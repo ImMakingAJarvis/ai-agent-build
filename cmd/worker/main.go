@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/catalog"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/engine"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/metrics"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
@@ -552,7 +553,21 @@ func newPlanHandler() (*planworker.Handler, error) {
 	}
 	// WORKER_REPO_ROOT is the repo the plan step summarises for the model
 	// (the worker runs with the repo root as its CWD by default).
-	pipe, err := planworker.NewPipeline(promptsDir, os.Getenv("WORKER_REPO_ROOT"), reg)
+	// The capability catalog is optional: a missing or unreadable file
+	// means the planner simply cannot emit capability cards (it still
+	// plans normal model-executed tasks), so a load failure is logged and
+	// passes a nil catalog rather than failing the whole handler.
+	catPath := os.Getenv("WORKER_CAPABILITIES_FILE")
+	if catPath == "" {
+		catPath = "config/capabilities.yaml"
+	}
+	var cat *catalog.File
+	if c, cerr := catalog.Load(catPath); cerr != nil {
+		log.Printf("worker: no capability catalog at %s (%v) — the planner cannot emit capability cards", catPath, cerr)
+	} else {
+		cat = c
+	}
+	pipe, err := planworker.NewPipeline(promptsDir, os.Getenv("WORKER_REPO_ROOT"), reg, cat)
 	if err != nil {
 		return nil, fmt.Errorf("planning pipeline: %w", err)
 	}

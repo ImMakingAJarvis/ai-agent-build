@@ -383,7 +383,7 @@ func TestDefaultCommandSuperagentDriver(t *testing.T) {
 
 func TestPromptHasRulesJobAndNote(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir()) // don't drain the real inbox
-	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }, Mailbox: func(string) string { return "" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT", Branch: "br"}}, "local", "NOTE")
 	for _, w := range []string{"RULES", "d0", "TEXT", "br", "NOTE"} {
 		if !strings.Contains(p, w) {
@@ -398,6 +398,7 @@ func TestPromptIncludesMachineSnapshot(t *testing.T) {
 	r := &Runner{
 		Brief:       func(string) string { return "RULES" },
 		StackStatus: func() string { return snap },
+		Mailbox:     func(string) string { return "" },
 	}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
 	for _, w := range []string{"MACHINE SNAPSHOT at round start", snap} {
@@ -414,10 +415,69 @@ func TestPromptIncludesMachineSnapshot(t *testing.T) {
 
 func TestPromptOmitsEmptySnapshot(t *testing.T) {
 	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
-	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }, Mailbox: func(string) string { return "" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
 	if strings.Contains(p, "MACHINE SNAPSHOT") {
 		t.Fatal("empty snapshot must not add a section")
+	}
+}
+
+// TestPromptIncludesMailbox is the mailbox drain step in the round prompt
+// (plan §3.8, EVB-36): waiting mail for the driver's identity appears as a
+// MAILBOX section between the capabilities and the job line, with the
+// processing instructions.
+func TestPromptIncludesMailbox(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	mail := "1. [review_request] brain -> sonnet | review PR #253: mailbox code (corr=rev-253-1)\n   body: ..."
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }, Mailbox: func(string) string { return mail }}
+	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
+	for _, w := range []string{"MAILBOX — waiting mail in agent.brain.inbox", mail, "jarvis-mq answer"} {
+		if !strings.Contains(p, w) {
+			t.Fatalf("prompt lacks %q:\n%s", w, p)
+		}
+	}
+	// Order: snapshot/caps area, then the mailbox, then the job line.
+	mi, ji := strings.Index(p, "MAILBOX"), strings.Index(p, "=== YOUR JOB THIS ROUND")
+	if !(mi >= 0 && mi < ji) {
+		t.Fatalf("mailbox not before the job line: mail=%d job=%d", mi, ji)
+	}
+	// The identity follows the driver (local → brain here).
+	gotDriver := ""
+	r.Mailbox = func(d string) string { gotDriver = d; return mail }
+	r.Prompt(Job{Spec: Spec{ID: "d1", Title: "T", Instructions: "TEXT"}}, "sonnet", "")
+	if gotDriver != "sonnet" {
+		t.Fatalf("Mailbox got driver %q, want sonnet", gotDriver)
+	}
+}
+
+// TestPromptOmitsEmptyMailbox: an empty inbox adds no section — an idle
+// round is prompt-identical to pre-EVB-36.
+func TestPromptOmitsEmptyMailbox(t *testing.T) {
+	t.Setenv("JARVIS_DATA_DIR", t.TempDir())
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }, Mailbox: func(string) string { return "" }}
+	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
+	if strings.Contains(p, "MAILBOX") {
+		t.Fatal("empty inbox must not add a section")
+	}
+}
+
+// TestMailboxIdentityFor pins the driver → identity map (plan §3.8):
+// local/superagent are the brain, igpu is the helper, sonnet/opus are the
+// API coworkers (opus reads planner's inbox).
+func TestMailboxIdentityFor(t *testing.T) {
+	cases := map[string]string{
+		"local":       "brain",
+		"igpu":        "igpu-helper",
+		"sonnet":      "sonnet",
+		"opus":        "planner",
+		"superagent":  "brain",
+		"unknown":     "brain",
+		"":            "brain",
+	}
+	for driver, want := range cases {
+		if got := MailboxIdentityFor(driver); got != want {
+			t.Errorf("MailboxIdentityFor(%q) = %q, want %q", driver, got, want)
+		}
 	}
 }
 
@@ -426,7 +486,7 @@ func TestPromptIncludesIdleOwnerMessages(t *testing.T) {
 	if _, err := inbox.Send("hello from the owner"); err != nil {
 		t.Fatal(err)
 	}
-	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }}
+	r := &Runner{Brief: func(string) string { return "RULES" }, StackStatus: func() string { return "" }, Mailbox: func(string) string { return "" }}
 	p := r.Prompt(Job{Spec: Spec{ID: "d0", Title: "T", Instructions: "TEXT"}}, "local", "")
 	if !strings.Contains(p, "hello from the owner") ||
 		!strings.Contains(p, "while the agent was idle") {

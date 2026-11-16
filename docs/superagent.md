@@ -56,6 +56,7 @@ goal → plan (≤8 steps)
 | `list_dir` | `{"path": "."}` | sorted, dirs marked with `/` |
 | `memory_search` | `{"query": "…", "k": 5}` | jarvis-memory `POST /search` (default `http://localhost:8101`); unreachable → observation, not an error |
 | `web_fetch` | `{"url": "…"}` | http/https only; returns status line + first 3000 chars |
+| `rabbitmq` | `{"op": "caps|submit|listen|yield", …}` | the `jarvis-mq` surface in-process: the capability catalog, an envelope-v2 submit to `cap.<capability>`, a durable switchboard listener, and the job park (`yield` ends the run `YIELDED`) — `docs/event-driven.md`, "In-process (superagent)" |
 | `step_done` | `{"note": "…"}` | the step is achieved; note how it was verified |
 | `replan` | `{"reason": "…"}` | the plan no longer fits |
 | `finish` | `{"summary": "…", "ok": true}` | the goal is done (or failed) |
@@ -105,6 +106,9 @@ stdout; exit 0 iff the goal was completed.
   runs `superagent <round prompt>` (the round prompt = stage-3 brief +
   job text, exactly like the other drivers). The Runner tees its stdout
   to `transcript.txt` and the Redis live stream, and exit 0 = done.
+- A `rabbitmq` `op=yield` call ends the run `YIELDED` (exit 0), parks the
+  job in `waiting` on its correlation ids, and the switchboard's wake
+  restarts it — the event flow is in `docs/event-driven.md`.
 - `jarvis-jobs`: `-driver superagent` is accepted on `run` and `add`,
   and `next`/`show` report it.
 - `scripts/agent-run` (the round loop):
