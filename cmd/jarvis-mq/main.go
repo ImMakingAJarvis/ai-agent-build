@@ -31,6 +31,7 @@
 //	jarvis-mq results flow.plan-x          # consume + pretty-print Results (acks)
 //	jarvis-mq unlisten flow.plan-x
 //	jarvis-mq caps                         # catalog: where/cost/depth/runtime per capability
+//	jarvis-mq call echo --input msg=hi     # sync RPC: wait for the Result here (plan §3.8)
 package main
 
 import (
@@ -98,6 +99,8 @@ func main() {
 		err = runListeners(os.Args[2:])
 	case "submit":
 		err = runSubmit(os.Args[2:])
+	case "call":
+		err = runCall(os.Args[2:])
 	case "results":
 		err = runResults(os.Args[2:])
 	case "caps":
@@ -140,6 +143,10 @@ func usage() {
   unlisten <queue> [flags]    remove the queue's listeners (--corr to narrow)
   listeners                   list all listeners (queue, action, target, timeout)
   submit <capability> [flags] publish an envelope-v2 request to cap.<capability>
+  call <capability> [flags]   call a capability synchronously (plan §3.8):
+                              publish with direct reply-to, wait for its
+                              Result, print it, exit 0. Refuses capabilities
+                              that need the brain out (that would deadlock).
   results <queue> [-n N]      consume and pretty-print Result messages (acks them)
   caps [--file PATH]          the capability catalog, one line per capability:
                               where it runs, the cost, current queue depth,
@@ -174,6 +181,15 @@ submit flags:
   --deadline T              give up after T (RFC3339 or a duration like 2h from now)
   --wake-job J              agentjob id a worker may wake directly if the switchboard is down
   --parent-job J            id of the job that submitted this one
+call flags:
+  --input k=v               capability argument (repeatable; JSON-typed)
+  --input-ref P             input file or dir the worker reads, by path (repeatable)
+  --out-dir D               where the worker writes its artifacts
+  --timeout D               give up waiting for the Result after D (default 60s);
+                            on timeout the request STAYS on cap.<cap> for the
+                            async path — the worker still processes it
+  --corr C                  correlation id (default: a fresh unique one)
+  --json                    print the raw Result JSON instead of the pretty form
 results flags:
   -n N                      max messages to pop (default 100: drain what has arrived)
   --json                    raw JSON bodies, one per line
@@ -1520,6 +1536,151 @@ func runSubmit(args []string) error {
 	}
 	fmt.Printf("published %s → %s (corr=%s reply-to=%s)\n", m.ID, qname, m.CorrelationID, m.ReplyTo)
 	return nil
+}
+
+// runCall is `submit` without the park (plan §3.8, EVB-38): publish the
+// request with reply-to set to the amq.rabbitmq.reply-to pseudo-queue and
+// block for the Result with the matching correlation id — a synchronous
+// RPC. The broker hands the consuming channel a private per-caller queue
+// (replies from other callers never arrive here), and the worker's reply
+// follows the broker-rewritten reply-to property (internal/capworker).
+//
+// The refusal gate runs before anything touches the broker: a capability
+// with a placement that needs the brain out would deadlock a synchronous
+// call — the round blocks here waiting for the reply while the swap
+// window needs the brain stopped, and the window never opens mid-round.
+// A timeout only stops waiting: the request stays on the durable cap
+// queue and the worker still processes it (its Result is then dropped —
+// the private queue is gone — so the async path, submit + listen, is the
+// way to get a result for slow work).
+func runCall(args []string) error {
+	fs := flag.NewFlagSet("call", flag.ExitOnError)
+	input := &inputFlag{}
+	fs.Var(input, "input", "capability argument k=v (repeatable, JSON-typed)")
+	inputRefs := &stringListFlag{}
+	fs.Var(inputRefs, "input-ref", "input file or dir the worker reads, by path (repeatable)")
+	outDir := fs.String("out-dir", "", "where the worker writes its artifacts")
+	timeout := fs.Duration("timeout", 60*time.Second, "give up waiting for the Result after D (e.g. 60s)")
+	corr := fs.String("corr", "", "correlation id (default: a fresh unique one)")
+	asJSON := fs.Bool("json", false, "print the raw Result JSON instead of the pretty form")
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("the capability is the first argument: jarvis-mq call <capability> [flags]")
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected extra argument %q", fs.Arg(0))
+	}
+	capability := args[0]
+	if !validCapabilityName(capability) {
+		return fmt.Errorf("capability %q is not valid: a dotted path (image.generate) or a single word (echo), lowercase alphanumeric segments", capability)
+	}
+	if *timeout <= 0 {
+		return fmt.Errorf("--timeout must be > 0 (e.g. 60s)")
+	}
+
+	// Refusal gate (EVB-38): the catalog says where the capability runs,
+	// and a swap-window placement makes the call a deadlock. Fail closed
+	// when the catalog cannot be read — the gate is the point of call.
+	f, err := catalog.Load(catalogDefaultPath())
+	if err != nil {
+		return fmt.Errorf("call %s: load capability catalog: %v (call refuses capabilities it cannot check)", capability, err)
+	}
+	if reason := f.CallRefusal(capability); reason != "" {
+		return fmt.Errorf("refusing to call %s: %s", capability, reason)
+	}
+
+	id := *corr
+	if id == "" {
+		id = defaultID()
+	}
+	m, err := buildSubmitMessage(submitParams{
+		capability: capability,
+		id:         defaultID(),
+		replyTo:    queue.ReplyToDirect,
+		corr:       id,
+		input:      *input,
+		inputRefs:  *inputRefs,
+		outDir:     *outDir,
+	})
+	if err != nil {
+		return err
+	}
+
+	conn, err := newConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	qname := queue.CapQueueName(capability)
+	if err := conn.EnsureCapQueue(qname); err != nil {
+		return err
+	}
+
+	// Consume BEFORE publishing: a fast worker must not be able to answer
+	// before the consumer exists. autoAck is mandatory — the broker 406s
+	// a reply consumer that acknowledges (verified on this broker).
+	ch, err := conn.NewChannel()
+	if err != nil {
+		return err
+	}
+	defer ch.Close()
+	replies, err := ch.Consume(queue.ReplyToDirect, "jarvis-mq-call", true, false, false, false, nil)
+	if err != nil {
+		return fmt.Errorf("call %s: consume the direct reply queue: %w", capability, err)
+	}
+
+	// Publish ON THE CONSUMING CHANNEL: the broker rewrites the
+	// request's reply-to only for a channel that consumes
+	// amq.rabbitmq.reply-to. A publish on the shared main channel is
+	// rejected with "fast reply consumer does not exist" — an async
+	// channel exception PublishWithContext swallows, so the request
+	// would never leave and the call would time out (verified against
+	// the broker's logs).
+	if err := conn.PublishOn(ch, m, qname+".default"); err != nil {
+		return fmt.Errorf("call %s: publish: %w", capability, err)
+	}
+
+	deadline := time.Now().Add(*timeout)
+	for time.Now().Before(deadline) {
+		var del amqp.Delivery
+		var got bool
+		select {
+		case del = <-replies:
+			got = true
+		case <-time.After(time.Until(deadline)):
+		}
+		if !got {
+			break // the timeout fired: no Result in time
+		}
+		if !resultMatches(del, id) {
+			continue // defensive: the private queue is per-caller, but a
+			// stray delivery is not ours
+		}
+		res, rerr := queue.DecodeResult(del.Body)
+		if rerr != nil {
+			return fmt.Errorf("call %s: the reply for corr %s is not a Result: %w", capability, id, rerr)
+		}
+		if *asJSON {
+			fmt.Println(string(del.Body))
+		} else {
+			printResult(res)
+		}
+		return nil
+	}
+	return fmt.Errorf("call %s: timed out after %s waiting for the Result (corr=%s). The request is still on %s — the worker will process it, but its Result goes to a reply queue that no longer exists; for a slow capability use submit --reply-to flow.<job-id> + listen instead", capability, timeout.Round(time.Millisecond), id, qname)
+}
+
+// resultMatches reports whether a delivery on the direct reply queue is
+// the Result for corr: the AMQP correlation id first (the worker mirrors
+// it at publish), then the envelope field.
+func resultMatches(del amqp.Delivery, corr string) bool {
+	if del.CorrelationId != "" {
+		return del.CorrelationId == corr
+	}
+	res, err := queue.DecodeResult(del.Body)
+	return err == nil && res.CorrelationID == corr
 }
 
 // runResults consumes the Result messages a worker left on a reply queue
