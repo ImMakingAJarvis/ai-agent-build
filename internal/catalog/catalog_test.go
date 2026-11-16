@@ -183,3 +183,31 @@ func TestLoadFromDisk(t *testing.T) {
 		t.Error("Load of a missing file should fail")
 	}
 }
+
+// TestCallRefusal pins the synchronous-call gate (jarvis-mq call, plan
+// §3.8 / EVB-38): a capability with ANY placement that needs the brain
+// out is refused — image.generate has a swap-window GPU placement AND an
+// alongside CPU placement, and the swap-window one wins, because a
+// blocking call deadlocks the brain. Alongside-only capabilities pass,
+// and a capability the catalog does not list is NOT refused (like submit,
+// it degrades to the call's timeout path).
+func TestCallRefusal(t *testing.T) {
+	f, err := Parse([]byte(validDoc))
+	if err != nil {
+		t.Fatalf("Parse validDoc: %v", err)
+	}
+
+	if reason := f.CallRefusal("image.generate"); reason == "" {
+		t.Error("image.generate (has a needs_brain_out placement): expected a refusal, got none")
+	} else if !strings.Contains(reason, "brain out") || !strings.Contains(reason, "submit + yield") {
+		t.Errorf("image.generate refusal = %q, want it to name the brain-out deadlock and the submit + yield alternative", reason)
+	}
+
+	if reason := f.CallRefusal("echo"); reason != "" {
+		t.Errorf("echo (cpu only): expected allowed, got refusal %q", reason)
+	}
+
+	if reason := f.CallRefusal("not.in.catalog"); reason != "" {
+		t.Errorf("capability missing from the catalog: expected allowed (degrades to the timeout path), got refusal %q", reason)
+	}
+}
