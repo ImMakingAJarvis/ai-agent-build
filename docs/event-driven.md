@@ -212,12 +212,12 @@ Default: sonnet.
    `jarvis-review request <PR> [--reviewer sonnet|planner|local] [--board REF]
    [--summary ...]` — posts a `review_request` (PR link + summary) to the
    reviewer's inbox with a wake attached (the answer, same `corr`, wakes
-   the sender's job), enqueues the reviewer job (driver sonnet/opus, class
+   the sender's job), enqueues the reviewer job (driver sonnet/opus/local, class
    `fix`, priority 100 so the loop pulls it right after the sender yields),
    and mirrors the request onto the board item.
 2. **Yield** (sender): `jarvis-jobs yield $JARVIS_JOB_ID --wait-on <corr>
    ...` and end the round.
-3. **Review** (the reviewer's round — a fresh sonnet/opus session): its
+3. **Review** (the reviewer's round — a fresh sonnet/opus/local session): its
    round prompt carries its own inbox (the **mailbox drain step**: the
    driver's identity — local→`brain`, igpu→`igpu-helper`, sonnet→`sonnet`,
    opus→`planner` — peeks its inbox and, if there is mail, the prompt

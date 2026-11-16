@@ -8,8 +8,8 @@
 #      with a WAKE attached: the sender's parked job wakes when the
 #      reviewer's `answer` (same corr) lands on the sender's inbox — the
 #      listener-wake pair from task EVB-35;
-#   2. enqueues the reviewer job (driver sonnet/opus, class fix, high
-#      priority so the loop pulls it right after the sender yields);
+#   2. enqueues the reviewer job (driver sonnet/opus/local, class fix,
+#      high priority so the loop pulls it right after the sender yields);
 #   3. mirrors the request onto the board item (--board) so the exchange is
 #      readable on Plane. The reviewer's answer mirrors too (it carries the
 #      same board ref).
@@ -117,9 +117,9 @@ if ! jarvis-mq "${tell_args[@]}"; then
   exit 1
 fi
 
-# 2. The reviewer job — self-contained for a fresh sonnet/opus session. Its
-#    round prompt carries the reviewer's inbox (the mailbox drain step), and
-#    the instructions below are the whole job.
+# 2. The reviewer job — self-contained for a fresh sonnet/opus/local
+#    session. Its round prompt carries the reviewer's inbox (the mailbox
+#    drain step), and the instructions below are the whole job.
 reviewer_instructions=$(cat <<EOF
 You are the PR reviewer (${ridentity}) in the EVB-36 reviewer flow. A
 review_request for PR #${pr} is waiting in your inbox
