@@ -28,6 +28,26 @@ const CapMaxPriority = 10
 // CapQueueName returns the queue name for a capability.
 func CapQueueName(capability string) string { return CapQueuePrefix + capability }
 
+// ReplyToDirect is RabbitMQ's direct-reply-to pseudo-queue (plan §3.8,
+// EVB-38). A caller consumes it — the broker hands that channel a private
+// auto-delete queue, and the consume must be auto-ack — and publishes
+// requests with reply-to set to this name; the broker rewrites the
+// delivered request's reply-to property to the private queue, and the
+// worker's reply — published to the default exchange with the rewritten
+// value as the routing key — lands back on the caller's channel.
+//
+// The rewrite state is per CHANNEL, not per connection: the request must
+// be published on the very channel that consumed this pseudo-queue. A
+// publish from any other channel of the same connection is rejected with
+// "fast reply consumer does not exist" (an async channel exception the
+// client's Publish does not surface), so the request never reaches the
+// worker.
+//
+// Replies are at-most-once: if the caller is gone, the reply is dropped,
+// so a caller that times out should let the async path (submit + listen)
+// pick the work up again.
+const ReplyToDirect = "amq.rabbitmq.reply-to"
+
 // ValidCapabilityName reports whether s is acceptable as a capability: a
 // dotted path (image.generate) or a single word (echo), lowercase
 // alphanumeric segments. The name decides the queue (cap.<cap>) and the

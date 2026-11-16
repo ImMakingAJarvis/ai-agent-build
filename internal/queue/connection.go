@@ -240,12 +240,23 @@ func (c *Conn) Publish(m Message, routingKey string) error {
 	c.mu.Lock()
 	ch := c.channel
 	c.mu.Unlock()
+	return c.PublishOn(ch, m, routingKey)
+}
 
+// PublishOn is Publish on a specific channel. jarvis-mq call needs it for
+// the direct reply-to trick (plan §3.8): the broker rewrites a request's
+// reply-to to the caller's private queue only when the PUBLISHING channel
+// is the one that consumes amq.rabbitmq.reply-to — the rewrite state is
+// per-channel, not per-connection. A publish on any other channel of the
+// same connection is rejected with "fast reply consumer does not exist",
+// and because the channel exception arrives asynchronously,
+// PublishWithContext returns nil: the request never leaves the client and
+// the caller just times out (verified against this broker's logs).
+func (c *Conn) PublishOn(ch *amqp.Channel, m Message, routingKey string) error {
 	pub, err := newPublishing(m, uint8(m.Priority))
 	if err != nil {
 		return fmt.Errorf("encode job %s: %w", m.ID, err)
 	}
-
 	return ch.PublishWithContext(context.Background(), c.exchange, routingKey, false, false, pub)
 }
 
