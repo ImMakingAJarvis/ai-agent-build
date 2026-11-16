@@ -154,3 +154,23 @@ func TestComment(t *testing.T) {
 		t.Errorf("comment not escaped: %q", got)
 	}
 }
+
+// TestLiveRAM: the RAM-only fallback reads meminfo without touching
+// nvidia-smi (the no-GPU node's self-report path, EVB-37).
+func TestLiveRAM(t *testing.T) {
+	dir := t.TempDir()
+	meminfo := filepath.Join(dir, "meminfo")
+	// 32 GiB free of 64 GiB total, in kB.
+	body := "MemTotal:        67108864 kB\nMemFree:         1000000 kB\nMemAvailable:    33554432 kB\n"
+	if err := os.WriteFile(meminfo, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := Live{Bin: filepath.Join(dir, "no-such-binary"), MemInfo: meminfo}
+	free, total, err := l.RAM()
+	if err != nil {
+		t.Fatalf("RAM: %v", err)
+	}
+	if free != 32.0 || total != 64.0 {
+		t.Errorf("RAM = (%v, %v) GiB, want (32, 64)", free, total)
+	}
+}

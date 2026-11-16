@@ -95,6 +95,14 @@ func (l Live) Readings(ctx context.Context) (Readings, error) {
 	return Readings{FreeVRAMGB: freeVRAM, FreeRAMGB: freeRAM, TotalVRAMGB: totalVRAM, TotalRAMGB: totalRAM}, nil
 }
 
+// RAM reads only the system-memory half of Readings (MemAvailable and
+// MemTotal, in GiB). A node without a GPU cannot use Readings (there is
+// no nvidia-smi to read) but can still self-report its RAM —
+// capworker-remote falls back to this (EVB-37).
+func (l Live) RAM() (free, total float64, err error) {
+	return l.ram()
+}
+
 // ram reads MemAvailable and MemTotal from the (overridable) meminfo
 // path.
 func (l Live) ram() (free, total float64, err error) {
