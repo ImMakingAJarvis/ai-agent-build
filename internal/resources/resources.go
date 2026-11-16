@@ -102,13 +102,18 @@ type Outcome struct {
 // Device is one of the box's resources with its live facts. VRAMTotalMB
 // is set for the gpu (read live from nvidia-smi); RAMTotalMB for cpu
 // and igpu (both report the same shared pool). Cores is informational
-// (cpu only).
+// (cpu only). RAMFreeMB and LastReport are remote-only (EVB-37): a
+// remote:<host> device is read-only accounting the node self-reports —
+// its own totals and current free RAM — and LastReport is what
+// ExpireRemotes uses to notice the node has gone dark.
 type Device struct {
-	Name        string `json:"name"`
-	Present     bool   `json:"present"`
-	VRAMTotalMB int64  `json:"vram_total_mb"`
-	RAMTotalMB  int64  `json:"ram_total_mb"`
-	Cores       int    `json:"cores,omitempty"`
+	Name        string    `json:"name"`
+	Present     bool      `json:"present"`
+	VRAMTotalMB int64     `json:"vram_total_mb"`
+	RAMTotalMB  int64     `json:"ram_total_mb"`
+	Cores       int       `json:"cores,omitempty"`
+	RAMFreeMB   int64     `json:"ram_free_mb,omitempty"` // remote self-report
+	LastReport  time.Time `json:"last_report,omitempty"` // remote self-report liveness
 }
 
 // State is the GET /state payload: the devices, the active leases
@@ -164,6 +169,53 @@ func (l *Ledger) SetDevice(d Device) {
 	l.devices[d.Name] = d
 }
 
+// RecordSelfReport folds in one self-report from a remote node (EVB-37,
+// plan §3.9): the node reports its own totals and current free RAM, and
+// the ledger upserts the device. Remote boxes are read-only accounting —
+// Request denies every lease against them — and LastReport is the
+// liveness ExpireRemotes expires on. Local devices are the service's own
+// live readings and are rejected here.
+func (l *Ledger) RecordSelfReport(device string, vramTotalMB, ramTotalMB, ramFreeMB int64) error {
+	if !strings.HasPrefix(device, RemotePrefix) {
+		return fmt.Errorf("self-report only from remote devices (got %q)", device)
+	}
+	if vramTotalMB < 0 || ramTotalMB < 0 || ramFreeMB < 0 {
+		return fmt.Errorf("self-report values must not be negative")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	d := l.devices[device]
+	d.Name = device
+	d.Present = true
+	d.VRAMTotalMB = vramTotalMB
+	d.RAMTotalMB = ramTotalMB
+	d.RAMFreeMB = ramFreeMB
+	d.LastReport = time.Now().UTC()
+	l.devices[device] = d
+	return nil
+}
+
+// ExpireRemotes marks a remote device absent (Present=false) when its
+// last self-report is older than staleAfter: a node that goes dark stops
+// advertising its resources on the next refresh tick (the service calls
+// this in its refresh loop). Local devices come from the service's own
+// readings and are never touched here.
+func (l *Ledger) ExpireRemotes(staleAfter time.Duration) {
+	if staleAfter <= 0 {
+		return
+	}
+	now := time.Now().UTC()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for name, d := range l.devices {
+		if strings.HasPrefix(name, RemotePrefix) && !d.LastReport.IsZero() &&
+			now.Sub(d.LastReport) > staleAfter {
+			d.Present = false
+			l.devices[name] = d
+		}
+	}
+}
+
 // SetLiveFreeRAM records the box's current free system RAM in MB (the
 // live reading's MemAvailable, folded in by the service on each
 // refresh). RAM requests — cpu and igpu leases, and a gpu lease's
@@ -215,8 +267,13 @@ func (l *Ledger) Request(req Request) Outcome {
 
 	dev, known := l.devices[req.Device]
 	switch {
-	case !known && strings.HasPrefix(req.Device, RemotePrefix):
-		return denied(Outcome{}, fmt.Sprintf("no self-report from %s (remote workers register in EVB-37)", req.Device))
+	case strings.HasPrefix(req.Device, RemotePrefix):
+		// Remote boxes are read-only accounting (EVB-37): the node
+		// self-reports its resources, but nobody leases them from here.
+		if !known || !dev.Present {
+			return denied(Outcome{}, fmt.Sprintf("no self-report from %s (remote workers self-report via POST /device-report)", req.Device))
+		}
+		return denied(Outcome{}, fmt.Sprintf("%s is a remote device: read-only accounting, its resources are not leaseable from this box", req.Device))
 	case !known:
 		return denied(Outcome{}, fmt.Sprintf("unknown device %q (known: %s)", req.Device, l.knownDeviceNames()))
 	case !dev.Present:
@@ -504,11 +561,14 @@ func (l *Ledger) nextIDLocked() string {
 }
 
 // ramPool is the shared system RAM pool in MB: cpu and igpu both draw
-// it, and a gpu lease's ram_mb (host staging buffers) does too.
+// it, and a gpu lease's ram_mb (host staging buffers) does too. Remote
+// devices are excluded (EVB-37): a big box at the other end of the wire
+// is not this box's RAM — it must not inflate the pool that decides
+// local fits.
 func (l *Ledger) ramPool() int64 {
 	var pool int64
 	for _, d := range l.devices {
-		if d.Present && d.RAMTotalMB > pool {
+		if d.Present && !strings.HasPrefix(d.Name, RemotePrefix) && d.RAMTotalMB > pool {
 			pool = d.RAMTotalMB
 		}
 	}

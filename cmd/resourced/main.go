@@ -128,6 +128,9 @@ type service struct {
 	window   *windowController // nil when the capability catalog is missing
 	measured *measurementStore // the VRAM footprint overlay (EVB-28)
 	log      *slog.Logger
+	// remoteStale is how long a remote self-report may go quiet before
+	// the node is marked absent (EVB-37); 0 disables the sweep.
+	remoteStale time.Duration
 
 	// Push-style metrics (decisions and waits are events, not state).
 	decisions *prometheus.CounterVec   // resourced_lease_decisions_total{decision}
@@ -221,6 +224,9 @@ func (s *service) refresh(ctx context.Context) {
 		RAMTotalMB: ramMB, Cores: runtime.NumCPU()})
 	s.ledger.SetDevice(resources.Device{Name: resources.DeviceIGPU, Present: present[placement.IGPU],
 		RAMTotalMB: ramMB})
+	// Remote nodes (EVB-37): a self-report older than the stale window
+	// means the node is dark — stop advertising its resources.
+	s.ledger.ExpireRemotes(s.remoteStale)
 	// Rule 5 (EVB-28): RAM-only workers are grantable any time,
 	// verified against the live free RAM — the ledger grants RAM leases
 	// only when this reading has room.
@@ -342,6 +348,29 @@ func (s *service) handleState(w http.ResponseWriter, r *http.Request) {
 		resp["window"] = s.window.State()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleDeviceReport is POST /device-report (EVB-37, plan §3.9): a
+// remote node's self-report — its own VRAM/RAM totals and current free
+// RAM. The ledger upserts the device (read-only accounting: it appears
+// in /state but is never leaseable from this box). Local devices come
+// from the service's own live readings and are rejected here.
+func (s *service) handleDeviceReport(w http.ResponseWriter, r *http.Request) {
+	var rep struct {
+		Device      string `json:"device"`
+		VRAMTotalMB int64  `json:"vram_total_mb"`
+		RAMTotalMB  int64  `json:"ram_total_mb"`
+		RAMFreeMB   int64  `json:"ram_free_mb"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+		http.Error(w, fmt.Sprintf("bad device report: %v", err), http.StatusBadRequest)
+		return
+	}
+	if err := s.ledger.RecordSelfReport(rep.Device, rep.VRAMTotalMB, rep.RAMTotalMB, rep.RAMFreeMB); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "device": rep.Device})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -532,6 +561,9 @@ func main() {
 	reg := prometheus.NewRegistry()
 	measured := newMeasurementStore(envOr("MEASUREMENTS_FILE", defaultMeasurementsFile()), log)
 	svc := newService(ledger, pub, fit.Live{}, measured, reg, log)
+	// Remote self-report liveness (EVB-37): the nodes report on a 30 s
+	// cadence, so a 3-minute quiet window means the node is dark.
+	svc.remoteStale = durEnv("REMOTE_REPORT_STALE", 3*time.Minute, log)
 	svc.refresh(ctx) // first pass before the API takes traffic
 
 	// The swap-window controller (EVB-27, plan §3.6 rules 3–4). It
@@ -545,6 +577,7 @@ func main() {
 	mux.HandleFunc("POST /lease", svc.handleLeasePost)
 	mux.HandleFunc("DELETE /lease/", svc.handleLeaseDelete)
 	mux.HandleFunc("GET /state", svc.handleState)
+	mux.HandleFunc("POST /device-report", svc.handleDeviceReport)
 	mux.HandleFunc("POST /measure", svc.handleMeasurePost)
 	mux.HandleFunc("GET /measured", svc.handleMeasuredGet)
 	mux.HandleFunc("DELETE /measured/", svc.handleMeasuredDelete)

@@ -3,6 +3,7 @@ package resources
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // testLedger is the box of the plan: a 4090 with 24576 MB VRAM and 128 GB
@@ -486,5 +487,110 @@ func TestGrantOrdering(t *testing.T) {
 	}
 	if leases[0].ID != "l1" || leases[10].ID != "l11" || leases[11].ID != "l12" {
 		t.Errorf("grant order broken: first=%s tenth=%s last=%s", leases[0].ID, leases[10].ID, leases[11].ID)
+	}
+}
+
+// TestRemoteSelfReport is the EVB-37 accounting: a remote node upserts
+// itself via RecordSelfReport (present, with its reported totals and
+// free RAM), leases against it are always denied (read-only), and a
+// node that goes dark is marked absent by ExpireRemotes.
+func TestRemoteSelfReport(t *testing.T) {
+	l := testLedger()
+	if err := l.RecordSelfReport("remote:gpu-rack", 24576, 65536, 40000); err != nil {
+		t.Fatalf("RecordSelfReport: %v", err)
+	}
+	found := false
+	for _, d := range l.Devices() {
+		if d.Name == "remote:gpu-rack" {
+			found = true
+			if !d.Present || d.VRAMTotalMB != 24576 || d.RAMTotalMB != 65536 || d.RAMFreeMB != 40000 {
+				t.Errorf("device = %+v, want present with the reported values", d)
+			}
+			if d.LastReport.IsZero() {
+				t.Error("LastReport not set by the self-report")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("remote device missing from Devices()")
+	}
+	// A second report refreshes, it does not duplicate.
+	if err := l.RecordSelfReport("remote:gpu-rack", 24576, 65536, 1000); err != nil {
+		t.Fatalf("refresh report: %v", err)
+	}
+	if n := len(l.Devices()); n != 4 {
+		t.Errorf("devices after refresh = %d, want 4 (no duplicate)", n)
+	}
+	// Local names are not self-reportable.
+	if err := l.RecordSelfReport("gpu", 1, 1, 1); err == nil {
+		t.Error("RecordSelfReport must reject a local device name")
+	}
+	if err := l.RecordSelfReport("remote:bad", -1, 1, 1); err == nil {
+		t.Error("RecordSelfReport must reject negative values")
+	}
+}
+
+// TestRemoteLeaseDenied: even a reported, present remote device is
+// read-only — the box never takes leases against it (plan §3.9).
+func TestRemoteLeaseDenied(t *testing.T) {
+	l := testLedger()
+	if err := l.RecordSelfReport("remote:gpu-rack", 24576, 65536, 40000); err != nil {
+		t.Fatalf("RecordSelfReport: %v", err)
+	}
+	got := l.Request(req("w", "remote:gpu-rack", 4096, 0))
+	status(t, got, Outcome{Status: Denied})
+	if !strings.Contains(got.Reason, "read-only") {
+		t.Errorf("reason %q, want the read-only explanation", got.Reason)
+	}
+	// And the unknown/dark case keeps the self-report pointer.
+	got = l.Request(req("w", "remote:gone", 0, 1))
+	status(t, got, Outcome{Status: Denied})
+	if !strings.Contains(got.Reason, "no self-report") {
+		t.Errorf("reason %q, want the no-self-report pointer", got.Reason)
+	}
+}
+
+// TestRemoteRAMPoolExcluded: a remote box's RAM must not inflate the
+// local pool that decides local RAM fits.
+func TestRemoteRAMPoolExcluded(t *testing.T) {
+	l := testLedger()
+	// A 512 GB remote node next to the box's 128 GB.
+	if err := l.RecordSelfReport("remote:big", 0, 524288, 500000); err != nil {
+		t.Fatalf("RecordSelfReport: %v", err)
+	}
+	got := l.Request(req("w", DeviceCPU, 0, 131073))
+	status(t, got, Outcome{Status: Denied})
+	if !strings.Contains(got.Reason, "the box has 131072 MB total") {
+		t.Errorf("reason %q — the remote 512 GB must not have inflated the pool", got.Reason)
+	}
+}
+
+// TestExpireRemotes: a remote whose self-report goes quiet stops
+// advertising (Present=false); local devices are untouched, and a fresh
+// report brings it back.
+func TestExpireRemotes(t *testing.T) {
+	l := testLedger()
+	if err := l.RecordSelfReport("remote:node2", 0, 32768, 1000); err != nil {
+		t.Fatalf("RecordSelfReport: %v", err)
+	}
+	l.ExpireRemotes(time.Minute) // fresh — nothing happens
+	if dev := l.devices["remote:node2"]; !dev.Present {
+		t.Fatal("a fresh self-report must stay present")
+	}
+	time.Sleep(2 * time.Millisecond)
+	l.ExpireRemotes(time.Millisecond)
+	if dev := l.devices["remote:node2"]; dev.Present {
+		t.Fatal("a stale self-report must mark the device absent")
+	}
+	// Absent → the lease denial flips to the no-self-report pointer.
+	if got := l.Request(req("w", "remote:node2", 0, 1)); !strings.Contains(got.Reason, "no self-report") {
+		t.Errorf("reason %q, want the no-self-report pointer for a dark node", got.Reason)
+	}
+	// A fresh report brings it back.
+	if err := l.RecordSelfReport("remote:node2", 0, 32768, 2000); err != nil {
+		t.Fatalf("re-report: %v", err)
+	}
+	if dev := l.devices["remote:node2"]; !dev.Present {
+		t.Fatal("a new self-report must mark the device present again")
 	}
 }
