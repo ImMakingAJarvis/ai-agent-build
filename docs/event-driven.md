@@ -200,12 +200,16 @@ hands it to another model for review, then parks until the review lands.
 **Reviewer pick rule** (the documented simple one): `sonnet` for code PRs
 (a `claude` session that can read the diff and run the go gate in a
 throwaway worktree); `planner` (opus driver) for docs/plan-only PRs (no
-code to test — the planning review is the better fit). Default: sonnet.
+code to test — the planning review is the better fit); `local` as the
+fallback when the API drivers are dead (e.g. a bad `ANTHROPIC_API_KEY`) —
+a fresh local brain session reviews (same model as the author, different
+session: it proves the loop runs, not a cross-model opinion).
+Default: sonnet.
 
 **The loop**, one command per side:
 
 1. **Request** (sender, the brain's round):
-   `jarvis-review request <PR> [--reviewer sonnet|planner] [--board REF]
+   `jarvis-review request <PR> [--reviewer sonnet|planner|local] [--board REF]
    [--summary ...]` — posts a `review_request` (PR link + summary) to the
    reviewer's inbox with a wake attached (the answer, same `corr`, wakes
    the sender's job), enqueues the reviewer job (driver sonnet/opus, class

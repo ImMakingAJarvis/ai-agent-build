@@ -20,15 +20,19 @@
 #              the go gate in a throwaway worktree;
 #   planner  — docs/plan-only PRs: no code to test, so the stronger
 #              planning review (opus driver) is the better fit.
+#   local    — fallback when the API drivers are dead (e.g. a bad
+#              ANTHROPIC_API_KEY): a fresh local brain session reviews.
+#              Same model as the author, different session — it proves the
+#              loop runs, but it is not a cross-model opinion.
 # The default is sonnet.
 #
 # Usage:
-#   jarvis-review request <PR-N> [--reviewer sonnet|planner] [--board REF]
+#   jarvis-review request <PR-N> [--reviewer sonnet|planner|local] [--board REF]
 #                          [--branch BR] [--wake JOB] [--timeout D]
 #                          [--summary TEXT]
 #
 #   <PR-N>      the PR number to review (e.g. 253)
-#   --reviewer  sonnet (default) or planner
+#   --reviewer  sonnet (default), planner, or local (API-drivers-dead fallback)
 #   --board REF the Plane item (e.g. EVB-38) the exchange is mirrored on
 #   --branch BR the PR's branch (default: detected via `gh pr view`)
 #   --wake JOB  the sender's parked agentjob to wake on the answer
@@ -77,7 +81,8 @@ done
 case "$reviewer" in
   sonnet)  rdriver="sonnet" ridentity="sonnet" ;;
   planner) rdriver="opus"   ridentity="planner" ;;
-  *) echo "jarvis-review: --reviewer must be sonnet or planner (got $reviewer)" >&2; exit 2 ;;
+  local)   rdriver="local"  ridentity="brain" ;;
+  *) echo "jarvis-review: --reviewer must be sonnet, planner or local (got $reviewer)" >&2; exit 2 ;;
 esac
 [[ -n "$wake" ]] || { echo "jarvis-review: no --wake and \$JARVIS_JOB_ID is unset — pass --wake <job>" >&2; exit 2; }
 
