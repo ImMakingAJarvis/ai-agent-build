@@ -25,14 +25,28 @@ NAS share or scp). No other dependency — no Go toolchain, no repo.
 REMOTE_USER_PASSWORD=$(openssl rand -hex 12) rabbitmq/remote-user.sh <node> <cap1> [cap2 ...]
 ```
 
-Creates `remote-<node>` with exactly the permissions the worker declares
-at startup (consume its `cap.<its caps>`; publish `flow.*` + `events`;
-configure the exchanges/queues it needs) and nothing more — no `tasks`
-write, no dead-queue access, no admin tag. Re-running is idempotent
+Creates `remote-<node>` with exactly the permissions the worker's
+declaration and publish paths require: consume its `cap.<its caps>`
+queues; re-declare the shared topology at every start (configure on
+`tasks`/`events`/`jarvis.dlx`/`dead` and its cap queue, plus the
+write/read pairs each declaration and bind needs); publish Results
+back to the `flow.*` reply queues through the default exchange (that
+publish checks write on `amq.default` and on the flow queue — the
+worker replies to whatever flow queue the request named, so the whole
+`flow.*` family is writable) and retry republishes through the
+`tasks` exchange (so the user can technically reach any routing key
+on it — the remote node is trusted infrastructure, not an untrusted
+client); heartbeats on `events`. It gets read on `flow.*` because the
+reply path re-declares a *missing* reply queue (an early Result is
+held on the broker until someone listens), and declaring a new queue
+checks read — the consequence is it can also consume flow queues,
+accepted on the same trusted-infrastructure grounds. It gets no
+read/consume on `dead` (the dead-letter evidence stays on the box)
+and no admin tag. Re-running is idempotent
 (updates permissions; rotates the password when `REMOTE_USER_PASSWORD`
 is set). It prints the permission regexes, the password, and a config
-snippet. The password goes into the node's config file only — never into
-the repo.
+snippet. The password goes into the node's config file only — never
+into the repo.
 
 ## Node config (`capworker-remote.yaml`, chmod 600)
 

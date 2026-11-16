@@ -5,6 +5,9 @@
 # Usage:
 #   REMOTE_USER_PASSWORD=... rabbitmq/remote-user.sh <node> <cap1> [cap2 ...]
 #
+# <cap> is a capability name: a single word (echo) or a dotted path
+# (image.generate) — the same names every submitter validates.
+#
 # <node> is the node's id: the user is remote-<node> and the worker's
 # location/device becomes remote:<node> — it must match the node's
 # capworker-remote.yaml `node:` field. The password comes from
@@ -12,13 +15,41 @@
 # Idempotent: re-running updates the permissions; with REMOTE_USER_PASSWORD
 # set it also changes the password of an existing user.
 #
-# The user gets exactly what the remote capworker needs, nothing more:
+# The user gets what the remote capworker's declaration and publish
+# paths require, and nothing beyond it:
 #   configure  tasks, events, jarvis.dlx, dead, cap.<its caps>, flow.*
-#              (the worker declares these exchanges/queues at startup)
-#   write      events (heartbeats), flow.* (results back to the submitter)
-#   read       cap.<its caps> (its own work queues)
-# Deliberately NOT granted: write on tasks (only the box publishes jobs),
-# access to the dead queue (dead-lettering is broker-side), any admin tag.
+#              (the worker re-declares the shared topology at every
+#              start — the exchanges, the dead queue, its own cap queue
+#              — and re-declares the reply queue before publishing a
+#              Result)
+#   write      amq.default — the Result reply publishes through the
+#              default exchange (routing key = the flow queue's name),
+#              and basic.publish on it checks write on the default
+#              exchange itself, not just on the queue;
+#              tasks — the retry republish rides it (routing key
+#              <capqueue>.default), so this also reaches any other
+#              routing key on it: the remote node is trusted
+#              infrastructure, not an untrusted client, and it is the
+#              price of the shared publish path;
+#              events (heartbeats); dead (the shared
+#              declaration re-binds dead -> jarvis.dlx on every worker
+#              start, and RabbitMQ counts a queue-to-exchange bind as a
+#              write on the queue — the worker still cannot read or
+#              consume dead, only re-declare the binding);
+#              jarvis.dlx (declaring a cap queue with
+#              x-dead-letter-exchange needs write on the DLX);
+#              flow.* (the reply path re-declares and re-binds the
+#              reply queue before publishing the Result);
+#              cap.<its caps> (binding its own queues to tasks)
+#   read       cap.<its caps> (its own work queues), flow.* (declaring
+#              a queue that does not exist yet — the reply path
+#              re-declares a missing reply queue so an early Result is
+#              held on the broker — checks read on the queue, and the
+#              consequence is that it can consume flow queues too:
+#              trusted infrastructure), tasks and jarvis.dlx (binding a
+#              queue to an exchange needs read on the exchange)
+# Deliberately NOT granted: read/consume on dead (the dead-letter
+# evidence stays on the box), any admin tag.
 #
 # TLS: this script only manages the user. Off-LAN links need the broker's
 # ssl listener on 5671 (rabbitmq.conf: listeners.ssl.tcp = 5671 + certs) and
@@ -36,7 +67,11 @@ case $NODE in
 esac
 for c in "$@"; do
   case $c in
-    *[!a-z0-9-]* | '') echo "capability must match [a-z0-9-]+: $c" >&2; exit 2 ;;
+    # a dotted path of lowercase alphanumeric segments (echo, image.generate)
+    *[!a-z0-9.-]* | '' | .* | *. | *..*)
+      echo "capability must be a dotted path of lowercase alphanumeric segments (echo, image.generate): $c" >&2
+      exit 2
+      ;;
   esac
 done
 
@@ -51,18 +86,19 @@ else
   rmq() { docker exec jarvis-rabbitmq rabbitmqctl "$@"; }
 fi
 
-# capability alternation: echo|transcribe
+# capability alternation: echo|transcribe (dots escaped — they would
+# otherwise be regex wildcards in the permission patterns)
 caps_alt=""
 for c in "$@"; do
   if [ -n "$caps_alt" ]; then
     caps_alt+="|"
   fi
-  caps_alt+=$c
+  caps_alt+=${c//./\\.}
 done
 
-RE_READ="^cap\.(${caps_alt})\$"
-RE_WRITE="^(events|flow\..+)\$"
-RE_CONFIGURE="^(tasks|events|jarvis\.dlx|dead|cap\.(${caps_alt})|flow\..+)\$"
+RE_CONFIGURE="^(tasks|events|jarvis\.dlx|dead|flow\..+|cap\.(${caps_alt}))\$"
+RE_WRITE="^(amq\.default|tasks|events|dead|jarvis\.dlx|flow\..+|cap\.(${caps_alt}))\$"
+RE_READ="^(cap\.(${caps_alt})|flow\..+|tasks|jarvis\.dlx)\$"
 
 PASSWORD=${REMOTE_USER_PASSWORD:-}
 GENERATED=no
@@ -84,7 +120,8 @@ case $users_json in
     rmq add_user -p "$VHOST" "$USER" "$PASSWORD"
     ;;
 esac
-rmq set_permissions -p "$VHOST" "$USER" "$RE_READ" "$RE_WRITE" "$RE_CONFIGURE" >/dev/null
+# rabbitmqctl set_permissions takes CONF, WRITE, READ (in that order).
+rmq set_permissions -p "$VHOST" "$USER" "$RE_CONFIGURE" "$RE_WRITE" "$RE_READ" >/dev/null
 
 # What the node should actually use: on a re-run without
 # REMOTE_USER_PASSWORD the password is unchanged, so show a placeholder
@@ -102,9 +139,9 @@ fi
 
 echo "Remote RabbitMQ user provisioned (vhost $VHOST):"
 echo "  user      $USER"
-echo "  read      $RE_READ"
-echo "  write     $RE_WRITE"
 echo "  configure $RE_CONFIGURE"
+echo "  write     $RE_WRITE"
+echo "  read      $RE_READ"
 echo "$PW_LINE"
 echo
 echo "Node config for $NODE (capworker-remote.yaml; chmod 600 on the node):"

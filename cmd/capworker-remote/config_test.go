@@ -104,6 +104,7 @@ func TestLoadValidation(t *testing.T) {
 		{"unknown builtin", "node: n\nbroker:\n  url: amqp://u:p@h/\ncapabilities:\n  - name: x\n    builtin: transcribe\n", "unsupported builtin"},
 		{"empty command program", "node: n\nbroker:\n  url: amqp://u:p@h/\ncapabilities:\n  - name: x\n    command: [\"\"]\n", "program"},
 		{"duplicate capability", "node: n\nbroker:\n  url: amqp://u:p@h/\ncapabilities:\n  - name: x\n    builtin: echo\n  - name: x\n    builtin: echo\n", "duplicate"},
+		{"hyphenated cap name", "node: n\nbroker:\n  url: amqp://u:p@h/\ncapabilities:\n  - name: echo-demo\n    builtin: echo\n", "valid capability name"},
 		{"bad duration", "node: n\nbroker:\n  url: amqp://u:p@h/\nheartbeat: soon\ncapabilities:\n  - name: echo\n    builtin: echo\n", "duration"},
 	}
 	for _, tt := range tests {

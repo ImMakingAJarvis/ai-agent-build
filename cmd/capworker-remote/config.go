@@ -193,8 +193,8 @@ func (c *Config) validate() error {
 	}
 	seen := map[string]bool{}
 	for i, cap := range c.Capabilities {
-		if !idRe.MatchString(cap.Name) {
-			return fmt.Errorf("capworker-remote: capabilities[%d].name must match [a-z0-9-]+ (got %q)", i, cap.Name)
+		if !queue.ValidCapabilityName(cap.Name) {
+			return fmt.Errorf("capworker-remote: capabilities[%d].name %q is not a valid capability name (a dotted path or a single word, lowercase alphanumeric — the same check every submitter applies)", i, cap.Name)
 		}
 		if seen[cap.Name] {
 			return fmt.Errorf("capworker-remote: duplicate capability %q", cap.Name)
