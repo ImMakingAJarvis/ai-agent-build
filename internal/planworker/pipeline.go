@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/catalog"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 )
@@ -43,6 +45,7 @@ type Pipeline struct {
 	prompts  map[string]string // step filename -> template
 	schema   *TaskSchema
 	registry *registry.File
+	catalog  *catalog.File
 	repoRoot string
 
 	// Reviewer is the "different model" for the review step, if one is
@@ -55,10 +58,14 @@ type Pipeline struct {
 // NewPipeline loads the three prompts and the task schema from dir and
 // returns a Pipeline that runs the planning flow. repoRoot is the repo the
 // plan step summarises for the model ("" gives a placeholder instead).
-func NewPipeline(dir, repoRoot string, reg *registry.File) (*Pipeline, error) {
+// cat is the capability catalog (config/capabilities.yaml), or nil when
+// there is none — the decompose prompt then lists no capabilities and the
+// planner cannot emit capability cards.
+func NewPipeline(dir, repoRoot string, reg *registry.File, cat *catalog.File) (*Pipeline, error) {
 	p := &Pipeline{
 		prompts:  map[string]string{},
 		registry: reg,
+		catalog:  cat,
 		repoRoot: repoRoot,
 	}
 	for _, name := range []string{"plan.md", "decompose.md", "review.md"} {
@@ -128,6 +135,7 @@ func (p *Pipeline) decompose(ctx context.Context, model Model, job *Job, planDoc
 		"EPIC_ID":         job.Item.ID,
 		"PLAN":            planDoc,
 		"EXECUTOR_MODELS": p.executorModels(),
+		"CAPABILITIES":    p.catalogCapabilities(),
 	})
 
 	var lastErr error
@@ -212,6 +220,30 @@ func (p *Pipeline) executorModels() string {
 		ids = append(ids, m.ID)
 	}
 	return strings.Join(ids, ", ")
+}
+
+// catalogCapabilities renders the capability catalog for the decompose
+// prompt, one line per capability: its name, where it can run, the cost
+// (does it need the 4090 out of the brain), and its typical runtime — the
+// same facts jarvis-mq caps shows the model. A nil or empty catalog gives
+// a placeholder, in which case the prompt says no capability is available
+// and the planner emits ordinary model-executed tasks.
+func (p *Pipeline) catalogCapabilities() string {
+	if p.catalog == nil || len(p.catalog.Capabilities) == 0 {
+		return "(none configured)"
+	}
+	var b strings.Builder
+	for _, name := range p.catalog.SortedNames() {
+		c := p.catalog.Capabilities[name]
+		rt, err := c.TypicalRuntime()
+		typical := "?"
+		if err == nil {
+			typical = rt.Round(time.Second).String()
+		}
+		fmt.Fprintf(&b, "- %s: %s — where: %s, %s, typical ~%s\n",
+			name, c.Description, strings.Join(c.Locations(), ","), c.Cost(), typical)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // repoSummary builds the plan step's repo input: a bounded file tree plus

@@ -216,6 +216,36 @@ func TestDecodeArrival(t *testing.T) {
 		t.Fatalf("message no-id = %+v, want {\"\" msg}", got)
 	}
 
+	// A mailbox envelope: the corr is the question/answer corr and the ref
+	// is the subject (the woken round's continuation cites it). It must be
+	// recognized as a mailbox, not fall through to the generic Message
+	// branch (which would drop the corr — the field is "corr", not
+	// "correlation_id").
+	mail, _ := queue.EncodeMailbox(queue.MailboxMessage{
+		ID: "mb1", Kind: queue.MailKindAnswer, From: "igpu-helper", To: "brain",
+		Subject: "the engine is at 61C", Body: "fine", Corr: "q1",
+	})
+	got, err = decodeArrival(mail)
+	if err != nil {
+		t.Fatalf("decode mailbox: %v", err)
+	}
+	if got.corr != "q1" || got.ref != "the engine is at 61C" {
+		t.Fatalf("mailbox = %+v, want {q1 the engine is at 61C}", got)
+	}
+
+	// A mailbox with no subject: the ref falls back to the id.
+	mail, _ = queue.EncodeMailbox(queue.MailboxMessage{ID: "mb2", Kind: queue.MailKindFYI, From: "brain", To: "sonnet"})
+	if got, _ := decodeArrival(mail); got.corr != "" || got.ref != "mb2" {
+		t.Fatalf("mailbox no-subject = %+v, want {\"\" mb2}", got)
+	}
+
+	// A generic Message whose Kind is set ("agent") is NOT a mailbox (no
+	// to field): it must still decode as a message, corr intact.
+	mbody, _ = json.Marshal(queue.Message{ID: "m5", Kind: queue.KindAgent, Title: "a job", CorrelationID: "c5"})
+	if got, _ := decodeArrival(mbody); got.corr != "c5" || got.ref != "m5" {
+		t.Fatalf("agent-kind message = %+v, want {c5 m5}", got)
+	}
+
 	// An undecodable body is an error (the caller dead-letters it).
 	if _, err := decodeArrival([]byte("not json")); err == nil {
 		t.Fatalf("invalid body: want an error")

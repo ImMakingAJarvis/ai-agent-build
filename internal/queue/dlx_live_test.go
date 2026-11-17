@@ -458,13 +458,21 @@ func rejectUndecodable(c *Conn, name string) error {
 	return del.Nack(false, false)
 }
 
+// deadPeekMax is how far into the dead queue these tests look. It must be
+// well above ListDead's default (50, the dashboard's window): the
+// production dead queue legitimately holds a backlog of real dead letters,
+// and a freshly dead-lettered test message lands at the TAIL — beyond the
+// 50 window the test could not see it (EVB-35, 2026-11-13: all five of
+// these tests timed out on a 65-letter backlog).
+const deadPeekMax = 500
+
 // waitForDead polls the dead queue until a dead letter with routing key rk
 // shows up (dead-lettering is asynchronous for the expiry path).
 func waitForDead(t *testing.T, c *Conn, rk string) DeadLetter {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		items, err := c.ListDead(50)
+		items, err := c.ListDead(deadPeekMax)
 		if err != nil {
 			t.Fatalf("list dead: %v", err)
 		}
@@ -480,7 +488,7 @@ func waitForDead(t *testing.T, c *Conn, rk string) DeadLetter {
 }
 
 func listDeadByRK(c *Conn, rk string) int {
-	items, err := c.ListDead(50)
+	items, err := c.ListDead(deadPeekMax)
 	if err != nil {
 		return -1
 	}

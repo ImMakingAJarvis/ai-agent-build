@@ -56,6 +56,13 @@ type Runner struct {
 	// each capability runs, what it costs, queue depth, typical runtime).
 	// Return "" to omit it.
 	Capabilities func() string
+	// Mailbox returns the waiting mail for the round prompt (plan §3.8,
+	// EVB-36 — the mailbox drain step): the driver's agent identity
+	// (local → brain, igpu → igpu-helper, sonnet → sonnet, opus →
+	// planner, superagent → brain) sees its inbox in its own round.
+	// Default: peeks it with `jarvis-mq inbox`. Return "" to omit it
+	// (empty inbox or tool missing — mail is durable, nothing is lost).
+	Mailbox func(driver string) string
 	// Tee, if set, also receives the agent's output live (agent.log).
 	Tee io.Writer
 	// SignalFile, if non-empty, is polled during job execution. When it
@@ -336,6 +343,77 @@ func (r *Runner) capabilities() string {
 	return defaultCapabilities()
 }
 
+// MailboxIdentityFor maps a round driver to the agent identity whose inbox
+// its round reads (plan §3.8, EVB-36): a local round IS the brain, an igpu
+// round is the iGPU helper, and the API drivers are their own identities.
+// planner has no driver of its own yet — its rounds run on the opus driver,
+// so opus reads agent.planner.inbox. superagent runs on the local brain.
+func MailboxIdentityFor(driver string) string {
+	switch driver {
+	case "igpu":
+		return "igpu-helper"
+	case "sonnet":
+		return "sonnet"
+	case "opus":
+		return "planner"
+	default:
+		return "brain"
+	}
+}
+
+// defaultMailbox peeks the driver's identity inbox and returns the
+// `jarvis-mq inbox` output for the round prompt (plan §3.8, EVB-36). The
+// peek is non-destructive: the messages stay in the inbox until the round
+// takes them, and a wake keeps its message for the woken round. It returns
+// "" on an empty or missing inbox or a wedged tool — mail is durable on the
+// broker, so a missed peek is retried next round, never lost.
+func defaultMailbox(driver string) string {
+	id := MailboxIdentityFor(driver)
+	bin := "/usr/local/bin/jarvis-mq"
+	if _, err := os.Stat(bin); err != nil {
+		bin = "jarvis-mq"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "inbox", id, "-n", "10").CombinedOutput()
+	s := strings.TrimSpace(string(out))
+	if ctx.Err() == context.DeadlineExceeded {
+		return "" // never block the round on a wedged broker
+	}
+	if err != nil || s == "" || s == queue.MailboxQueueName(id)+": empty" {
+		return ""
+	}
+	return s
+}
+
+func (r *Runner) mailbox(driver string) string {
+	if r.Mailbox != nil {
+		return r.Mailbox(driver)
+	}
+	return defaultMailbox(driver)
+}
+
+// mailboxInstructions is the one-liner that tells the round what to do with
+// the mail (EVB-36): act on it in this round, and clear it only once it is
+// handled.
+const mailboxInstructions = "Process this mail in this round: a review_request gets its review done and a reply via `jarvis-mq answer <from> --corr <corr> \"<verdict and findings>\"`; a question gets an `answer` the same way; an fyi/handoff gets read, then cleared with `jarvis-mq take <identity>`."
+
+// mailboxSection renders the round prompt's mailbox block (plan §3.8,
+// EVB-36 — the agent-run/mailbox drain step): the driver's identity sees
+// its waiting mail at the start of its round. Empty inbox → no section, so
+// an idle round is prompt-identical to before.
+func (r *Runner) mailboxSection(driver string) string {
+	mail := r.mailbox(driver)
+	if mail == "" {
+		return ""
+	}
+	id := MailboxIdentityFor(driver)
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nMAILBOX — waiting mail in %s (the agent-to-agent channel, plan §3.8):\n%s\n", queue.MailboxQueueName(id), mail)
+	fmt.Fprintf(&b, "%s\n", mailboxInstructions)
+	return b.String()
+}
+
 // continuationBlock renders the resume context for a woken round (plan
 // §3.5, EVB-16): the job's continuation.md — what it was doing, what is in
 // flight, the exact next step, written by the yielding round — plus the
@@ -414,8 +492,9 @@ func (r *Runner) continuationBlock(j Job) string {
 const capsCostModel = "Cost model: submitting a capability that is \"needs brain out\" costs ~2 min of swap (the window bracket, shared); batch requests — if you will need several such capabilities, submit them all before yielding (one window, one wake). Capabilities that \"run alongside you\" cost no window; prefer a cpu/igpu placement when it is good enough."
 
 // Prompt is the stage-3 rules, the machine snapshot, the capability
-// catalog (the event toolbox), and the job text (plus any typed note). A
-// woken round additionally gets its continuation (continuationBlock)
+// catalog (the event toolbox), the driver's waiting mailbox mail (the
+// mailbox drain step, plan §3.8), and the job text (plus any typed note).
+// A woken round additionally gets its continuation (continuationBlock)
 // between the branch line and the instructions.
 func (r *Runner) Prompt(j Job, driver, note string) string {
 	var b strings.Builder
@@ -430,6 +509,11 @@ func (r *Runner) Prompt(j Job, driver, note string) string {
 	if caps := r.capabilities(); caps != "" {
 		fmt.Fprintf(&b, "\nCAPABILITIES (jarvis-mq caps — the event toolbox; submit with `jarvis-mq submit <cap>`, the Result lands on $JARVIS_REPLY_QUEUE):\n%s\n%s\n", caps, capsCostModel)
 	}
+	// The mailbox drain step (plan §3.8, EVB-36): the driver's identity sees
+	// its waiting mail at the start of the round — a review request, a
+	// question, an fyi. Omitted when the inbox is empty, so an idle round is
+	// prompt-identical to before.
+	b.WriteString(r.mailboxSection(driver))
 	fmt.Fprintf(&b, "\n=== YOUR JOB THIS ROUND: %s — %s ===\n", j.ID, j.Title)
 	if j.Branch != "" {
 		fmt.Fprintf(&b, "Branch: %s\n", j.Branch)

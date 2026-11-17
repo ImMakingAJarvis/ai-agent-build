@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +18,12 @@ import (
 	"strings"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/catalog"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/switchboard"
 )
 
 const (
@@ -43,7 +49,7 @@ func Specs() []ToolSpec {
 		{"write_file", `{"path": "...", "content": "..."} — create/overwrite a file in the work dir`},
 		{"list_dir", `{"path": "."} — list a directory`},
 		{"memory_search", `{"query": "...", "k": 5} — search the memory graph of past work`},
-		{"rabbitmq", `{"op":"publish|consume|peek|depth","queue":"flow.x","title":"...","instructions":"...","context":"...","n":1} — event handoff: publish a job to a queue (flow.* are created on demand) or consume results another model left there (docs/event-driven.md)`},
+		{"rabbitmq", `{"op":"publish|consume|peek|depth|caps|submit|listen|yield","queue":"flow.x","title":"...","instructions":"...","n":1,"capability":"image.describe","corr":"c1","input":{"path":"..."},"input-ref":"...","out-dir":"...","action":"wake|forward|notify","target":"...","wait-on":"c1","note":"..."} — events + capabilities (docs/event-driven.md): publish/consume/peek/depth on queues; caps lists the capability catalog; submit posts an envelope-v2 request to cap.<capability> (Result lands on the job's flow queue); listen attaches a switchboard listener; yield (job-backed runs) parks the run until its wait-on results arrive`},
 		{"web_fetch", `{"url": "..."} — fetch a URL and return the first part of the body`},
 		{"step_done", `{"note": "..."} — this step is achieved; note how it was verified`},
 		{"replan", `{"reason": "..."} — the plan no longer fits; the planner runs again`},
@@ -57,6 +63,10 @@ type Tools struct {
 	Guard     *Guard
 	MemoryURL string // jarvis-memory base URL; "" disables memory_search
 	HTTP      *http.Client
+	// Yielded is set when a rabbitmq yield op succeeded: the run ends as
+	// "yielded" (exit 0; the agent job stays Waiting for the switchboard
+	// to wake it — the same contract as a brain round that yielded).
+	Yielded bool
 }
 
 // NewTools builds the default toolset for workdir.
@@ -253,13 +263,32 @@ func saRandSuffix() string {
 }
 
 // runMQ is the event-driven handoff tool: publish a job to a queue for
-// another model to pick up, or consume the result one left there
-// (docs/event-driven.md). It is the in-process form of the jarvis-mq CLI.
+// another model to pick up, consume the result one left there, or — the
+// capability ops (EVB-32) — list the catalog (caps), post an envelope-v2
+// request to a capability worker (submit), attach a switchboard listener
+// (listen), or park the run until its results arrive (yield). It is the
+// in-process form of the jarvis-mq CLI: the same queue libraries, the same
+// envelope, the same catalog file — reuse, not a fork.
 func (t *Tools) runMQ(ctx context.Context, a Action) (string, error) {
 	op := argStr(a.Args, "op", "")
+	switch op {
+	case "caps":
+		return t.runMQCaps()
+	case "submit":
+		return t.runMQSubmit(ctx, a)
+	case "listen":
+		return t.runMQListen(ctx, a)
+	case "yield":
+		return t.runMQYield(a)
+	case "publish", "consume", "peek", "depth":
+		// the queue ops, below
+	default:
+		return "", fmt.Errorf("rabbitmq op must be publish, consume, peek, depth, caps, submit, listen or yield (got %q)", op)
+	}
+
 	q := argStr(a.Args, "queue", "")
 	if q == "" {
-		return "", fmt.Errorf("rabbitmq needs a queue")
+		return "", fmt.Errorf("rabbitmq %s needs a queue", op)
 	}
 	conn, err := queue.NewConn()
 	if err != nil {
@@ -334,8 +363,294 @@ func (t *Tools) runMQ(ctx context.Context, a Action) (string, error) {
 		}
 		return fmt.Sprintf("%s: %d", q, d), nil
 	default:
-		return "", fmt.Errorf("rabbitmq op must be publish, consume, peek or depth (got %q)", op)
+		return "", fmt.Errorf("rabbitmq op must be publish, consume, peek, depth, caps, submit, listen or yield (got %q)", op)
 	}
+}
+
+// runMQCaps renders the capability catalog the way `jarvis-mq caps` does —
+// one line per capability: where it runs, what it costs, the queue depth
+// right now, how long a request usually takes. The catalog is the repo's
+// config/capabilities.yaml ($JARVIS_CAPABILITIES to override; the machine
+// path is the fallback when the work dir is not a checkout) — the same file
+// the round preamble and resourced read.
+func (t *Tools) runMQCaps() (string, error) {
+	path := os.Getenv("JARVIS_CAPABILITIES")
+	if path == "" {
+		if _, err := os.Stat("config/capabilities.yaml"); err == nil {
+			path = "config/capabilities.yaml"
+		} else {
+			path = "/home/agent/ai-agent-build/config/capabilities.yaml"
+		}
+	}
+	f, err := catalog.Load(path)
+	if err != nil {
+		return "caps: " + err.Error(), nil
+	}
+	conn, cerr := queue.NewConn()
+	if cerr != nil {
+		// The catalog is still useful when the broker is down: depths as "-".
+		conn = nil
+	}
+	var sb strings.Builder
+	for _, name := range f.SortedNames() {
+		c := f.ByName(name)
+		depths := "-"
+		if conn != nil {
+			d, derr := conn.QueueDepth(queue.CapQueueName(name))
+			if derr == nil {
+				depths = strconv.Itoa(d)
+			} else {
+				var aerr *amqp.Error
+				if !errors.As(derr, &aerr) || aerr.Code != amqp.NotFound {
+					depths = "?" // a real failure: do not pretend the queue is empty
+				}
+			}
+		}
+		rt, rerr := c.TypicalRuntime()
+		rts := "unknown"
+		if rerr == nil {
+			rts = rt.String()
+		}
+		fmt.Fprintf(&sb, "%s\twhere=%s\tcost=%s\tdepth=%s\ttypical~%s\n",
+			name, strings.Join(c.Locations(), ","), c.Cost(), depths, rts)
+	}
+	if conn != nil {
+		conn.Close()
+	}
+	return truncate(sb.String(), maxOutput), nil
+}
+
+// runMQSubmit posts an envelope-v2 capability request to cap.<capability>
+// (plan §3.3) — the in-process form of `jarvis-mq submit`. The Result lands
+// on the reply queue; for a job-backed run that defaults to the job's own
+// flow queue (flow.$JARVIS_JOB_ID), which is what the switchboard's wake
+// listener (op=listen) and the yield (op=yield) key on.
+func (t *Tools) runMQSubmit(ctx context.Context, a Action) (string, error) {
+	capability := strings.TrimSpace(argStr(a.Args, "capability", ""))
+	if capability == "" {
+		return "", fmt.Errorf("rabbitmq submit needs a capability (e.g. image.describe; op=caps lists them)")
+	}
+	if !queue.ValidCapabilityName(capability) {
+		return "", fmt.Errorf("capability %q is not valid: a dotted path (image.generate) or a single word (echo), lowercase alphanumeric segments", capability)
+	}
+	jobID := os.Getenv("JARVIS_JOB_ID")
+	replyTo := strings.TrimSpace(argStr(a.Args, "reply-to", ""))
+	if replyTo == "" {
+		if jobID != "" {
+			replyTo = "flow." + jobID
+		} else {
+			replyTo = "flow.sa-" + strconv.FormatInt(time.Now().Unix(), 10) + "-" + saRandSuffix()
+		}
+	}
+	corr := strings.TrimSpace(argStr(a.Args, "corr", ""))
+	if corr == "" {
+		corr = "sa-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	input := map[string]any{}
+	if raw, ok := argRaw(a.Args, "input"); ok {
+		b, _ := json.Marshal(raw)
+		if err := json.Unmarshal(b, &input); err != nil {
+			return "", fmt.Errorf("rabbitmq submit input must be an object of strings: %v", err)
+		}
+	}
+	var refs []string
+	if raw, ok := argRaw(a.Args, "input-ref"); ok {
+		switch v := raw.(type) {
+		case string:
+			if v != "" {
+				refs = append(refs, v)
+			}
+		case []any:
+			for _, e := range v {
+				if s, ok := e.(string); ok && s != "" {
+					refs = append(refs, s)
+				}
+			}
+		}
+	}
+	var deadline *time.Time
+	if ds := argStr(a.Args, "deadline", ""); ds != "" {
+		tm, err := queue.ParseDeadline(ds)
+		if err != nil {
+			return "", fmt.Errorf("rabbitmq submit deadline: %v", err)
+		}
+		deadline = &tm
+	}
+	m := queue.Message{
+		ID:            "sa-" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Type:          "capability",
+		CreatedAt:     time.Now().UTC(),
+		Source:        "superagent",
+		Payload:       map[string]string{},
+		SchemaVersion: 2,
+		Capability:    capability,
+		ReplyTo:       replyTo,
+		CorrelationID: corr,
+		WakeJob:       argStr(a.Args, "wake-job", jobID),
+		Input:         input,
+		InputRefs:     refs,
+		OutDir:        argStr(a.Args, "out-dir", ""),
+		Location:      argStr(a.Args, "location", ""),
+		Deadline:      deadline,
+	}
+	conn, err := queue.NewConn()
+	if err != nil {
+		return "rabbitmq unreachable: " + err.Error(), nil
+	}
+	defer conn.Close()
+	qname := queue.CapQueueName(capability)
+	if err := conn.EnsureCapQueue(qname); err != nil {
+		return "", err
+	}
+	if queue.IsFlowQueue(replyTo) {
+		if err := conn.EnsureFlowQueue(replyTo); err != nil {
+			return "", err
+		}
+	}
+	if err := conn.Publish(m, qname+".default"); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("submitted %s (corr %s) → %s; the Result lands on %s", capability, corr, qname, replyTo), nil
+}
+
+// runMQListen attaches a durable switchboard listener (plan §3.2) — the
+// in-process form of `jarvis-mq listen`. When a message the listener claims
+// lands on the queue, the switchboard wakes the job (action=wake),
+// republishes it (forward), or notifies Discord (notify).
+func (t *Tools) runMQListen(ctx context.Context, a Action) (string, error) {
+	q := strings.TrimSpace(argStr(a.Args, "queue", ""))
+	if q == "" {
+		return "", fmt.Errorf("rabbitmq listen needs a queue")
+	}
+	action := argStr(a.Args, "action", switchboard.ActionWake)
+	corr := strings.TrimSpace(argStr(a.Args, "corr", ""))
+	target := strings.TrimSpace(argStr(a.Args, "target", ""))
+	l := switchboard.Listener{
+		ID:       "lsn-" + q + (func() string { if corr == "" { return "" }; return "-" + corr })() + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) + "-" + saRandSuffix(),
+		Queue:    q,
+		Action:   action,
+		Timeout:  time.Duration(argInt(a.Args, "timeout", 0)) * time.Second,
+		TimeoutAction: argStr(a.Args, "timeout-action", ""),
+		CorrFilter: corr,
+	}
+	switch action {
+	case switchboard.ActionWake:
+		jobID := argStr(a.Args, "job", os.Getenv("JARVIS_JOB_ID"))
+		if jobID == "" {
+			return "", fmt.Errorf("rabbitmq listen action=wake needs a job (pass 'job' or run inside an agent job with JARVIS_JOB_ID set)")
+		}
+		l.JobID = jobID
+	case switchboard.ActionForward:
+		if target == "" {
+			return "", fmt.Errorf("rabbitmq listen action=forward needs a target queue")
+		}
+		l.TargetQueue = target
+	case switchboard.ActionNotify:
+		l.Text = target
+		if l.Text == "" {
+			l.Text = "result landed on " + q
+		}
+	default:
+		return "", fmt.Errorf("rabbitmq listen action must be wake, forward or notify (got %q)", action)
+	}
+	if ds := argStr(a.Args, "timeout", ""); ds != "" && argInt(a.Args, "timeout", 0) == 0 {
+		if d, err := time.ParseDuration(ds); err == nil {
+			l.Timeout = d
+		}
+	}
+	conn, err := queue.NewConn()
+	if err != nil {
+		return "rabbitmq unreachable: " + err.Error(), nil
+	}
+	defer conn.Close()
+	switch {
+	case queue.IsFlowQueue(q):
+		err = conn.EnsureFlowQueue(q)
+	case queue.IsCapQueue(q):
+		err = conn.EnsureCapQueue(q)
+	default:
+		return "", fmt.Errorf("rabbitmq listen: only flow.* and cap.* queues can be listened (got %q)", q)
+	}
+	if err != nil {
+		return "", err
+	}
+	dir := os.Getenv("LISTENERS_DIR")
+	if dir == "" {
+		dir = filepath.Join(agentjob.DataDir(), "listeners")
+	}
+	st, err := switchboard.OpenStore(dir)
+	if err != nil {
+		return "", err
+	}
+	if err := st.Create(l); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("listening on %s: %s listener %s (corr %s)", q, action, l.ID, orAny(corr)), nil
+}
+
+// orAny renders a correlation filter for humans.
+func orAny(corr string) string {
+	if corr == "" {
+		return "any"
+	}
+	return corr
+}
+
+// runMQYield parks the run on capability results (plan §3.2 step 9): it
+// records the wait on the agent job and flags the toolset so the agent loop
+// ends the run as "yielded". The switchboard's wake listener then resumes
+// the job when every wait-on correlation has arrived — the woken run
+// consumes the results from its flow queue. Only a job-backed run can
+// yield; a standalone run should consume the result instead.
+func (t *Tools) runMQYield(a Action) (string, error) {
+	jobID := os.Getenv("JARVIS_JOB_ID")
+	if jobID == "" {
+		return "", fmt.Errorf("rabbitmq yield needs an agent job (no JARVIS_JOB_ID in env) — submit + listen on a flow queue and consume the result instead")
+	}
+	waitOn := strings.TrimSpace(argStr(a.Args, "wait-on", ""))
+	if waitOn == "" {
+		return "", fmt.Errorf("rabbitmq yield needs wait-on: the comma-separated correlation ids to wait for")
+	}
+	var corrs []string
+	for _, c := range strings.Split(waitOn, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			corrs = append(corrs, c)
+		}
+	}
+	if len(corrs) == 0 {
+		return "", fmt.Errorf("rabbitmq yield: wait-on has no ids")
+	}
+	note := strings.TrimSpace(argStr(a.Args, "note", ""))
+	if note == "" {
+		return "", fmt.Errorf("rabbitmq yield needs a note: the continuation (what the woken round should do)")
+	}
+	deadline := 2 * time.Hour // the round's default wait, like a brain yield
+	if raw, ok := argRaw(a.Args, "deadline"); ok {
+		switch v := raw.(type) {
+		case string:
+			if d, err := time.ParseDuration(v); err == nil {
+				deadline = d
+			} else if tm, err := queue.ParseDeadline(v); err == nil {
+				if u := time.Until(tm); u > 0 {
+					deadline = u
+				}
+			}
+		case float64:
+			if v > 0 {
+				deadline = time.Duration(v) * time.Second
+			}
+		}
+	}
+	st, err := agentjob.Open(agentjob.DataDir())
+	if err != nil {
+		return "", fmt.Errorf("rabbitmq yield: open job store: %v", err)
+	}
+	waitUntil := time.Now().Add(deadline)
+	if err := st.Yield(jobID, corrs, waitUntil, note); err != nil {
+		return "", fmt.Errorf("rabbitmq yield: %v", err)
+	}
+	t.Yielded = true
+	return fmt.Sprintf("yielded: job %s waits on %s until %s (note: %s)", jobID, strings.Join(corrs, ","), waitUntil.Format(time.RFC3339), note), nil
 }
 
 func sortedArgKeys(m map[string]string) []string {

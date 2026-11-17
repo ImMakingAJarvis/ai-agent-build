@@ -146,7 +146,11 @@ func run(log *slog.Logger) error {
 		Checks:      taskrunner.ShellChecker{},
 		Live:        live,
 		MaxAttempts: 3,
-		Log:         log,
+		// Capability cards (plan §3.7) are submitted to cap.<cap> on this
+		// same connection and awaited on their per-card flow queue — no LLM
+		// round. Normal cards never touch it.
+		Caps: taskrunner.NewQueueCapabilityClient(conn),
+		Log:  log,
 	}
 
 	// Settle the job's store entry from the run result. A missing entry

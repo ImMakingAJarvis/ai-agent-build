@@ -164,6 +164,14 @@ func refOr(ref, fallback string) string {
 	return ref
 }
 
+// Post posts a model-prefixed comment on an explicit work item — the
+// generic entry point for callers that already hold the board ref (the
+// mailbox mirroring in jarvis-mq ask/tell posts
+// "<subject> — <body>" on the message's board item; the job's card itself
+// comes from its title and uses PostYield/PostWake). Same best-effort
+// contract: no Plane config = no comment (nil).
+func Post(ref, model, msg string) error { return post(ref, model, msg) }
+
 // post resolves the board ref against the workspace and adds the comment.
 // A missing Plane config is not an error: board comments are a
 // best-effort overlay on the board-mapped subset of jobs.

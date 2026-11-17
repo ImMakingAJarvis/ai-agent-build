@@ -149,9 +149,12 @@ type arrival struct {
 	ref  string
 }
 
-// decodeArrival turns a delivery body into an arrival. Results on flow queues
-// are queue.Result; a DecodeMessage of a Result body does not error, so the
-// discriminator is Status != "".
+// decodeArrival turns a delivery body into an arrival. Results on flow
+// queues are queue.Result; a DecodeMessage of a Result body does not error,
+// so the discriminator is Status != "". Mailbox envelopes (agent.<x>.inbox,
+// plan §3.8) are discriminated by kind+to before the generic Message —
+// DecodeMessage of a mailbox body does not error either, so the mailbox
+// branch must come first.
 func decodeArrival(body []byte) (arrival, error) {
 	res, err := queue.DecodeResult(body)
 	if err == nil && res.Status != "" {
@@ -163,6 +166,14 @@ func decodeArrival(body []byte) (arrival, error) {
 			ref = "status=" + res.Status
 		}
 		return arrival{corr: res.CorrelationID, ref: ref}, nil
+	}
+	if queue.IsMailboxBody(body) {
+		mb, _ := queue.DecodeMailbox(body) // IsMailboxBody already checked it
+		ref := mb.Subject
+		if ref == "" {
+			ref = mb.ID
+		}
+		return arrival{corr: mb.Corr, ref: ref}, nil
 	}
 	m, err := queue.DecodeMessage(body)
 	if err != nil {
