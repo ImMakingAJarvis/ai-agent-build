@@ -166,6 +166,27 @@ func (f *File) ByName(cap string) *Capability {
 	return &c
 }
 
+// CallRefusal returns why a synchronous call to capability (jarvis-mq
+// call, plan §3.8 / EVB-38) must be refused — "" when the call is
+// allowed. A placement that needs the brain out makes a synchronous call
+// a deadlock: the round blocks in call waiting for the reply while the
+// swap window needs the brain stopped, and the window never opens
+// mid-round. A capability the catalog does not list is NOT refused — like
+// submit, a misspelling or a workerless capability degrades to the call's
+// timeout path rather than being dropped up front.
+func (f *File) CallRefusal(capability string) string {
+	c := f.ByName(capability)
+	if c == nil {
+		return ""
+	}
+	for _, w := range c.Workers {
+		if w.NeedsBrainOut {
+			return fmt.Sprintf("its %s placement needs the brain out (the swap window) — a synchronous call would deadlock the brain, which the window needs stopped; use submit + yield instead", w.Location)
+		}
+	}
+	return ""
+}
+
 // Load reads and validates the catalog file at path.
 func Load(path string) (*File, error) {
 	data, err := os.ReadFile(path)

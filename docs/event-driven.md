@@ -9,6 +9,11 @@ continues. **Mailboxes** (`agent.<name>.inbox`) are the direct-message
 channel between agent identities ([Mailboxes](#mailboxes-agent-to-agent)).
 [Queues](#queues) is the full topology in one place.
 
+> **Status (2026-11-16):** the event-driven brain plan is complete — all
+> 38 tasks (EVB-1 through EVB-38) are shipped; this document is its
+> as-built record. The last task is the synchronous `call`
+> ([CLI](#cli)).
+
 ## Queues
 
 Everything lives on vhost `/`: three durable exchanges and nine queue
@@ -200,20 +205,24 @@ hands it to another model for review, then parks until the review lands.
 **Reviewer pick rule** (the documented simple one): `sonnet` for code PRs
 (a `claude` session that can read the diff and run the go gate in a
 throwaway worktree); `planner` (opus driver) for docs/plan-only PRs (no
-code to test — the planning review is the better fit). Default: sonnet.
+code to test — the planning review is the better fit); `local` as the
+fallback when the API drivers are dead (e.g. a bad `ANTHROPIC_API_KEY`) —
+a fresh local brain session reviews (same model as the author, different
+session: it proves the loop runs, not a cross-model opinion).
+Default: sonnet.
 
 **The loop**, one command per side:
 
 1. **Request** (sender, the brain's round):
-   `jarvis-review request <PR> [--reviewer sonnet|planner] [--board REF]
+   `jarvis-review request <PR> [--reviewer sonnet|planner|local] [--board REF]
    [--summary ...]` — posts a `review_request` (PR link + summary) to the
    reviewer's inbox with a wake attached (the answer, same `corr`, wakes
-   the sender's job), enqueues the reviewer job (driver sonnet/opus, class
+   the sender's job), enqueues the reviewer job (driver sonnet/opus/local, class
    `fix`, priority 100 so the loop pulls it right after the sender yields),
    and mirrors the request onto the board item.
 2. **Yield** (sender): `jarvis-jobs yield $JARVIS_JOB_ID --wait-on <corr>
    ...` and end the round.
-3. **Review** (the reviewer's round — a fresh sonnet/opus session): its
+3. **Review** (the reviewer's round — a fresh sonnet/opus/local session): its
    round prompt carries its own inbox (the **mailbox drain step**: the
    driver's identity — local→`brain`, igpu→`igpu-helper`, sonnet→`sonnet`,
    opus→`planner` — peeks its inbox and, if there is mail, the prompt
@@ -455,7 +464,42 @@ prefix). `submit` publishes an envelope-v2 request to `cap.<capability>`
         --location gpu --vram-mb 12000 --ram-mb 2048 --deadline 2h
 
 `--input k=v` JSON-types the value (512 → number, true → bool, else the
-string typed); `--deadline` is RFC3339 or a duration from now. `results`
+string typed); `--deadline` is RFC3339 or a duration from now. For a fast
+capability there is the synchronous alternative — `call` (plan §3.8,
+EVB-38): the same envelope-v2 request, but with reply-to set to RabbitMQ's
+`amq.rabbitmq.reply-to` pseudo-queue, and the CLI blocks for the Result —
+RPC, no park, no wake:
+
+    jarvis-mq call echo --input msg=hi --timeout 60s     # prints the Result, exit 0
+    jarvis-mq call echo --timeout 2s                     # exit 1: timeout (below)
+
+Mechanics: the caller consumes the pseudo-queue (auto-ack is mandatory —
+the broker 406s a replying consumer that acknowledges) and publishes the
+request **on that same channel**. The broker hands the channel a private
+auto-delete queue and rewrites the delivered request's reply-to property
+to it; the worker replies to the default exchange with the rewritten value
+as routing key (internal/capworker follows the property, not the JSON
+body), and the Result lands back on the caller's channel. The rewrite
+state is per-channel, not per-connection: a publish from any other channel
+of the connection is rejected with "fast reply consumer does not exist" —
+an async channel exception the client's Publish swallows, so the request
+never leaves and the call would just time out. Two guardrails:
+
+- **Refusal, before the broker:** a capability whose catalog placement
+  has `needs_brain_out` is refused with the deadlock message — a
+  synchronous call would block the round for the reply while the swap
+  window needs the brain stopped, and the window never opens mid-round.
+  A capability the catalog does not list is NOT refused: like submit, it
+  degrades to the timeout path. An unreadable catalog fails the call
+  (the gate is the point of it).
+- **Timeout ≠ cancel:** `--timeout` only stops waiting. The request stays
+  on `cap.<cap>`, the worker still processes it (done-marker and all),
+  but its Result is dropped — the private queue is gone, and direct
+  replies are at-most-once. Slow capability → submit + listen + yield.
+
+`call` exits 0 with the Result printed when the worker answers (even
+`status: error` — the capability ran and said no, which is the answer
+asked for); non-zero on timeout, refusal or transport errors. `results`
 consumes and pretty-prints `Result` messages from the reply queue (acks
 them; `-n N` to cap, `--json` for the raw bodies):
 

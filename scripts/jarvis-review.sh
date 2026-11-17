@@ -8,8 +8,8 @@
 #      with a WAKE attached: the sender's parked job wakes when the
 #      reviewer's `answer` (same corr) lands on the sender's inbox — the
 #      listener-wake pair from task EVB-35;
-#   2. enqueues the reviewer job (driver sonnet/opus, class fix, high
-#      priority so the loop pulls it right after the sender yields);
+#   2. enqueues the reviewer job (driver sonnet/opus/local, class fix,
+#      high priority so the loop pulls it right after the sender yields);
 #   3. mirrors the request onto the board item (--board) so the exchange is
 #      readable on Plane. The reviewer's answer mirrors too (it carries the
 #      same board ref).
@@ -20,15 +20,19 @@
 #              the go gate in a throwaway worktree;
 #   planner  — docs/plan-only PRs: no code to test, so the stronger
 #              planning review (opus driver) is the better fit.
+#   local    — fallback when the API drivers are dead (e.g. a bad
+#              ANTHROPIC_API_KEY): a fresh local brain session reviews.
+#              Same model as the author, different session — it proves the
+#              loop runs, but it is not a cross-model opinion.
 # The default is sonnet.
 #
 # Usage:
-#   jarvis-review request <PR-N> [--reviewer sonnet|planner] [--board REF]
+#   jarvis-review request <PR-N> [--reviewer sonnet|planner|local] [--board REF]
 #                          [--branch BR] [--wake JOB] [--timeout D]
 #                          [--summary TEXT]
 #
 #   <PR-N>      the PR number to review (e.g. 253)
-#   --reviewer  sonnet (default) or planner
+#   --reviewer  sonnet (default), planner, or local (API-drivers-dead fallback)
 #   --board REF the Plane item (e.g. EVB-38) the exchange is mirrored on
 #   --branch BR the PR's branch (default: detected via `gh pr view`)
 #   --wake JOB  the sender's parked agentjob to wake on the answer
@@ -77,7 +81,8 @@ done
 case "$reviewer" in
   sonnet)  rdriver="sonnet" ridentity="sonnet" ;;
   planner) rdriver="opus"   ridentity="planner" ;;
-  *) echo "jarvis-review: --reviewer must be sonnet or planner (got $reviewer)" >&2; exit 2 ;;
+  local)   rdriver="local"  ridentity="brain" ;;
+  *) echo "jarvis-review: --reviewer must be sonnet, planner or local (got $reviewer)" >&2; exit 2 ;;
 esac
 [[ -n "$wake" ]] || { echo "jarvis-review: no --wake and \$JARVIS_JOB_ID is unset — pass --wake <job>" >&2; exit 2; }
 
@@ -112,9 +117,9 @@ if ! jarvis-mq "${tell_args[@]}"; then
   exit 1
 fi
 
-# 2. The reviewer job — self-contained for a fresh sonnet/opus session. Its
-#    round prompt carries the reviewer's inbox (the mailbox drain step), and
-#    the instructions below are the whole job.
+# 2. The reviewer job — self-contained for a fresh sonnet/opus/local
+#    session. Its round prompt carries the reviewer's inbox (the mailbox
+#    drain step), and the instructions below are the whole job.
 reviewer_instructions=$(cat <<EOF
 You are the PR reviewer (${ridentity}) in the EVB-36 reviewer flow. A
 review_request for PR #${pr} is waiting in your inbox

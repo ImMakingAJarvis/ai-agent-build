@@ -3,6 +3,8 @@ package queue
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"os"
@@ -20,12 +22,29 @@ const (
 
 // Conn wraps an AMQP connection and channel with automatic reconnect.
 type Conn struct {
-	url       string
-	exchange  string
-	mu        sync.Mutex
-	conn      *amqp.Connection
-	channel   *amqp.Channel
-	closed    bool
+	url      string
+	exchange string
+	opts     DialOpts
+	mu       sync.Mutex
+	conn     *amqp.Connection
+	channel  *amqp.Channel
+	closed   bool
+}
+
+// DialOpts tunes one connection beyond the URL (the remote worker's
+// off-LAN path, plan §3.9): an explicit broker URL and the TLS trust
+// for amqps://. A zero value is the pre-existing behavior: RABBITMQ_URL
+// or the default, plain amqp://.
+type DialOpts struct {
+	// URL is the broker URL (amqp:// or amqps://). Empty = AMQPURL().
+	URL string
+	// CACert is a PEM CA bundle for verifying the broker's amqps://
+	// certificate (the self-signed CA both nodes share). Empty = the
+	// system root pool.
+	CACert []byte
+	// InsecureSkipVerify disables certificate verification (TLS still
+	// encrypts the link). LAN/lab only — never for an off-LAN link.
+	InsecureSkipVerify bool
 }
 
 // AMQPURL is the effective broker URL: RABBITMQ_URL or the default.
@@ -40,17 +59,46 @@ func AMQPURL() string {
 
 // NewConn creates a connection to RabbitMQ and declares the exchange.
 func NewConn() (*Conn, error) {
-	url := AMQPURL()
-	c := &Conn{url: url, exchange: defaultExchange}
+	return NewConnOpts(DialOpts{})
+}
+
+// NewConnOpts creates a connection with explicit dial options (the
+// remote worker's config-file path, plan §3.9): the broker URL and, for
+// an off-LAN amqps:// link, the CA bundle or the insecure flag. A zero
+// DialOpts is NewConn.
+func NewConnOpts(o DialOpts) (*Conn, error) {
+	url := o.URL
+	if url == "" {
+		url = AMQPURL()
+	}
+	c := &Conn{url: url, exchange: defaultExchange, opts: o}
 	if err := c.connect(); err != nil {
 		return nil, fmt.Errorf("queue: connect: %w", err)
 	}
 	return c, nil
 }
 
+// tlsConfig builds the TLS config for a tuned connection, reporting
+// tuned=false when there is nothing to tune (no CA, not insecure) so
+// the plain amqp:// path stays exactly amqp.Dial.
+func (o DialOpts) tlsConfig() (cfg *tls.Config, tuned bool, err error) {
+	if len(o.CACert) == 0 && !o.InsecureSkipVerify {
+		return nil, false, nil
+	}
+	cfg = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: o.InsecureSkipVerify}
+	if len(o.CACert) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(o.CACert) {
+			return nil, false, fmt.Errorf("no certificates parsed from the CA bundle")
+		}
+		cfg.RootCAs = pool
+	}
+	return cfg, true, nil
+}
+
 func (c *Conn) connect() error {
 	var err error
-	c.conn, err = amqp.Dial(c.url)
+	c.conn, err = c.dial()
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", c.url, err)
 	}
@@ -66,6 +114,19 @@ func (c *Conn) connect() error {
 		return fmt.Errorf("declare exchange %s: %w", c.exchange, err)
 	}
 	return nil
+}
+
+// dial opens the AMQP connection: plain amqp.Dial unless DialOpts tunes
+// the TLS trust (an off-LAN amqps:// link with a shared CA, plan §3.9).
+func (c *Conn) dial() (*amqp.Connection, error) {
+	tlsCfg, tuned, err := c.opts.tlsConfig()
+	if err != nil {
+		return nil, err
+	}
+	if !tuned {
+		return amqp.Dial(c.url)
+	}
+	return amqp.DialConfig(c.url, amqp.Config{TLSClientConfig: tlsCfg})
 }
 
 // Reconnect re-establishes the connection and channel if the underlying
@@ -179,12 +240,23 @@ func (c *Conn) Publish(m Message, routingKey string) error {
 	c.mu.Lock()
 	ch := c.channel
 	c.mu.Unlock()
+	return c.PublishOn(ch, m, routingKey)
+}
 
+// PublishOn is Publish on a specific channel. jarvis-mq call needs it for
+// the direct reply-to trick (plan §3.8): the broker rewrites a request's
+// reply-to to the caller's private queue only when the PUBLISHING channel
+// is the one that consumes amq.rabbitmq.reply-to — the rewrite state is
+// per-channel, not per-connection. A publish on any other channel of the
+// same connection is rejected with "fast reply consumer does not exist",
+// and because the channel exception arrives asynchronously,
+// PublishWithContext returns nil: the request never leaves the client and
+// the caller just times out (verified against this broker's logs).
+func (c *Conn) PublishOn(ch *amqp.Channel, m Message, routingKey string) error {
 	pub, err := newPublishing(m, uint8(m.Priority))
 	if err != nil {
 		return fmt.Errorf("encode job %s: %w", m.ID, err)
 	}
-
 	return ch.PublishWithContext(context.Background(), c.exchange, routingKey, false, false, pub)
 }
 

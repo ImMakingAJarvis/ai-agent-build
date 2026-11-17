@@ -533,6 +533,18 @@ func (w *Worker) handle(ctx context.Context, del amqp.Delivery) {
 		return
 	}
 
+	// Direct reply-to (plan §3.8, EVB-38): a synchronous caller
+	// (jarvis-mq call) sets the request's reply-to to the
+	// amq.rabbitmq.reply-to pseudo-queue, and the broker rewrites the
+	// DELIVERED message's reply-to property to a private per-caller queue
+	// while the JSON body still carries the base name. The reply must
+	// follow the property. For a normal flow-queue reply the property and
+	// the envelope agree (mirrored at publish), so preferring the
+	// property changes nothing there.
+	if del.ReplyTo != "" {
+		req.ReplyTo = del.ReplyTo
+	}
+
 	// The lease is gone (revoked, or a fail-open re-sync that came back
 	// denied): this delivery may have arrived before the consumer's
 	// cancel landed. Requeue it — the work goes to a placement that

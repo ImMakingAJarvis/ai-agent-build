@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -292,6 +295,85 @@ func TestValidateTell(t *testing.T) {
 	for _, kind := range []string{queue.MailKindFYI, queue.MailKindHandoff, queue.MailKindQuestion, ""} {
 		if err := validateTell(kind, "job-1"); err == nil {
 			t.Errorf("%s + wake: want an error, got nil", kind)
+		}
+	}
+}
+
+// callRefusalDoc is a minimal catalog: one capability that runs
+// alongside the brain, one that needs the swap window.
+const callRefusalDoc = `
+capabilities:
+  echo:
+    workers:
+      - location: cpu
+        model: echo
+        vram_mb: 0
+        ram_mb: 64
+        needs_brain_out: false
+        start: ""
+        stop: ""
+        typical_runtime: 30s
+        idle_s: 0
+  photo.generate:
+    workers:
+      - location: gpu
+        model: zimage-turbo
+        vram_mb: 12288
+        ram_mb: 4096
+        needs_brain_out: true
+        start: "docker compose up -d art"
+        stop: "docker compose stop art"
+        typical_runtime: 45s
+        idle_s: 300
+`
+
+// TestCallRefusesBrainOutBeforeTheBroker is the CLI half of the EVB-38
+// refusal gate: a capability with a needs_brain_out placement must be
+// refused with the deadlock message BEFORE any broker connection (the
+// test sets no broker up at all — a dial attempt would fail or hang),
+// and an alongside capability passes the gate (it then fails on the
+// broker dial, a different error).
+func TestCallRefusesBrainOutBeforeTheBroker(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "capabilities.yaml")
+	if err := os.WriteFile(path, []byte(callRefusalDoc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JARVIS_CAPABILITIES", path)
+
+	err := runCall([]string{"photo.generate", "--timeout", "1s"})
+	if err == nil {
+		t.Fatal("call photo.generate: expected the brain-out refusal, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to call photo.generate") ||
+		!strings.Contains(err.Error(), "deadlock") ||
+		!strings.Contains(err.Error(), "submit + yield") {
+		t.Errorf("refusal = %q, want it to name the deadlock and the submit + yield alternative", err)
+	}
+
+	// The gate passes for an alongside capability: with the broker
+	// pointed at a closed port the run dies at the dial — not with a
+	// refusal. (A dead port fails the dial instantly, so the test stays
+	// hermetic: it never touches the real broker or its queues.)
+	t.Setenv("RABBITMQ_URL", "amqp://jarvis:jarvis-local@127.0.0.1:59999")
+	if err := runCall([]string{"echo", "--timeout", "1s"}); err == nil || strings.Contains(err.Error(), "refusing to call") {
+		t.Errorf("call echo: gate should pass and the run should die at the dial; got %v", err)
+	}
+}
+
+// TestCallFlagValidation pins the argument errors that must fire before
+// the catalog or the broker: no capability, an invalid name, a
+// non-positive timeout.
+func TestCallFlagValidation(t *testing.T) {
+	for _, args := range [][]string{
+		{},
+		{"--timeout", "1s"},
+		{"Image.Generate"},
+		{"echo", "--timeout", "0s"},
+		{"echo", "extra"},
+	} {
+		if err := runCall(args); err == nil {
+			t.Errorf("runCall(%v): expected an error, got nil", args)
 		}
 	}
 }

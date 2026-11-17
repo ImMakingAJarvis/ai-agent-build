@@ -159,14 +159,17 @@ and verified its artifacts.
 When a round finishes a PR and wants a second pair of eyes from another
 model, hand it to a reviewer and park (plan §3.8). One command:
 
-    jarvis-review request <PR> [--reviewer sonnet|planner] [--board REF] \
+    jarvis-review request <PR> [--reviewer sonnet|planner|local] [--board REF] \
         [--summary "what the PR does"]
 
 It posts a `review_request` to the reviewer's inbox (with a wake on the
 answer), enqueues the reviewer job (it jumps the queue — class fix,
 priority 100), and prints the corr + the yield command. Reviewer rule:
 `sonnet` for code PRs (it can run the go gate), `planner` (opus) for
-docs/plan-only PRs; default sonnet. Then:
+docs/plan-only PRs; default sonnet. `local` is the fallback when the API
+drivers are dead (e.g. a bad ANTHROPIC_API_KEY): a fresh local brain
+session reviews (same model as the author — it proves the loop, not a
+cross-model opinion). Then:
 
     jarvis-jobs yield $JARVIS_JOB_ID --wait-on <corr> \
         --note "..." --in-flight "PR #N open, review requested" \

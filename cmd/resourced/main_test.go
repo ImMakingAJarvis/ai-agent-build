@@ -503,3 +503,42 @@ func TestMetricsScrape(t *testing.T) {
 		}
 	}
 }
+
+// TestDeviceReportAPI is the EVB-37 endpoint: POST /device-report
+// upserts the remote device (visible in /state with its reported
+// values), and rejects local device names and bad bodies.
+func TestDeviceReportAPI(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	report := http.HandlerFunc(svc.handleDeviceReport)
+	code, out := doWith(t, report, "POST", "/device-report",
+		`{"device":"remote:node2","vram_total_mb":24576,"ram_total_mb":32768,"ram_free_mb":10000}`)
+	if code != http.StatusOK || out["device"] != "remote:node2" {
+		t.Fatalf("code=%d out=%v, want 200 + the device name", code, out)
+	}
+	// The device rides along in /state with its reported facts.
+	code, st := doWith(t, http.HandlerFunc(svc.handleState), "GET", "/state", "")
+	if code != http.StatusOK {
+		t.Fatalf("state: %d", code)
+	}
+	devs, _ := st["devices"].([]any)
+	found := false
+	for _, d := range devs {
+		m, _ := d.(map[string]any)
+		if m["name"] == "remote:node2" {
+			found = true
+			if m["ram_free_mb"] != float64(10000) || m["vram_total_mb"] != float64(24576) {
+				t.Errorf("state device = %v, want the reported values", m)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("remote:node2 missing from /state: %v", devs)
+	}
+	// Local names and bad bodies are 400s, not 500s.
+	if code, _ = doWith(t, report, "POST", "/device-report", `{"device":"gpu"}`); code != http.StatusBadRequest {
+		t.Errorf("local device name: code=%d, want 400", code)
+	}
+	if code, _ = doWith(t, report, "POST", "/device-report", `{not json`); code != http.StatusBadRequest {
+		t.Errorf("bad body: code=%d, want 400", code)
+	}
+}
