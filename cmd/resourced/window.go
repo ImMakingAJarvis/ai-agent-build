@@ -66,6 +66,11 @@ type SwapRunner interface {
 	// loaded). It never bypasses a running round — the guard is inside
 	// jarvis-swap (invariant 1).
 	Open(ctx context.Context, forCaps []string, reason string) error
+	// OpenGame runs `jarvis-swap out --game --reason <r> --force`: the
+	// brain goes out for a Steam game (its VRAM is the game's) and no
+	// photo service loads. Same round guard, same state file (the
+	// marker carries for:["game"]).
+	OpenGame(ctx context.Context, reason string) error
 	// Close runs `jarvis-swap in --reason <r>` and blocks until the
 	// brain is back (started, healthy, real completion check).
 	Close(ctx context.Context, reason string) error
@@ -100,6 +105,10 @@ func newShellSwapRunner(cmd, statePath string, timeout time.Duration, log *slog.
 
 func (r *shellSwapRunner) Open(ctx context.Context, forCaps []string, reason string) error {
 	return r.run(ctx, []string{"out", "--for", strings.Join(forCaps, ","), "--reason", reason, "--force"}...)
+}
+
+func (r *shellSwapRunner) OpenGame(ctx context.Context, reason string) error {
+	return r.run(ctx, "out", "--game", "--reason", reason, "--force")
 }
 
 func (r *shellSwapRunner) Close(ctx context.Context, reason string) error {
@@ -152,6 +161,30 @@ func (r *shellSwapRunner) State() (bool, []string, time.Time, error) {
 		return true, st.For, time.Time{}, nil
 	}
 	return true, st.For, t, nil
+}
+
+// httpBrainUp probes the brain engine's HTTP endpoint (BRAIN_URL,
+// default http://127.0.0.1:11434): status < 400 = the engine is up and
+// answering. The game window's steady-state check uses it to tell "brain
+// out as intended" from "brain came back under a long game" without
+// parsing docker.
+func httpBrainUp(ctx context.Context) bool {
+	base := os.Getenv("BRAIN_URL")
+	if base == "" {
+		base = "http://127.0.0.1:11434"
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, base, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode < 400
 }
 
 // tail keeps the last few hundred characters of a command's output.
@@ -347,6 +380,8 @@ type windowController struct {
 	swapMu sync.Mutex // serializes every jarvis-swap operation (see openWindow/closeWindow)
 	mu     sync.Mutex
 	last   windowInfo
+
+	brainUp func(ctx context.Context) bool // the game window's steady-state probe (httpBrainUp)
 }
 
 func newWindowController(
@@ -383,6 +418,7 @@ func newWindowController(
 			Help: "Swap windows closed by the controller, by close class.",
 		}, []string{"reason"}),
 	}
+	wc.brainUp = httpBrainUp
 	reg.MustRegister(wc.openGauge, wc.ageGauge, wc.opensTotal, wc.closesTotal)
 	return wc
 }
@@ -394,6 +430,25 @@ func (wc *windowController) tick(ctx context.Context) {
 	open, forCaps, openedAt, err := wc.swap.State()
 	if err != nil {
 		wc.log.Warn("window: cannot read the swap state — holding the tick", "err", err)
+		return
+	}
+	// A game-owned window (for:["game"]) belongs to the stream
+	// controller: it opened it (AcquireForGame) and closes it
+	// (ReleaseFromGame) when the game ends. The queue/brain-wait policy
+	// must not run against it — a drained or max decision would close
+	// the window under a running game (the 4h watchdog-maintenance
+	// deadline that the stream controller's keepalive re-arms is the
+	// failsafe for a wedged game).
+	if open && forContainsGame(forCaps) {
+		now := time.Now().UTC()
+		wc.mu.Lock()
+		wc.last = windowInfo{Open: true, For: forCaps, OpenedAt: openedAt,
+			Reason: "held for the active game (the stream controller owns it)", LastTick: now}
+		wc.mu.Unlock()
+		wc.openGauge.Set(1)
+		if !openedAt.IsZero() {
+			wc.ageGauge.Set(time.Since(openedAt).Seconds())
+		}
 		return
 	}
 	// The depth snapshot covers every catalog capability (EVB-30: the
@@ -481,9 +536,9 @@ func (wc *windowController) tick(ctx context.Context) {
 
 // openWindow runs one `jarvis-swap out` and records it (metric +
 // window.opened event). Every swap operation goes through swapMu so the
-// game watchdog's close (CloseForGame) and a tick's open/close can never
-// run jarvis-swap concurrently — a double `in` would race the brain's
-// health check.
+// game watchdog's open/close (AcquireForGame/ReleaseFromGame) and a
+// tick's open/close can never run jarvis-swap concurrently — a double
+// `in` would race the brain's health check.
 func (wc *windowController) openWindow(ctx context.Context, forCaps []string, reason, trigger string) error {
 	wc.swapMu.Lock()
 	defer wc.swapMu.Unlock()
@@ -542,15 +597,79 @@ func (wc *windowController) closeWindow(ctx context.Context, reason, cls string)
 	return nil
 }
 
-// CloseForGame is the game watchdog's window path (plan §3.6 rule 2,
-// EVB-29): the stream needs the 4090, so an open swap window closes now
-// and the brain comes back before the game gets its VRAM — the same
-// order as a drained close, for a game reason. A no-op when no window
-// is open. The caller (the stream controller) holds the GPU lease
-// revocation and the stream hold around this, so by the time the brain
-// is back there is no capability-worker VRAM left to wait for.
-func (wc *windowController) CloseForGame(ctx context.Context, reason string) error {
-	return wc.closeWindow(ctx, reason, "game")
+// AcquireForGame is the game watchdog's window path (plan §3.6 rule 2):
+// a Steam game is running and the 4090's VRAM is the game's, so the
+// brain goes OUT — jarvis-swap out --game stops the engine and marks
+// the window for:["game"]; no photo service loads (the game wants the
+// VRAM the art model would take). The steady state (window open for the
+// game, brain down) is a no-op with no event, so the keepalive's
+// periodic re-check stays quiet. An open photo window converts in
+// place: the script stops the art service and rewrites the marker. The
+// round guard inside jarvis-swap still holds (invariant 1) — the call
+// fails while a round runs and the keepalive retries.
+func (wc *windowController) AcquireForGame(ctx context.Context, reason string) error {
+	wc.swapMu.Lock()
+	defer wc.swapMu.Unlock()
+	open, forCaps, _, err := wc.swap.State()
+	if err != nil {
+		return err
+	}
+	if open && forContainsGame(forCaps) && !wc.brainUp(ctx) {
+		return nil // steady state: the game already has its VRAM
+	}
+	if err := wc.swap.OpenGame(ctx, reason); err != nil {
+		return err
+	}
+	wc.opensTotal.WithLabelValues("game").Inc()
+	wc.publish(ctx, queue.WindowEvent("opened", map[string]any{
+		"for":     []string{"game"},
+		"reason":  reason,
+		"trigger": "game",
+	}))
+	return nil
+}
+
+// ReleaseFromGame is the game-end's window path: the window closes ONLY
+// if it is the game's (for:["game"]). A photo window that opened while
+// the game ran is left for the queue policy — the game's VRAM is free
+// again, but the photo work still wants the brain out. No lease
+// revocation here: the stream controller's hold prevented new grants
+// for the whole game, so nothing is stale by the time the brain comes
+// home.
+func (wc *windowController) ReleaseFromGame(ctx context.Context, reason string) error {
+	wc.swapMu.Lock()
+	defer wc.swapMu.Unlock()
+	open, forCaps, _, err := wc.swap.State()
+	if err != nil {
+		return err
+	}
+	if !open {
+		return nil
+	}
+	if !forContainsGame(forCaps) {
+		wc.log.Info("window: open but not the game's — leaving it for the queue policy", "for", forCaps)
+		return nil
+	}
+	if err := wc.swap.Close(ctx, reason); err != nil {
+		return err
+	}
+	wc.closesTotal.WithLabelValues("game").Inc()
+	wc.publish(ctx, queue.WindowEvent("closed", map[string]any{"for": forCaps, "reason": reason}))
+	wc.mu.Lock()
+	wc.last = windowInfo{Reason: "closed: " + reason, LastTick: time.Now().UTC()}
+	wc.mu.Unlock()
+	return nil
+}
+
+// forContainsGame reports whether the window marker lists "game" — the
+// marker the game watchdog writes (jarvis-swap out --game).
+func forContainsGame(forCaps []string) bool {
+	for _, f := range forCaps {
+		if f == "game" {
+			return true
+		}
+	}
+	return false
 }
 
 func (wc *windowController) publish(ctx context.Context, ev queue.Event) {

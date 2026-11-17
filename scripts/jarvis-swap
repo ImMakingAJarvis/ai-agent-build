@@ -29,10 +29,19 @@
 # Commands:
 #   jarvis-swap status                          one-screen state report
 #   jarvis-swap out [--for CAPS] [--maintain 4h] [--jobs a,b] [--bump 1000]
-#                 [--reason TEXT] [--job ID] [--force]
+#                 [--reason TEXT] [--job ID] [--force] [--game]
 #       --for       comma-separated capabilities the window serves (recorded
 #                   in the state file, shown by `status`; resourced passes
 #                   the queued brain-out capabilities it saw when opening)
+#       --game      the window serves a running Steam game (the game
+#                   watchdog's brain stop): the brain goes out and its
+#                   VRAM is freed, but NO photo service loads — the game
+#                   wants that VRAM. The marker records for=game and the
+#                   window closes when the game ends (resourced runs `in`),
+#                   not when the queues drain. Idempotent: re-runs while
+#                   the game window is open are a no-op; an open
+#                   capability window CONVERTS to the game's (photo
+#                   services stopped, marker rewritten).
 #       --maintain  watchdog window length (default 4h; 45s|30m|2h|seconds)
 #       --jobs      comma-separated queued job ids to flip to the igpu
 #                   driver (jarvis-jobs requeue -driver igpu -priority N <id>)
@@ -290,7 +299,7 @@ cmd_status() {
 # out
 ########################################
 cmd_out() {
-  local maintain="$MAINTAIN_DEFAULT" forcaps="" jobs="" reason="GPU capability work" job="" force=0 bump="$SWAP_PRIORITY_DEFAULT"
+  local maintain="$MAINTAIN_DEFAULT" forcaps="" jobs="" reason="GPU capability work" job="" force=0 bump="$SWAP_PRIORITY_DEFAULT" game=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --for) forcaps="$2"; shift 2 ;;
@@ -300,12 +309,17 @@ cmd_out() {
       --job) job="$2"; shift 2 ;;
       --bump) bump="$2"; shift 2 ;;
       --force) force=1; shift ;;
+      --game) game=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       *) echo "unknown argument: $1" >&2; return 2 ;;
     esac
   done
+  # --game: the marker and the Discord line take the game's own identity
+  # (the stream controller passes neither --for nor --reason).
+  [[ "$game" == 1 && -z "$forcaps" ]] && forcaps="game"
+  [[ "$game" == 1 && "$reason" == "GPU capability work" ]] && reason="Steam game active"
 
-  log "=== swap OUT (for=${forcaps:-none} maintain=${maintain} jobs=${jobs:-none} reason=${reason}) ==="
+  log "=== swap OUT (for=${forcaps:-none} maintain=${maintain} jobs=${jobs:-none} reason=${reason} game=${game}) ==="
 
   # Round guard: this must run BETWEEN brain rounds, never under one. When
   # a swap job is dispatched as a round it is the only running job; a
@@ -323,12 +337,14 @@ cmd_out() {
   [[ -n "$running" ]] || n=0
   if [[ "$n" -ge 2 ]]; then
     log "ABORT: $n jobs are running — a round is in flight; do not swap out under it"
-    notify "swap OUT aborted: $n rounds running (see $LOG)"
+    # A game keepalive retries every 60 s while a round runs: logging is
+    # enough there, Discord gets one line per real (human) attempt.
+    [[ "$game" == 1 ]] || notify "swap OUT aborted: $n rounds running (see $LOG)"
     return 1
   fi
   if [[ "$n" -eq 1 && ( -z "$job" || "$running" != "$job" ) ]]; then
     log "ABORT: round ${running} is in flight and this is not it (job=${job:-none}) — --force does not bypass a running round"
-    notify "swap OUT aborted: round ${running} is in flight (see $LOG)"
+    [[ "$game" == 1 ]] || notify "swap OUT aborted: round ${running} is in flight (see $LOG)"
     return 1
   fi
   if [[ "$n" -eq 0 && "$force" -ne 1 ]]; then
@@ -337,10 +353,41 @@ cmd_out() {
   fi
 
   # Already out? Idempotent: (re)flip the jobs and leave the window as is.
+  # The game half (the keepalive re-runs this every 60 s while the game
+  # runs) is stricter:
+  #   - the window is already the game's → steady state, nothing to do;
+  #   - an open CAPABILITY window → convert it: stop the photo services
+  #     (they hold the VRAM the game wants), re-arm the watchdog and
+  #     rewrite the marker for=game;
+  #   - brain down with NO window marker → do NOT adopt someone else's
+  #     maintenance window (the 2026-11-04 failure mode); the watchdog
+  #     owns it.
   if ! brain_up; then
     if jarvis-watchdog maintain status 2>/dev/null | grep -q "maintenance active"; then
+      if [[ "$game" == 1 ]]; then
+        if sed -n 's/.*"for":\[\([^]]*\)\].*/\1/p' "$WINDOW_STATE" 2>/dev/null | grep -q '"game"'; then
+          log "game window already open — steady state, nothing to do"
+          return 0
+        fi
+        log "converting the open capability window to the game window ($reason) ..."
+        local until
+        until=$(jarvis-watchdog maintain status 2>/dev/null | sed -n 's/maintenance active: brain restarts skipped until \([^ (]*\).*/\1/p')
+        if [[ "$DRY_RUN" == 0 ]]; then
+          (cd "$REPO" && docker compose stop art bench) || log "WARNING: docker compose stop art bench failed"
+          jarvis-watchdog maintain "$maintain" "game swap window: $reason" || log "WARNING: could not re-arm the watchdog maintenance window"
+          window_state_write "$forcaps" "$reason"
+        else
+          log "[DRY-RUN] would stop art bench, re-arm maintain $maintain and re-write the marker for=game"
+        fi
+        notify "brain swap OUT: the window converted to the game window ($reason) — the photo services stopped, the brain stays out for the game until it ends (window until ${until:-?})."
+        return 0
+      fi
       log "brain already down and a maintenance window is active — window already open"
     else
+      if [[ "$game" == 1 ]]; then
+        log "ABORT: brain down without a maintenance window — the watchdog owns this, not the game"
+        return 1
+      fi
       log "ABORT: brain is down and NO maintenance window is active — this is not a swap, it is the 2026-11-04 failure mode. Leaving it for the watchdog."
       notify "swap OUT aborted: brain down without a maintenance window — the watchdog owns this, not the swap"
       return 1
@@ -380,19 +427,26 @@ cmd_out() {
   # 3. Wait for the VRAM to actually come back (CUDA release is not instant).
   wait_vram "$VRAM_FREE_WANT_MB" || return 1
 
-  # 4. Load the photo services. `up -d` is a no-op for ones already running;
-  #    the art model load is what takes minutes.
-  if [[ "$DRY_RUN" == 0 ]]; then
-    (cd "$REPO" && docker compose up -d art bench) || {
-      log "ERROR: docker compose up -d art bench failed"
-      return 1
-    }
+  # 4. Load the photo services — capability windows only. A game window
+  #    wants the VRAM the art model would take: the game IS the tenant,
+  #    so it ends with the brain out and no services loaded. `up -d` is
+  #    a no-op for ones already running; the art model load is what
+  #    takes minutes.
+  if [[ "$game" == 0 ]]; then
+    if [[ "$DRY_RUN" == 0 ]]; then
+      (cd "$REPO" && docker compose up -d art bench) || {
+        log "ERROR: docker compose up -d art bench failed"
+        return 1
+      }
+    else
+      log "[DRY-RUN] would run: docker compose up -d art bench"
+    fi
+    wait_health "$ART_URL" "art" 60 || return 1
+    wait_art_loaded || return 1
+    wait_health "$BENCH_URL" "bench" 120 || return 1
   else
-    log "[DRY-RUN] would run: docker compose up -d art bench"
+    log "game window: no photo services — the 4090's VRAM is the game's"
   fi
-  wait_health "$ART_URL" "art" 60 || return 1
-  wait_art_loaded || return 1
-  wait_health "$BENCH_URL" "bench" 120 || return 1
 
   # 5. Flip the queued jobs to the iGPU driver AND push them to the front
   #    of their band. Jobs run as code when tagged (e.g. photo jobs — the
@@ -431,7 +485,11 @@ cmd_out() {
   # 6. Tell the house.
   local until
   until=$(jarvis-watchdog maintain status 2>/dev/null | sed -n 's/maintenance active: brain restarts skipped until \([^ (]*\).*/\1/p')
-  notify "brain swap OUT: brain paused for GPU capability work ($reason; window serves ${forcaps:-?}). art+bench on the 4090; capability jobs run as code (no model round), window until ${until:-?}. I pick up from notes/brain-handoff.md when I am back. Flipped: ${flipped:-none}."
+  if [[ "$game" == 1 ]]; then
+    notify "brain swap OUT: the brain is out for the active game ($reason). No photo services loaded — the 4090's VRAM is the game's; the brain comes back when the game ends (window until ${until:-?})."
+  else
+    notify "brain swap OUT: brain paused for GPU capability work ($reason; window serves ${forcaps:-?}). art+bench on the 4090; capability jobs run as code (no model round), window until ${until:-?}. I pick up from notes/brain-handoff.md when I am back. Flipped: ${flipped:-none}."
+  fi
   log "=== swap OUT complete ==="
   return 0
 }

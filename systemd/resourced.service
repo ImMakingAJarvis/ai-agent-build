@@ -7,6 +7,10 @@
 # window controller share the process (one binary, one /state, one
 # /metrics).
 #
+# The game/stream watchdog (EVB-29, this is the brain-side half): while a
+# Steam game runs, resourced stops the brain (jarvis-swap out --game) so
+# the game gets the VRAM; a Sunshine desktop stream takes no GPU action.
+#
 # Listen on the docker bridge gateway, NOT 127.0.0.1: the capability
 # containers reach it via host.docker.internal (extra_hosts
 # host-gateway in docker-compose.yml), and 127.0.0.1 is not routable
@@ -32,6 +36,12 @@ Environment=REFRESH_INTERVAL=30s
 Environment=WINDOW_INTERVAL=30s
 # Sunshine's video-stream UDP port (its config here is all-default).
 Environment=SUNSHINE_STREAM_PORT=48010
+# Game watchdog opt-outs: comma-separated command-line substrings that
+# keep a game from evicting the brain (a light game the owner wants to
+# play alongside it). Empty (default) = every Steam game counts.
+#Environment=STEAM_GAME_EXCLUDES=
+# The brain engine's HTTP endpoint the game keepalive probes.
+#Environment=BRAIN_URL=http://127.0.0.1:11434
 # plan §7.2 defaults (no Nathan answer in the Discord logs, PR #231)
 Environment=MAX_WINDOW=2h
 Environment=MAX_BRAIN_WAIT=20m

@@ -57,6 +57,7 @@ func TestStreamTypeString(t *testing.T) {
 		{NoStream, "none"},
 		{SunshineStream, "sunshine"},
 		{SteamRemotePlay, "steam-remote-play"},
+		{SteamGame, "steam-game"},
 		{StreamType(99), "none"},
 	}
 	for _, tt := range tests {
@@ -64,6 +65,92 @@ func TestStreamTypeString(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("StreamType(%d).String() = %q; want %q", tt.st, got, tt.want)
 		}
+	}
+}
+
+// IsGame splits the kinds: a game is a tenant that wants the 4090's VRAM
+// (the brain goes out for it); a Sunshine desktop stream is not (NVENC
+// only).
+func TestIsGame(t *testing.T) {
+	tests := []struct {
+		st   StreamType
+		want bool
+	}{
+		{NoStream, false},
+		{SunshineStream, false},
+		{SteamRemotePlay, true},
+		{SteamGame, true},
+	}
+	for _, tt := range tests {
+		if got := tt.st.IsGame(); got != tt.want {
+			t.Errorf("%v.IsGame() = %v; want %v", tt.st, got, tt.want)
+		}
+	}
+}
+
+// ---------- procGameRunning (the Steam game detection) ----------
+
+// writeCmdline writes one synthetic /proc entry: <root>/<pid>/cmdline with
+// NUL-separated argv (what the kernel keeps).
+func writeCmdline(t *testing.T, root, pid, cmdline string) {
+	t.Helper()
+	dir := filepath.Join(root, pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(cmdline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The detection reads argv, not the exe link: a native game's own binary
+// sits at …/steamapps/common/<Game>/, a Proton launch carries the game
+// path among the proton arguments, and every library root (default,
+// snap, extra libraries) contains the same "steamapps/common/" marker —
+// while the Steam client itself and SteamLinuxRuntime never match.
+func TestProcGameRunning(t *testing.T) {
+	d := t.TempDir()
+
+	// A snap-install Proton launch: the game path is among proton's argv.
+	writeCmdline(t, d, "100",
+		"/home/nathan/snap/steam/common/.local/share/Steam/steamapps/common/Proton 9-0/proton\x00"+
+			"/home/nathan/snap/steam/common/.local/share/Steam/steamapps/common/Fake Game/fakegame\x00")
+	// A native game: its own binary is the install path.
+	writeCmdline(t, d, "200",
+		"/home/nathan/snap/steam/common/.local/share/Steam/steamapps/common/AnotherGame/another\x00")
+	// The Steam client itself: no steamapps/common/ in argv.
+	writeCmdline(t, d, "300", "/snap/steam/279/ubuntu12_32/steam\x00--version\x00")
+	// SteamLinuxRuntime lives in the same tree but is tooling, not a game.
+	writeCmdline(t, d, "400",
+		"/home/nathan/snap/steam/common/.local/share/Steam/steamapps/common/SteamLinuxRuntime/runtime\x00")
+	// An unrelated process.
+	writeCmdline(t, d, "500", "/usr/bin/firefox\x00https://example.com\x00")
+	// A non-pid entry (like /proc/self, /proc/net) is skipped, even if it
+	// would match — and a pid with no cmdline (kernel thread) is skipped.
+	if err := os.MkdirAll(filepath.Join(d, "self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCmdline(t, d, "600", "")
+	if err := os.MkdirAll(filepath.Join(d, "700"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if !procGameRunning(d, nil) {
+		t.Fatal("procGameRunning = false, want true (a Proton + a native game are running)")
+	}
+	if procGameRunning(d, []string{"Fake Game", "AnotherGame"}) {
+		t.Fatal("procGameRunning = true with both games excluded, want false")
+	}
+	if !procGameRunning(d, []string{"Fake Game"}) {
+		t.Fatal("procGameRunning = false excluding only one game, want true (the other is running)")
+	}
+	// An exclude that matches nothing changes nothing.
+	if !procGameRunning(d, []string{"SomeOtherGame"}) {
+		t.Fatal("procGameRunning = false with an irrelevant exclude, want true")
+	}
+	// An empty root reports no game (the walk fails cleanly).
+	if procGameRunning(filepath.Join(d, "does-not-exist"), nil) {
+		t.Fatal("procGameRunning = true on a missing root, want false")
 	}
 }
 
