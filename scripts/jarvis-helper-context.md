@@ -24,17 +24,22 @@ Be brief: the direct answer, then the command(s) if any. Max ~10 lines.
 |---|---|---|
 | engine | 11434 (127.0.0.1) | the brain: llama.cpp serving jarvis-brain (qwen3.8 27B GGUF) |
 | engine-igpu | 11435 (127.0.0.1) | you: Vulkan llama.cpp serving jarvis-igpu (Qwen2.5-3B GGUF) on the Ryzen iGPU — always on, never stopped by photo swap windows |
-| art | 8120 | photo generation (Z-Image-Turbo 6B) + gallery site |
+| art | 8120 | photo generation (Z-Image-Turbo 6B + FLUX.2 [klein] 4B reference model) + gallery site |
+| bench | 8121 (127.0.0.1) | T2I model benchmark: candidate models, blind swipe voting |
 | chat | — | Discord bot answering owner DMs with the brain; bridges voice wake events to jobs |
-| dashboard | 8080 | web dashboard: jobs, queue, system state (PWA) |
+| dashboard | 8080 | web dashboard: jobs, queue, system state, kanban (PWA) |
 | ha | — | publishes Jarvis sensors to Home Assistant via MQTT |
 | voice | 8100 / 8443 | voice pipeline: wake word → STT → brain → TTS (while the worker is deep in a job the LLM step routes to you — the iGPU helper model — so voice stays responsive) |
 | memory | 8101 (127.0.0.1) | vector search over work logs and jobs |
 | memory-reindex | — | re-scans memory sources every 15 min |
-| rabbitmq | 5672, 1883 (MQTT), 15672 (mgmt) | message broker |
+| rabbitmq | 5672, 1883 (MQTT), 15672 (mgmt) | message broker (events + cap.* + flow.* + sched.* queues) |
+| redis | 6379 (127.0.0.1) | live job streams (the dashboard tails them) + flag store |
 | worker | — | consumes the raw RabbitMQ job queue |
+| switchboard | — | routes capability results back to waiting jobs (the wake mechanism) |
+| sched-tick / sched-audit | — | cadence queues: sched-tick fires sched.<cadence>.tick on hour/day/week/month boundaries; sched-audit enqueues the weekly notes-audit brain round |
+| cap workers | — | capability workers on the cap.* queues: image-gen-worker, audio-transcribe-worker, image-describe-worker-{cpu,gpu}, llm-small-worker-{cpu,gpu}, bench-worker, cap-echo |
 | wake-queue | — | optional (profile `optional`): wake events → job pipeline |
-| prometheus / grafana / node-exporter / nvidia-exporter | 9090 / 3000 / 9100 / 3001 | monitoring |
+| prometheus / grafana / node-exporter / nvidia-exporter / token-ledger | 9090 / 3000 / 9100 / 3001 / 9102 (compose net) | monitoring + all-time token counter |
 
 The first column holds the **compose service names**: use them in
 `docker compose` commands (e.g. `docker compose restart memory`).
@@ -49,6 +54,15 @@ path — prefer `docker compose` for the running stack.
   round ends; `--now` forces; `--dry-run` previews). Inhibit it with
   `touch /var/lib/jarvis/agent-run.disabled`.
 - `agent-resume` — resumes the agent after a reboot.
+- `resourced` — VRAM/RAM ledger + lease broker + the brain swap-window
+  controller: a 30s tick decides when a photo swap window is needed and
+  opens/closes it via `jarvis-swap`; on `172.17.0.1:9104`. Inhibit:
+  `touch /var/lib/jarvis/resourced.disabled`.
+- `jarvis-watchdog` — brain watchdog: re-arms a dead brain at the
+  maintenance deadline; `jarvis-watchdog maintain <dur> [reason]` opens
+  the maintenance window.
+- `task-runner` — kanban task runner (the :8080 dashboard serves the board).
+- `plane-bridge` — Plane webhook bridge (work board at 111.1.2.222:8088).
 - `jarvis-engine-igpu` — disabled legacy unit (rollback path only); you
   run in the compose container of that name.
 - `ollama` — installed but disabled (the engine superseded it).
@@ -67,9 +81,18 @@ path — prefer `docker compose` for the running stack.
 
 ## CLI tools (on PATH)
 
-- `jarvis-jobs` — job queue: `add|show|next|finish|run` (store `~/.local/share/jarvis/jobs`)
+- `jarvis-jobs` — job queue: `add|show|next|finish|run|yield|requeue|skip|photo-ready` (store `~/.local/share/jarvis/jobs`)
 - `jarvis-discord` — `notify "msg"` / `ask "question"` to the owner on Discord
 - `jarvis-notes` — the done/system/asked note buckets
+- `jarvis-mq` — capability + mailbox messaging: `caps|submit|listen|results|inbox|ask|tell|answer`
+- `jarvis-swap` — brain swap window: `out [--for caps] [--maintain 4h] [--jobs ids] | in | status | handoff`
+- `jarvis-stack-status` — one screen of stack state (`--json` for machine output)
+- `jarvis-board` — Plane work board: `item|link|comment|state|done`
+- `jarvis-kanban` — local kanban: `show|comment|comments`
+- `jarvis-secrets` — write-only secrets store: `list|add|get|rm` (values on stdin, never argv)
+- `jarvis-review` — request a PR review from another model: `request <PR>`
+- `jarvis-photo` — the photo executor: `make --job <id>` (photo jobs run as code, no model round)
+- `jarvis-helper` — you: `jarvis-helper "question"` asks this model with this brief as context
 - `agent-local` — run Claude Code on the local brain
 - `agent-reboot`, `agent-run-restart`, `enqueue`, `jarvis-reply`, `jarvis-art`
 
