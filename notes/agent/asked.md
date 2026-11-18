@@ -121,3 +121,7 @@
 - 2026-11-13T19:23Z Nathan: Sunshine is desktop streaming only — must NOT stop the brain; a Steam game should (any game, intensity detection waived; STEAM_GAME_EXCLUDES is the opt-out)
 - 2026-11-13T20:10Z Nathan wants a place to give the agent secrets (API keys etc.) that he can add/remove but never view back
 - 2026-11-18T05:20Z Nathan delegates open-ended 'find work from Plane and do it' rounds — pick a Backlog Plane item, build it, PR + notify + move to Done (did T2I-3).
+- 2026-11-18T13:06Z Nathan (Discord 11-18): wants the benchmark results surfaced — asked about the Qwen flash results, then asked for a website page with all MoE run metrics/results
+- 2026-11-18T13:23Z Nathan asked for the Qwen 3.8 Flash Next VRAM sweep results summarized per memory config (100/150/200/250 MB free) — 2026-11-18; followed by the /benchmarks dashboard page (PR #260)
+- 2026-11-18T17:21Z Nathan: find the optimal MoE cache size at 128K context for all MoE models, results to the benchmark page, install a model as thinker/planner/coder if it's a good coder; coding exercises as part of the benchmark
+- 2026-11-18T18:12Z Nathan, home 2026-11-18: wants to test the voice chat (sent him PWA + /voice/chat URLs after the ffmpeg fix)
