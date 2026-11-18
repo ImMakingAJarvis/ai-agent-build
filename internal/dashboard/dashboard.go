@@ -482,6 +482,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/plans", func(w http.ResponseWriter, r *http.Request) { s.plans.handlePlanList(s, w, r) })
 	mux.HandleFunc("GET /html/plans-section", func(w http.ResponseWriter, r *http.Request) { s.plans.handlePlanListHTML(s, w, r) })
 	mux.HandleFunc("GET /logs", s.handleLogsPage)
+	mux.HandleFunc("GET /benchmarks", s.handleMoeBenchPage)
 	mux.HandleFunc("GET /api/engine/logs", s.handleEngineLogs)
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobLog)
 	mux.HandleFunc("GET /html/jobs/{id}", s.handleJobLogHTML)
