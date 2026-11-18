@@ -30,38 +30,42 @@ driver).
 
 Photo jobs need the 4090 **without** the brain on it: the art/bench
 services wait for ~12 GB of free VRAM before generating
-(docs/brain-swap.md). The loop brackets the whole ready batch with a
-swap window instead of the old manual bracket (two extra igpu jobs):
+(docs/brain-swap.md). **Since EVB-27 (2026-11-11) the swap window is
+owned by the resourced window controller, not by this loop** — the
+agent-run photo bracket was removed (docs/services.md, the `resourced`
+row). resourced (host systemd service, `172.17.0.1:9104`) applies its
+window policy on a 30s tick (MAX_WINDOW 2h / MAX_BRAIN_WAIT 20m /
+MIN_WINDOW 2m; photo jobs excluded from rule-3 counts) and opens/closes
+the window via `jarvis-swap out --for` / `in`; window state is
+`swap-window.json` (the dashboard reads it) — `jarvis-swap status` for a
+human view. What this loop still does:
 
-- **Before the first photo job runs** the loop calls
-  `jarvis-swap out --jobs <batch> --force`: watchdog maintenance window
-  first (the brain re-arms at the deadline), brain unit stopped,
-  art+bench up, and every ready photo job flipped to priority 1000 (the
-  `igpu` driver label is vestigial for photo jobs). The pulled job then
-  runs as **code** — the `jarvis-photo` executor, no model round (not
-  even the iGPU helper), regardless of its spec driver.
+- **`jarvis-jobs next` skips jobs whose engine is down** — during a
+  window the brain container is stopped, so local jobs stay ready and
+  run after the window; photo jobs are exempt (they run as code — the
+  `jarvis-photo` executor, no model round, not even the iGPU helper).
 - **`jarvis-jobs photo-ready`** lists the batch (ready + tagged, in run
   order; empty output = drained). The tag is set by image-queue
   ingestion or `jarvis-jobs add -tags photo`.
-- **Re-flip:** `out` is idempotent — while the window is open, each
-  photo pull re-flips the batch, so photo jobs that arrive mid-window
-  join the priority-1000 batch and the maintenance window extends as
-  long as there is work.
-- **When the batch drains** (no ready photo jobs) the loop calls
-  `jarvis-swap in` at the top of the next iteration: window closed,
-  art+bench stopped, brain reloaded and API-checked.
-- **Only windows the loop opened get closed by the loop:** a successful
-  `out` writes the marker `~/.config/jarvis/photo-window`, and the
-  drain check requires it. A manual window (docs/brain-swap.md) for
-  non-photo work — e.g. a VRAM sweep with no photo jobs — never gets a
-  marker and is left to the owner. A manual window *with* a photo batch
-  is adopted: the first photo pull re-flips it and writes the marker.
-- **Failure handling:** if `out` cannot open the window (e.g. brain down
-  without a maintenance window — the 2026-11-04 mode the watchdog owns),
-  the loop backs off 60 s and retries, notifying once per failure
-  stretch, not per retry. A failed `in` is retried the same way; the
-  watchdog deadline re-arms the brain either way. `jarvis-swap`
-  notifies Discord on both a successful out and in; swap.log is
+- **`jarvis-swap out` / `in`** do the heavy lifting: `out` opens the
+  watchdog maintenance window first (the brain re-arms at the
+  deadline), stops the brain container, brings art+bench up, and flips
+  the ready photo jobs to priority 1000 (the `igpu` driver label is
+  vestigial for photo jobs); `in` closes the window, stops art+bench,
+  reloads the brain and API-checks it. `out` is idempotent — a re-run
+  re-flips the batch, so photo jobs that arrive mid-window are picked
+  up too.
+- **Only windows the controller opened get closed by the controller:**
+  a successful `out` writes the marker `~/.config/jarvis/photo-window`,
+  and the drain check requires it. A manual window (docs/brain-swap.md)
+  for non-photo work — e.g. a VRAM sweep with no photo jobs — never
+  gets a marker and is left to the owner. A manual window *with* a
+  photo batch is adopted: the next tick re-flips it and writes the
+  marker.
+- **Failure handling:** the watchdog deadline re-arms the brain no
+  matter what (the 2026-11-04 mode — brain down with no maintenance
+  window — is the watchdog's, not a swap). `jarvis-swap` notifies
+  Discord on both a successful out and in; swap.log is
   `~/.local/state/jarvis/swap.log`.
 
 ## Restart from chat (`!restart`)

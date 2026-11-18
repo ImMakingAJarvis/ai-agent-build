@@ -38,6 +38,14 @@ swap` is that something; the watchdog's maintenance mode is the failsafe.
   path. **Photo jobs no longer run on it**: they run as code (the
   `jarvis-photo` executor, no model round at all), and their
   `driver: igpu` spec is vestigial band bookkeeping.
+- **Window controller** = the `resourced` host systemd service (EVB-27,
+  2026-11-11; `172.17.0.1:9104`, docs/services.md) — its 30s tick decides
+  when a swap window is needed (plan §3.6: MAX_WINDOW 2h / MAX_BRAIN_WAIT
+  20m / MIN_WINDOW 2m; photo jobs excluded from rule-3 counts) and
+  opens/closes it via `jarvis-swap out --for` / `in`. It replaced the
+  agent-run photo bracket. Window state: `jarvis-swap status`
+  (`swap-window.json`, read by the dashboard). Inhibit: `touch
+  /var/lib/jarvis/resourced.disabled`.
 - **Photo executor** = `jarvis-photo make --job <id>` (`cmd/jarvis-photo`),
   run by the agentjob Runner for photo-tagged jobs (no model round). It
   is self-sufficient: it starts the art service if it is down, waits for
@@ -58,11 +66,12 @@ swap` is that something; the watchdog's maintenance mode is the failsafe.
 
 ## The protocol
 
-**The bracket is automatic** (the queue watcher's photo window,
-`scripts/agent-run`, docs/agent-run.md): when the loop pulls a job
-tagged `photo` it opens the window itself for the whole ready batch
-(`jarvis-jobs photo-ready` lists it), and closes it — brain back — as
-soon as the batch drains. Photo jobs get the tag from image-queue
+**The bracket is automatic** (the resourced window controller —
+EVB-27, 2026-11-11; docs/agent-run.md "Photo window"): its 30s tick
+decides when a swap window is needed and opens it for the whole ready
+batch (`jarvis-jobs photo-ready` lists it), and closes it — brain back —
+as soon as the batch drains. The agent-run photo bracket that did this
+before EVB-27 was removed. Photo jobs get the tag from image-queue
 ingestion, or by hand: `jarvis-jobs add ... -tags photo`. The brain's
 part is now only:
 
@@ -78,11 +87,11 @@ part is now only:
 3. Make sure the photo work is queued (image-queue ingestion, or
    `jarvis-jobs add` with `-tags photo -prompt "..."` — the prompt is
    stored in the job's prompt sidecar that the executor reads).
-4. End the round. The watcher opens the window on the next pull.
+4. End the round. The window controller opens the window on its next tick (30s).
 
-Then the loop carries it (no brain required):
+Then the window controller carries it (no brain required):
 
-5. First photo pull → `jarvis-swap out` opens the watchdog window
+5. The window opens: `jarvis-swap out` opens the watchdog window
    FIRST, stops the brain container, waits for the VRAM to clear,
    `docker compose up -d art bench` (no-ops if already up), waits for
    the art model to load, then flips the whole ready batch to `igpu`
@@ -90,9 +99,9 @@ Then the loop carries it (no brain required):
    for photo jobs, which run as code) and notifies Discord.
 6. The photo jobs run one by one as code (the `jarvis-photo` executor —
    no model round, not even the iGPU helper) while the brain is off
-   (expected — that is the whole point). Each pull re-flips the batch,
-   so photo jobs that arrive mid-window are picked up too.
-7. When the batch drains, the loop runs `jarvis-swap in`: closes the
+   (expected — that is the whole point). A re-run of `out` re-flips the
+   batch, so photo jobs that arrive mid-window are picked up too.
+7. When the batch drains, the window controller runs `jarvis-swap in`: closes the
    window, stops art+bench, starts the brain container, waits up to 15 min
    for `/health`, runs the API check (a real completion must come back,
    not just a 200), notifies Discord.
@@ -105,8 +114,9 @@ Then the loop carries it (no brain required):
 
 ### Manual bracket (fallback)
 
-When agent-run is stopped, or for a one-off window from a terminal, the
-original manual bracket still works: from a brain round, enqueue two
+For a one-off window from a terminal, or when the window controller is
+inhibited (`touch /var/lib/jarvis/resourced.disabled`), the manual
+bracket still works: from a brain round, enqueue two
 fix jobs, both `-driver igpu -priority 100` — **swap-out** (instructions:
 "Brain swap OUT. Run exactly `jarvis-swap out --jobs <photo ids>
 --maintain 4h --job <this job's id>`. Then `jarvis-swap status`. If it
@@ -114,18 +124,18 @@ exited 0, finish the job (exit 0). If not, `jarvis-discord notify 'swap
 OUT failed: <last line of ~/.local/state/jarvis/swap.log>'` and finish
 with a failure. Do nothing else.") and **swap-in** (same but
 `jarvis-swap in`, plus `-depends <every photo job id>`). A manual window
-that has a photo batch is adopted by the watcher — the first photo pull
-re-flips it and takes over the close — so a manual open is never a dead
-end. A manual window with no photo jobs is left to the owner.
+that has a photo batch is adopted by the window controller — the next
+tick re-flips it and takes over the close — so a manual open is never a
+dead end. A manual window with no photo jobs is left to the owner.
 
 ## Failure modes — all bounded, none lose the brain
 
 - **A photo job fails** (keepgoing off → the worker autopauses): the
-  batch drains, so the loop closes the window on the next iteration —
+  batch drains, so the window controller closes it on the next tick —
   there is no swap-in job to strand. Fix or requeue the photo job; the
-  next photo pull opens a fresh window. (Manual bracket: the swap-in
-  job is stranded — `jarvis-jobs skip <swap-in id>`, then a fresh
-  window.)
+  next tick with a ready photo batch opens a fresh window. (Manual
+  bracket: the swap-in job is stranded — `jarvis-jobs skip <swap-in
+  id>`, then a fresh window.)
 - **The photo run fails** (art service down or the model never loads
   within the executor's wait): the job fails → autopause → the batch
   drains and the deadline re-arms the brain. Same recovery as a failed
@@ -136,7 +146,7 @@ end. A manual window with no photo jobs is left to the owner.
 - **A local job is queued mid-window**: `jarvis-jobs next` skips it
   (brain down); it runs after the window. Nothing to do.
 - **The window expires before the photos finish**: the watchdog re-arms
-  the brain; the loop's next photo pull opens a fresh window
+  the brain; the window controller's next tick opens a fresh window
   automatically (`out` runs again). Manual bracket: art+bench are still
   loaded but gated (below 12 GB free), the flipped jobs are still igpu
   at priority 1000 — run a fresh window, or
@@ -148,15 +158,16 @@ end. A manual window with no photo jobs is left to the owner.
 
 ## Invariants
 
-- **Never stop the brain mid-round.** The watcher runs `jarvis-swap
-  out` *between* rounds — before `jarvis-jobs run` — and the manual
+- **Never stop the brain mid-round.** The window controller runs
+  `jarvis-swap out` *between* rounds (resourced ticks between agent-run
+  rounds, and `out` aborts if a round is running) and the manual
   swap-out job runs on the iGPU — so at the moment the brain stops, no
   brain round is in flight. `jarvis-swap out` enforces this
   mechanically: it aborts if a round other than its own is running, and
   a run with no round at all needs `--force`.
 - **Never run `jarvis-swap out`/`in` from a local (brain) round** — that
   would stop the engine out from under the running session. Only from
-  the queue watcher (between rounds), from an igpu round, or by hand
+  the window controller (between rounds), from an igpu round, or by hand
   from a terminal with `--force`.
 - **Idempotent re-runs**: `out` on an already-open window re-flips the
   jobs and resets a fresh maintain; `in` with the brain already serving
