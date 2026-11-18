@@ -15,8 +15,15 @@ Endpoints:
   POST /stt          Speech-to-Text only: audio file in → {"text": "..."}
   POST /tts          Text-to-Speech only: {"text": "..."} → WAV audio out
   POST /history/reset  Clear conversation memory
+  GET  /voice/session  Call-mode state (docs/voice-call.md)
+  POST /voice/session/force-end  End the current call
   GET  /health       Health check (verifies Ollama + whisper model are ready)
   WS   /voice/ws     WebSocket for real-time 2-way audio communication
+
+Call mode: saying "talk to me" starts a conversational call that takes the
+machine over (the brain is swapped for a dedicated call engine via the
+resourced swap window); it ends on "bye" or 5 quiet minutes. See
+docs/voice-call.md.
 
 Designed to sit between Home Assistant and the local LLM.  Home Assistant
 sends an audio clip (wav/ogg/mp3); the service transcribes it with
@@ -51,6 +58,18 @@ Environment:
                   the plain-HTTP port stays up for the Home Assistant
                   integration, which speaks http://.
   TLS_CERT / TLS_KEY  default ~/.config/jarvis/tls/voice.{crt,key}
+
+Call mode (docs/voice-call.md):
+  RESOURCED_URL   swap-window controller (default http://172.17.0.1:9104 —
+                  the bridge gateway; host.docker.internal does not resolve
+                  inside the voice container)
+  VOICE_ENGINE_URL  the call engine (default http://engine-voice:11436,
+                  compose service name — the brain's 127.0.0.1:11434 is not
+                  reachable from the container)
+  VOICE_SESSION_IDLE_S  end the call after this many quiet seconds (300)
+  VOICE_SESSION_MAX_S   hard cap on call length (3600)
+  VOICE_LEVEL_MIN_DB    audio-path addressed threshold in dBFS (-40):
+                  quieter utterances are background noise and are ignored
 """
 
 import asyncio
@@ -107,6 +126,20 @@ VOICE_PASS = os.getenv("VOICE_PASS", "")
 TLS_PORT = int(os.getenv("TLS_PORT", "8443"))
 TLS_CERT = os.getenv("TLS_CERT", os.path.expanduser("~/.config/jarvis/tls/voice.crt"))
 TLS_KEY = os.getenv("TLS_KEY", os.path.expanduser("~/.config/jarvis/tls/voice.key"))
+
+# Call mode (docs/voice-call.md). A call takes the machine over: the brain
+# is swapped for a dedicated call engine (engine-voice) via the resourced
+# swap window, and turns hit the call engine directly instead of queueing
+# behind jobs. All URLs are from inside the voice container: resourced
+# lives on the host's bridge gateway, the engines are compose service names.
+RESOURCED_URL = os.getenv("RESOURCED_URL", "http://172.17.0.1:9104")
+VOICE_ENGINE_URL = os.getenv("VOICE_ENGINE_URL", "http://engine-voice:11436")
+VOICE_SESSION_IDLE_S = int(os.getenv("VOICE_SESSION_IDLE_S", "300"))
+VOICE_SESSION_MAX_S = int(os.getenv("VOICE_SESSION_MAX_S", "3600"))
+# Audio-path addressed gating: an utterance quieter than this (RMS dBFS) is
+# background conversation, not Nathan — no reply, no idle-timer reset.
+# The HA text path is already wake-gated, so it always counts as addressed.
+VOICE_LEVEL_MIN_DB = float(os.getenv("VOICE_LEVEL_MIN_DB", "-40"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [voice] %(message)s")
 logger = logging.getLogger("voice")
@@ -669,7 +702,7 @@ async def resolve_llm(model: str | None) -> tuple[str, str]:
 
 
 async def run_tool_loop(client, messages, on_action=None, model=None,
-                        max_tokens=300, actions=None):
+                        max_tokens=300, actions=None, base_url=None):
     """One brain turn: LLM call, tool execution, repeat until a plain
     answer. Appends the exchange to messages. Returns (reply, scheduled).
 
@@ -677,11 +710,16 @@ async def run_tool_loop(client, messages, on_action=None, model=None,
     output cap (voice keeps a short cap, text chat a longer one); actions, if
     a list, is appended with {tool,label,result,scheduled} per tool run so a
     non-streaming caller (the /chat endpoint) can report what happened.
+    base_url pins the engine (the call engine on a voice call) instead of
+    letting resolve_llm() route the turn.
     """
     reply = "(no reply)"
     scheduled = False
     tools_supported = True
-    base_url, model_id = await resolve_llm(model)
+    if base_url:
+        base_url, model_id = base_url, (model or LOCAL_MODEL)
+    else:
+        base_url, model_id = await resolve_llm(model)
     for rnd in range(MAX_TOOL_ROUNDS + 1):
         payload = {
             "model": model_id,
@@ -764,7 +802,8 @@ async def run_tool_loop(client, messages, on_action=None, model=None,
     return reply, scheduled
 
 
-async def ask_brain(user_text: str, on_action=None, model=None, max_tokens=300) -> str:
+async def ask_brain(user_text: str, on_action=None, model=None, max_tokens=300,
+                    history=None, system_prompt=None, base_url=None) -> str:
     """Send text to the brain and get a spoken reply.
 
     The brain may call the tools in VOICE_TOOLS (schedule_job, search_jobs);
@@ -772,16 +811,26 @@ async def ask_brain(user_text: str, on_action=None, model=None, max_tokens=300) 
     results back, and let the model answer. on_action, if given, is awaited
     with a short status string when a tool starts, so the UI can show what
     voice is doing.
+
+    Call-mode overrides (docs/voice-call.md): history (a separate list — a
+    call keeps its own conversation, defaulting to the global chat_history),
+    system_prompt (default VOICE_SYSTEM_PROMPT), and base_url (pin the call
+    engine instead of routing through resolve_llm).
     """
+    if history is None:
+        history = chat_history
+    if system_prompt is None:
+        system_prompt = VOICE_SYSTEM_PROMPT
     messages = [
-        {"role": "system", "content": VOICE_SYSTEM_PROMPT},
-        *chat_history[-MAX_HISTORY:],
+        {"role": "system", "content": system_prompt},
+        *history[-MAX_HISTORY:],
         {"role": "user", "content": user_text},
     ]
 
     async with httpx.AsyncClient(timeout=180.0) as client:
         reply, scheduled = await run_tool_loop(
-            client, messages, on_action, model=model, max_tokens=max_tokens
+            client, messages, on_action, model=model, max_tokens=max_tokens,
+            base_url=base_url,
         )
 
         # Guardrail: the model sometimes says "I queued it" without calling
@@ -803,11 +852,12 @@ async def ask_brain(user_text: str, on_action=None, model=None, max_tokens=300) 
                 ),
             })
             reply, scheduled = await run_tool_loop(
-                client, messages, on_action, model=model, max_tokens=max_tokens
+                client, messages, on_action, model=model, max_tokens=max_tokens,
+                base_url=base_url,
             )
 
-    chat_history.append({"role": "user", "content": user_text})
-    chat_history.append({"role": "assistant", "content": reply})
+    history.append({"role": "user", "content": user_text})
+    history.append({"role": "assistant", "content": reply})
     logger.info("LLM reply: %s", reply[:100])
     return reply
 
@@ -876,6 +926,347 @@ def ascii_header(value: str) -> str:
     """
     value = _HEADER_CONTROL_RE.sub(" ", value)
     return value.encode("latin-1", "replace").decode("latin-1")
+
+# ---------------------------------------------------------------------------
+# Call mode — the conversational "call" (docs/voice-call.md)
+# ---------------------------------------------------------------------------
+# "Okay, talk to me" starts a call: the VRAM window opens (brain out, the
+# same 27B model in its own container on :11436) and the conversation runs
+# on the call engine until "okay, thanks, bye" or five quiet minutes. The
+# state machine lives here, in the voice service, because this is the only
+# component that sees every utterance on every path (POST /voice,
+# /voice/json, the WebSocket).
+#
+#   idle ──trigger──▶ opening ──window open──▶ active
+#    ▲                                        │
+#    └── goodbye / 5 min quiet / 60 min max ──┘
+#
+# If resourced is unreachable or another tenant owns the window, the call
+# runs DEGRADED on the normal LLM routing (resolve_llm) — it still works,
+# just not on the dedicated engine.
+
+CALL_TRIGGER_RE = re.compile(
+    r"\b(?:talk to me|let'?s (?:talk|chat)|start (?:a |the )?(?:conversation|call)|"
+    r"chat with me|i want to talk|have (?:a )?(?:conversation|chat))\b",
+    re.IGNORECASE,
+)
+CALL_GOODBYE_RE = re.compile(
+    r"\b(?:bye|goodbye|good night|see you|see ya|that'?s all|talk later)\b",
+    re.IGNORECASE,
+)
+
+# Canned, no LLM: the trigger turn cannot wait for the window (minutes —
+# the satellite times out at 120s), and the goodbye reply must be instant.
+CALL_OPENING_REPLY = (
+    "Let's do that. I'm moving over to the dedicated call engine — give me "
+    "a couple of minutes and I'll be all yours."
+)
+CALL_GOODBYE_REPLY = "Talk soon. I'm handing the machine back."
+
+CALL_SYSTEM_PROMPT = (
+    "You are Jarvis, on a voice call with Nathan. Keep replies to one or "
+    "two spoken sentences — conversational, direct, no lists, no markdown, "
+    "no filler. You have your usual tools (schedule_job, search_jobs); use "
+    "them when asked and say plainly what you did."
+)
+
+_call_engine_cache = {"at": 0.0, "val": False}
+CALL_ENGINE_UP_TTL = 15.0
+
+
+async def call_engine_up() -> bool:
+    """Probe the call engine's llama.cpp /health, cached (same pattern as
+    brain_up — a down engine must not slow turns with a full timeout)."""
+    now = time.monotonic()
+    if now - _call_engine_cache["at"] <= CALL_ENGINE_UP_TTL:
+        return _call_engine_cache["val"]
+    val = False
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(f"{VOICE_ENGINE_URL}/health")
+            val = resp.status_code == 200
+    except Exception:
+        val = False
+    _call_engine_cache.update(at=now, val=val)
+    return val
+
+
+def wav_rms_dbfs(wav_bytes: bytes) -> float:
+    """Loudness of a 16-bit PCM WAV in dBFS (RMS relative to full scale).
+
+    -120 (silence) for empty audio, and the gate threshold itself for audio
+    that cannot be decoded — a decode failure must not swallow an utterance.
+    """
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            if w.getsampwidth() != 2:
+                return VOICE_LEVEL_MIN_DB
+            raw = w.readframes(w.getnframes())
+    except Exception:
+        return VOICE_LEVEL_MIN_DB
+    pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float64)
+    if pcm.size == 0:
+        return -120.0
+    rms = float(np.sqrt(np.mean(pcm * pcm)))
+    if rms < 1.0:
+        return -120.0
+    return float(20.0 * np.log10(rms / 32768.0))
+
+
+class CallSession:
+    """State machine for the voice call (see the section header above)."""
+
+    IDLE, OPENING, ACTIVE = "idle", "opening", "active"
+
+    def __init__(self):
+        self.state = self.IDLE
+        self.since = None              # monotonic: session start
+        self.last_addressed = None     # monotonic: last addressed utterance
+        self.turns = 0
+        self.window = "closed"         # closed | requested | open | error
+        self.window_error = ""
+        self.history: list[dict] = []  # the call's own conversation
+        self._window_lock = asyncio.Lock()
+        self._window_open = False      # we own the voice swap window
+        self._watchdog_task = None
+
+    # -- state -------------------------------------------------------------
+
+    def in_call(self) -> bool:
+        return self.state in (self.OPENING, self.ACTIVE)
+
+    def snapshot(self) -> dict:
+        """State for GET /voice/session."""
+        now = time.monotonic()
+        snap = {
+            "state": self.state,
+            "window": self.window,
+            "turns": self.turns,
+        }
+        if self.since is not None:
+            snap["running_s"] = int(now - self.since)
+            snap["idle_s"] = int(now - (self.last_addressed or self.since))
+        if self.window_error:
+            snap["window_error"] = self.window_error
+        return snap
+
+    # -- entry point: one transcribed utterance ----------------------------
+
+    async def on_utterance(self, text: str, level_db: float | None,
+                           on_action=None) -> tuple[str, str | None]:
+        """Route one transcribed utterance through the call state machine.
+
+        level_db is the utterance's loudness (RMS dBFS); None means the path
+        is already wake-gated (the HA text path) and always counts as
+        addressed. Trigger and goodbye phrases count as addressed whatever
+        their level — a quiet "talk to me" should still start a call.
+
+        Returns (kind, reply):
+          ("ignored", None)   background noise — no reply
+          ("normal", None)    not a call — the caller runs its usual path
+          ("session", reply)  the call answered (canned or call-engine LLM)
+        """
+        addressed = (
+            level_db is None
+            or level_db >= VOICE_LEVEL_MIN_DB
+            or bool(CALL_TRIGGER_RE.search(text))
+            or bool(CALL_GOODBYE_RE.search(text))
+        )
+        if not addressed:
+            logger.info(
+                "Call: ignoring quiet utterance (%.1f dBFS < %.1f): %s",
+                level_db, VOICE_LEVEL_MIN_DB, text[:80],
+            )
+            return "ignored", None
+
+        if not self.in_call():
+            if CALL_TRIGGER_RE.search(text):
+                await self.start()
+                return "session", CALL_OPENING_REPLY
+            return "normal", None
+
+        # In a call: this utterance addresses us.
+        self.last_addressed = time.monotonic()
+        if CALL_GOODBYE_RE.search(text):
+            await self.end()
+            return "session", CALL_GOODBYE_REPLY
+
+        self.turns += 1
+        reply = await self.ask(text, on_action=on_action)
+        return "session", reply
+
+    # -- lifecycle ----------------------------------------------------------
+
+    async def start(self):
+        """Start the call: request the window in the background, answer now
+        with the canned opening (the window takes minutes to open)."""
+        self.state = self.OPENING
+        self.since = time.monotonic()
+        self.last_addressed = self.since
+        self.turns = 0
+        self.history = []
+        self.window = "requested"
+        self.window_error = ""
+        logger.info("Call: started (window requested)")
+        asyncio.create_task(self._acquire_window())
+
+    async def end(self):
+        """End the call and release the window (in the background — the
+        swap back takes minutes and must not hold up the goodbye reply)."""
+        self.state = self.IDLE
+        self.since = None
+        self.last_addressed = None
+        self.turns = 0
+        self.history = []
+        if not self._window_open:
+            # No window to release (a degraded call, or the release already
+            # ran): clear the stale window state. An in-flight acquire sets
+            # it again when it lands — and its release clears it again.
+            self.window = "closed"
+            self.window_error = ""
+        logger.info("Call: ended")
+        asyncio.create_task(self._release_window())
+
+    # -- the swap window ------------------------------------------------------
+
+    async def _acquire_window(self):
+        """Request the voice swap window from resourced (POST /window/voice).
+
+        Blocks for minutes (brain swap + engine load), so it runs as a
+        background task. Serialized with _release_window: a release that
+        lands while the request is in flight waits on the same lock, then
+        closes the window as soon as it opens — a late open can never
+        orphan the window.
+        """
+        async with self._window_lock:
+            if self.state == self.IDLE:
+                return  # the session ended before we got here
+            try:
+                async with httpx.AsyncClient(timeout=1200.0) as client:
+                    resp = await client.post(
+                        f"{RESOURCED_URL}/window/voice",
+                        headers={"X-Reason": "voice call session"},
+                    )
+            except Exception as e:
+                self.window = "error"
+                self.window_error = f"resourced unreachable: {e}"
+                logger.warning(
+                    "Call: %s — degrading to normal LLM routing",
+                    self.window_error,
+                )
+                # The session may have ended (goodbye) while the request was
+                # hanging — do not resurrect it.
+                if self.state != self.IDLE:
+                    self.state = self.ACTIVE
+                return
+            if resp.status_code == 200:
+                self._window_open = True
+                self.window = "open"
+                logger.info("Call: voice window open — turns go to the call engine")
+            else:
+                # 409: another tenant owns the window (a game or the photo
+                # queue) — voice does not steal a window it does not own.
+                self.window = "error"
+                self.window_error = (
+                    f"window refused ({resp.status_code}): {resp.text[:150]}"
+                )
+                logger.warning(
+                    "Call: %s — degrading to normal LLM routing",
+                    self.window_error,
+                )
+            if self.state != self.IDLE:
+                self.state = self.ACTIVE
+
+    async def _release_window(self):
+        """Close the voice window, if we own one. Waits out an in-flight
+        acquire (same lock) so a late open cannot orphan the window. The
+        watchdog maintain window (2h) re-arms the brain no matter what, so
+        a failed release degrades — it never deadlocks."""
+        async with self._window_lock:
+            if not self._window_open:
+                return
+            self._window_open = False
+            try:
+                async with httpx.AsyncClient(timeout=600.0) as client:
+                    resp = await client.delete(
+                        f"{RESOURCED_URL}/window/voice",
+                        headers={"X-Reason": "voice call ended"},
+                    )
+            except Exception as e:
+                self.window = "error"
+                self.window_error = f"release failed: {e}"
+                logger.warning(
+                    "Call: %s — the watchdog maintain window re-arms the "
+                    "brain at the deadline", self.window_error,
+                )
+                return
+            if resp.status_code == 200:
+                self.window = "closed"
+                logger.info("Call: voice window closed")
+            else:
+                self.window = "error"
+                self.window_error = (
+                    f"release refused ({resp.status_code}): {resp.text[:150]}"
+                )
+                logger.warning(
+                    "Call: %s — the watchdog maintain window re-arms the "
+                    "brain at the deadline", self.window_error,
+                )
+
+    # -- turns --------------------------------------------------------------
+
+    async def ask(self, text: str, on_action=None) -> str:
+        """One call turn: the call engine when it is up and we own the
+        window, else the normal routing (brain, or the iGPU model while the
+        brain is down or busy — the usual swap-window behavior)."""
+        base, model = await self._llm_route()
+        return await ask_brain(
+            text, on_action=on_action, history=self.history,
+            system_prompt=CALL_SYSTEM_PROMPT, max_tokens=200,
+            base_url=base, model=model,
+        )
+
+    async def _llm_route(self):
+        """(base_url, model) for a call turn, or None for normal routing."""
+        if self.state == self.ACTIVE and self.window == "open":
+            if await call_engine_up():
+                return VOICE_ENGINE_URL, LOCAL_MODEL
+        return None
+
+    # -- the idle watchdog ----------------------------------------------------
+
+    def start_watchdog(self):
+        """Start the idle timer. Idempotent: lifespan runs once per
+        listener, and TLS means two listeners in one process."""
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.create_task(self._watchdog())
+
+    def stop_watchdog(self):
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+        self._watchdog_task = None
+
+    async def _watchdog(self):
+        """Every 30s: end a call that has been quiet VOICE_SESSION_IDLE_S or
+        has run VOICE_SESSION_MAX_S. This is the only thing that ends a call
+        Nathan simply walks away from; the swap-window failsafe (maintain
+        2h) bounds the VRAM side."""
+        while True:
+            await asyncio.sleep(30)
+            if not self.in_call():
+                continue
+            now = time.monotonic()
+            quiet = now - (self.last_addressed or self.since)
+            age = now - self.since
+            if quiet > VOICE_SESSION_IDLE_S:
+                logger.info("Call: %.0fs quiet — ending", quiet)
+                await self.end()
+            elif age > VOICE_SESSION_MAX_S:
+                logger.info("Call: %.0fs elapsed — ending (max)", age)
+                await self.end()
+
+
+session = CallSession()
 
 # ---------------------------------------------------------------------------
 # Request models
@@ -952,10 +1343,12 @@ def _ws_token_ok(ws: WebSocket) -> bool:
 @asynccontextmanager
 async def lifespan(context_app):
     load_whisper()
+    session.start_watchdog()
     if VOICE_USER and VOICE_PASS:
         logger.info("Basic auth enabled (user: %s)", VOICE_USER)
     logger.info("Voice service starting on port %d", LISTEN_PORT)
     yield
+    session.stop_watchdog()
 
 # NOTE: app-level dependencies must be passed at construction time; assigning
 # app.dependencies afterwards is silently ignored by FastAPI.
@@ -1144,6 +1537,11 @@ async def voice_endpoint(file: UploadFile = File(...), model: str | None = Form(
 
     `model` (optional form field) overrides the brain model for this turn —
     the mobile app's model picker sends it here and in /voice/json.
+
+    Call mode (docs/voice-call.md): the utterance goes through the call
+    state machine first — a trigger phrase starts a call, a goodbye ends
+    one, and an utterance quieter than VOICE_LEVEL_MIN_DB is background
+    noise: {"status": "ignored", ...}, no audio, no idle-timer reset.
     """
     start = time.time()
     audio = await file.read()
@@ -1157,7 +1555,14 @@ async def voice_endpoint(file: UploadFile = File(...), model: str | None = Form(
                 content={"error": "No speech detected in audio"},
             )
 
-        reply = await ask_ollama(text, model=model)
+        kind, reply = await session.on_utterance(text, level_db=wav_rms_dbfs(audio))
+        if kind == "ignored":
+            return JSONResponse(content={
+                "status": "ignored", "reason": "not addressed",
+                "transcript": text,
+            })
+        if kind == "normal":
+            reply = await ask_ollama(text, model=model)
         reply_audio = await synthesize(reply)
 
         elapsed = time.time() - start
@@ -1169,6 +1574,7 @@ async def voice_endpoint(file: UploadFile = File(...), model: str | None = Form(
                 "X-Transcript": ascii_header(text),
                 "X-Reply": ascii_header(reply),
                 "X-Elapsed": f"{elapsed:.1f}",
+                "X-Session": session.state,
             },
         )
     except RuntimeError as e:
@@ -1184,16 +1590,27 @@ async def voice_endpoint(file: UploadFile = File(...), model: str | None = Form(
 
 @app.post("/voice/json")
 async def voice_json_endpoint(req: TextRequest):
-    """Full pipeline via JSON body: {"text": "..."} -> WAV audio out."""
+    """Full pipeline via JSON body: {"text": "..."} -> WAV audio out.
+
+    The Home Assistant satellite path — already wake-gated upstream, so
+    every text here counts as addressed to the call state machine
+    (trigger/goodbye handling applies; the level gate does not).
+    """
     start = time.time()
     try:
-        reply = await ask_ollama(req.text, model=req.model)
+        kind, reply = await session.on_utterance(req.text, level_db=None)
+        if kind == "normal":
+            reply = await ask_ollama(req.text, model=req.model)
         reply_audio = await synthesize(reply)
         elapsed = time.time() - start
         return Response(
             content=reply_audio,
             media_type="audio/wav",
-            headers={"X-Reply": ascii_header(reply), "X-Elapsed": f"{elapsed:.1f}"},
+            headers={
+                "X-Reply": ascii_header(reply),
+                "X-Elapsed": f"{elapsed:.1f}",
+                "X-Session": session.state,
+            },
         )
     except Exception as e:
         logger.exception("Voice JSON pipeline error")
@@ -1204,6 +1621,23 @@ async def reset_history():
     """Clear conversation history."""
     chat_history.clear()
     return JSONResponse(content={"status": "history cleared"})
+
+@app.get("/voice/session")
+async def session_status():
+    """Call-mode state (docs/voice-call.md): state (idle/opening/active),
+    swap window (closed/requested/open/error), turn count, engine health."""
+    snap = session.snapshot()
+    snap["engine_up"] = await call_engine_up()
+    return JSONResponse(content=snap)
+
+
+@app.post("/voice/session/force-end")
+async def session_force_end():
+    """End the current call now (the window is released in the background)."""
+    if not session.in_call():
+        return JSONResponse(content={"status": "no active call"})
+    await session.end()
+    return JSONResponse(content={"status": "call ended"})
 
 @app.get("/voice/chat")
 async def voice_chat_page():
@@ -1253,8 +1687,8 @@ async def voice_websocket(ws: WebSocket):
         await ws.close(code=1008)
         return
 
-    # Send initial idle state
-    await ws.send_json({"type": "status", "state": "idle"})
+    # Send initial idle state (with the call-mode state, docs/voice-call.md)
+    await ws.send_json({"type": "status", "state": "idle", "session": session.state})
 
     audio_buffer = bytearray()
     processing = False
@@ -1296,7 +1730,8 @@ async def voice_websocket(ws: WebSocket):
 
                     try:
                         # STT (the buffer is raw PCM16 — wrap it in a WAV first)
-                        text = await transcribe(pcm16_to_wav(bytes(audio_buffer), declared_rate))
+                        utterance_wav = pcm16_to_wav(bytes(audio_buffer), declared_rate)
+                        text = await transcribe(utterance_wav)
                         if not text:
                             await ws.send_json({
                                 "type": "status", "state": "idle",
@@ -1318,7 +1753,22 @@ async def voice_websocket(ws: WebSocket):
                         async def _action(label: str):
                             await ws.send_json({"type": "action", "text": label})
 
-                        reply = await ask_brain(text, on_action=_action)
+                        # Call mode (docs/voice-call.md): trigger/goodbye
+                        # handling, and a quiet utterance in a call is
+                        # background noise — no reply, no idle-timer reset.
+                        kind, reply = await session.on_utterance(
+                            text, level_db=wav_rms_dbfs(utterance_wav),
+                            on_action=_action,
+                        )
+                        if kind == "ignored":
+                            await ws.send_json({
+                                "type": "status", "state": "idle",
+                                "text": "(background noise — ignored)",
+                                "session": session.state,
+                            })
+                            continue
+                        if kind == "normal":
+                            reply = await ask_brain(text, on_action=_action)
 
                         # TTS - stream audio chunks as they arrive
                         await ws.send_json({"type": "status", "state": "speaking", "text": reply})
@@ -1345,7 +1795,10 @@ async def voice_websocket(ws: WebSocket):
                             chunk = raw_pcm[i:i + chunk_size]
                             await ws.send_bytes(chunk)
 
-                        await ws.send_json({"type": "status", "state": "idle", "text": reply})
+                        await ws.send_json({
+                            "type": "status", "state": "idle",
+                            "text": reply, "session": session.state,
+                        })
 
                     except Exception as e:
                         logger.exception("WebSocket pipeline error")

@@ -100,6 +100,45 @@ services:
     # job; it counts ALL traffic to the engine (chat, agent, jobs),
     # not just the worker's queue jobs.
 
+  # ---------------- the call engine (port 11436) ---------------------------
+  # The voice-call takeover: the SAME 27B GGUF as the brain in its own
+  # container, profile-gated so it NEVER starts on its own — only
+  # `jarvis-swap out --voice` runs it (the brain is stopped first, which
+  # is what frees the ~18 GB it needs). Short context + one parallel
+  # slot: it exists to answer one fast conversation, not to run agent
+  # rounds. `restart: "no"` on purpose — it must not auto-start on a
+  # host reboot (it would race the brain for the same 24.5 GB); a
+  # mid-call crash leaves the session degraded on the normal path
+  # (docs/voice-call.md).
+  engine-voice:
+    image: jarvis/engine:local
+    container_name: jarvis-engine-voice
+    profiles: ["voice"]
+    restart: "no"
+    user: "1001:1001"
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      LD_LIBRARY_PATH: /usr/local/cuda-13.1/lib64
+    shm_size: "16gb"
+    ports:
+      - "127.0.0.1:11436:11436"
+    volumes:
+      - /opt/jarvis-engine:/opt/jarvis-engine:ro
+      - /usr/local/cuda-13.1/lib64:/usr/local/cuda-13.1/lib64:ro
+    command:
+      [ "-m", "/opt/jarvis-engine/models/jarvis-brain.gguf",
+        "--host", "0.0.0.0",
+        "--port", "11436",
+        "--parallel", "1",
+        "--ctx-size", "32768",
+        "--kv-unified",
+        "--jinja",
+        "--chat-template-file", "/opt/jarvis-engine/templates/qwen3.8-chat-template.jinja",
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--log-disable" ]
+
   # ---------------- the iGPU helper (port 11435) ---------------------------
   # The small always-on model (Qwen2.5-3B Q4_K_M) on the Ryzen iGPU,
   # Vulkan. Its own container and its own port: containers reach it by
