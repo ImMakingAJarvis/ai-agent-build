@@ -1,0 +1,232 @@
+{{define "moe-table"}}
+<div class="table-wrap">
+{{if .Caption}}<div class="table-caption">{{ .Caption }}</div>{{end}}
+<table class="dtable">
+<thead>
+<tr>{{range $i, $h := .Headers}}<th{{if gt $i 0}} class="num"{{end}}>{{ $h }}</th>{{end}}</tr>
+</thead>
+<tbody>
+{{range .Rows}}
+<tr>{{range $i, $c := .}}<td{{if gt $i 0}} class="num"{{end}}>{{ $c }}</td>{{end}}</tr>
+{{end}}
+{{if .Avg}}
+<tr class="avg">{{range $i, $c := .Avg}}<td{{if gt $i 0}} class="num"{{end}}>{{ $c }}</td>{{end}}</tr>
+{{end}}
+</tbody>
+</table>
+{{if .Footnote}}<div class="footnote">{{ .Footnote }}</div>{{end}}
+</div>
+{{end}}
+{{define "moe-chart"}}
+<div class="chart">
+<div class="chart-head"><span class="chart-title">{{ .Title }}</span><span class="chart-unit">{{ .Unit }}</span></div>
+{{range .Bars}}
+<div class="bar-row">
+<span class="bar-label">{{ .Label }}</span>
+<div class="track"><div class="bar s{{ .Series }}" style="width: {{ .Width }}"></div></div>
+<span class="bar-val">{{ .Value }}</span>
+</div>
+{{end}}
+</div>
+{{end}}
+{{define "moe-point"}}
+<div class="point">
+<div class="point-head">
+<span class="point-id">{{ .ID }}</span>
+<span class="point-target">{{ .Target }}</span>
+<span class="point-meta">{{ .Meta }}</span>
+<span class="chip {{ .State }}">{{ .Outcome }}</span>
+</div>
+<div class="point-ctx">Max served context: <strong>{{ .MaxCtx }}</strong></div>
+{{if .Note}}<p class="point-note">{{ .Note }}</p>{{end}}
+{{if .Table}}{{template "moe-table" .Table}}{{end}}
+</div>
+{{end}}
+{{define "moebench"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoE benchmarks · Jarvis dashboard</title>
+<style>
+:root {
+  --bg: #0d0d0d;
+  --surface-1: #1a1a19;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.5;
+  max-width: 1060px;
+  margin: 0 auto;
+  padding: 28px 24px 48px;
+}
+.back { display: inline-block; margin-bottom: 14px; color: var(--series-1); text-decoration: none; font-size: .85rem; }
+.back:hover { text-decoration: underline; }
+h1 { font-size: 1.5rem; letter-spacing: -0.01em; }
+.subtitle { color: var(--muted); font-size: .85rem; margin: 4px 0 22px; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 28px; }
+.tile { background: var(--surface-1); border: 1px solid var(--gridline); border-radius: 10px; padding: 14px 16px; }
+.tile-value { font-size: 1.5rem; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.tile-label { color: var(--muted); font-size: .75rem; margin-top: 2px; }
+.section { margin-bottom: 34px; }
+.section-title { font-size: 1.05rem; font-weight: 650; padding-bottom: 8px; border-bottom: 1px solid var(--baseline); }
+.section-sub { color: var(--muted); font-size: .8rem; margin-top: 8px; }
+.h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .07em; color: var(--text-secondary); margin: 20px 0 10px; }
+.kv { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 28px; background: var(--surface-1); border: 1px solid var(--gridline); border-radius: 10px; padding: 14px 16px; margin-top: 12px; }
+.kv-row { display: flex; gap: 10px; font-size: .82rem; }
+.kv-k { color: var(--muted); min-width: 130px; }
+.kv-v { color: var(--text-primary); }
+.model-name { font-size: .95rem; font-weight: 650; margin-top: 14px; }
+.model-meta { color: var(--muted); font-size: .8rem; margin: 2px 0 0; }
+.prose { color: var(--text-secondary); font-size: .83rem; margin: 10px 0; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.table-wrap { margin: 12px 0; overflow-x: auto; }
+.table-caption { color: var(--text-secondary); font-size: .82rem; margin-bottom: 6px; }
+table.dtable { width: 100%; border-collapse: collapse; font-size: .82rem; }
+.dtable th { text-align: left; color: var(--muted); font-weight: 500; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; padding: 6px 10px; border-bottom: 1px solid var(--baseline); white-space: nowrap; }
+.dtable td { padding: 6px 10px; border-bottom: 1px solid var(--gridline); color: var(--text-secondary); white-space: nowrap; }
+.dtable td:first-child { color: var(--text-primary); }
+.dtable th.num, .dtable td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.dtable tr.avg td { font-weight: 650; color: var(--text-primary); border-top: 1px solid var(--baseline); border-bottom: 1px solid var(--baseline); }
+.footnote { color: var(--muted); font-size: .75rem; margin-top: 6px; }
+.chip { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .7rem; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; white-space: nowrap; }
+.chip.good { color: var(--good); background: rgba(12,163,12,.12); box-shadow: inset 0 0 0 1px rgba(12,163,12,.45); }
+.chip.warn { color: var(--warning); background: rgba(250,178,25,.1); box-shadow: inset 0 0 0 1px rgba(250,178,25,.4); }
+.chip.crit { color: var(--critical); background: rgba(208,59,59,.12); box-shadow: inset 0 0 0 1px rgba(208,59,59,.45); }
+.chart { background: var(--surface-1); border: 1px solid var(--gridline); border-radius: 10px; padding: 16px 18px 14px; margin: 14px 0; }
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+.chart-title { font-size: .85rem; font-weight: 600; }
+.chart-unit { color: var(--muted); font-size: .75rem; }
+.bar-row { display: grid; grid-template-columns: 170px 1fr 84px; align-items: center; gap: 12px; margin: 9px 0; }
+.bar-label { color: var(--text-secondary); font-size: .8rem; text-align: right; white-space: nowrap; }
+.track { position: relative; height: 18px; border-left: 2px solid var(--baseline); background-image: linear-gradient(to right, var(--gridline) 1px, transparent 1px); background-size: 25% 100%; }
+.bar { position: absolute; left: 0; top: 50%; transform: translateY(-50%); height: 10px; border-radius: 0 4px 4px 0; }
+.bar.s1 { background: var(--series-1); }
+.bar.s2 { background: var(--series-2); }
+.bar.s3 { background: var(--series-3); }
+.bar-val { font-size: .82rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.legend { display: flex; gap: 18px; margin-bottom: 10px; }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: .78rem; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; }
+.swatch.s1 { background: var(--series-1); }
+.swatch.s2 { background: var(--series-2); }
+.bw-group { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--gridline); }
+.bw-name { color: var(--text-secondary); font-size: .78rem; margin-bottom: 4px; }
+.point { background: var(--surface-1); border: 1px solid var(--gridline); border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+.point-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.point-id { color: var(--muted); font-size: .72rem; font-weight: 650; letter-spacing: .05em; }
+.point-target { font-size: .92rem; font-weight: 650; }
+.point-meta { color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
+.point-head .chip { margin-left: auto; }
+.point-ctx { margin-top: 8px; font-size: .8rem; color: var(--text-secondary); }
+.point-note { margin-top: 8px; font-size: .82rem; color: var(--text-secondary); }
+.callout { border: 1px solid var(--baseline); border-left: 3px solid var(--warning); border-radius: 8px; padding: 12px 14px; margin: 14px 0; background: var(--surface-1); }
+.callout-title { font-size: .82rem; font-weight: 650; color: var(--warning); margin-bottom: 4px; }
+.callout-body { font-size: .82rem; color: var(--text-secondary); }
+.footer { margin-top: 36px; padding-top: 14px; border-top: 1px solid var(--baseline); color: var(--muted); font-size: .78rem; }
+.sources { list-style: none; margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.sources li { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; }
+@media (max-width: 720px) {
+  .tiles { grid-template-columns: 1fr 1fr; }
+  .kv { grid-template-columns: 1fr; }
+  .bar-row { grid-template-columns: 110px 1fr 70px; }
+  .bar-label { font-size: .72rem; }
+}
+</style>
+</head>
+<body>
+<a class="back" href="/">&larr; dashboard</a>
+<h1>MoE benchmarks</h1>
+<p class="subtitle">Every MoE benchmark run on this machine &middot; RTX 4090 (24.5 GB VRAM) &middot; Ollama 0.40.7 + FreeToken 0.2.1 &middot; report as of 2026-11-18</p>
+
+<div class="tiles">
+{{range .Tiles}}
+<div class="tile"><div class="tile-value">{{ index . 0 }}</div><div class="tile-label">{{ index . 1 }}</div></div>
+{{end}}
+</div>
+
+<section class="section">
+<h2 class="section-title">Ollama A/B &mdash; jarvis-moe vs jarvis-brain</h2>
+<p class="section-sub">Source: docs/moe-benchmark.md &middot; same prompt, 3 runs each, keep_alive -1</p>
+<div class="kv">
+{{range .Ollama.Setup}}
+<div class="kv-row"><span class="kv-k">{{ index . 0 }}</span><span class="kv-v">{{ index . 1 }}</span></div>
+{{end}}
+</div>
+{{range .Ollama.Models}}
+<h3 class="h3">{{ .Name }}</h3>
+<div class="model-meta">{{ .Meta }}</div>
+{{template "moe-table" .Table}}
+{{end}}
+<h3 class="h3">Throughput</h3>
+{{range .Ollama.Charts}}{{template "moe-chart" .}}{{end}}
+<h3 class="h3">Summary</h3>
+{{template "moe-table" .Ollama.Summary}}
+</section>
+
+<section class="section">
+<h2 class="section-title">{{ .Qwen.Name }} &mdash; FreeToken VRAM sweep</h2>
+<div class="model-meta">{{ .Qwen.Meta }}</div>
+<p class="prose">{{ .Qwen.Note }}</p>
+{{with .Qwen.Attempt}}
+<div class="callout">
+<div class="callout-title">{{ .Title }}</div>
+<p class="callout-body">{{ .Body }}</p>
+</div>
+{{end}}
+<h3 class="h3">Sweep points</h3>
+{{range .Qwen.Points}}{{template "moe-point" .}}{{end}}
+</section>
+
+<section class="section">
+<h2 class="section-title">{{ .Glm.Name }} &mdash; FreeToken VRAM sweep</h2>
+<div class="model-meta">{{ .Glm.Meta }}</div>
+<h3 class="h3">Provenance &amp; shards</h3>
+<p class="prose">{{ .Glm.Provenance }}</p>
+{{template "moe-table" .Glm.Shards}}
+<p class="prose">{{ .Glm.WhyQuant }}</p>
+<h3 class="h3">Bandwidth bench (ft bench bw)</h3>
+<p class="prose">{{ .Glm.BW.Ceilings }}</p>
+{{template "moe-table" .Glm.BW.Table}}
+<div class="chart">
+<div class="chart-head"><span class="chart-title">Expert bandwidth by format</span><span class="chart-unit">GB/s</span></div>
+<div class="legend">
+<span class="legend-item"><span class="swatch s1"></span>CPU-MoE</span>
+<span class="legend-item"><span class="swatch s2"></span>PCIe-gather</span>
+</div>
+{{range .Glm.BW.Groups}}
+<div class="bw-group">
+<div class="bw-name">{{ .Name }}</div>
+<div class="bar-row"><span class="bar-label">CPU-MoE</span><div class="track"><div class="bar s1" style="width: {{ .Cpu.Width }}"></div></div><span class="bar-val">{{ .Cpu.Value }}</span></div>
+<div class="bar-row"><span class="bar-label">PCIe-gather</span><div class="track"><div class="bar s2" style="width: {{ .Pci.Width }}"></div></div><span class="bar-val">{{ .Pci.Value }}</span></div>
+</div>
+{{end}}
+</div>
+<p class="footnote">{{ .Glm.BW.Note }}</p>
+<h3 class="h3">Sweep points</h3>
+{{range .Glm.Points}}{{template "moe-point" .}}{{end}}
+</section>
+
+<footer class="footer">
+<p>Data transcribed from the docs below, as of 2026-11-18.</p>
+<ul class="sources">
+{{range .Sources}}<li>{{ . }}</li>
+{{end}}
+</ul>
+</footer>
+</body>
+</html>{{end}}
