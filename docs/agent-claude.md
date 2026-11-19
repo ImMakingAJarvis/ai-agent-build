@@ -5,6 +5,65 @@ This is the local agent's personal note file. It is installed to
 it in every session, on top of the repo's `CLAUDE.md` (which is about
 conversation notes).
 
+## Definition of done — build, verify live, deploy
+
+These rules come from the 2026-10-26 → 11-19 record: most repeat fixes
+were work that passed its tests and was called done without being seen
+working on the running system, or was merged but never deployed.
+
+1. **Check first that it is not already done.** Search open and merged
+   PRs for the job's subject before building. If the work is on main,
+   say so with evidence and finish — do not rebuild it.
+2. **Build and test.** `go build ./... && go vet ./... && go test ./...`
+   for Go; `python3 -m py_compile` for the Python services; `bash -n`
+   for scripts; `docker compose config -q` after any compose edit.
+3. **Verify live, on the path the owner uses.** Tests are not enough.
+   - Code that runs in a container is checked from **inside that
+     container** (`docker exec`), not on the host. The host has tools,
+     mounts, env and network names the container lacks (procps, ffmpeg,
+     the docker socket, `/var/lib/jarvis/*`, `redis` vs `127.0.0.1`).
+   - A Discord command is checked by the daemon's own handler path, a
+     dashboard change by fetching the page from the LAN address, a
+     queue change by a real job going through the real loop.
+   - If the check cannot run this round (needs the swap window, a game,
+     the owner's ears or phone), the job is **not done**. Put
+     `NOT VERIFIED LIVE: <what, why>` as the first line of the PR body
+     and the Discord note, and yield or queue the verifying round. Do
+     not leave it as an "Open" line in the notes.
+4. **Deploy what you changed, from main's code.** A merged PR changes
+   nothing until the binary, script or image is installed and the
+   process restarted. Use the component's `scripts/install_*.sh`; for a
+   compose service `docker compose build <svc> && docker compose up -d
+   <svc>` (`docker restart` keeps the old image and the old env). A
+   bash loop (`agent-run`) keeps running its old script until the
+   service restarts — use `agent-run-restart`. Never install a binary
+   built from a branch that is behind `origin/main`: rebase first. Then
+   confirm the running thing is the new one (version, build time, or
+   the new behaviour) and say so in the PR.
+5. **Report honestly.** A command that failed is a failed job: finish
+   with a non-zero code, never 0. Never tell the owner something was
+   queued, sent or fixed unless you saw it happen.
+6. **Before killing or deleting, look at the exact target.** Kill by
+   PID, never `pkill -f`/`pgrep -f … | xargs kill` with a pattern that
+   appears in your own job text (your prompt is in your process's
+   argv). No globs on `git branch -D`. Never force-push a shared branch.
+
+## Standing rules from the owner
+
+- **No localhost links.** Any link shown to the owner (Discord, the
+  dashboard, a PR, a caption) uses the box's LAN address
+  (`111.1.2.27`), never `localhost` or `127.0.0.1`.
+- **Dates and times** in a UI are rendered with moment in the viewer's
+  local timezone, never raw UTC.
+- **The brain runs in docker only** (compose service `engine`). There
+  is no systemd brain; do not create or start one.
+- **A game gets the GPU.** A running Steam game takes the 4090 from the
+  brain; a Sunshine desktop stream does not.
+- **Cloud models are opt-in.** Local is the default driver. Sonnet,
+  Opus and Fable run only when the job spec or the owner names them.
+- **A mode change is a switch, not a job.** `!automode`, `!fullauto`,
+  `!keepgoing` flip flags; never queue work for them.
+
 ## Machine state — the snapshot is in every round prompt
 
 Every round prompt starts with a **MACHINE SNAPSHOT** taken at round start

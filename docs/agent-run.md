@@ -4,7 +4,7 @@
 
 Unit: `/etc/systemd/system/agent-run.service` (repo: `systemd/agent-run.service`). User `agent`. Starts on boot.
 
-It shares Ollama with `jarvis-chat`. That is expected.
+It shares the brain engine (llama.cpp, container `jarvis-engine`, port 11434) with `jarvis-chat`. That is expected.
 
 The unit uses `Restart=on-failure`, so a crash or kill (non-zero exit) comes back after 10s; a Discord **Stop** (exit 0) stays stopped.
 
@@ -12,7 +12,10 @@ When the queue is empty, the think queue keeps the machine busy — docs/idle-wo
 
 ## Drivers (who runs a round)
 
-Each round runs on one of three drivers, picked in the checkpoint:
+Each round runs on one driver, picked in the checkpoint (or taken from
+the job spec in full-auto). The three below are the common ones; `opus`
+(the API `claude` binary pinned to Opus) and `superagent`
+(docs/superagent.md) are also valid:
 
 - **Local model** (default): `agent-local` on the 27B brain (port 11434).
 - **Igpu model**: the same `agent-local` path pointed at the 3B helper
@@ -23,7 +26,7 @@ Each round runs on one of three drivers, picked in the checkpoint:
 - **Sonnet**: the API `claude` binary, for rounds the local models are
   stuck on.
 
-`jarvis-jobs run <id> -driver local|igpu|sonnet` does the same from the
+`jarvis-jobs run <id> -driver local|igpu|sonnet|opus|superagent` does the same from the
 command line; the driver of the last round is recorded in
 `~/.config/jarvis/driver` (a reboot mid-round resumes on the same
 driver).
