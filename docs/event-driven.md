@@ -377,13 +377,36 @@ The components that react to a game:
   the brain — `jarvis-swap out --game` opens a `for:["game"]` window:
   brain out, **no photo services loaded** (the 4090's VRAM is the
   game's), state file marked so the window controller's tick policy
-  (drained/max/brain-wait) never closes it. A 60 s keepalive retries the
-  brain stop past the round guard and re-arms the watchdog's 4 h
-  maintenance window, so a long session outlives the deadline. On a game
-  end it releases the window (`jarvis-swap in`, only when the window is
-  the game's — a photo window left open is the queue policy's) and the
-  hold clears, so the queued GPU leases grant again. `stream.started` /
-  `stream.stopped` events carry the stream type and what the start did
+  (drained/max/brain-wait) never closes it.
+- **The round guard and the cut.** `jarvis-swap` refuses to stop the
+  brain while a local round runs (invariant 1), and the original design
+  just retried every 60 s — which worked until a round outlived the
+  session: on 2026-11-18 the round ran 25 minutes, the game 10, the
+  brain never released its ~17 GB and the game sat black (VRAM OOM).
+  Now, when the brain-out fails and a driver-local round is in flight,
+  resourced CUTS the round: it writes the same `restart-signal` file
+  the `!photonow` preemption writes (content `steam-game`, NOT the
+  `!fixnow` sentinel — the runner's 1 s poller kills the round within a
+  second and the job goes back to ready for a FRESH conversation), and
+  the owner gets one Discord line per game session. The cut round is
+  back in the ready queue in a second, so a **game-hold marker**
+  (`~/.local/state/jarvis/game-hold`, env `JARVIS_GAME_HOLD_FILE`) is
+  set BEFORE the brain stop: `jarvis-jobs next` skips driver-local jobs
+  while it exists. The engine-down skip covers the brain-out itself;
+  the marker covers the gap around it — without it the loop would start
+  the cut round again and flap (start, guard abort, cut, start, …).
+  The keepalive is adaptive while the brain is still up — 5 s until the
+  brain-out lands, 60 s in the steady state — and re-arms the
+  watchdog's 4 h maintenance window, so a long session outlives the
+  deadline. On a game end it releases the window (`jarvis-swap in`,
+  only when the window is the game's — a photo window left open is the
+  queue policy's); only once the brain is back do the hold and the
+  marker clear, so the queued GPU leases grant again and local rounds
+  may start. A close that fails (the brain still out) keeps both on; a
+  sweeper clears them once the brain is back — as does a resourced that
+  starts with the marker left behind (a restart mid-game, or a missed
+  end transition). `stream.started` / `stream.stopped` events carry the
+  stream type and what the start did
   (`resourced_stream_active` gauge, `stream_active` in `GET /state`).
   The worker's old brain-side half was dead as deployed (the container
   has no docker socket and no view of the host's /proc) and was removed

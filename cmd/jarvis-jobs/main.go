@@ -794,7 +794,11 @@ func confDir() string {
 // lets the worker idle-poll through a brain-swap photo window
 // (docs/brain-swap.md) instead of burning local rounds on a brain that is
 // deliberately off, and what stops it from doing the same while the
-// watchdog is restarting a crashed brain.
+// watchdog is restarting a crashed brain. While the game-hold marker
+// (cmd/resourced/stream.go) exists, driver-local jobs are skipped too:
+// a game wants the 4090 (brain-out pending, brain out, or brain coming
+// back) and a new local round would race the swap — the engine-down
+// skip covers the game itself, the marker covers the gap around it.
 func nextRunnable(store *agentjob.Store) (*agentjob.Job, error) {
 	exclude := map[string]bool{}
 	for {
@@ -812,12 +816,34 @@ func nextRunnable(store *agentjob.Store) (*agentjob.Job, error) {
 			return j, nil
 		}
 		d := effectiveDriver(j)
+		if d == "local" && gameHoldActive() {
+			fmt.Fprintf(os.Stderr, "jarvis-jobs: skipping %s — a game holds the 4090 (it stays ready)\n", j.ID)
+			exclude[j.ID] = true
+			continue
+		}
 		if driverUp(d) {
 			return j, nil
 		}
 		fmt.Fprintf(os.Stderr, "jarvis-jobs: skipping %s — driver %s engine is down (it stays ready)\n", j.ID, d)
 		exclude[j.ID] = true
 	}
+}
+
+// gameHoldActive reports whether resourced's game watchdog is holding the
+// 4090 for a game: it writes the marker when a game starts and clears it
+// when the brain is back (cmd/resourced/stream.go). A zero-cost stat —
+// this gate must not add network to the queue poll.
+func gameHoldActive() bool {
+	if p := os.Getenv("JARVIS_GAME_HOLD_FILE"); p != "" {
+		_, err := os.Stat(p)
+		return err == nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(home, ".local", "state", "jarvis", "game-hold"))
+	return err == nil
 }
 
 // effectiveDriver is the driver scripts/agent-run would run this job on:

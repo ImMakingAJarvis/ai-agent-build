@@ -676,11 +676,22 @@ func main() {
 	// The game/stream watchdog (EVB-29, plan §3.6 rule 2): while a GAME
 	// is active the ledger revokes the capability workers' GPU leases,
 	// holds the GPU queue, and resourced stops the brain (jarvis-swap
-	// out --game; the 60s keepalive re-arms the maintenance window and
-	// retries the brain stop past the round guard). A desktop stream
-	// takes no GPU action. Its own goroutine — the window operations
-	// block for the model loads.
-	go newStreamController(svc, reg, log).Run(ctx)
+	// out --game; the keepalive re-arms the maintenance window and
+	// retries the brain stop past the round guard — cutting a running
+	// local round first, so a round that outlives the session cannot
+	// keep the game black). A desktop stream takes no GPU action. Its
+	// own goroutine — the window operations block for the model loads.
+	sc := newStreamController(svc, reg, log)
+	// A game-hold marker left behind (a restart mid-game, or a close
+	// that failed) must not park local rounds forever: the sweeper
+	// clears it — and the GPU hold — once the brain is back. If a game
+	// really is running, the watcher's initial state emit takes the
+	// game path first and the sweeper backs off on its first tick.
+	if sc.gameHoldActive() {
+		log.Info("game-hold marker present at startup — the sweeper clears it once the brain is back")
+		go sc.sweepBrainBack(ctx)
+	}
+	go sc.Run(ctx)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
