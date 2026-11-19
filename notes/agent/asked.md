@@ -103,13 +103,9 @@
 - 2026-11-08T16:03Z 2026-11-08: Nathan asked for auto mode on (nightly gate). It was already on; confirmed. fullauto also on, keepgoing off.
 - 2026-11-03T19:19Z Nathan: make NoBrakes the highest priority and start working on it next
 - 2026-11-08T23:06Z Nathan: the image generator only did 1024x1024 — he wants landscape 16x9 (and by extension other shapes/sizes) (2026-11-08).
-- 2026-11-03T19:19Z Nathan: make NoBrakes the highest priority and start working on it next
-- 2026-11-08T15:02Z Nathan: image generation should not need any model (not even the iGPU helper) — pure code that stands up the generator, waits, generates, saves, DMs, galleries, and queues a follow-up with the image if the job asked for one; the job creator decides on follow-ups
-- 2026-11-08T16:03Z 2026-11-08: Nathan asked for auto mode on (nightly gate). It was already on; confirmed. fullauto also on, keepgoing off.
 - 2026-11-08T19:57Z Nathan: EVB Phase 0 — merge cursor/dashboard-job-logs-5db6 with pagination, sweep stale notes/bench branches into one commit, resolve Reel branches per Gate 1 decisions; he merged PR #204 mid-round (active PR merging)
 - 2026-11-08T21:28Z HomeAI TTS announcements: Nathan confirmed keep (yes-cherry-pick, 2026-11-08, EVB-6)
 - 2026-11-08T22:13Z Nathan resolved the 2026-11-05 zombie-engine deviation: option A — compose container canonical (keep) (2026-11-08, EVB-7; recorded in notes/agent/system.md + PR #205)
-- 2026-11-08T23:06Z Nathan: the image generator only did 1024x1024 — he wants landscape 16x9 (and by extension other shapes/sizes) (2026-11-08).
 - 2026-11-08T23:50Z EVB-8 build was a pure plan-task (no new Nathan decision). One open item for Nathan to confirm on PR #205: the plan wrote StartedAt/FinishedAt time.Time with no json tags; I added started_at/finished_at for wire-format consistency with the snake_case siblings.
 - 2026-11-09T11:55Z Gallery URLs must not be localhost/127 — viewable from any device; the fix sat unmerged in PR #200 since 11-08, so loopback links were still being posted
 - 2026-11-10T03:12Z Nathan: benchmark NVIDIA's Dory as iGPU+CPU models in parallel with the 4090 brain; switch iGPU (and later a CPU lane) if tok/s decent; asked whether cpu/igpu workers have their own RabbitMQ queues. Decision: no switch (iGPU tg 3.56 < 4 t/s gate and 3.8× slower than 3B; CPU 1.16 vs 22.9); lanes exist (jobs.cpu/jobs.igpu) but are empty — no models registered, no CPU engine → DRY project.
@@ -124,3 +120,8 @@
 - 2026-11-12T12:17Z Nathan (10-27): make voice sound natural/conversational, not a bad GLaDOS imitation; 11-12 asked via Discord (timed out, away until ~11-19): give agent SSH to HA box / fix Piper add-on options himself / leave queued — he chooses the Piper access path
 - 2026-11-13T19:23Z Nathan: Sunshine is desktop streaming only — must NOT stop the brain; a Steam game should (any game, intensity detection waived; STEAM_GAME_EXCLUDES is the opt-out)
 - 2026-11-13T20:10Z Nathan wants a place to give the agent secrets (API keys etc.) that he can add/remove but never view back
+- 2026-11-18T05:20Z Nathan delegates open-ended 'find work from Plane and do it' rounds — pick a Backlog Plane item, build it, PR + notify + move to Done (did T2I-3).
+- 2026-11-18T13:06Z Nathan (Discord 11-18): wants the benchmark results surfaced — asked about the Qwen flash results, then asked for a website page with all MoE run metrics/results
+- 2026-11-18T13:23Z Nathan asked for the Qwen 3.8 Flash Next VRAM sweep results summarized per memory config (100/150/200/250 MB free) — 2026-11-18; followed by the /benchmarks dashboard page (PR #260)
+- 2026-11-18T17:21Z Nathan: find the optimal MoE cache size at 128K context for all MoE models, results to the benchmark page, install a model as thinker/planner/coder if it's a good coder; coding exercises as part of the benchmark
+- 2026-11-18T18:12Z Nathan, home 2026-11-18: wants to test the voice chat (sent him PWA + /voice/chat URLs after the ffmpeg fix)
