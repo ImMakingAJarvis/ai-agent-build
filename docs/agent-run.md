@@ -28,6 +28,37 @@ command line; the driver of the last round is recorded in
 `~/.config/jarvis/driver` (a reboot mid-round resumes on the same
 driver).
 
+## `!igpu` jobs (jobs tagged `igpu-direct`)
+
+DM `!igpu <task>` queues a job the owner has already assigned to the iGPU
+worker: spec driver `igpu`, class `fix`, priority 1000, tag `igpu-direct`
+(docs/discord.md, "`!igpu`"). It is the recovery path for a brain that is
+down or held for a game, so the loop keeps out of its way:
+
+- **`jarvis-jobs next` offers it whenever the iGPU engine answers
+  `/health`** — the brain's health and the game-hold marker gate
+  driver-local jobs only. At priority 1000 in the fix band it is ahead of
+  everything except an older job at the same level.
+- **Full auto** runs it on its spec driver, like any job.
+- **Supervised**: a job tagged `igpu-direct` is dispatched on the iGPU
+  model **without the "Who runs it?" question** (the owner chose the
+  driver when they sent it), with a one-line notice. The question comes
+  back after the round, as usual.
+- **`!igpu …` typed while a checkpoint question is open** is a command,
+  not an answer: the loop does *not* take the text as instructions for
+  the job it was asking about (that would start that job on the local
+  model — the one that is down). It waits a few seconds for
+  `jarvis-chat` to store the job and reads the queue again; the `!igpu`
+  job is then at the top and runs. If no job shows up (the chat daemon
+  is down), the next question says so.
+- It never interrupts a running round. A round that is stuck is cut with
+  `!restart`, which re-queues its job; the `!igpu` job is then picked by
+  the normal queue order (top of the fix band).
+
+The loop change lives in `scripts/agent-run` (`is_igpu_direct_job`, and the
+`!igpu` case of the checkpoint answer); `scripts/agent_run_test.go` runs the
+real script against stub tools.
+
 ## Photo window (jobs tagged `photo`)
 
 Photo jobs need the 4090 **without** the brain on it: the art/bench
@@ -86,6 +117,7 @@ re-queued job.
   only acts on `running` jobs, so a done job is never re-run.
 - `!restart` while a checkpoint question is open does nothing (the bot skips
   DMs then) — use the checkpoint's **Skip**/**Stop** buttons instead.
+  (`!igpu` is the one command that does work then — see above.)
 
 `!restart` restarts the *conversation*, not the service. To restart the
 agent-run **service** itself use the restart helper below.

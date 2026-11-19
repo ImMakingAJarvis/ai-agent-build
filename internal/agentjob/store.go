@@ -110,7 +110,7 @@ type Spec struct {
 
 	// Tags is an open set of job-level markers (job.json "tags"). Tags with
 	// built-in semantics: TagNightly (NoBrakes nightly gate), TagPhoto
-	// (brain-swap photo window).
+	// (brain-swap photo window), TagIGPUDirect (the owner's !igpu jobs).
 	Tags []string `json:"tags,omitempty"`
 
 	// WaitOn and WaitUntil describe the job's current wait, set by Store.
@@ -146,6 +146,14 @@ const TagNightly = "nightly"
 // first one runs and swaps the brain back in when the batch drains. Set
 // with `jarvis-jobs add -tags photo`, and by image-queue ingestion.
 const TagPhoto = "photo"
+
+// TagIGPUDirect marks a job the owner sent straight to the iGPU worker
+// with the !igpu Discord command (cmd/jarvis-chat/igpu.go). The job's
+// spec driver is igpu; the tag tells the supervised agent-run loop that
+// the owner already chose the driver, so it dispatches the job on the
+// iGPU model without asking "Who runs it?" (scripts/agent-run). Full
+// auto needs no tag: it honors the spec driver on its own.
+const TagIGPUDirect = "igpu-direct"
 
 // HasTag reports whether the spec carries tag.
 func (sp Spec) HasTag(tag string) bool {

@@ -292,6 +292,19 @@ is_photo_job() {
     | tr ',' '\n' | grep -q '^[[:space:]]*photo[[:space:]]*$'
 }
 
+# ---- !igpu jobs (docs/discord.md, cmd/jarvis-chat/igpu.go) ----------------
+# A job tagged `igpu-direct` was sent to the iGPU worker by the owner with
+# the !igpu Discord command: its spec driver is igpu and the owner already
+# said who runs it, so the supervised loop dispatches it on the iGPU model
+# without asking. It is the recovery path for a dead or held 4090 brain —
+# a "Who runs it?" question would only add a click (and one wrong click
+# runs the recovery on the brain that is down). Full auto needs no special
+# case: it honors the spec driver.
+is_igpu_direct_job() {
+  jarvis-jobs show "$1" 2>/dev/null | sed -n 's/^tags: //p' \
+    | tr ',' '\n' | grep -q '^[[:space:]]*igpu-direct[[:space:]]*$'
+}
+
 msg="${checkpoint:-$(summary "$(cat "$DRIVER" 2>/dev/null || echo agent)" "${status:-?}")}"
 round=0
 while :; do
@@ -349,6 +362,11 @@ while :; do
       d=igpu
       note=""
       notify "Photo job ${job_title} (${job_id}): running as code (jarvis-photo), no model round; resourced opens the swap window for it."
+    elif [[ -n "$job_id" ]] && is_igpu_direct_job "$job_id"; then
+      # An !igpu job: the owner picked the driver when they sent it.
+      d=igpu
+      note=""
+      notify "iGPU job ${job_title} (${job_id}): running on the iGPU model, as you asked with !igpu."
     else
       if [[ -n "$job_id" ]]; then
         q="Next: $job_title ($job_id). Who runs it? You can also type instructions for this round."
@@ -406,6 +424,18 @@ $q"); then
                    msg="Couldn't turn on keep going — the NoBrakes flag store (Redis) is unreachable; the switch is unchanged."
                  fi
                  notify "$msg"
+                 continue ;;
+        '!igpu'|'!igpu'[[:space:]]*) shopt -u nocasematch
+                 # An !igpu typed while this question was open is a command
+                 # for jarvis-chat (it queues the task on the igpu driver),
+                 # not instructions for this round. Taking it as a note
+                 # would run the job named above on the LOCAL model — and
+                 # !igpu is what the owner sends when the brain is down.
+                 # Give the chat daemon a moment to store the job, then
+                 # read the queue again: the new job is at the top of the
+                 # fix band and is dispatched without a question.
+                 sleep 3
+                 msg="You sent !igpu while I was asking what to run. That is a jarvis-chat command, not round instructions, so I ran nothing with it — but its iGPU job is not next in the queue. If it does not show up, send !igpu again."
                  continue ;;
         *)       d=local; note="$answer" ;;
       esac
