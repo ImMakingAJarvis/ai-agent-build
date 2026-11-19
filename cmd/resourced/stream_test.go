@@ -16,8 +16,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -40,7 +44,15 @@ func newStreamTest(t *testing.T) (*service, *fakePub, *prometheus.Registry, *str
 	svc.detect = func(ctx context.Context) map[placement.Location]bool {
 		return map[placement.Location]bool{placement.CPU: true, placement.GPU: true}
 	}
-	return svc, pub, reg, newStreamController(svc, reg, log)
+	sc := newStreamController(svc, reg, log)
+	// Hermetic preemption side effects: the defaults shell out to the
+	// real jarvis-jobs/jarvis-discord and write to the real conf/state
+	// dirs, which the tests must never touch.
+	sc.signalDir = t.TempDir()
+	sc.gameHold = filepath.Join(t.TempDir(), "game-hold")
+	sc.localRounds = func() []string { return nil }
+	sc.notifyOwner = func(string) error { return nil }
+	return svc, pub, reg, sc
 }
 
 // gaugeValue scrapes one gauge out of the registry by name.
@@ -428,6 +440,215 @@ func TestGameKeepaliveConvertsPhotoWindow(t *testing.T) {
 	if swap.openGameCalls != 1 || !swap.open || len(swap.forCaps) != 1 || swap.forCaps[0] != "game" {
 		t.Fatalf("convert: openGame=%d open=%v for=%v, want the game window",
 			swap.openGameCalls, swap.open, swap.forCaps)
+	}
+}
+
+// TestStreamGameStartCutsRunningRound is the 2026-11-18 incident: a
+// local round was in flight when the game started and outlived it, so
+// jarvis-swap's round guard aborted every brain-out and the game sat
+// black. Now the game CUTS the round: the restart-signal is written
+// (content "steam-game" — a fresh re-run, not a !fixnow resume), the
+// owner gets the one Discord line, and the brain-out lands on the
+// keepalive's 5 s tick.
+func TestStreamGameStartCutsRunningRound(t *testing.T) {
+	svc, pub, _, sc := newStreamTest(t)
+	ctx := context.Background()
+
+	swap := &fakeSwap{failOpenGame: errors.New("local round is in flight — --force does not bypass it")}
+	svc.window = newTestWindowController(t, swap, &world{}, pub)
+	svc.ledger.RefreshBrainLease(18432)
+	sc.localRounds = func() []string { return []string{"chat-1795025589-376f"} }
+	var notices []string
+	sc.notifyOwner = func(msg string) error { notices = append(notices, msg); return nil }
+
+	sc.streamStarted(ctx, streamwatcher.SteamGame)
+
+	// The round was cut: the signal file is written with the fresh-run
+	// content (NOT the !fixnow sentinel).
+	b, err := os.ReadFile(filepath.Join(sc.signalDir, "restart-signal"))
+	if err != nil {
+		t.Fatalf("restart-signal not written: %v", err)
+	}
+	if string(b) != "steam-game" {
+		t.Fatalf("restart-signal content = %q, want %q (a fresh re-run)", string(b), "steam-game")
+	}
+	// The owner got exactly one line naming the cut round.
+	if len(notices) != 1 {
+		t.Fatalf("owner notices = %d, want 1: %q", len(notices), notices)
+	}
+	if !strings.Contains(notices[0], "chat-1795025589-376f") {
+		t.Fatalf("notice = %q, want it to name the cut round", notices[0])
+	}
+	// The marker and the hold are on; no window.opened went out (the
+	// brain never went out).
+	if !sc.gameHoldActive() {
+		t.Fatal("the game-hold marker must be set")
+	}
+	if !svc.ledger.StreamActive() {
+		t.Fatal("the hold must be on even though the brain-out failed")
+	}
+	if countKeys(pub.keys(), "window.opened") != 0 {
+		t.Fatalf("window.opened events = %d, want 0 (the brain never went out)", countKeys(pub.keys(), "window.opened"))
+	}
+
+	// The keepalive retries every 5 s; the owner is NOT notified again
+	// while the guard keeps aborting.
+	svc.window.brainUp = func(context.Context) bool { return true }
+	sc.probeBrain = func(context.Context) bool { return true }
+	sc.gameKeepalive(ctx)
+	if len(notices) != 1 {
+		t.Fatalf("owner notices = %d, want 1 (one line per session): %q", len(notices), notices)
+	}
+	// The round is gone (the runner requeued it): the brain goes out.
+	swap.mu.Lock()
+	swap.failOpenGame = nil
+	swap.mu.Unlock()
+	sc.gameKeepalive(ctx)
+	if swap.openGameCalls != 3 || !swap.open || len(swap.forCaps) != 1 || swap.forCaps[0] != "game" {
+		t.Fatalf("keepalive: calls=%d open=%v for=%v, want the brain out for the game on the retry",
+			swap.openGameCalls, swap.open, swap.forCaps)
+	}
+}
+
+// TestStreamGameStartNoRoundNoSignal: a failed brain-out with no local
+// round in flight is not a preemption — the keepalive owns the retry;
+// no signal is written and the owner is not bothered. The game-hold
+// marker is still set (the brain may be out for the game regardless).
+func TestStreamGameStartNoRoundNoSignal(t *testing.T) {
+	svc, _, _, sc := newStreamTest(t)
+	ctx := context.Background()
+
+	swap := &fakeSwap{failOpenGame: errors.New("steady state")}
+	svc.window = newTestWindowController(t, swap, &world{}, &fakePub{})
+	svc.ledger.RefreshBrainLease(18432)
+	var notices []string
+	sc.notifyOwner = func(msg string) error { notices = append(notices, msg); return nil }
+
+	sc.streamStarted(ctx, streamwatcher.SteamGame)
+
+	if _, err := os.Stat(filepath.Join(sc.signalDir, "restart-signal")); !os.IsNotExist(err) {
+		t.Fatalf("restart-signal = %v, want absent (no round to cut)", err)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("owner notices = %d, want 0: %q", len(notices), notices)
+	}
+	if !sc.gameHoldActive() {
+		t.Fatal("the game-hold marker is set even when nothing was cut")
+	}
+	if !svc.ledger.StreamActive() {
+		t.Fatal("the hold must be on")
+	}
+}
+
+// TestStreamGameEndClearsHoldAndMarker: the close after the game
+// succeeds (the brain is back) — the GPU hold and the game-hold marker
+// come off in the same transition.
+func TestStreamGameEndClearsHoldAndMarker(t *testing.T) {
+	svc, _, _, sc := newStreamTest(t)
+	ctx := context.Background()
+
+	swap := &fakeSwap{}
+	svc.window = newTestWindowController(t, swap, &world{}, &fakePub{})
+	svc.ledger.RefreshBrainLease(18432)
+
+	sc.streamStarted(ctx, streamwatcher.SteamGame)
+	if !sc.gameHoldActive() {
+		t.Fatal("the game-hold marker should be set while the game runs")
+	}
+	if !svc.ledger.StreamActive() {
+		t.Fatal("the hold should be on while the game runs")
+	}
+
+	sc.streamStopped(ctx)
+
+	if svc.ledger.StreamActive() {
+		t.Fatal("StreamActive = true after the game ended")
+	}
+	if sc.gameHoldActive() {
+		t.Fatal("the game-hold marker must be cleared once the brain is back")
+	}
+}
+
+// TestStreamGameEndBrainStillDownKeepsHold: the close after the game
+// failed (the brain is still out) — the GPU hold and the game-hold
+// marker STAY on (a new local round must not start on a down brain),
+// and the sweeper clears them once the brain is back.
+func TestStreamGameEndBrainStillDownKeepsHold(t *testing.T) {
+	svc, _, _, sc := newStreamTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	swap := &fakeSwap{failClose: errors.New("the brain is still loading")}
+	svc.window = newTestWindowController(t, swap, &world{}, &fakePub{})
+	svc.ledger.RefreshBrainLease(18432)
+	var brainUp atomic.Bool // the sweeper's probe; race-free from the test
+	sc.probeBrain = func(context.Context) bool { return brainUp.Load() }
+	sc.sweepEvery = 20 * time.Millisecond
+
+	sc.streamStarted(ctx, streamwatcher.SteamGame)
+	if !swap.open {
+		t.Fatalf("setup: the game window should be open")
+	}
+
+	sc.streamStopped(ctx)
+
+	// The close failed: the hold and the marker stay on.
+	if !svc.ledger.StreamActive() {
+		t.Fatal("StreamActive = false, want the hold on while the brain is still out")
+	}
+	if !sc.gameHoldActive() {
+		t.Fatal("the game-hold marker must stay while the brain is still out")
+	}
+
+	// The brain is back: the sweeper clears the hold and the marker.
+	brainUp.Store(true)
+	deadline := time.Now().Add(2 * time.Second)
+	for sc.gameHoldActive() || svc.ledger.StreamActive() {
+		if time.Now().After(deadline) {
+			t.Fatalf("sweeper: hold=%v marker=%v, want both cleared", svc.ledger.StreamActive(), sc.gameHoldActive())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestGameKeepaliveInterval: the keepalive's adaptive cadence — 5 s
+// while the brain is still up (the brain-out is pending), 60 s in the
+// steady state (brain out under the game window) and when no game runs.
+func TestGameKeepaliveInterval(t *testing.T) {
+	svc, _, _, sc := newStreamTest(t)
+	ctx := context.Background()
+
+	swap := &fakeSwap{failOpenGame: errors.New("round running")}
+	svc.window = newTestWindowController(t, swap, &world{}, &fakePub{})
+	svc.ledger.RefreshBrainLease(18432)
+
+	// No game: the quiet 60 s.
+	if d := sc.gameKeepalive(ctx); d != 60*time.Second {
+		t.Fatalf("no game: interval = %v, want 60 s", d)
+	}
+
+	sc.streamStarted(ctx, streamwatcher.SteamGame)             // the brain-out failed
+	sc.probeBrain = func(context.Context) bool { return true } // brain still up
+	if d := sc.gameKeepalive(ctx); d != 5*time.Second {
+		t.Fatalf("brain-out pending: interval = %v, want 5 s", d)
+	}
+
+	// The retry lands: the brain goes out under the game window.
+	swap.mu.Lock()
+	swap.failOpenGame = nil
+	swap.mu.Unlock()
+	if d := sc.gameKeepalive(ctx); d != 5*time.Second {
+		t.Fatalf("after the retry: interval = %v, want 5 s (still settling)", d)
+	}
+	if !swap.open {
+		t.Fatal("the brain-out should have landed on the retry")
+	}
+
+	// Now the brain is out under the game window: the steady state.
+	sc.probeBrain = func(context.Context) bool { return false }
+	sc.maintainAlive = func() bool { return true } // keep the maintenance branch quiet
+	if d := sc.gameKeepalive(ctx); d != 60*time.Second {
+		t.Fatalf("steady state: interval = %v, want 60 s", d)
 	}
 }
 

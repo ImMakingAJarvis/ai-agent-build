@@ -75,6 +75,69 @@ func TestNextRunnableSkipsDownEngines(t *testing.T) {
 	}
 }
 
+// TestNextRunnableSkipsLocalJobsUnderGameHold: while resourced's
+// game-hold marker exists (a game wants the 4090 — brain-out pending,
+// brain out, or brain coming back), driver-local jobs are skipped even
+// when the brain answers /health — the marker covers the gap the
+// engine-down skip does not (the brain is still up while the cut round
+// sits back in the ready queue). Non-local drivers are unaffected, and
+// the local job is runnable again once the marker is cleared.
+func TestNextRunnableSkipsLocalJobsUnderGameHold(t *testing.T) {
+	s, err := agentjob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedWithDriver(t, s, "localjob", "local", 10)
+	seedWithDriver(t, s, "igpujob", "igpu", 1)
+
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(brain.Close)
+	igpu := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(igpu.Close)
+	t.Setenv("JARVIS_BRAIN_URL", brain.URL)
+	t.Setenv("JARVIS_IGPU_URL", igpu.URL)
+	holdFile := filepath.Join(t.TempDir(), "game-hold")
+	t.Setenv("JARVIS_GAME_HOLD_FILE", holdFile)
+
+	// No marker: the higher-priority local job wins.
+	j, err := nextRunnable(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "localjob" {
+		t.Fatalf("no marker: nextRunnable got %v, want localjob", j)
+	}
+
+	// The marker is on (a game holds the 4090): localjob is skipped even
+	// with the brain up, igpujob runs.
+	if err := os.WriteFile(holdFile, []byte("2026-11-18T21:26:46Z"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j, err = nextRunnable(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "igpujob" {
+		t.Fatalf("game-hold marker on: nextRunnable got %v, want igpujob (local stays ready)", j)
+	}
+
+	// The brain is back and the marker is cleared: localjob is runnable.
+	if err := os.Remove(holdFile); err != nil {
+		t.Fatal(err)
+	}
+	j, err = nextRunnable(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "localjob" {
+		t.Fatalf("marker cleared: nextRunnable got %v, want localjob", j)
+	}
+}
+
 func TestEffectiveDriver(t *testing.T) {
 	conf := t.TempDir()
 	if err := os.WriteFile(filepath.Join(conf, "driver"), []byte("igpu\n"), 0o644); err != nil {
