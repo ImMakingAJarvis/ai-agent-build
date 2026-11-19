@@ -1,0 +1,9 @@
+[Unit]
+Description=Morning digest of overnight think work (docs/idle-work.md)
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+Environment=HOME=/home/agent
+ExecStart=/usr/bin/python3 /home/agent/ai-agent-build/scripts/think_digest.py

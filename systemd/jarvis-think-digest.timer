@@ -1,0 +1,10 @@
+[Unit]
+Description=Morning digest of overnight think work (08:00)
+
+[Timer]
+# Local time (America/Los_Angeles); Persistent catches up if the box was off.
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
