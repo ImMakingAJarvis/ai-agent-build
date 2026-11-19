@@ -34,12 +34,15 @@ type fakeSwap struct {
 	openCalls     int
 	closeCalls    int
 	openGameCalls int
+	openVoiceCalls int
 	lastOpen      string // "caps | reason"
 	lastClose     string
 	lastOpenGame  string
+	lastOpenVoice string
 	failOpen      error
 	failClose     error
 	failOpenGame  error
+	failOpenVoice error
 }
 
 func (f *fakeSwap) Open(ctx context.Context, forCaps []string, reason string) error {
@@ -84,6 +87,20 @@ func (f *fakeSwap) OpenGame(ctx context.Context, reason string) error {
 	return nil
 }
 
+func (f *fakeSwap) OpenVoice(ctx context.Context, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.openVoiceCalls++
+	if f.failOpenVoice != nil {
+		return f.failOpenVoice
+	}
+	f.open = true
+	f.forCaps = []string{"voice"}
+	f.openedAt = time.Now()
+	f.lastOpenVoice = reason
+	return nil
+}
+
 func (f *fakeSwap) State() (bool, []string, time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -115,6 +132,16 @@ func (f *fakeSwap) openAsPhoto() {
 	defer f.mu.Unlock()
 	f.open = true
 	f.forCaps = []string{"image.generate"}
+	f.openedAt = time.Now()
+}
+
+// openAsVoice opens the fake window as if `jarvis-swap out --voice` had
+// already run (the voice service's marker).
+func (f *fakeSwap) openAsVoice() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.open = true
+	f.forCaps = []string{"voice"}
 	f.openedAt = time.Now()
 }
 
@@ -608,6 +635,140 @@ func TestReleaseFromGame(t *testing.T) {
 	}
 	if swap3.open || swap3.closeCalls != 1 || swap3.lastClose != "steam game ended" {
 		t.Fatalf("game window: open=%v closes=%d last=%q, want closed once",
+			swap3.open, swap3.closeCalls, swap3.lastClose)
+	}
+	if got := pub3.keys(); !lastIs(got, "window.closed") {
+		t.Fatalf("events = %v, want last window.closed", got)
+	}
+}
+
+// TestWindowTickHoldsVoiceWindow: a window opened for a voice call
+// (for:["voice"]) belongs to the voice service — the tick's queue
+// policy must not run against it, or a drained or maxed-out decision
+// would close the window under a live call. The failsafe is the
+// watchdog-maintenance deadline re-armed at open, not the tick.
+func TestWindowTickHoldsVoiceWindow(t *testing.T) {
+	swap := &fakeSwap{}
+	swap.openAsVoice()
+	w := &world{depth: map[string]int{}} // fully drained
+	pub := &fakePub{}
+	wc := newTestWindowController(t, swap, w, pub)
+	ctx := context.Background()
+
+	swap.backdate(3 * time.Hour) // past max_window — the queue policy would close
+	wc.tick(ctx)
+	if !swap.open || swap.closeCalls != 0 {
+		t.Fatalf("voice window: open=%v closes=%d, want untouched by the tick",
+			swap.open, swap.closeCalls)
+	}
+	st := wc.State()
+	if !st.Open || st.Reason != "held for the active voice call (the voice service owns it)" {
+		t.Fatalf("window state = %+v, want held for the voice call", st)
+	}
+	if got := pub.keys(); len(got) != 0 {
+		t.Fatalf("events = %v, want none (no close, no reopen)", got)
+	}
+}
+
+// TestAcquireForVoice: the voice service's open path.
+//   - window closed → jarvis-swap out --voice (window.opened)
+//   - steady state (open for voice, brain down) → a no-op, no event
+//   - a photo window open → left alone, error (the call degrades)
+//   - a failed swap (the round guard) → error, no window.opened
+func TestAcquireForVoice(t *testing.T) {
+	ctx := context.Background()
+
+	swap := &fakeSwap{}
+	pub := &fakePub{}
+	wc := newTestWindowController(t, swap, &world{}, pub)
+	if err := wc.AcquireForVoice(ctx, "voice call session"); err != nil {
+		t.Fatalf("AcquireForVoice: %v", err)
+	}
+	if swap.openVoiceCalls != 1 || !swap.open || len(swap.forCaps) != 1 || swap.forCaps[0] != "voice" {
+		t.Fatalf("acquire: openVoice=%d open=%v for=%v, want one open --voice for [voice]",
+			swap.openVoiceCalls, swap.open, swap.forCaps)
+	}
+	if swap.lastOpenVoice != "voice call session" {
+		t.Fatalf("open reason = %q", swap.lastOpenVoice)
+	}
+	if got := pub.keys(); !lastIs(got, "window.opened") {
+		t.Fatalf("events = %v, want last window.opened", got)
+	}
+
+	// Steady state: open for voice, brain down → no new call, no event.
+	wc.brainUp = func(context.Context) bool { return false }
+	if err := wc.AcquireForVoice(ctx, "voice call session (re-check)"); err != nil {
+		t.Fatalf("steady state: %v", err)
+	}
+	if swap.openVoiceCalls != 1 || len(pub.keys()) != 1 {
+		t.Fatalf("steady state: openVoice=%d events=%v, want no new call or event", swap.openVoiceCalls, pub.keys())
+	}
+
+	// A photo window open → left alone (no conversion), error back.
+	swap2 := &fakeSwap{}
+	swap2.openAsPhoto()
+	pub2 := &fakePub{}
+	wc2 := newTestWindowController(t, swap2, &world{}, pub2)
+	if err := wc2.AcquireForVoice(ctx, "voice call session"); err == nil {
+		t.Fatal("a window open for another tenant must be an error (the call degrades)")
+	}
+	if !swap2.open || swap2.openVoiceCalls != 0 || len(pub2.keys()) != 0 {
+		t.Fatalf("photo window: open=%v openVoice=%d events=%v, want untouched (no conversion), no event",
+			swap2.open, swap2.openVoiceCalls, pub2.keys())
+	}
+
+	// A failed swap: the error comes back, nothing is published.
+	swap3 := &fakeSwap{failOpenVoice: errors.New("round running")}
+	pub3 := &fakePub{}
+	wc3 := newTestWindowController(t, swap3, &world{}, pub3)
+	if err := wc3.AcquireForVoice(ctx, "voice call session"); err == nil {
+		t.Fatal("a failed jarvis-swap must return its error")
+	}
+	if got := pub3.keys(); len(got) != 0 {
+		t.Fatalf("a failed acquire must not publish: %v", got)
+	}
+}
+
+// TestReleaseFromVoice: the call-end path.
+//   - window closed → a no-op
+//   - open but a GAME window → left for the stream controller (no close, no event)
+//   - open for voice → jarvis-swap in, with the window.closed event
+func TestReleaseFromVoice(t *testing.T) {
+	ctx := context.Background()
+
+	swap := &fakeSwap{}
+	pub := &fakePub{}
+	wc := newTestWindowController(t, swap, &world{}, pub)
+	if err := wc.ReleaseFromVoice(ctx, "voice call ended"); err != nil {
+		t.Fatalf("closed: %v", err)
+	}
+	if swap.closeCalls != 0 || len(pub.keys()) != 0 {
+		t.Fatalf("closed: closes=%d events=%v, want a no-op", swap.closeCalls, pub.keys())
+	}
+
+	// Open but not voice's → left alone.
+	swap2 := &fakeSwap{}
+	swap2.openAsGame()
+	pub2 := &fakePub{}
+	wc2 := newTestWindowController(t, swap2, &world{}, pub2)
+	if err := wc2.ReleaseFromVoice(ctx, "voice call ended"); err != nil {
+		t.Fatalf("game window: %v", err)
+	}
+	if !swap2.open || swap2.closeCalls != 0 || len(pub2.keys()) != 0 {
+		t.Fatalf("game window: open=%v closes=%d events=%v, want left for the stream controller",
+			swap2.open, swap2.closeCalls, pub2.keys())
+	}
+
+	// Open for voice → closed.
+	swap3 := &fakeSwap{}
+	swap3.openAsVoice()
+	pub3 := &fakePub{}
+	wc3 := newTestWindowController(t, swap3, &world{}, pub3)
+	if err := wc3.ReleaseFromVoice(ctx, "voice call ended (goodbye)"); err != nil {
+		t.Fatalf("voice window: %v", err)
+	}
+	if swap3.open || swap3.closeCalls != 1 || swap3.lastClose != "voice call ended (goodbye)" {
+		t.Fatalf("voice window: open=%v closes=%d last=%q, want closed once",
 			swap3.open, swap3.closeCalls, swap3.lastClose)
 	}
 	if got := pub3.keys(); !lastIs(got, "window.closed") {

@@ -369,6 +369,57 @@ func (s *service) handleState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleWindowVoicePost is POST /window/voice: the voice service (it
+// runs in a container and reaches this service by IP, not in-process)
+// asks for the call window — it heard a trigger phrase and the call
+// engine wants the 4090. AcquireForVoice BLOCKS until the window is
+// fully open (brain stopped, call engine healthy — minutes), so the
+// HTTP call takes that long; the caller must use a generous timeout
+// (the voice service uses 5 min). Errors mean "not available" — the
+// window is open for another tenant (game, capability) or the round
+// guard held — and the call degrades to the normal LLM path rather
+// than retrying. X-Reason becomes the marker's reason and the Discord
+// line.
+func (s *service) handleWindowVoicePost(w http.ResponseWriter, r *http.Request) {
+	if s.window == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "window controller disabled (no capability catalog)",
+		})
+		return
+	}
+	reason := r.Header.Get("X-Reason")
+	if reason == "" {
+		reason = "voice call session"
+	}
+	if err := s.window.AcquireForVoice(r.Context(), reason); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"open": true, "window": s.window.State()})
+}
+
+// handleWindowVoiceDelete is DELETE /window/voice: the call ended
+// (goodbye, idle timeout, max length, force-end) and the brain comes
+// back. Closes only a window that is voice's; a photo or game window
+// that opened mid-call is left for the queue policy / stream controller.
+func (s *service) handleWindowVoiceDelete(w http.ResponseWriter, r *http.Request) {
+	if s.window == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "window controller disabled (no capability catalog)",
+		})
+		return
+	}
+	reason := r.Header.Get("X-Reason")
+	if reason == "" {
+		reason = "voice call ended"
+	}
+	if err := s.window.ReleaseFromVoice(r.Context(), reason); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"open": false, "window": s.window.State()})
+}
+
 // handleDeviceReport is POST /device-report (EVB-37, plan §3.9): a
 // remote node's self-report — its own VRAM/RAM totals and current free
 // RAM. The ledger upserts the device (read-only accounting: it appears
@@ -596,6 +647,8 @@ func main() {
 	mux.HandleFunc("POST /lease", svc.handleLeasePost)
 	mux.HandleFunc("DELETE /lease/", svc.handleLeaseDelete)
 	mux.HandleFunc("GET /state", svc.handleState)
+	mux.HandleFunc("POST /window/voice", svc.handleWindowVoicePost)
+	mux.HandleFunc("DELETE /window/voice", svc.handleWindowVoiceDelete)
 	mux.HandleFunc("POST /device-report", svc.handleDeviceReport)
 	mux.HandleFunc("POST /measure", svc.handleMeasurePost)
 	mux.HandleFunc("GET /measured", svc.handleMeasuredGet)

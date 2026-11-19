@@ -71,6 +71,13 @@ type SwapRunner interface {
 	// photo service loads. Same round guard, same state file (the
 	// marker carries for:["game"]).
 	OpenGame(ctx context.Context, reason string) error
+	// OpenVoice runs `jarvis-swap out --voice --reason <r> --force`: the
+	// brain goes out for a voice call and the call engine (the 27B in its
+	// own container, :11436) loads instead of the photo services. Same
+	// round guard, same state file (the marker carries for:["voice"]).
+	// It never converts a window it does not own (jarvis-swap returns
+	// an error then); the voice session degrades to the normal path.
+	OpenVoice(ctx context.Context, reason string) error
 	// Close runs `jarvis-swap in --reason <r>` and blocks until the
 	// brain is back (started, healthy, real completion check).
 	Close(ctx context.Context, reason string) error
@@ -109,6 +116,10 @@ func (r *shellSwapRunner) Open(ctx context.Context, forCaps []string, reason str
 
 func (r *shellSwapRunner) OpenGame(ctx context.Context, reason string) error {
 	return r.run(ctx, "out", "--game", "--reason", reason, "--force")
+}
+
+func (r *shellSwapRunner) OpenVoice(ctx context.Context, reason string) error {
+	return r.run(ctx, "out", "--voice", "--reason", reason, "--force")
 }
 
 func (r *shellSwapRunner) Close(ctx context.Context, reason string) error {
@@ -434,16 +445,22 @@ func (wc *windowController) tick(ctx context.Context) {
 	}
 	// A game-owned window (for:["game"]) belongs to the stream
 	// controller: it opened it (AcquireForGame) and closes it
-	// (ReleaseFromGame) when the game ends. The queue/brain-wait policy
-	// must not run against it — a drained or max decision would close
-	// the window under a running game (the 4h watchdog-maintenance
-	// deadline that the stream controller's keepalive re-arms is the
-	// failsafe for a wedged game).
-	if open && forContainsGame(forCaps) {
+	// (ReleaseFromGame) when the game ends. A voice-owned window
+	// (for:["voice"]) belongs to the voice service: it opened it
+	// (AcquireForVoice) and closes it (ReleaseFromVoice) when the call
+	// ends. The queue/brain-wait policy must not run against either — a
+	// drained or max decision would close the window under a running
+	// game or a live call (the watchdog-maintenance deadline re-armed at
+	// open is the failsafe for a wedged tenant).
+	if open && (forContainsGame(forCaps) || forContainsVoice(forCaps)) {
 		now := time.Now().UTC()
+		tenant := "the active game (the stream controller owns it)"
+		if forContainsVoice(forCaps) {
+			tenant = "the active voice call (the voice service owns it)"
+		}
 		wc.mu.Lock()
 		wc.last = windowInfo{Open: true, For: forCaps, OpenedAt: openedAt,
-			Reason: "held for the active game (the stream controller owns it)", LastTick: now}
+			Reason: "held for " + tenant, LastTick: now}
 		wc.mu.Unlock()
 		wc.openGauge.Set(1)
 		if !openedAt.IsZero() {
@@ -661,11 +678,92 @@ func (wc *windowController) ReleaseFromGame(ctx context.Context, reason string) 
 	return nil
 }
 
+// AcquireForVoice is the voice call's window path (docs/voice-call.md):
+// the voice service heard a trigger phrase and the call engine wants the
+// 4090 — jarvis-swap out --voice stops the brain and loads the call
+// engine (:11436) instead of the photo services. The steady state
+// (window open for voice, brain down) is a no-op with no event, so the
+// voice service's periodic re-check stays quiet. An open window that is
+// NOT voice's (game, capability) is left alone: OpenVoice errors, the
+// session degrades to the normal LLM path, and the tenant keeps its VRAM
+// (no double tenant, no stolen window). The round guard inside
+// jarvis-swap still holds (invariant 1).
+func (wc *windowController) AcquireForVoice(ctx context.Context, reason string) error {
+	wc.swapMu.Lock()
+	defer wc.swapMu.Unlock()
+	open, forCaps, _, err := wc.swap.State()
+	if err != nil {
+		return err
+	}
+	if open && !forContainsVoice(forCaps) {
+		// The window belongs to another tenant (game, capability): do
+		// not even ask jarvis-swap to take it — it would abort, and the
+		// call simply degrades to the normal LLM path (jarvis-swap keeps
+		// its own check for the manual path).
+		return fmt.Errorf("window is open for %v — voice will not take a window it does not own", forCaps)
+	}
+	if open && forContainsVoice(forCaps) && !wc.brainUp(ctx) {
+		return nil // steady state: the call already has its engine
+	}
+	if err := wc.swap.OpenVoice(ctx, reason); err != nil {
+		return err
+	}
+	wc.opensTotal.WithLabelValues("voice").Inc()
+	wc.publish(ctx, queue.WindowEvent("opened", map[string]any{
+		"for":     []string{"voice"},
+		"reason":  reason,
+		"trigger": "voice",
+	}))
+	return nil
+}
+
+// ReleaseFromVoice is the call-end's window path: the window closes ONLY
+// if it is voice's (for:["voice"]). A photo or game window that opened
+// while the call ran is left for the queue policy / stream controller —
+// the call is over, but that work still wants the brain out. No lease
+// revocation here: voice capabilities do not lease the photo services.
+func (wc *windowController) ReleaseFromVoice(ctx context.Context, reason string) error {
+	wc.swapMu.Lock()
+	defer wc.swapMu.Unlock()
+	open, forCaps, _, err := wc.swap.State()
+	if err != nil {
+		return err
+	}
+	if !open {
+		return nil
+	}
+	if !forContainsVoice(forCaps) {
+		wc.log.Info("window: open but not the voice call's — leaving it for the queue policy", "for", forCaps)
+		return nil
+	}
+	if err := wc.swap.Close(ctx, reason); err != nil {
+		return err
+	}
+	wc.closesTotal.WithLabelValues("voice").Inc()
+	wc.publish(ctx, queue.WindowEvent("closed", map[string]any{"for": forCaps, "reason": reason}))
+	wc.mu.Lock()
+	wc.last = windowInfo{Reason: "closed: " + reason, LastTick: time.Now().UTC()}
+	wc.mu.Unlock()
+	return nil
+}
+
 // forContainsGame reports whether the window marker lists "game" — the
 // marker the game watchdog writes (jarvis-swap out --game).
 func forContainsGame(forCaps []string) bool {
 	for _, f := range forCaps {
 		if f == "game" {
+			return true
+		}
+	}
+	return false
+}
+
+// forContainsVoice reports whether the window marker lists "voice" —
+// the marker the voice service's window path writes (jarvis-swap out
+// --voice).
+func forContainsVoice(forCaps []string) bool {
+	for _, f := range forCaps {
+		if f == "voice" {
 			return true
 		}
 	}
