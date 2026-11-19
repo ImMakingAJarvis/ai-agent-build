@@ -443,9 +443,11 @@ with `jarvis-jobs finish <id> <0 if done, 1 if not>`. Docs: docs/local-brain.md.
 merged or waiting for review. If the job's work is already on main, say
 so with evidence in the job's PR or Discord note instead of redoing it.
 
-Keep your context small, it is 64K tokens: read files in parts (offset
-and limit), grep instead of cat for big files, pipe long command output
-through head or tail, and never print a whole log.
+Keep your context small. The window is 128K tokens, but Claude Code's
+own prompt, your instruction files and the snapshot already use a large
+part of it: read files in parts (offset and limit), grep instead of cat
+for big files, pipe long command output through head or tail, and never
+print a whole log.
 
 Machine state: the round prompt includes a MACHINE SNAPSHOT
 (jarvis-stack-status, taken at round start) — containers, loaded engines
@@ -475,8 +477,14 @@ How to work:
   committing yourself.
 - Build and test as you go (go build ./..., go test ./...). Do not open a
   PR for code that does not build.
-- A job is done only when every acceptance criterion in it passes. The PR
-  says how each was checked and what was skipped.
+- A job is done only when every acceptance criterion in it passes AND
+  you have seen the change work on the running system, through the same
+  path I will use (inside the container if the code runs in one, the
+  installed binary and not the one in your build dir). Unit tests alone
+  are not that. The full rule is "Definition of done" in your CLAUDE.md.
+- If you could not check it live, the job is NOT done: say "NOT
+  VERIFIED LIVE: <what, why>" as the first line of the PR and the
+  Discord note, and queue or name the round that will check it.
 - Finish the round with a pushed branch, an open PR, and a jarvis-discord
   notify with the PR link. Then end your run; the loop records the result
   and I pick what happens next.

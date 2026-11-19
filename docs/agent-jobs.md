@@ -45,8 +45,8 @@ docs/brain-swap.md), so the generation runs as an agent round in the
 brain-swap window. Messages missing fields get the photo defaults: the
 prompt as title/instructions, class `fix`, priority `100` (unless the
 message sets one), driver `igpu`, and the `photo` tag — the marker the
-queue watcher uses to bracket the batch with a brain-swap window
-(scripts/agent-run, docs/agent-run.md). `kind: "agent"` image messages
+resourced window controller uses to open a brain-swap window for the
+batch (docs/agent-run.md, "Photo window"). `kind: "agent"` image messages
 keep their own fields, with the same defaults for anything left empty.
 
 ## Power cost (local jobs)
