@@ -103,30 +103,164 @@ func writeCmdline(t *testing.T, root, pid, cmdline string) {
 	}
 }
 
-// The detection reads argv, not the exe link: a native game's own binary
-// sits at …/steamapps/common/<Game>/, a Proton launch carries the game
-// path among the proton arguments, and every library root (default,
-// snap, extra libraries) contains the same "steamapps/common/" marker —
-// while the Steam client itself and SteamLinuxRuntime never match.
+const (
+	steamHome  = "/home/nathan/.local/share/Steam/steamapps/common/"
+	ssdLibrary = "/mnt/ssd1t/SteamLibrary/steamapps/common/"
+	protonDir  = steamHome + "Proton - Experimental/"
+	riftApart  = steamHome + "Ratchet & Clank - Rift Apart/RiftApart.exe"
+)
+
+// writeProc writes one synthetic /proc entry: argv as a NUL-separated
+// cmdline and, when exe is set, the exe link (dangling is fine — only
+// the link target is read).
+func writeProc(t *testing.T, root, pid string, argv []string, exe string) {
+	t.Helper()
+	writeCmdline(t, root, pid, strings.Join(argv, "\x00")+"\x00")
+	if exe != "" {
+		if err := os.Symlink(exe, filepath.Join(root, pid, "exe")); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A process is a game only when its own binary sits in a game dir, or
+// when a Proton/Wine/Steam launch wrapper is handed a game executable as
+// a whole argument. Mentioning a game path (a prompt, a grep) is not a
+// game, and neither is Steam's own tooling.
+func TestClassifyGame(t *testing.T) {
+	cases := []struct {
+		name   string
+		argv   []string
+		exe    string
+		want   bool
+		reason string
+	}{
+		{
+			name:   "native game",
+			argv:   []string{steamHome + "Slay the Spire 2/SlayTheSpire2", "--fullscreen"},
+			want:   true,
+			reason: "argv0 in game dir Slay the Spire 2",
+		},
+		{
+			name:   "native game by exe link",
+			argv:   []string{"./SlayTheSpire2"},
+			exe:    steamHome + "Slay the Spire 2/SlayTheSpire2",
+			want:   true,
+			reason: "exe in game dir Slay the Spire 2",
+		},
+		{
+			name:   "game in the extra SSD library",
+			argv:   []string{ssdLibrary + "Baldurs Gate 3/bin/bg3"},
+			want:   true,
+			reason: "argv0 in game dir Baldurs Gate 3",
+		},
+		{
+			name:   "proton script launching RiftApart.exe",
+			argv:   []string{"python3", protonDir + "proton", "waitforexitandrun", riftApart},
+			exe:    "/usr/bin/python3.12",
+			want:   true,
+			reason: "proton launch of Ratchet & Clank - Rift Apart",
+		},
+		{
+			name: "reaper wrapping the proton launch",
+			argv: []string{"/home/nathan/.local/share/Steam/steamrt64/reaper", "SteamLaunch", "AppId=1895880", "--",
+				steamHome + "SteamLinuxRuntime_4/_v2-entry-point", "--verb=waitforexitandrun", "--",
+				protonDir + "proton", "waitforexitandrun", riftApart},
+			want:   true,
+			reason: "steam-launch launch of Ratchet & Clank - Rift Apart",
+		},
+		{
+			name: "pressure-vessel adverb wrapping the proton launch",
+			argv: []string{"/usr/lib/pressure-vessel/from-host/libexec/steam-runtime-tools-0/pv-adverb",
+				"--generate-locales", "--", protonDir + "proton", "waitforexitandrun", riftApart},
+			want:   true,
+			reason: "steam-launch launch of Ratchet & Clank - Rift Apart",
+		},
+		{
+			name:   "the game under wine (windows argv0)",
+			argv:   []string{`S:\steamapps\common\Ratchet & Clank - Rift Apart\RiftApart.exe`},
+			exe:    protonDir + "files/bin/wine64-preloader",
+			want:   true,
+			reason: "argv0 in game dir Ratchet & Clank - Rift Apart",
+		},
+		{
+			name:   "wine handed a game exe",
+			argv:   []string{"wine64", ssdLibrary + "BioShock Infinite/Binaries/Win32/BioShockInfinite.exe"},
+			want:   true,
+			reason: "wine launch of BioShock Infinite",
+		},
+		{
+			name: "claude -p prompt that mentions steamapps/common",
+			argv: []string{"claude", "--model", "jarvis-brain", "-p",
+				"=== YOUR JOB THIS ROUND: Fix steam's download issue ===\n1. Exit Steam completely.\n" +
+					"2. rm -rf ~/.local/share/Steam/steamapps/common/Proton\\ Experimental\n" +
+					"3. check " + riftApart + "\n"},
+			want: false,
+		},
+		{
+			name: "a non-launcher handed a game path as its own argument",
+			argv: []string{"grep", "-r", "crash", riftApart},
+			want: false,
+		},
+		{
+			name: "steamwebhelper",
+			argv: []string{"/home/nathan/.local/share/Steam/ubuntu12_64/steamwebhelper", "--type=zygote",
+				"--user-data-dir=/home/nathan/.local/share/Steam/config/htmlcache"},
+			want: false,
+		},
+		{
+			name: "the steam client",
+			argv: []string{"/home/nathan/.local/share/Steam/steamrt64/steam", "-srt-logger-opened"},
+			want: false,
+		},
+		{
+			name: "proton install dir on its own: wineserver",
+			argv: []string{protonDir + "files/lib/wine/../../bin/wineserver"},
+			want: false,
+		},
+		{
+			name: "proton with no game argument",
+			argv: []string{protonDir + "proton", "runinprefix", "winecfg"},
+			want: false,
+		},
+		{
+			name: "steam linux runtime",
+			argv: []string{steamHome + "SteamLinuxRuntime_sniper/pressure-vessel/bin/pv-bwrap", "--args", "26"},
+			want: false,
+		},
+		{
+			name: "a launcher pointing at a game dir, not an executable in it",
+			argv: []string{"wine64", ssdLibrary + "BioShock Infinite/"},
+			want: false,
+		},
+		{
+			name: "a launcher argument too long to be a path",
+			argv: []string{"wine64", ssdLibrary + "Game/" + strings.Repeat("a", maxPathLen) + ".exe"},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, got := classifyGame(tc.argv, tc.exe)
+			if got != tc.want {
+				t.Fatalf("classifyGame = %v (%q), want %v", got, reason, tc.want)
+			}
+			if tc.want && !strings.HasPrefix(reason, tc.reason) {
+				t.Fatalf("reason = %q, want prefix %q", reason, tc.reason)
+			}
+		})
+	}
+}
+
+// The /proc walk: the claude round and Steam's helpers alone are no game;
+// a real game is found with its pid, argv0 and reason; STEAM_GAME_EXCLUDES
+// still opts games out.
 func TestProcGameRunning(t *testing.T) {
 	d := t.TempDir()
-
-	// A snap-install Proton launch: the game path is among proton's argv.
-	writeCmdline(t, d, "100",
-		"/home/nathan/snap/steam/common/.local/share/Steam/steamapps/common/Proton 9-0/proton\x00"+
-			"/home/nathan/snap/steam/common/.local/share/Steam/steamapps/common/Fake Game/fakegame\x00")
-	// A native game: its own binary is the install path.
-	writeCmdline(t, d, "200",
-		"/home/nathan/snap/steam/common/.local/share/Steam/steamapps/common/AnotherGame/another\x00")
-	// The Steam client itself: no steamapps/common/ in argv.
-	writeCmdline(t, d, "300", "/snap/steam/279/ubuntu12_32/steam\x00--version\x00")
-	// SteamLinuxRuntime lives in the same tree but is tooling, not a game.
-	writeCmdline(t, d, "400",
-		"/home/nathan/snap/steam/common/.local/share/Steam/steamapps/common/SteamLinuxRuntime/runtime\x00")
-	// An unrelated process.
-	writeCmdline(t, d, "500", "/usr/bin/firefox\x00https://example.com\x00")
-	// A non-pid entry (like /proc/self, /proc/net) is skipped, even if it
-	// would match — and a pid with no cmdline (kernel thread) is skipped.
+	writeProc(t, d, "100", []string{"claude", "-p", "rm -rf " + protonDir + "\nthen restart steam"}, "")
+	writeProc(t, d, "200", []string{"/home/nathan/.local/share/Steam/ubuntu12_64/steamwebhelper", "--type=zygote"}, "")
+	writeProc(t, d, "300", []string{protonDir + "files/bin/wineserver"}, "")
+	// A non-pid entry and pids without a cmdline are skipped.
 	if err := os.MkdirAll(filepath.Join(d, "self"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -135,20 +269,32 @@ func TestProcGameRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !procGameRunning(d, nil) {
-		t.Fatal("procGameRunning = false, want true (a Proton + a native game are running)")
+	if m, ok := findGame(d, nil); ok {
+		t.Fatalf("findGame = %+v with no game running, want none", m)
 	}
-	if procGameRunning(d, []string{"Fake Game", "AnotherGame"}) {
+
+	writeProc(t, d, "400", []string{ssdLibrary + "Baldurs Gate 3/bin/bg3"}, "")
+	m, ok := findGame(d, nil)
+	if !ok {
+		t.Fatal("findGame = none, want the BG3 process")
+	}
+	if m.PID != "400" || m.Argv0 != ssdLibrary+"Baldurs Gate 3/bin/bg3" || !strings.Contains(m.Reason, "Baldurs Gate 3") {
+		t.Fatalf("findGame = %+v, want pid 400, the bg3 argv0 and a BG3 reason", m)
+	}
+
+	writeProc(t, d, "500", []string{"python3", protonDir + "proton", "waitforexitandrun", riftApart}, "")
+	if !procGameRunning(d, nil) {
+		t.Fatal("procGameRunning = false, want true")
+	}
+	if procGameRunning(d, []string{"Baldurs Gate 3", "Rift Apart"}) {
 		t.Fatal("procGameRunning = true with both games excluded, want false")
 	}
-	if !procGameRunning(d, []string{"Fake Game"}) {
-		t.Fatal("procGameRunning = false excluding only one game, want true (the other is running)")
+	if !procGameRunning(d, []string{"Baldurs Gate 3"}) {
+		t.Fatal("procGameRunning = false excluding only BG3, want true (Rift Apart is running)")
 	}
-	// An exclude that matches nothing changes nothing.
 	if !procGameRunning(d, []string{"SomeOtherGame"}) {
 		t.Fatal("procGameRunning = false with an irrelevant exclude, want true")
 	}
-	// An empty root reports no game (the walk fails cleanly).
 	if procGameRunning(filepath.Join(d, "does-not-exist"), nil) {
 		t.Fatal("procGameRunning = true on a missing root, want false")
 	}

@@ -119,6 +119,10 @@ type Watcher struct {
 	mu   sync.Mutex
 	prev StreamType
 
+	// lastGamePID is the pid of the last logged game match, so a game
+	// is logged once when it is first seen, not on every poll.
+	lastGamePID string
+
 	done chan struct{}
 }
 
@@ -186,8 +190,16 @@ func (w *Watcher) detect() StreamType {
 	// carries the install path in argv — and it is the state that stops
 	// the brain, so it is checked first (a game streamed to a Moonlight
 	// client would otherwise read as a Sunshine stream).
-	if w.steam && steamGameRunning(w.cfg.SteamGameExcludes) {
-		return SteamGame
+	if w.steam {
+		if m, ok := steamGameRunning(w.cfg.SteamGameExcludes); ok {
+			if m.PID != w.lastGamePID {
+				log.Printf("streamwatcher: steam game detected: pid=%s argv0=%q reason=%s",
+					m.PID, m.Argv0, m.Reason)
+				w.lastGamePID = m.PID
+			}
+			return SteamGame
+		}
+		w.lastGamePID = ""
 	}
 	// Sunshine UDP stream connections are the most reliable indicator.
 	if sunshineStreaming(w.cfg.SunshineUser, w.cfg.SunshineStreamPort) {
@@ -239,38 +251,58 @@ func steamInstalled() bool {
 	return err == nil
 }
 
-// steamGameRunning reports whether a Steam game is running on the host:
-// some process's command line points into a game install directory
-// (…/steamapps/common/<Game>/…).
-//
-// It reads /proc/<pid>/cmdline — world-readable, so it works from
-// resourced (the agent user, no ptrace rights over other users'
-// processes) where the exe-link and socket-scoped checks are limited.
-// Native and Proton launches both carry the install path in argv: Proton
-// runs …/steamapps/common/Proton X-Y/proton with the game path among its
-// arguments, and a native game's own binary sits at
-// …/steamapps/common/<Game>/. Every library root contains the same
-// marker — the default ~/.local/share/Steam, the snap install's
-// /home/<user>/snap/steam/common/.local/share/Steam, and extra
-// libraries — so the check does not depend on where Steam lives.
-// The Steam client itself never matches: it runs from …/ubuntu12_32/
-// and its helpers from …/config/, …/logs/ and shader-cache paths, none
-// of which contain "steamapps/common/".
-//
-// SteamLinuxRuntime (depot/install tooling) lives in the same tree but
-// is not a game and is always excluded; excludes adds further
-// substring opt-outs (Config.SteamGameExcludes) for games the owner
-// does not want to evict the brain for.
-func steamGameRunning(excludes []string) bool {
-	return procGameRunning("/proc", excludes)
+// gameMatch says which process made procGameRunning report a game and why.
+type gameMatch struct {
+	PID    string
+	Argv0  string
+	Reason string
 }
 
-// procGameRunning is the /proc walk behind steamGameRunning, split out
-// so the tests can point it at a fixture directory.
+// steamGameRunning reports whether a Steam game is running on the host,
+// and which process matched.
+//
+// It reads /proc/<pid>/cmdline (world-readable, so it works from
+// resourced as the agent user) and, where readable, the /proc/<pid>/exe
+// link. A process counts as a game in exactly two shapes:
+//
+//   - its own binary is a game: argv[0] or the resolved exe lies inside
+//     …/steamapps/common/<Game>/ and <Game> is not a Steam tool dir
+//     (Proton*, SteamLinuxRuntime*, Steamworks Shared, …). This is a
+//     native game, or a Wine-run game whose argv[0] is its Windows path.
+//   - it is a Proton/Wine/Steam launch wrapper (proton, wine*, reaper,
+//     pressure-vessel, steam-launch-wrapper, anything run from a tool
+//     dir) and a LATER argument is an executable path inside a game dir.
+//
+// Only whole argv elements count, and only ones that look like a path:
+// absolute (or a Windows drive path), no newline, at most PATH_MAX long.
+// A process that merely mentions a game path — a prompt passed with
+// `claude -p`, an editor, a grep — is neither shape and never matches,
+// which is what the old substring scan over the joined cmdline got
+// wrong. Every library root carries the same "steamapps/common/" marker
+// (~/.local/share/Steam, the snap install, extra libraries such as
+// /mnt/ssd1t/SteamLibrary), so the check does not depend on where Steam
+// lives. The Steam client and steamwebhelper run from …/ubuntu12_32/
+// and …/steamrt64/ and never match.
+//
+// excludes are substring opt-outs over the whole cmdline
+// (Config.SteamGameExcludes) for games the owner does not want to evict
+// the brain for.
+func steamGameRunning(excludes []string) (gameMatch, bool) {
+	return findGame("/proc", excludes)
+}
+
+// procGameRunning is findGame without the match details.
 func procGameRunning(root string, excludes []string) bool {
+	_, ok := findGame(root, excludes)
+	return ok
+}
+
+// findGame is the /proc walk behind steamGameRunning, split out so the
+// tests can point it at a fixture directory.
+func findGame(root string, excludes []string) (gameMatch, bool) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return false
+		return gameMatch{}, false
 	}
 	for _, e := range entries {
 		if !isPID(e.Name()) {
@@ -283,21 +315,150 @@ func procGameRunning(root string, excludes []string) bool {
 		if len(b) > 65536 {
 			b = b[:65536] // a pathologically long argument list is not a game
 		}
-		cl := strings.ReplaceAll(string(b), "\x00", " ")
-		if !strings.Contains(cl, "steamapps/common/") {
+		argv := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
+		exe, _ := os.Readlink(filepath.Join(root, e.Name(), "exe"))
+		reason, ok := classifyGame(argv, exe)
+		if !ok || excluded(string(b), excludes) {
 			continue
 		}
-		if strings.Contains(cl, "steamapps/common/SteamLinuxRuntime") {
-			continue
+		return gameMatch{PID: e.Name(), Argv0: argv[0], Reason: reason}, true
+	}
+	return gameMatch{}, false
+}
+
+// classifyGame reports whether one process (its argv and resolved exe,
+// "" when unreadable) is a running Steam game, with the match reason.
+func classifyGame(argv []string, exe string) (string, bool) {
+	if len(argv) == 0 {
+		return "", false
+	}
+	if game, ok := gameDirOf(argv[0]); ok {
+		return "argv0 in game dir " + game, true
+	}
+	if game, ok := gameDirOf(exe); ok {
+		return "exe in game dir " + game, true
+	}
+	kind := launcherKind(argv, exe)
+	if kind == "" {
+		return "", false
+	}
+	for _, arg := range argv[1:] {
+		if game, ok := gameDirOf(arg); ok && isExecutablePath(arg) {
+			return kind + " launch of " + game + " (" + arg + ")", true
 		}
-		skipped := false
-		for _, x := range excludes {
-			if x != "" && strings.Contains(cl, x) {
-				skipped = true
-				break
-			}
+	}
+	return "", false
+}
+
+// maxPathLen is PATH_MAX: an argument longer than that is not a path.
+const maxPathLen = 4096
+
+// gameDirOf reports the <Game> of a path inside …/steamapps/common/<Game>/
+// when <Game> is a game, not a Steam tool dir. The path must be a single
+// path-shaped argument and must lie INSIDE the game dir (the dir itself
+// is not a running game). Windows paths (Wine argv) are normalised.
+func gameDirOf(p string) (string, bool) {
+	if p == "" || len(p) > maxPathLen || strings.ContainsAny(p, "\n\r") {
+		return "", false
+	}
+	p = strings.ReplaceAll(p, `\`, "/")
+	if !strings.HasPrefix(p, "/") && !isDrivePath(p) {
+		return "", false
+	}
+	const marker = "steamapps/common/"
+	i := strings.Index(p, marker)
+	if i < 0 {
+		return "", false
+	}
+	rest := p[i+len(marker):]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 || slash == len(rest)-1 {
+		return "", false
+	}
+	game := rest[:slash]
+	if isSteamToolDir(game) {
+		return "", false
+	}
+	return game, true
+}
+
+// isDrivePath reports a Windows drive path such as "S:/steamapps/…".
+func isDrivePath(p string) bool {
+	return len(p) >= 3 && p[1] == ':' && p[2] == '/' &&
+		(p[0] >= 'A' && p[0] <= 'Z' || p[0] >= 'a' && p[0] <= 'z')
+}
+
+// steamToolDirs are steamapps/common/ entries that ship Steam tooling,
+// not games (matched exactly; Proton* and SteamLinuxRuntime* by prefix).
+var steamToolDirs = map[string]bool{
+	"Steamworks Shared":        true,
+	"Steam Controller Configs": true,
+	"Steam.dll":                true,
+}
+
+func isSteamToolDir(game string) bool {
+	return strings.HasPrefix(game, "Proton") ||
+		strings.HasPrefix(game, "SteamLinuxRuntime") ||
+		steamToolDirs[game]
+}
+
+// launcherKind names the Proton/Wine/Steam launch wrapper a process is,
+// or "" when it is none of them.
+func launcherKind(argv []string, exe string) string {
+	for _, p := range []string{argv[0], exe} {
+		if inSteamToolDir(p) {
+			return "steam-tool"
 		}
-		if !skipped {
+	}
+	base := filepath.Base(strings.ReplaceAll(argv[0], `\`, "/"))
+	switch {
+	case base == "proton":
+		return "proton"
+	case strings.HasPrefix(base, "wine"):
+		return "wine"
+	case strings.HasPrefix(base, "python") && len(argv) > 1 && filepath.Base(argv[1]) == "proton":
+		return "proton"
+	case base == "reaper", base == "steam-launch-wrapper",
+		base == "pv-adverb", base == "pv-bwrap", base == "srt-bwrap",
+		base == "pressure-vessel-wrap", base == "_v2-entry-point":
+		return "steam-launch"
+	}
+	return ""
+}
+
+// inSteamToolDir reports a path inside …/steamapps/common/<tool>/.
+func inSteamToolDir(p string) bool {
+	if p == "" || len(p) > maxPathLen || strings.ContainsAny(p, "\n\r") || !strings.HasPrefix(p, "/") {
+		return false
+	}
+	const marker = "steamapps/common/"
+	i := strings.Index(p, marker)
+	if i < 0 {
+		return false
+	}
+	rest := p[i+len(marker):]
+	if slash := strings.IndexByte(rest, '/'); slash > 0 {
+		rest = rest[:slash]
+	}
+	return isSteamToolDir(rest)
+}
+
+// isExecutablePath reports whether a game-dir argument names something
+// a launcher runs: a Windows executable, or a file with an exec bit.
+func isExecutablePath(p string) bool {
+	if strings.HasSuffix(strings.ToLower(p), ".exe") {
+		return true
+	}
+	st, err := os.Stat(p)
+	return err == nil && st.Mode().IsRegular() && st.Mode()&0o111 != 0
+}
+
+// excluded reports whether the raw cmdline matches a STEAM_GAME_EXCLUDES
+// substring (NULs read as spaces, as an owner would type the command).
+func excluded(cmdline string, excludes []string) bool {
+	cl := strings.ReplaceAll(cmdline, "\x00", " ")
+	for _, x := range excludes {
+		if x != "" && strings.Contains(cl, x) {
 			return true
 		}
 	}
