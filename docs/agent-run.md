@@ -8,6 +8,8 @@ It shares Ollama with `jarvis-chat`. That is expected.
 
 The unit uses `Restart=on-failure`, so a crash or kill (non-zero exit) comes back after 10s; a Discord **Stop** (exit 0) stays stopped.
 
+When the queue is empty, the think queue keeps the machine busy — docs/idle-work.md.
+
 ## Drivers (who runs a round)
 
 Each round runs on one of three drivers, picked in the checkpoint:
