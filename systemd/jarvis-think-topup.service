@@ -1,0 +1,12 @@
+[Unit]
+Description=Top up the think queue (idle work, docs/idle-work.md)
+After=network.target
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+Environment=HOME=/home/agent
+# A missing backlog (before the PR that ships this file is merged) is a
+# logged no-op inside the script, never a failed unit.
+ExecStart=/usr/bin/python3 /home/agent/ai-agent-build/scripts/think_topup.py
