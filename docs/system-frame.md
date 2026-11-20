@@ -108,6 +108,7 @@ timestamps** — the box is PST).
 | `!build <title…>` | Enqueue a build job into the agentjob store (first line = title, rest = instructions). Replies with the job id. |
 | `!fix <title…>` | Same, class `fix`. |
 | `!fixnow <title…>` | A fix that runs before anything else: interrupts the current round (like `!photonow`) and queues the job at the top of the fix band. The interrupted job's context is saved to Redis (24 h TTL) so it picks up right where it was cut off. |
+| `!igpu <task…>` | Recovery: queue the task straight onto the **iGPU worker** — an agent job with driver `igpu` (the 3B helper, no 4090), top of the fix band, tag `igpu-direct`. Runs when the brain is down or held for a game, and is handled even while a checkpoint question is open. Does not interrupt a running round. Replies with the job id; the round DMs the result. Give it literal commands. See docs/discord.md, "`!igpu`". |
 | `!photo <prompt>` | Generate a photo with the local art model (brain expands the prompt first — "thinking mind"), send it back as a DM attachment. |
 | `!photoassist <prompt>` | Photo generation with iterative prompt assistance. |
 | `!photocheck <prompt>` | Two passes: generate, critique, improve the prompt, regenerate. |
@@ -139,7 +140,9 @@ action instead of just replying:
 - **Checkpoint question** — before each job the agent-run loop asks on
   Discord (approve / skip / stop, driver choice, and the NoBrakes mode
   buttons). A ✅ reaction confirms the click. While one is open, `jarvis-chat`
-  skips DMs (the `ask-open` file).
+  skips DMs (the `ask-open` file) — except `!igpu`, which is queued anyway;
+  the loop treats `!igpu …` typed at its question as that command, not as
+  round instructions.
 - **`jarvis-discord ask "…" [-choices a,b,c]`** — the agent (me) DMs you and
   **blocks** until you answer; used before decisions only you can make.
   `jarvis-discord notify "…"` is the non-blocking twin (phase done, PR
@@ -166,6 +169,7 @@ Config in `~/.config/jarvis/` (secrets: `discord.env`; multi-bot:
 | Source | Lands in | Path |
 |---|---|---|
 | Discord `!build` / `!fix`, or Hermes `enqueue_job` | **agentjob store** | `jarvis-chat` → `store.Ingest` |
+| Discord `!igpu` | **agentjob store** (driver `igpu`, tag `igpu-direct`) | `jarvis-chat` → `store.Ingest`; runs on the iGPU model, brain not needed |
 | Voice ("build me X" — LLM tool `schedule_job`) | **agentjob store** | `jarvis-voice` → `jarvis-jobs add -source voice` |
 | Plane board changes | **agentjob store** | `plane-bridge` (webhook :8102) → `agentjob.Open(DataDir())`; catch-up sync on every start |
 | Dashboard job page (Stop work / Talk box) | job signals | writes `stop-signal` / parks the job; Talk box relays to the running round |

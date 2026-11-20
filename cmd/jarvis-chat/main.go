@@ -14,7 +14,8 @@
 //
 // It skips messages while a checkpoint question is open
 // ($CONF/ask-open exists) and skips Discord replies to bot questions
-// (those belong to Ask).
+// (those belong to Ask). The one exception is the !igpu command
+// (igpu.go), which is handled even then.
 //
 // Multi-bot support:
 // The primary bot (DISCORD_BOT_TOKEN) uses the basic chat handler.
@@ -193,6 +194,16 @@ func main() {
 		if botIndex == 0 {
 			// Primary bot: basic chat handler.
 			d.OnMessage(func(in chat.Incoming) {
+				// !igpu queues a job for the iGPU worker (igpu.go). It is the
+				// recovery path for a dead or held 4090 brain, so it is the
+				// one command handled even while a checkpoint question is
+				// open: with the brain down the loop is usually parked on
+				// exactly such a question. agent-run recognizes the same
+				// text as a command, not as instructions for its round.
+				if handleIGPU(d, in) {
+					return
+				}
+
 				// Skip while a checkpoint question is open.
 				if _, err := os.Stat(confDir + "/ask-open"); err == nil {
 					return
