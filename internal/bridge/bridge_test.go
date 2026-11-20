@@ -1563,3 +1563,99 @@ func TestReplanRepeatedAfterFinished(t *testing.T) {
 		t.Errorf("queue publishes = %d, want 2 (the refresh re-publishes)", len(fq.published()))
 	}
 }
+
+// TestPlanningByLaterAssignee: a card assigned to a human and a model bot
+// plans with the bot even when the human is listed first. Only the first
+// assignee used to be read, so BWT-1 sat in Planning (2026-11-20).
+func TestPlanningByLaterAssignee(t *testing.T) {
+	b, f, store, dir := newBridge(t, "jarvis-bot@x")
+	modelsFile := filepath.Join(dir, "models.yaml")
+	writeTestRegistry(t, modelsFile, "claude-fable-5-1", 0, 0)
+	b.cfg.ModelsFile = modelsFile
+	b.cfg.FitSource = fixedReadings{fit.Readings{FreeVRAMGB: 24, FreeRAMGB: 64}}
+
+	f.mu.Lock()
+	f.members = append(f.members,
+		fakeMember{id: "user-nathan", email: "nathan@x"},
+		fakeMember{id: "user-fable", email: "fable-bot@nathan.homes"})
+	f.mu.Unlock()
+	f.setItem("proj-1", "wi-plan", "Uploaded plan", "st-planning", "", 3)
+	f.mu.Lock()
+	f.items["proj-1"]["wi-plan"]["assignees"] = []string{"user-nathan", "user-fable"}
+	f.mu.Unlock()
+
+	if _, err := b.CatchUp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get("plane-plan_epic-wi-plan"); err != nil {
+		t.Fatalf("the bot assignee (listed second) did not queue the plan: %v", err)
+	}
+}
+
+// TestPlanningWithoutBotAssigneeExplains: a Planning card with no model
+// bot assigned is not planned, and the card says why — once, not on every
+// catch-up.
+func TestPlanningWithoutBotAssigneeExplains(t *testing.T) {
+	b, f, store, _ := newBridge(t, "jarvis-bot@x")
+	f.mu.Lock()
+	f.members = append(f.members, fakeMember{id: "user-nathan", email: "nathan@x"})
+	f.mu.Unlock()
+	f.setItem("proj-1", "wi-plan", "Uploaded plan", "st-planning", "", 3)
+	f.mu.Lock()
+	f.items["proj-1"]["wi-plan"]["assignees"] = []string{"user-nathan"}
+	f.mu.Unlock()
+
+	for i := 0; i < 2; i++ {
+		if _, err := b.CatchUp(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Get("plane-plan_epic-wi-plan"); err == nil {
+		t.Fatal("a card with no bot assignee was queued")
+	}
+	notes := 0
+	for _, c := range f.Comments() {
+		if c.item == "wi-plan" && strings.Contains(c.html, "no assignee is a model bot") {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Errorf("explaining comments = %d, want 1", notes)
+	}
+}
+
+// TestPlanningFailedJobExplains: a card whose plan job failed says so
+// instead of sitting in Planning with no sign why.
+func TestPlanningFailedJobExplains(t *testing.T) {
+	b, f, store, dir := newBridge(t, "jarvis-bot@x")
+	modelsFile := filepath.Join(dir, "models.yaml")
+	writeTestRegistry(t, modelsFile, "claude-fable-5-1", 0, 0)
+	b.cfg.ModelsFile = modelsFile
+	b.cfg.FitSource = fixedReadings{fit.Readings{FreeVRAMGB: 24, FreeRAMGB: 64}}
+	f.mu.Lock()
+	f.members = append(f.members, fakeMember{id: "user-fable", email: "fable-bot@nathan.homes"})
+	f.mu.Unlock()
+	f.setItem("proj-1", "wi-plan", "Uploaded plan", "st-planning", "", 3)
+	f.mu.Lock()
+	f.items["proj-1"]["wi-plan"]["assignees"] = []string{"user-fable"}
+	f.mu.Unlock()
+
+	if _, err := b.CatchUp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetStatus("plane-plan_epic-wi-plan", agentjob.State{Status: agentjob.Failed}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.CatchUp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range f.Comments() {
+		if c.item == "wi-plan" && strings.Contains(c.html, "jarvis-jobs requeue plane-plan_epic-wi-plan") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no comment explaining the failed plan job")
+	}
+}

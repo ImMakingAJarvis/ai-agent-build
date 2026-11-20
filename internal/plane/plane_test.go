@@ -1247,3 +1247,48 @@ func TestListProjectsFollowsCursor(t *testing.T) {
 		t.Fatalf("projects = %+v", projects)
 	}
 }
+
+// TestListLabelsAndStatesFollowCursor: a project with more labels (or
+// states) than one page is returned in full. A plan:<model> label on page
+// 2 was invisible to the bridge, so its card was never queued for
+// planning (2026-11-20).
+func TestListLabelsAndStatesFollowCursor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		kind := "label"
+		if strings.Contains(r.URL.Path, "/states/") {
+			kind = "state"
+		}
+		if r.URL.Query().Get("cursor") == "" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"results":           []map[string]string{{"id": kind + "1", "name": "epic"}},
+				"next_cursor":       "c2",
+				"next_page_results": true,
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"results":           []map[string]string{{"id": kind + "2", "name": "plan:qwen3.8-27b"}},
+			"next_cursor":       "c3",
+			"next_page_results": false,
+		})
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, APIKey: "k", Workspace: "jarvis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels, err := c.ListLabels(context.Background(), "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) != 2 || labels[1].Name != "plan:qwen3.8-27b" {
+		t.Fatalf("labels = %+v, want both pages", labels)
+	}
+	if l, err := c.LabelByName(context.Background(), "p", "PLAN:qwen3.8-27b"); err != nil || l.ID != "label2" {
+		t.Fatalf("LabelByName on page 2 = %+v, %v", l, err)
+	}
+	states, err := c.ListStates(context.Background(), "p")
+	if err != nil || len(states) != 2 {
+		t.Fatalf("states = %+v, %v, want both pages", states, err)
+	}
+}

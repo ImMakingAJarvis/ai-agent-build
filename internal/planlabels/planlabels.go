@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -47,40 +48,59 @@ func Sync(ctx context.Context, c *plane.Client, projectIDs []string, f *registry
 	for _, m := range planners {
 		want[LabelName(m.ID)] = true
 	}
+	// A failure in one project is collected, not returned at once: the
+	// projects after it still get their labels (one project's 409 used to
+	// stall the sync for every project listed after it, 2026-11-20).
+	var errs []error
 	for _, projectID := range projectIDs {
-		labels, err := c.ListLabels(ctx, projectID)
-		if err != nil {
-			return fmt.Errorf("planlabels: listing labels: %w", err)
+		if err := syncProject(ctx, c, projectID, planners, want, log); err != nil {
+			errs = append(errs, fmt.Errorf("project %s: %w", projectID, err))
 		}
-		present := make(map[string]string, len(labels)) // plan: label name → id
-		for _, l := range labels {
-			if strings.HasPrefix(l.Name, Prefix) {
-				present[l.Name] = l.ID
-			}
+	}
+	return errors.Join(errs...)
+}
+
+// syncProject applies the wanted plan: labels to one project.
+func syncProject(ctx context.Context, c *plane.Client, projectID string, planners []registry.Model, want map[string]bool, log *slog.Logger) error {
+	labels, err := c.ListLabels(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("planlabels: listing labels: %w", err)
+	}
+	present := make(map[string]string, len(labels)) // plan: label name → id
+	for _, l := range labels {
+		if strings.HasPrefix(l.Name, Prefix) {
+			present[l.Name] = l.ID
 		}
-		// Remove labels whose model is no longer an enabled planner.
-		for _, l := range labels {
-			if !strings.HasPrefix(l.Name, Prefix) || want[l.Name] {
+	}
+	// Remove labels whose model is no longer an enabled planner.
+	for _, l := range labels {
+		if !strings.HasPrefix(l.Name, Prefix) || want[l.Name] {
+			continue
+		}
+		if err := c.DeleteLabel(ctx, projectID, l.ID); err != nil {
+			return fmt.Errorf("planlabels: deleting stale label %q: %w", l.Name, err)
+		}
+		log.Info("plan label removed (model no longer an enabled planner)",
+			"project", projectID, "label", l.Name)
+	}
+	// Create the missing ones, in registry file order.
+	for _, m := range planners {
+		name := LabelName(m.ID)
+		if _, ok := present[name]; ok {
+			continue
+		}
+		if _, err := c.CreateLabel(ctx, projectID, name, Color); err != nil {
+			var apiErr *plane.APIError
+			if errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict {
+				// It exists after all (created between the list and
+				// now, or a list that missed it): the goal holds.
+				log.Info("plan label already exists", "project", projectID, "label", name)
 				continue
 			}
-			if err := c.DeleteLabel(ctx, projectID, l.ID); err != nil {
-				return fmt.Errorf("planlabels: deleting stale label %q: %w", l.Name, err)
-			}
-			log.Info("plan label removed (model no longer an enabled planner)",
-				"project", projectID, "label", l.Name)
+			return fmt.Errorf("planlabels: creating label %q: %w", name, err)
 		}
-		// Create the missing ones, in registry file order.
-		for _, m := range planners {
-			name := LabelName(m.ID)
-			if _, ok := present[name]; ok {
-				continue
-			}
-			if _, err := c.CreateLabel(ctx, projectID, name, Color); err != nil {
-				return fmt.Errorf("planlabels: creating label %q: %w", name, err)
-			}
-			log.Info("plan label added (model enabled as planner)",
-				"project", projectID, "label", name)
-		}
+		log.Info("plan label added (model enabled as planner)",
+			"project", projectID, "label", name)
 	}
 	return nil
 }
