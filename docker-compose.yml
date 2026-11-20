@@ -343,6 +343,120 @@ services:
       # read-only, no token file is written (the cache is in-memory).
       - /home/agent/.config/ghapp:/home/agent/.config/ghapp:ro
 
+  # ---------------- PR review queues (Job 12a, docs/pr-review-build-plan.md)
+  # The reviewers run the claude CLI against the Anthropic API — they never
+  # load a local model — so these must stay CPU-only: no nvidia runtime, no
+  # deploy.resources.reservations.devices, no NVIDIA_VISIBLE_DEVICES, no
+  # dependency on engine. TestComposeNoGPU in cmd/review-worker fails the
+  # build if any of these four blocks gains a GPU.
+  review-sonnet:
+    build:
+      context: .
+      dockerfile: docker/review/Dockerfile
+      args: { BIN: cmd/review-worker }
+    image: jarvis/review-worker:local
+    container_name: jarvis-review-sonnet
+    restart: always
+    command: ["-queue", "review.sonnet", "-model", "sonnet"]
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+    environment:
+      HOME: /home/agent
+      JARVIS_CONF: /home/agent/.config/jarvis
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      # The live checkout (rw: worktrees + commits on the PR branch) and a
+      # host dir for the worktrees themselves.
+      REVIEW_REPO: /repo
+      REVIEW_WORKTREE_BASE: /worktrees
+    volumes:
+      - /home/agent/.config/jarvis:/home/agent/.config/jarvis
+      - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      # The repo: the reviewer works in git worktrees of it and pushes the
+      # PR branch. The ghapp app key (ro) lets the git credential helper
+      # (mounted .gitconfig, which calls the ghapp-token script in the image)
+      # mint the installation token for that push.
+      - /home/agent/ai-agent-build:/repo
+      - /home/agent/.gitconfig:/home/agent/.gitconfig:ro
+      - /home/agent/.config/ghapp:/home/agent/.config/ghapp:ro
+      - /var/lib/jarvis/review-worktrees:/worktrees
+  review-opus:
+    build:
+      context: .
+      dockerfile: docker/review/Dockerfile
+      args: { BIN: cmd/review-worker }
+    image: jarvis/review-worker:local
+    container_name: jarvis-review-opus
+    restart: always
+    command: ["-queue", "review.opus", "-model", "opus"]
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+    environment:
+      HOME: /home/agent
+      JARVIS_CONF: /home/agent/.config/jarvis
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      REVIEW_REPO: /repo
+      REVIEW_WORKTREE_BASE: /worktrees
+    volumes:
+      - /home/agent/.config/jarvis:/home/agent/.config/jarvis
+      - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /home/agent/ai-agent-build:/repo
+      - /home/agent/.gitconfig:/home/agent/.gitconfig:ro
+      - /home/agent/.config/ghapp:/home/agent/.config/ghapp:ro
+      - /var/lib/jarvis/review-worktrees:/worktrees
+  review-fable:
+    build:
+      context: .
+      dockerfile: docker/review/Dockerfile
+      args: { BIN: cmd/review-worker }
+    image: jarvis/review-worker:local
+    container_name: jarvis-review-fable
+    restart: always
+    command: ["-queue", "review.fable", "-model", "fable"]
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+    environment:
+      HOME: /home/agent
+      JARVIS_CONF: /home/agent/.config/jarvis
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      REVIEW_REPO: /repo
+      REVIEW_WORKTREE_BASE: /worktrees
+    volumes:
+      - /home/agent/.config/jarvis:/home/agent/.config/jarvis
+      - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /home/agent/ai-agent-build:/repo
+      - /home/agent/.gitconfig:/home/agent/.gitconfig:ro
+      - /home/agent/.config/ghapp:/home/agent/.config/ghapp:ro
+      - /var/lib/jarvis/review-worktrees:/worktrees
+  # The five-minute check: a loop, not a model — it never runs claude, it
+  # publishes jobs and writes logs. discord.env carries the token for the
+  # end of day digest (the binary reads it from the environment).
+  review-sweep:
+    build:
+      context: .
+      dockerfile: docker/review/Dockerfile
+      args: { BIN: cmd/review-sweep }
+    image: jarvis/review-sweep:local
+    container_name: jarvis-review-sweep
+    restart: always
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+      - /home/agent/.config/jarvis/discord.env
+    environment:
+      HOME: /home/agent
+      JARVIS_CONF: /home/agent/.config/jarvis
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      JARVIS_REVIEW_CFG: /config/review.yaml
+    volumes:
+      - /home/agent/.config/jarvis:/home/agent/.config/jarvis
+      - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
+      # review records (pr-<n>.json + revival log), the per-model Plane
+      # secrets, and the agent job store the sweep checks for missing jobs.
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /home/agent/ai-agent-build/config:/config:ro
+
   dashboard:
     build:
       context: .
