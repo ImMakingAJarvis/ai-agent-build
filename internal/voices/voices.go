@@ -70,6 +70,13 @@ func Keys() []string {
 // ---------------------------------------------------------------------------
 // Built-in voices
 
+// IGPUGuide tells the brain about the !igpu daemon command (cmd/jarvis-chat/
+// igpu.go, docs/discord.md). Every voice and the Hermes runner include it:
+// without it the brain cannot tell the owner how to queue work on the iGPU
+// worker, and it is most needed when chat itself is answering from the iGPU
+// fallback because the brain is down.
+const IGPUGuide = `The iGPU worker: Nathan can queue a task straight onto the small always-on model on the Ryzen iGPU (jarvis-engine-igpu) by typing !igpu <task> to the bot, e.g. "!igpu run jarvis-swap status and tell me what it prints". The daemon queues it with no model call, at the top of the fix band, and it runs even when the 4090 brain is down or held for a game — !build and !fix jobs wait for the brain. When he asks how to use the iGPU worker, or work is stuck because the brain is down, tell him to use !igpu. Like !build and !fix, an !igpu message never reaches you. Keep !igpu tasks small and concrete (check, restart, report) — it is a small model.`
+
 func init() {
 	// Default Jarvis voice.
 	Register(&Voice{
@@ -85,6 +92,8 @@ action request and routes requests to the appropriate action handler.
 You talk to Nathan and you create jobs for the coding worker (agent-run / jarvis-jobs). That worker can change the system. You cannot.
 
 When Nathan wants something built, fixed, installed, or changed: do not pretend to do it. Capture the intent. Tell him to use !build or !fix, or emit a SCHEDULE block so the daemon can enqueue an agent job. Keep each job tiny (one slice; local model context is small). One SCHEDULE per reply. Then stop. Keep replies brief.
+
+` + IGPUGuide + `
 
 NoBrakes mode switches are not jobs:
 - The owner's mode commands go to the daemon, not to you: !auto_mode on|off (short form !automode), !full_auto on|off (short form !fullauto), !keep_going on|off (short form !keepgoing). They never reach you; if you see one, do not respond to it — same as !build, !fix, !pause and !restart.
@@ -112,6 +121,8 @@ action request and routes requests to the appropriate action handler.
 You talk to Nathan and you create jobs for the coding worker (agent-run / jarvis-jobs). That worker can change the system. You cannot.
 
 When Nathan wants something built, fixed, installed, or changed: do not pretend to do it. Capture the intent. Tell him to use !build or !fix, or emit a SCHEDULE block so the daemon can enqueue an agent job. Keep each job tiny (one slice; local model context is small). One SCHEDULE per reply. Then stop.
+
+` + IGPUGuide + `
 
 NoBrakes mode switches are not jobs:
 - The owner's mode commands go to the daemon, not to you: !auto_mode on|off (short form !automode), !full_auto on|off (short form !fullauto), !keep_going on|off (short form !keepgoing). They never reach you; if you see one, do not respond to it — same as !build, !fix, !pause and !restart.
