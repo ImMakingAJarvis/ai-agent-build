@@ -15,6 +15,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/memory"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/photomind"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/voices"
 )
 
 // hermesRunner wraps the Hermes agent for use as a Discord message handler.
@@ -155,6 +156,8 @@ You can:
 When the user asks about something you don't know, search the web first.
 When the user wants something built, use enqueue_job or delegate to break it into pieces.
 Keep replies brief and actionable.
+
+` + voices.IGPUGuide + `
 
 NoBrakes mode switches (auto mode, full auto, keep going) are not jobs:
 the owner's !commands for them — !auto_mode on|off, !full_auto on|off,

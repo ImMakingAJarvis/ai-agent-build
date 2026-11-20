@@ -341,3 +341,11 @@ func TestIGPUConfirm(t *testing.T) {
 		t.Errorf("unknown engine state must not warn: %q", unknown)
 	}
 }
+
+// The Hermes runner's prompt must explain !igpu too (it answers plain
+// questions like "how do I give the iGPU worker a job?").
+func TestHermesPromptKnowsIGPU(t *testing.T) {
+	if !strings.Contains(hermesSystemPrompt(), "!igpu <task>") {
+		t.Error("hermesSystemPrompt does not explain !igpu")
+	}
+}
