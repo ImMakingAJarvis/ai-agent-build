@@ -637,6 +637,20 @@ func (c *Client) SetState(ctx context.Context, projectID, itemID, stateID string
 	return &out, nil
 }
 
+// SetAssignees replaces a work item's assignees with the given user IDs.
+// The users must already be members of the project.
+func (c *Client) SetAssignees(ctx context.Context, projectID, itemID string, userIDs []string) (*WorkItem, error) {
+	if userIDs == nil {
+		userIDs = []string{}
+	}
+	var out WorkItem
+	body := map[string][]string{"assignees": userIDs}
+	if err := c.do(ctx, "PATCH", c.itemPath(projectID, itemID), body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // AddLabels attaches labels to a work item (by label ID). It fetches the
 // item first because this build's PATCH replaces the whole label list
 // rather than merging.

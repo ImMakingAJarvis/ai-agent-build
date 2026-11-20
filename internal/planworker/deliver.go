@@ -8,6 +8,7 @@ import (
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/placement"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/planeassign"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 )
 
@@ -16,8 +17,12 @@ import (
 // in it until Nathan approves (B5) or re-plans (B5).
 const PlanReviewState = "Plan review"
 
-// ReadyState is the state approved sub-items move to (B5).
+// ReadyState is the state planned tasks are created in. Ready is the
+// run trigger, so the work is queued as soon as the plan lands.
 const ReadyState = "Ready"
+
+// DoneState is where the planning card goes once its tasks are queued.
+const DoneState = "Done"
 
 // The marker convention (P5/P6) lives in the plane package — the bridge
 // matches on the same strings when it recognises an epic as planned.
@@ -32,12 +37,10 @@ const (
 //   - the plan document becomes a project page, linked from the epic
 //     (the plan-page: line in the epic's description) and summarised in a
 //     comment on it;
-//   - the tasks become sub-items of the epic in Plan review, each with a
-//     blocked-by relation per dependency and the model:<id> label of the
-//     executor the plan chose — never a run: label, placement comes from
-//     the registry (A5);
-//   - the epic itself moves to Plan review, where Nathan approves or
-//     re-plans it (B5).
+//   - the tasks become sub-items of the planning card in Ready, each
+//     assigned to the Qwen worker (jarvis-bot2), with a blocked-by
+//     relation per dependency and the model:<id> label of that executor;
+//   - the planning card itself moves to Done.
 //
 // Delivery converges: a re-run against the same epic reuses the sub-items
 // and page it already created (found via their markers) and replaces the
@@ -67,8 +70,7 @@ type Delivery struct {
 
 // Deliver writes res's plan and tasks to the board for job's epic. Any
 // failure returns an error and the epic is left where it was: only a fully
-// successful delivery moves it to Plan review (the state is the
-// "ready for approval" signal).
+// successful delivery moves it to Done.
 func (d *Deliverer) Deliver(ctx context.Context, job *Job, res *Result) (*Delivery, error) {
 	if job.Board.ProjectID == "" {
 		return nil, fmt.Errorf("plan job %s: no board project id", msgID(job))
@@ -79,15 +81,23 @@ func (d *Deliverer) Deliver(ctx context.Context, job *Job, res *Result) (*Delive
 	projectID := job.Board.ProjectID
 	epicID := job.Item.ID
 
-	state, err := d.Plane.StateByName(ctx, projectID, PlanReviewState)
+	state, err := d.Plane.StateByName(ctx, projectID, ReadyState)
 	if err != nil {
-		return nil, fmt.Errorf("state %q: %w", PlanReviewState, err)
+		return nil, fmt.Errorf("state %q: %w", ReadyState, err)
+	}
+	done, err := d.Plane.StateByName(ctx, projectID, DoneState)
+	if err != nil {
+		return nil, fmt.Errorf("state %q: %w", DoneState, err)
+	}
+	qwenID, err := d.qwenMember(ctx)
+	if err != nil {
+		return nil, err
 	}
 	labels, err := d.modelLabels(ctx, projectID, res.Tasks)
 	if err != nil {
 		return nil, err
 	}
-	items, err := d.subItems(ctx, job, res, projectID, epicID, state, labels)
+	items, err := d.subItems(ctx, job, res, projectID, epicID, state, labels, qwenID)
 	if err != nil {
 		return nil, err
 	}
@@ -101,10 +111,24 @@ func (d *Deliverer) Deliver(ctx context.Context, job *Job, res *Result) (*Delive
 	if err := d.summaryComment(ctx, projectID, epicID, job, res, page); err != nil {
 		return nil, err
 	}
-	if _, err := d.Plane.SetState(ctx, projectID, epicID, state.ID); err != nil {
-		return nil, fmt.Errorf("move epic to %s: %w", PlanReviewState, err)
+	if _, err := d.Plane.SetState(ctx, projectID, epicID, done.ID); err != nil {
+		return nil, fmt.Errorf("move planning card to %s: %w", DoneState, err)
 	}
 	return &Delivery{Page: page, Items: items}, nil
+}
+
+// qwenMember is the workspace member id of the Qwen worker (jarvis-bot2).
+func (d *Deliverer) qwenMember(ctx context.Context) (string, error) {
+	members, err := d.Plane.ListWorkspaceMembers(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list workspace members: %w", err)
+	}
+	for _, m := range members {
+		if strings.EqualFold(m.Email, planeassign.QwenEmail) {
+			return m.ID, nil
+		}
+	}
+	return "", fmt.Errorf("workspace has no member %s", planeassign.QwenEmail)
 }
 
 // modelLabels resolves the model:<id> label id for every executor model
@@ -164,9 +188,10 @@ func (d *Deliverer) enabledExecutor(id string) bool {
 	return false
 }
 
-// subItems creates (or reuses, via the plan-task: marker) the epic's task
-// sub-items in Plan review and wires their blocked-by relations.
-func (d *Deliverer) subItems(ctx context.Context, job *Job, res *Result, projectID, epicID string, state *plane.State, labels map[string]string) (map[string]string, error) {
+// subItems creates (or reuses, via the plan-task: marker) the planning
+// card's task sub-items in Ready, assigns the Qwen worker, and wires
+// their blocked-by relations.
+func (d *Deliverer) subItems(ctx context.Context, job *Job, res *Result, projectID, epicID string, state *plane.State, labels map[string]string, qwenID string) (map[string]string, error) {
 	// Cards a previous (partially failed) delivery already created.
 	have := map[string]string{} // task id -> work item id
 	items, err := d.Plane.ListWorkItems(ctx, projectID)
@@ -200,6 +225,9 @@ func (d *Deliverer) subItems(ctx context.Context, job *Job, res *Result, project
 			if _, err := d.Plane.AddLabels(ctx, projectID, id, labels[t.ExecutorModel]); err != nil {
 				return nil, fmt.Errorf("task %q: label: %w", t.ID, err)
 			}
+			if _, err := d.Plane.SetAssignees(ctx, projectID, id, []string{qwenID}); err != nil {
+				return nil, fmt.Errorf("task %q: assign qwen: %w", t.ID, err)
+			}
 			out[t.ID] = id
 			continue
 		}
@@ -213,6 +241,9 @@ func (d *Deliverer) subItems(ctx context.Context, job *Job, res *Result, project
 		if err != nil {
 			return nil, fmt.Errorf("create sub-item for task %q: %w", t.ID, err)
 		}
+		if _, err := d.Plane.SetAssignees(ctx, projectID, wi.ID, []string{qwenID}); err != nil {
+			return nil, fmt.Errorf("task %q: assign qwen: %w", t.ID, err)
+		}
 		out[t.ID] = wi.ID
 	}
 
@@ -222,13 +253,13 @@ func (d *Deliverer) subItems(ctx context.Context, job *Job, res *Result, project
 	// is left where it is: a re-plan does not delete history or in-flight
 	// work.
 	if job.Trigger == TriggerReplan {
-		ready, err := d.Plane.StateByName(ctx, projectID, ReadyState)
-		if err != nil {
-			return nil, fmt.Errorf("state %q: %w", ReadyState, err)
+		owned := map[string]bool{state.ID: true}
+		if review, err := d.Plane.StateByName(ctx, projectID, PlanReviewState); err == nil {
+			owned[review.ID] = true
 		}
 		for i := range items {
 			it := &items[i]
-			if it.Parent != epicID || (it.State != state.ID && it.State != ready.ID) {
+			if it.Parent != epicID || !owned[it.State] {
 				continue
 			}
 			tid, ok := markerValue(it.DescriptionHTML, planTaskMarker)
@@ -336,8 +367,8 @@ func (d *Deliverer) summaryComment(ctx context.Context, projectID, epicID string
 	if job.Trigger == TriggerReplan {
 		verb = "Re-plan"
 	}
-	msg := fmt.Sprintf("%s: %s ready — %d task(s) in %s for review%s. Plan: %s",
-		res.Model.ID, verb, len(res.Tasks.Tasks), PlanReviewState, reviewed, url)
+	msg := fmt.Sprintf("%s: %s ready — %d task(s) in %s, assigned to %s%s. Plan: %s",
+		res.Model.ID, verb, len(res.Tasks.Tasks), ReadyState, planeassign.QwenEmail, reviewed, url)
 	if _, err := d.Plane.AddComment(ctx, projectID, epicID, "<p>"+htmlEscapeLine(msg)+"</p>"); err != nil {
 		return fmt.Errorf("summary comment: %w", err)
 	}

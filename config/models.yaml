@@ -232,3 +232,37 @@ models:
     enabled: true
     home_location: cloud
     fallback_location: none
+
+  # Claude Haiku and Opus. Plane assignees haiku-bot and opus-bot map to
+  # these ids (internal/planeassign). Same Anthropic key as Sonnet and
+  # Fable. Planner-only: finished tasks are assigned to jarvis-bot2
+  # (qwen3.8-27b), not to these users.
+  - id: claude-haiku-5-5
+    display_name: Claude Haiku (cloud)
+    location: cloud
+    engine: anthropic
+    endpoint: https://api.anthropic.com/v1
+    roles: [planner]
+    context_tokens: 200000
+    vram_gb: 0
+    ram_gb: 0
+    thinking: "thinking.budget_tokens:8192"
+    cost_per_mtok: 0.80
+    enabled: true
+    home_location: cloud
+    fallback_location: none
+
+  - id: claude-opus-5-5
+    display_name: Claude Opus (cloud)
+    location: cloud
+    engine: anthropic
+    endpoint: https://api.anthropic.com/v1
+    roles: [planner]
+    context_tokens: 200000
+    vram_gb: 0
+    ram_gb: 0
+    thinking: "thinking.budget_tokens:16384"
+    cost_per_mtok: 15
+    enabled: true
+    home_location: cloud
+    fallback_location: none
