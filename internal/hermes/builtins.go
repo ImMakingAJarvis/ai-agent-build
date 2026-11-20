@@ -21,8 +21,8 @@ import (
 func DefaultActions() []Action {
 	actions := []Action{
 		{
-			Key:              "enqueue_job",
-			Description:      "Enqueue a new build job into the worker queue",
+			Key:                "enqueue_job",
+			Description:        "Enqueue a new build job into the worker queue",
 			RequiresFullAccess: true,
 			Run: func(ctx context.Context, params map[string]string) (string, error) {
 				return runEnqueueJob(ctx, params)
@@ -64,8 +64,8 @@ func DefaultActions() []Action {
 			},
 		},
 		{
-			Key:              "delegate",
-			Description:     "Break a complex task into multiple smaller jobs and enqueue them for the worker",
+			Key:                "delegate",
+			Description:        "Break a complex task into multiple smaller jobs and enqueue them for the worker",
 			RequiresFullAccess: true,
 			Run: func(ctx context.Context, params map[string]string) (string, error) {
 				return runDelegate(ctx, params)
@@ -110,27 +110,26 @@ func runEnqueueJob(_ context.Context, params map[string]string) (string, error) 
 	return fmt.Sprintf("job enqueued: %s (%s)", title, msg.ID), nil
 }
 
-func runCheckStatus(_ context.Context, _ map[string]string) (string, error) {
-	// Check engine container status via docker.
-	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", "jarvis-engine").Output()
-	status := "unknown"
-	if err == nil {
-		status = strings.TrimSpace(string(out))
+// runCheckStatus answers "what are you working on?" / "are you alive?".
+// It must work from inside the chat container — no docker, no journal — so
+// it composes the container-visible checks from hoststatus.go: the brain
+// engine over HTTP, the host agent-run loop via the shared PID namespace,
+// and the live job queue from the mounted store.
+func runCheckStatus(ctx context.Context, _ map[string]string) (string, error) {
+	var b strings.Builder
+	b.WriteString("brain: " + engineHealth(ctx) + "\n")
+	if AgentRunLoopUp() {
+		b.WriteString("agent-run: up\n")
+	} else {
+		b.WriteString("agent-run: DOWN\n")
 	}
-
-	// Check for recent job activity.
-	out2, err2 := exec.Command("journalctl", "-u", "jarvis-worker", "--no-pager",
-		"-n", "5", "--since", "1 hour").Output()
-	log := "(no recent log entries)"
-	if err2 == nil && len(out2) > 0 {
-		log = strings.TrimSpace(string(out2))
-		// Truncate if too long for Discord.
-		if len(log) > 1800 {
-			log = log[:1800] + "..."
+	if summary, current, err := queueSnapshot(); err == nil {
+		b.WriteString("queue: " + summary)
+		if current != "" {
+			b.WriteString("\nnow: " + current)
 		}
 	}
-
-	return fmt.Sprintf("engine status: %s\n\nrecent log:\n%s", status, log), nil
+	return b.String(), nil
 }
 
 func runListJobs(_ context.Context, _ map[string]string) (string, error) {
@@ -156,10 +155,17 @@ func runListJobs(_ context.Context, _ map[string]string) (string, error) {
 	return strings.TrimSpace(b.String()), nil
 }
 
+// The chat container has no docker access, so these fail — report it
+// clearly instead of a bare "failed to start engine: " (an empty detail
+// from a missing binary).
 func runStartEngine(_ context.Context, _ map[string]string) (string, error) {
 	out, err := exec.Command("docker", "start", "jarvis-engine").CombinedOutput()
 	if err != nil {
-		return fmt.Sprintf("failed to start engine: %s", string(out)), nil
+		detail := strings.TrimSpace(string(out))
+		if detail == "" {
+			detail = "docker is not available in the chat container"
+		}
+		return fmt.Sprintf("failed to start engine: %s", detail), nil
 	}
 	return "jarvis-engine started successfully", nil
 }
@@ -167,23 +173,27 @@ func runStartEngine(_ context.Context, _ map[string]string) (string, error) {
 func runStopEngine(_ context.Context, _ map[string]string) (string, error) {
 	out, err := exec.Command("docker", "stop", "jarvis-engine").CombinedOutput()
 	if err != nil {
-		return fmt.Sprintf("failed to stop engine: %s", string(out)), nil
+		detail := strings.TrimSpace(string(out))
+		if detail == "" {
+			detail = "docker is not available in the chat container"
+		}
+		return fmt.Sprintf("failed to stop engine: %s", detail), nil
 	}
 	return "jarvis-engine stopped successfully", nil
 }
 
 // duckduckgoResult holds a single result from the DuckDuckGo instant answer API.
 type duckduckgoResult struct {
-	FirstURL  string `json:"FirstURL"`
-	Name      string `json:"Name"`
-	Text      string `json:"Text"`
+	FirstURL string `json:"FirstURL"`
+	Name     string `json:"Name"`
+	Text     string `json:"Text"`
 }
 
 // duckduckgoResponse is the top-level response from the DuckDuckGo API.
 type duckduckgoResponse struct {
-	AbstractText  string              `json:"AbstractText"`
-	AbstractURL   string              `json:"AbstractURL"`
-	RelatedTopics []duckduckgoResult  `json:"RelatedTopics"`
+	AbstractText  string             `json:"AbstractText"`
+	AbstractURL   string             `json:"AbstractURL"`
+	RelatedTopics []duckduckgoResult `json:"RelatedTopics"`
 }
 
 func runWebSearch(_ context.Context, params map[string]string) (string, error) {
@@ -276,9 +286,9 @@ func searchDuckDuckGo(query string) (string, error) {
 
 // wikiSearchResult holds a single Wikipedia search result.
 type wikiSearchResult struct {
-	Title string `json:"title"`
+	Title   string `json:"title"`
 	Snippet string `json:"snippet"`
-	PageID int    `json:"pageid"`
+	PageID  int    `json:"pageid"`
 }
 
 // wikiSearchResponse is the Wikipedia search API response.

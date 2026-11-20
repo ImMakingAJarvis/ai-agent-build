@@ -5,12 +5,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/chat"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/hermes"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/photo"
 )
 
@@ -161,19 +161,11 @@ func newChatJobID() string {
 	return fmt.Sprintf("chat-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
 }
 
-// agentRunUp reports whether the host agent-run loop is alive. The chat
-// daemon runs in a container, so the check only works because the service
-// shares the host PID namespace (docker-compose `pid: host`) and the image
-// carries procps (docker/jarvis-go/Dockerfile) — without either, pgrep
-// cannot see host processes and the check always reports "not running".
-//
-// The pattern is anchored to the loop's main process: the systemd unit
-// runs the bash script itself, so its command line is exactly
-// "bash /usr/local/bin/agent-run". Unanchored, any unrelated command line
-// that merely mentions the path (a worker round editing agent-run, a grep
-// in a journal, ...) would count as the loop being up.
+// agentRunUp reports whether the host agent-run loop is alive — the check
+// (and the reasoning behind it) lives in hermes.AgentRunLoopUp, shared with
+// the check_status action.
 func agentRunUp() bool {
-	return exec.Command("pgrep", "-f", "^bash /usr/local/bin/agent-run").Run() == nil
+	return hermes.AgentRunLoopUp()
 }
 
 func enqueueConfirm(id string) string {
