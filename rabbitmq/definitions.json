@@ -85,6 +85,34 @@
       }
     },
     {
+      "name": "review.sonnet",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "review.opus",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "review.fable",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "review.local",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
       "name": "jobs.gpu",
       "vhost": "/",
       "durable": true,
@@ -197,6 +225,38 @@
       "destination": "background",
       "destination_type": "queue",
       "routing_key": "background.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "review.sonnet",
+      "destination_type": "queue",
+      "routing_key": "review.sonnet.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "review.opus",
+      "destination_type": "queue",
+      "routing_key": "review.opus.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "review.fable",
+      "destination_type": "queue",
+      "routing_key": "review.fable.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "review.local",
+      "destination_type": "queue",
+      "routing_key": "review.local.#",
       "arguments": {}
     },
     {
