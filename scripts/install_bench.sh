@@ -23,6 +23,17 @@ fi
 for f in app.py config.py schema.sql models.yaml prompts.yaml test_loader.py; do
   install -m 644 "$REPO/bench/$f" "$DEPLOY/$f"
 done
+# Input image assets for ref/i2i prompts (bench/imgs -> /opt/jarvis-bench/imgs).
+# Deployed next to the code so the generation runner (T2I-5) can read the
+# reference/modification inputs; generated OUTPUT images go to $LIB/imgs
+# (/var/lib/jarvis/bench/imgs) instead — inputs and outputs are kept apart.
+if [[ -d "$REPO/bench/imgs" ]]; then
+  mkdir -p "$DEPLOY/imgs"
+  for img in "$REPO/bench/imgs"/*; do
+    [[ -f "$img" ]] || continue
+    install -m 644 "$img" "$DEPLOY/imgs/"
+  done
+fi
 echo "DEPLOYED_FROM $REPO @ $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo nogit) $(date -Is)" \
   >"$DEPLOY/DEPLOYED_FROM"
 echo "==> Deployed bench service to $DEPLOY"

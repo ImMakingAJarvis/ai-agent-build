@@ -1,23 +1,197 @@
-# Fixed prompt set for the bench (plan-jarvis-model-downloader-1793259146).
+# Fixed prompt set for the t2i bench (plane T2I-3).
 #
-# SAMPLE entries so the loader is testable — the real 20-prompt set (incl.
-# reference-image, img2img and subject-consistency tests) lands in the
-# "20-prompt set + input image assets" job of this plan.
+# 20 prompts across six categories. Every candidate model runs all the
+# prompts its caps allow, so each model renders a fixed number of images:
+#   t2i-photoreal     5 prompts x 1 image
+#   t2i-style         3 prompts x 1 image
+#   t2i-hard          4 prompts x 1 image   (text / hands / counting / macro)
+#   t2i-consistency   2 prompts x 4 images  (subject permanence across seeds)
+#   ref               3 prompts x 1 image   (reference-image input)
+#   i2i               3 prompts x 1 image   (image modification)
+#   ---------------------------------------------------------------------
+#   total             20 prompts = 26 images per model
 #
 # One entry per prompt. id is the upsert key and the id used in the
-# generations table. caps: capabilities the model must have; images: input
-# image file names (for img2img/ref prompts), relative to bench/imgs.
+# generations table. caps: capabilities the model must have to run the
+# prompt. images: input image file names (for ref/i2i prompts), relative to
+# bench/imgs (deployed to /opt/jarvis-bench/imgs by scripts/install_bench.sh).
+# repeats: how many times the runner (T2I-5) generates a prompt — 4 for the
+# consistency prompts (subject permanence across seeds), 1 otherwise. The
+# loader ignores this key; it is read by the generation runner.
 prompts:
-  - id: p01-portrait
-    title: Portrait
-    category: t2i
+  # --- t2i-photoreal (5) ---
+  - id: p01-keeper-portrait
+    title: Photoreal — portrait
+    category: t2i-photoreal
     prompt_text: >-
-      A portrait of an elderly lighthouse keeper at dusk, weathered face,
-      oil painting style
+      A photorealistic portrait of an elderly lighthouse keeper at dusk,
+      weathered face, wind-blown white beard, heavy wool coat, soft overcast
+      light, shallow depth of field
     caps: [t2i]
-  - id: p02-landscape
-    title: Landscape
-    category: t2i
+  - id: p02-mountain-valley
+    title: Photoreal — landscape
+    category: t2i-photoreal
     prompt_text: >-
-      A foggy pine forest at dawn, wide angle, soft light, photographic
+      A photorealistic wide-angle photo of a snow-dusted mountain valley at
+      sunrise, a river winding through the valley floor, snow-capped peaks,
+      golden hour light, crisp cold air
     caps: [t2i]
+  - id: p03-rain-crosswalk
+    title: Photoreal — street
+    category: t2i-photoreal
+    prompt_text: >-
+      A photorealistic street photo of a rainy city crosswalk at night, wet
+      asphalt reflecting neon signs, a person with a transparent umbrella,
+      long-exposure light trails from passing traffic
+    caps: [t2i]
+  - id: p04-espresso
+    title: Photoreal — food
+    category: t2i-photoreal
+    prompt_text: >-
+      A photorealistic close-up of a freshly pulled espresso in a ceramic cup,
+      steam rising, dark wooden table, warm morning light from a side window,
+      macro focus on the crema
+    caps: [t2i]
+  - id: p05-sea-turtle
+    title: Photoreal — animal
+    category: t2i-photoreal
+    prompt_text: >-
+      A photorealistic photo of a green sea turtle swimming in clear turquoise
+      water, seen from above, sunlight patterns dappling the pale sand below
+    caps: [t2i]
+
+  # --- t2i-style (3) ---
+  - id: p06-oil-lighthouse
+    title: Style — oil painting
+    category: t2i-style
+    prompt_text: >-
+      A lighthouse on a rocky headland at dusk in the style of a 19th-century
+      maritime oil painting, visible brushstrokes, warm lamp light against a
+      stormy teal sky
+    caps: [t2i]
+  - id: p07-watercolor-harbor
+    title: Style — watercolor
+    category: t2i-style
+    prompt_text: >-
+      A watercolor painting of a small harbor with a few fishing boats, loose
+      wet-on-wet technique, soft color bleeds, white paper showing through,
+      gentle morning mist
+    caps: [t2i]
+  - id: p08-flat-poster
+    title: Style — flat screen print
+    category: t2i-style
+    prompt_text: >-
+      A flat mid-century screen-print poster of a mountain landscape, limited
+      palette of four colors, bold geometric shapes, subtle halftone texture,
+      retro travel-poster composition
+    caps: [t2i]
+
+  # --- t2i-hard (4): the categories that separate strong models from weak
+  - id: p09-chalk-sign
+    title: Hard — text rendering
+    category: t2i-hard
+    prompt_text: >-
+      A photorealistic photo of a wooden cafe menu chalkboard that clearly
+      reads "TODAY: FRESH COFFEE" in neat chalk lettering, mounted on a brick
+      wall, warm interior light
+    caps: [t2i]
+  - id: p10-hands-pot
+    title: Hard — hands
+    category: t2i-hard
+    prompt_text: >-
+      A photorealistic close-up of two hands holding a small clay pot, fingers
+      wrapped naturally around it, correct anatomy, soft studio light, neutral
+      gray background
+    caps: [t2i]
+  - id: p11-seven-apples
+    title: Hard — counting
+    category: t2i-hard
+    prompt_text: >-
+      A photorealistic photo of exactly seven red apples arranged in a neat
+      row on a white table, evenly spaced, soft even light, no other objects
+    caps: [t2i]
+  - id: p12-macro-droplet
+    title: Hard — macro
+    category: t2i-hard
+    prompt_text: >-
+      An extreme macro photograph of a single water droplet on a green leaf,
+      the droplet reflecting a tiny inverted landscape, razor-thin depth of
+      field, natural light
+    caps: [t2i]
+
+  # --- t2i-consistency (2 x 4): subject permanence, same subject / 4 seeds
+  - id: p13-robot-consistency
+    title: Consistency — robot
+    category: t2i-consistency
+    repeats: 4
+    prompt_text: >-
+      A friendly small robot with a round glossy white head, two large friendly
+      blue eyes, and a small orange chest light, standing centered on a neutral
+      gray studio background, full body, soft even light
+    caps: [t2i]
+  - id: p14-red-panda-consistency
+    title: Consistency — red panda
+    category: t2i-consistency
+    repeats: 4
+    prompt_text: >-
+      A fluffy red panda sitting upright in deep fresh snow, facing the camera,
+      soft overcast winter light, fur detail, centered composition
+    caps: [t2i]
+
+  # --- ref (3): reference-image input (images = input file in bench/imgs)
+  - id: p15-ref-panda-subject
+    title: Ref — match subject
+    category: ref
+    prompt_text: >-
+      Match the reference image: a photorealistic close-up portrait of the
+      same fluffy red panda, keeping the same subject and fur markings, in a
+      different setting (a sunlit forest clearing), soft natural light
+    caps: [ref]
+    images: [ref-red-panda.png]
+  - id: p16-ref-lighthouse-style
+    title: Ref — match style
+    category: ref
+    prompt_text: >-
+      In the style of the reference image (19th-century maritime oil painting,
+      visible brushstrokes), paint a lighthouse at dawn on a calm sea, warm
+      light
+    caps: [ref]
+    images: [ref-lighthouse-oil.png]
+  - id: p17-ref-poster-style
+    title: Ref — match style
+    category: ref
+    prompt_text: >-
+      In the style of the reference image (flat mid-century screen-print,
+      limited palette, bold shapes), design a corporate safety poster about
+      wearing a seatbelt, single simple figure
+    caps: [ref]
+    images: [ref-poster-flat.png]
+
+  # --- i2i (3): image modification (images = input file in bench/imgs)
+  - id: p18-i2i-apple-green
+    title: i2i — recolor + add
+    category: i2i
+    prompt_text: >-
+      Modify the reference image: change the red apple to a green apple and add
+      a small paring knife beside it, keep the same composition, table and
+      lighting
+    caps: [i2i]
+    images: [i2i-apple.png]
+  - id: p19-i2i-robot-gold
+    title: i2i — recolor + detail
+    category: i2i
+    prompt_text: >-
+      Modify the reference image: recolor the robot head to brushed gold and
+      add a single small antenna on top, keep the same studio lighting and
+      camera angle
+    caps: [i2i]
+    images: [i2i-robot.png]
+  - id: p20-i2i-lighthouse-night
+    title: i2i — scene change
+    category: i2i
+    prompt_text: >-
+      Modify the reference image: change the scene to night, add stars to the
+      sky and a crescent moon, keep the oil-painting style and the same
+      lighthouse composition
+    caps: [i2i]
+    images: [ref-lighthouse-oil.png]
