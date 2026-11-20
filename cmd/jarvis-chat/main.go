@@ -270,11 +270,12 @@ func main() {
 					return
 				}
 
-				// !fullauto on / off sets or clears the NoBrakes full-auto
-				// flag in Redis: when on, the agent-run loop runs the next
-				// ready job immediately at any time of day (owner-only, same
-				// as !automode).
-				if _, _, isFullAuto := cutFullAuto(content); isFullAuto {
+				// !fullauto on <reviewer> / off sets or clears the NoBrakes
+				// full-auto flag in Redis (storing the reviewer when on):
+				// when on, the agent-run loop runs the next ready job
+				// immediately at any time of day (owner-only, same as
+				// !automode).
+				if _, _, _, isFullAuto := cutFullAuto(content); isFullAuto {
 					handleFullAuto(d, agentjob.StreamAddr(), content)
 					return
 				}
