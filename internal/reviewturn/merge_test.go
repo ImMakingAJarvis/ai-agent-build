@@ -1,9 +1,11 @@
 package reviewturn
 
 import (
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/reviewcfg"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/reviewstate"
 )
 
@@ -144,5 +146,28 @@ func TestMerge(t *testing.T) {
 				t.Errorf("reason %q does not contain %q", d.Reason, row.wantSub)
 			}
 		})
+	}
+}
+
+// TestMergeAllow covers Job 8b: a nil allow list asks Nathan, and the
+// repo's config/review.yaml still has an empty merge_allow.
+func TestMergeAllow(t *testing.T) {
+	d := Decide(ready("sonnet"), "sonnet", nil, false)
+	if d.Kind != Ask {
+		t.Fatalf("Decide with nil allow = %q (%q), want ask", d.Kind, d.Reason)
+	}
+	if !strings.Contains(d.Reason, "allow") {
+		t.Errorf("reason %q does not contain %q", d.Reason, "allow")
+	}
+
+	cfg, err := reviewcfg.Load("../../config/review.yaml")
+	if os.IsNotExist(err) {
+		t.Skip("config/review.yaml is absent")
+	}
+	if err != nil {
+		t.Fatalf("loading config/review.yaml: %v", err)
+	}
+	if len(cfg.MergeAllow) != 0 {
+		t.Errorf("merge_allow = %v, want empty", cfg.MergeAllow)
 	}
 }
