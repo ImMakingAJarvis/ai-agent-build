@@ -201,6 +201,20 @@ const (
 	BackgroundQueue = "background"
 )
 
+// Review queues (PR review build, Job 3 of docs/pr-review-build-plan.md):
+// one per reviewer — the review worker consumes them (Job 6). They carry
+// review requests, not fix-band agent jobs: no priority, no agent-run
+// consumer.
+const (
+	ReviewSonnetQueue = "review.sonnet"
+	ReviewOpusQueue   = "review.opus"
+	ReviewFableQueue  = "review.fable"
+	ReviewLocalQueue  = "review.local"
+)
+
+// ReviewQueues lists the review queues (PR review build, Job 3).
+var ReviewQueues = []string{ReviewSonnetQueue, ReviewOpusQueue, ReviewFableQueue, ReviewLocalQueue}
+
 // AllQueues lists the queues in priority order (highest first). Image
 // (photo generation) sits above coding and background — it almost always
 // takes priority, waiting only behind voice and fix.

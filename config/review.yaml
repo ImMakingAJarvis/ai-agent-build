@@ -1,0 +1,44 @@
+# Review queues. Loaded by internal/reviewcfg.
+month_cap_usd: 10
+max_open_prs: 2
+max_rounds: 3
+max_open_points: 10
+# Empty until Nathan adds a model id. No model merges to main while this is empty.
+merge_allow: []
+# Author response jobs use class build at this priority (higher runs first
+# inside the build band, and every fix still runs before any build).
+author_job_class: build
+author_job_priority: 500
+prices_usd_per_mtok:
+  sonnet: 3
+  opus: 15
+  fable: 10
+reviewers:
+  sonnet:
+    queue: review.sonnet
+    kind: cloud
+    needs_release: false
+  opus:
+    queue: review.opus
+    kind: cloud
+    needs_release: false
+  fable:
+    queue: review.fable
+    kind: cloud
+    needs_release: true
+  qwen3.8-27b:
+    queue: review.local
+    kind: local
+    needs_release: false
+sensitive_paths:
+  - cmd/resourced/
+  - internal/streamwatcher/
+  - scripts/jarvis-watchdog
+  - scripts/voice_service.py
+  - scripts/jarvis-voice.service
+  - internal/dashboard/
+  - cmd/dashboard/
+  - internal/secrets/
+  - scripts/jarvis-secrets
+  - docker-compose.yml
+  - scripts/agent-run

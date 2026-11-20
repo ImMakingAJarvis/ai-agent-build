@@ -270,11 +270,12 @@ func main() {
 					return
 				}
 
-				// !fullauto on / off sets or clears the NoBrakes full-auto
-				// flag in Redis: when on, the agent-run loop runs the next
-				// ready job immediately at any time of day (owner-only, same
-				// as !automode).
-				if _, _, isFullAuto := cutFullAuto(content); isFullAuto {
+				// !fullauto on <reviewer> / off sets or clears the NoBrakes
+				// full-auto flag in Redis (storing the reviewer when on):
+				// when on, the agent-run loop runs the next ready job
+				// immediately at any time of day (owner-only, same as
+				// !automode).
+				if _, _, _, isFullAuto := cutFullAuto(content); isFullAuto {
 					handleFullAuto(d, agentjob.StreamAddr(), content)
 					return
 				}
@@ -285,6 +286,15 @@ func main() {
 				// same as !automode / !fullauto).
 				if _, _, isKeepGoing := cutKeepGoing(content); isKeepGoing {
 					handleKeepGoing(d, agentjob.StreamAddr(), content)
+					return
+				}
+
+				// !review <pr> <reviewer> requests a PR review (the job
+				// lands on the reviewer's queue; a held Fable review is
+				// released with !review-release <pr>) — Job 5 of
+				// docs/pr-review-build-plan.md (owner-only, same as the
+				// NoBrakes commands above).
+				if handleReview(d, content) {
 					return
 				}
 

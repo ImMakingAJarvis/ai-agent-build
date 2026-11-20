@@ -968,6 +968,10 @@ func runPurge(args []string) error {
 var workerOwnedQueues = []string{
 	queue.VoiceQueue, queue.FixQueue, queue.CodingQueue, queue.BackgroundQueue,
 	queue.JobsGPUQueue, queue.JobsCPUQueue, queue.JobsIGPUQueue, "image",
+	// Review queues (PR review build, Job 3): the review worker consumes
+	// them (Job 6); jarvis-mq publish is the review request path to them.
+	queue.ReviewSonnetQueue, queue.ReviewOpusQueue, queue.ReviewFableQueue,
+	queue.ReviewLocalQueue,
 }
 
 func runDelete(args []string) error {

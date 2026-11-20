@@ -43,6 +43,16 @@ const (
 	// Discord !fullauto). A missing key reads as "off" — the safe default.
 	FullAutoKey = "nobrakes:full_auto"
 
+	// FullAutoReviewerKey holds the reviewer id full auto mode reviews
+	// with — the id named in `!fullauto on <reviewer>` (one of the
+	// reviewers in config/review.yaml). It is the companion to
+	// FullAutoKey: the on/off flag says whether the loop runs jobs, this
+	// key says which reviewer gets the PR when a full-auto job opens one.
+	// A missing key reads as "" — no reviewer stored; full auto's on
+	// path requires the key to be set. Written by the operator (Discord
+	// !fullauto on|off); `!fullauto off` clears it.
+	FullAutoReviewerKey = "nobrakes:full_auto_reviewer"
+
 	// KeepGoingKey holds the keep-going switch: "on" or "off". When "on",
 	// a failed auto-executed job does NOT pause autonomous execution:
 	// the owner is still notified, auto_mode/full_auto stay as they are,
@@ -159,6 +169,27 @@ func (s *Store) SetFullAuto(ctx context.Context, on bool) error {
 		return s.client.Set(ctx, FullAutoKey, AutoModeOn, 0).Err()
 	}
 	return s.client.Set(ctx, FullAutoKey, AutoModeOff, 0).Err()
+}
+
+// GetFullAutoReviewer returns the reviewer id stored for full auto mode,
+// or "" when the key is missing (no reviewer stored).
+func (s *Store) GetFullAutoReviewer(ctx context.Context) (string, error) {
+	v, err := s.client.Get(ctx, FullAutoReviewerKey).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return v, err
+}
+
+// SetFullAutoReviewer stores the reviewer id full auto mode reviews with
+// ("" deletes the key). It is the manual-override path: the Discord
+// `!fullauto on <reviewer>` command stores the id, `!fullauto off`
+// clears it.
+func (s *Store) SetFullAutoReviewer(ctx context.Context, reviewer string) error {
+	if reviewer == "" {
+		return s.client.Del(ctx, FullAutoReviewerKey).Err()
+	}
+	return s.client.Set(ctx, FullAutoReviewerKey, reviewer, 0).Err()
 }
 
 // GetKeepGoing returns the current keep-going value. A missing key reads

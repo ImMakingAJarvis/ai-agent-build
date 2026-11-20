@@ -8,8 +8,10 @@
 #      with a WAKE attached: the sender's parked job wakes when the
 #      reviewer's `answer` (same corr) lands on the sender's inbox — the
 #      listener-wake pair from task EVB-35;
-#   2. enqueues the reviewer job (driver sonnet/opus/local, class fix,
-#      high priority so the loop pulls it right after the sender yields);
+#   2. publishes one message to the reviewer's queue (review.sonnet /
+#      review.opus / review.local — PR review build, Job 3 of
+#      docs/pr-review-build-plan.md): the review worker consumes it;
+#      reviews no longer ride the fix band;
 #   3. mirrors the request onto the board item (--board) so the exchange is
 #      readable on Plane. The reviewer's answer mirrors too (it carries the
 #      same board ref).
@@ -79,9 +81,9 @@ done
 
 [[ "$pr" =~ ^[0-9]+$ ]] || { echo "jarvis-review: <PR-N> must be a number (got $pr)" >&2; exit 2; }
 case "$reviewer" in
-  sonnet)  rdriver="sonnet" ridentity="sonnet" ;;
-  planner) rdriver="opus"   ridentity="planner" ;;
-  local)   rdriver="local"  ridentity="brain" ;;
+  sonnet)  rdriver="sonnet" ridentity="sonnet"  rqueue="review.sonnet" ;;
+  planner) rdriver="opus"   ridentity="planner" rqueue="review.opus" ;;
+  local)   rdriver="local"  ridentity="brain"   rqueue="review.local" ;;
   *) echo "jarvis-review: --reviewer must be sonnet, planner or local (got $reviewer)" >&2; exit 2 ;;
 esac
 [[ -n "$wake" ]] || { echo "jarvis-review: no --wake and \$JARVIS_JOB_ID is unset — pass --wake <job>" >&2; exit 2; }
@@ -117,54 +119,26 @@ if ! jarvis-mq "${tell_args[@]}"; then
   exit 1
 fi
 
-# 2. The reviewer job — self-contained for a fresh sonnet/opus/local
-#    session. Its round prompt carries the reviewer's inbox (the mailbox
-#    drain step), and the instructions below are the whole job.
-reviewer_instructions=$(cat <<EOF
-You are the PR reviewer (${ridentity}) in the EVB-36 reviewer flow. A
-review_request for PR #${pr} is waiting in your inbox
-(agent.${ridentity}.inbox). Do the review and answer — that answer is what
-wakes the sender's parked job, so the corr MUST be ${corr}.
+# 2. The review job — one message to the reviewer's queue. Reviews no
+#    longer ride the fix band (PR review build, Job 3 of
+#    docs/pr-review-build-plan.md): the review worker consumes the queue
+#    and runs the review. The message names the PR, the branch and the
+#    reviewer — nothing else.
+if ! jarvis-mq publish "$rqueue" \
+  --title "review PR #${pr}" \
+  --payload "pr=${pr}" \
+  --payload "branch=${branch}" \
+  --payload "reviewer=${reviewer}" \
+  --source jarvis-review; then
+  echo "jarvis-review: review message failed to publish" >&2
+  exit 1
+fi
 
-Steps:
-1. Read the request:  jarvis-mq inbox ${ridentity}
-   (find the review_request, corr ${corr}: PR #${pr}, branch ${branch},
-   summary: ${summary})
-2. Review the PR WITHOUT touching the shared working tree
-   (/home/agent/ai-agent-build is the brain's live tree):
-   GH_TOKEN=\$(ghapp-token) gh pr view ${pr} --json title,body,files,mergeable
-   GH_TOKEN=\$(ghapp-token) gh pr diff ${pr}
-   git -C /home/agent/ai-agent-build fetch origin pull/${pr}/head
-   git -C /home/agent/ai-agent-build worktree add --detach /tmp/review-pr-${pr} FETCH_HEAD
-   cd /tmp/review-pr-${pr} && go build ./... && go vet ./... && go test ./...
-   Judge: correctness of the diff, new code covered by tests, docs match the
-   code, and nothing stray in the diff (notes/**, secrets, .pyc, binaries).
-3. Post the verdict as the answer (subject = one-line verdict, body = the
-   findings, one per line, file:line where useful):
-   jarvis-mq answer brain --from ${ridentity} --corr ${corr} ${board:+--board ${board}} "<approve|request_changes>: <verdict>" --body "<findings>"
-   Verdict is "approve" when the PR is mergeable and any findings are
-   non-blocking; "request_changes" when something must be fixed first.
-4. Clear the request:  jarvis-mq take ${ridentity}
-5. Clean up:  git -C /home/agent/ai-agent-build worktree remove --force /tmp/review-pr-${pr}
-6. End the round.
-
-Hard rules: read-only on the repo (the worktree is the only place you build).
-No pushes, no commits, no PR edits, no engine/stack changes, no notes. If you
-cannot complete the review (branch missing, a gate failure you cannot
-explain), still answer — with "request_changes: could not complete review —
-<why>" — so the sender's job wakes instead of timing out.
-EOF
-)
-
-job_id="$(jarvis-jobs add -driver "$rdriver" -class fix -priority 100 \
-  -id "review-pr-${pr}-$(date +%s)" \
-  -title "review PR #${pr} (corr ${corr})" \
-  -instructions "$reviewer_instructions")"
-
-echo "jarvis-review: reviewer job ${job_id} enqueued (driver ${rdriver}, class fix, priority 100)"
+echo "jarvis-review: review message published to ${rqueue} (reviewer ${reviewer})"
 echo
-echo "Next (sender): yield and end the round — the loop pulls ${job_id},"
-echo "the reviewer answers on agent.brain.inbox (corr ${corr}), the wake fires."
+echo "Next (sender): yield and end the round — the review worker consumes"
+echo "${rqueue} and reviews; if a reviewer session answers the mailbox"
+echo "request (corr ${corr}), the wake fires."
 echo
 echo "  jarvis-jobs yield ${wake} --wait-on ${corr} \\"
 echo "    --note \"PR #${pr} open, review requested of ${reviewer}\" \\"

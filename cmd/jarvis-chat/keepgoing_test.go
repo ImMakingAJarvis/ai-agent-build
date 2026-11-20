@@ -45,7 +45,7 @@ func TestCutKeepGoing(t *testing.T) {
 				c.in, on, valid, isCommand, c.on, c.valid, c.isCommand)
 		}
 		for _, cross := range []string{"!keepgoing on", "!keep_going on"} {
-			if o, v, is := cutFullAuto(cross); o || v || is {
+			if o, _, v, is := cutFullAuto(cross); o || v || is {
 				t.Errorf("cutFullAuto(%q) claimed !keepgoing: on=%v valid=%v isCommand=%v", cross, o, v, is)
 			}
 			if o, v, is := cutAutoMode(cross); o || v || is {

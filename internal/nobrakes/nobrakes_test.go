@@ -133,6 +133,32 @@ func TestGetFullAutoCorruptValueIsOff(t *testing.T) {
 	}
 }
 
+func TestFullAutoReviewerKey(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	// Missing key reads as "" — no reviewer stored.
+	if v, err := s.GetFullAutoReviewer(ctx); err != nil || v != "" {
+		t.Fatalf("missing key = %q, %v; want \"\", nil", v, err)
+	}
+	// Roundtrip: store, read back.
+	if err := s.SetFullAutoReviewer(ctx, "sonnet"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := s.GetFullAutoReviewer(ctx); err != nil || v != "sonnet" {
+		t.Fatalf("after set = %q, %v; want \"sonnet\", nil", v, err)
+	}
+	// "" deletes the key: the flag itself is untouched.
+	if err := s.SetFullAutoReviewer(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := s.GetFullAutoReviewer(ctx); err != nil || v != "" {
+		t.Fatalf("after clear = %q, %v; want \"\", nil", v, err)
+	}
+	if on, _ := s.FullAutoOn(ctx); on {
+		t.Error("FullAutoOn = true — clearing the reviewer must not touch the flag")
+	}
+}
+
 func TestGetKeepGoingMissingKeyIsOff(t *testing.T) {
 	s := newTestStore(t)
 	v, err := s.GetKeepGoing(context.Background())
