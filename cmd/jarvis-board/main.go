@@ -8,6 +8,8 @@
 //	jarvis-board state <item> <state> [msg] move the item to <state> (by name,
 //	                                        case-insensitive); with a msg, also
 //	                                        post "<model>: <msg>"
+//	jarvis-board assign <item> <email>  set the assignee to that workspace member
+//	jarvis-board describe <item>        replace the description with stdin (plain text)
 //
 // <item> is a work-item reference: a UUID, a display id like "AAB-43",
 // or a bare sequence "43". A prefixed display id selects its project by
@@ -35,6 +37,7 @@ import (
 	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/planeepic"
 )
 
 const usage = `usage (flags go before the positional args):
@@ -43,10 +46,15 @@ const usage = `usage (flags go before the positional args):
   jarvis-board comment <item> [message...]
   jarvis-board state <item> <state> [message...]
   jarvis-board done <item> [message...]
+  jarvis-board assign <item> <email>
+  jarvis-board describe <item>          description is plain text on stdin
 
   "state" moves the item to <state> (matched by name, case-insensitive);
   "done" is a shortcut for state <item> Done. With a trailing message the
   command also posts it as a model-prefixed comment.
+  "assign" sets the single assignee to the workspace member with that email
+  and adds them to the project as an editor if they are not already a member.
+  "describe" replaces the description with stdin, escaped as HTML.
 
 flags:
   --project <ref>   project ref (default $PLANE_PROJECT or "AAB")
@@ -135,6 +143,27 @@ func main() {
 		}
 		moveState(ctx, c, p, wi, ref, link, args[1], o.model, args[2:])
 
+	case "assign":
+		if len(args) < 2 {
+			fail(usage)
+		}
+		assignItem(ctx, c, p, wi, ref, link, args[1])
+
+	case "describe":
+		body, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fail(err.Error())
+		}
+		text := strings.TrimSpace(string(body))
+		if text == "" {
+			fail("empty description")
+		}
+		htmlBody := "<p>" + strings.ReplaceAll(html.EscapeString(text), "\n", "<br>") + "</p>"
+		if _, err := c.SetDescriptionHTML(ctx, p.ID, wi.ID, htmlBody); err != nil {
+			fail(err.Error())
+		}
+		fmt.Printf("%s description set %s\n", ref, link)
+
 	case "done":
 		// The common completion case, spelled out for the worker.
 		moveState(ctx, c, p, wi, ref, link, "Done", o.model, args[1:])
@@ -161,6 +190,47 @@ func moveState(ctx context.Context, c *plane.Client, p *plane.Project, wi *plane
 		}
 	}
 	fmt.Printf("%s -> %s %s\n", ref, st.Name, link)
+}
+
+// assignItem sets the card's only assignee to the workspace member with
+// email, adding them to the project as an editor when they are not already
+// a member (a viewer cannot be assigned work on this Plane build).
+func assignItem(ctx context.Context, c *plane.Client, p *plane.Project, wi *plane.WorkItem, ref, link, email string) {
+	email = strings.TrimSpace(email)
+	members, err := c.ListWorkspaceMembers(ctx)
+	if err != nil {
+		fail(err.Error())
+	}
+	var userID string
+	for _, m := range members {
+		if strings.EqualFold(m.Email, email) {
+			userID = m.ID
+			break
+		}
+	}
+	if userID == "" {
+		fail("no workspace member " + email)
+	}
+	projMembers, err := c.ListProjectMembers(ctx, p.ID)
+	if err != nil {
+		fail(err.Error())
+	}
+	inProject := false
+	for _, m := range projMembers {
+		if m.ID == userID {
+			inProject = true
+			break
+		}
+	}
+	if !inProject {
+		if err := c.AddProjectMember(ctx, p.ID, userID, planeepic.EditorRole); err != nil {
+			fail(err.Error())
+		}
+	}
+	if _, err := c.SetAssignees(ctx, p.ID, wi.ID, []string{userID}); err != nil {
+		fail(err.Error())
+	}
+	fmt.Printf("%s assigned %s %s\n", ref, email, link)
 }
 
 // commentHTML wraps a model-prefixed message in the comment_html

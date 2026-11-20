@@ -526,6 +526,41 @@ func TestHandleWebhookHumanEventLogsAndQueues(t *testing.T) {
 	}
 }
 
+// TestPlanningByAssignee queues a plan from a Planning card assigned to
+// Fable, with no plan: label.
+func TestPlanningByAssignee(t *testing.T) {
+	b, f, store, dir := newBridge(t, "jarvis-bot@x")
+	modelsFile := filepath.Join(dir, "models.yaml")
+	writeTestRegistry(t, modelsFile, "claude-fable-5-1", 0, 0)
+	b.cfg.ModelsFile = modelsFile
+	b.cfg.FitSource = fixedReadings{fit.Readings{FreeVRAMGB: 24, FreeRAMGB: 64}}
+
+	f.mu.Lock()
+	f.members = append(f.members, fakeMember{id: "user-fable", email: "fable-bot@nathan.homes"})
+	f.mu.Unlock()
+	f.setItem("proj-1", "wi-plan", "Uploaded plan", "st-planning", "", 3)
+	f.mu.Lock()
+	f.items["proj-1"]["wi-plan"]["assignees"] = []string{"user-fable"}
+	f.mu.Unlock()
+
+	body := eventBody("wi-plan", "proj-1", "nathan@x", "assignees")
+	if code := postWebhook(t, b, body, sign("s3cret", body)); code != http.StatusOK {
+		t.Fatalf("status %d, want 200", code)
+	}
+	b.Wait()
+	job, err := store.Get("plane-plan_epic-wi-plan")
+	if err != nil {
+		t.Fatalf("assignee did not queue the plan job: %v", err)
+	}
+	var inst map[string]any
+	if err := json.Unmarshal([]byte(job.Instructions), &inst); err != nil {
+		t.Fatalf("instructions: %v", err)
+	}
+	if inst["model_id"] != "claude-fable-5-1" {
+		t.Errorf("model_id = %v, want claude-fable-5-1", inst["model_id"])
+	}
+}
+
 // TestHandleWebhookOtherProjectNotChecked: events for other projects are
 // logged but never run the trigger check.
 func TestHandleWebhookOtherProjectNotChecked(t *testing.T) {

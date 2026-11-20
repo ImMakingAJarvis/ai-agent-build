@@ -7,10 +7,13 @@
 // state" becomes an agent job in the agentjob store, which the agent-run
 // loop picks up. The two trigger states (per PLAN.md P4):
 //
-//   - plan_epic: an item with the `epic` label and a `plan:<model>` label
-//     still in the Backlog state → a planning job (Phase B handles it).
+//   - plan_epic: a top-level card in Planning whose assignee maps to a
+//     planner model (internal/planeassign). A card that already has a
+//     delivered plan is re-planned instead. The older Backlog + plan:
+//     label path still queues, so labeled cards keep working.
 //   - run_task: a sub-item (has a parent) in the Ready state with no job
-//     yet → an execution job (Phase C handles it).
+//     yet → an execution job. The executor is the assignee's model when
+//     that assignee is a known user, otherwise the model: label.
 //
 // The bridge watches a set of projects (one Plane project per epic, per
 // the board standard — see docs/work-board/NOTES.md): webhooks are
@@ -42,6 +45,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/fit"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/placement"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/planeassign"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
 )
@@ -134,6 +138,7 @@ type Bridge struct {
 	secretKey []byte            // loaded from cfg.SecretFile
 	labels    map[string]string // label id → name
 	states    map[string]string // state id → name
+	members   map[string]string // workspace member id → email
 	botMember string            // workspace member id of cfg.BotEmail (B5 comment filter)
 
 	evMu   sync.Mutex
@@ -529,6 +534,21 @@ func (b *Bridge) evaluate(ctx context.Context, projectID string, item *plane.Wor
 	var queued int
 	modelID := modelLabel(names)
 	isEpic := hasLabel(names, "epic") && item.Parent == ""
+	// Assignee + Planning is the plan trigger. The assignee names the
+	// planner. A card that already carries a delivered plan is re-planned.
+	if item.Parent == "" && strings.EqualFold(stateName, "Planning") {
+		if id := b.assigneeModel(ctx, item); id != "" {
+			if reason := b.plannerBlock(id); reason != "" {
+				b.noteOnce(ctx, projectID, item, "bridge: not planning — "+reason)
+			} else if strings.Contains(item.DescriptionHTML, plane.PlanPageMarker) {
+				if b.enqueueReplan(ctx, projectID, item, id, names) {
+					queued++
+				}
+			} else if b.enqueue(ctx, projectID, TriggerPlan, item, id, names) {
+				queued++
+			}
+		}
+	}
 	if isEpic && modelID != "" && strings.EqualFold(stateName, "Backlog") {
 		if b.enqueue(ctx, projectID, TriggerPlan, item, modelID, names) {
 			queued++
@@ -673,6 +693,12 @@ func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *p
 //     once the broker or publisher is back.
 func (b *Bridge) enqueueRun(ctx context.Context, projectID string, item *plane.WorkItem, labelNames []string) bool {
 	id := "plane-" + TriggerRun + "-" + item.ID
+	// The assignee is the model. Stamp it onto the job payload as a
+	// model: label so the runner, which reads that label, places the
+	// card even when the board itself has no model: tag.
+	if modelID := b.assigneeModel(ctx, item); modelID != "" {
+		labelNames = withModelLabel(labelNames, modelID)
+	}
 	spec := agentjob.Spec{
 		ID:           id,
 		Title:        b.title(projectID, TriggerRun, item, ""),
@@ -1288,7 +1314,101 @@ func (b *Bridge) invalidateMeta() {
 	b.mu.Lock()
 	b.labels = nil
 	b.states = nil
+	b.members = nil
 	b.mu.Unlock()
+}
+
+// assigneeModel is the registry id for the card's first assignee that
+// maps to a model, or "" when the card has no such assignee.
+func (b *Bridge) assigneeModel(ctx context.Context, item *plane.WorkItem) string {
+	if len(item.Assignees) == 0 {
+		return ""
+	}
+	email, err := b.memberEmail(ctx, item.Assignees[0])
+	if err != nil || email == "" {
+		return ""
+	}
+	id, ok := planeassign.ModelForEmail(email)
+	if !ok {
+		return ""
+	}
+	return id
+}
+
+// memberEmail resolves a workspace member id to an email, caching the
+// member list on the bridge.
+func (b *Bridge) memberEmail(ctx context.Context, userID string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.members == nil {
+		members, err := b.cfg.Plane.ListWorkspaceMembers(ctx)
+		if err != nil {
+			return "", err
+		}
+		b.members = make(map[string]string, len(members))
+		for _, m := range members {
+			b.members[m.ID] = m.Email
+		}
+	}
+	return b.members[userID], nil
+}
+
+// plannerBlock reports why modelID cannot plan, or "" when it can.
+// An empty models file skips the check (tests and a bridge that has
+// not been pointed at a registry).
+func (b *Bridge) plannerBlock(modelID string) string {
+	if strings.TrimSpace(b.cfg.ModelsFile) == "" {
+		return ""
+	}
+	f, err := registry.Load(b.cfg.ModelsFile)
+	if err != nil {
+		return fmt.Sprintf("model registry: %v", err)
+	}
+	for i := range f.Models {
+		m := &f.Models[i]
+		if m.ID != modelID {
+			continue
+		}
+		if !m.Enabled {
+			return fmt.Sprintf("model %s is disabled", modelID)
+		}
+		for _, role := range m.Roles {
+			if role == "planner" {
+				return ""
+			}
+		}
+		return fmt.Sprintf("model %s is not a planner", modelID)
+	}
+	return fmt.Sprintf("model %s is not in the registry", modelID)
+}
+
+// noteOnce posts text on the card unless a comment already contains it.
+func (b *Bridge) noteOnce(ctx context.Context, projectID string, item *plane.WorkItem, text string) {
+	comments, err := b.cfg.Plane.ListComments(ctx, projectID, item.ID)
+	if err != nil {
+		b.cfg.Log.Warn("note: listing comments failed", "item", item.ID, "err", err)
+		return
+	}
+	for _, c := range comments {
+		if strings.Contains(c.CommentHTML, text) {
+			return
+		}
+	}
+	if _, err := b.cfg.Plane.AddComment(ctx, projectID, item.ID, "<p>"+html.EscapeString(text)+"</p>"); err != nil {
+		b.cfg.Log.Warn("note comment failed", "item", item.ID, "err", err)
+	}
+}
+
+// withModelLabel returns names with a single model:<id> label for modelID.
+func withModelLabel(names []string, modelID string) []string {
+	out := make([]string, 0, len(names)+1)
+	for _, n := range names {
+		if strings.HasPrefix(n, placement.ModelPrefix) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return append(out, placement.ModelPrefix+modelID)
 }
 
 // refreshLocked reloads labels and states for every watched project.

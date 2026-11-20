@@ -88,6 +88,7 @@ type fpItem struct {
 	Parent          string   `json:"parent"`
 	SequenceID      int      `json:"sequence_id"`
 	Priority        string   `json:"priority"`
+	Assignees       []string `json:"assignees"`
 }
 
 type fpPage struct {
@@ -102,6 +103,7 @@ func newFakeBoard() *fakeBoard {
 			"st-backlog":     {ID: "st-backlog", Name: "Backlog", Group: "backlog", Sequence: 65536, Color: "#94A3B8"},
 			"st-plan-review": {ID: "st-plan-review", Name: "Plan review", Group: "unstarted", Sequence: 131072, Color: "#FBBF24"},
 			"st-ready":       {ID: "st-ready", Name: "Ready", Group: "unstarted", Sequence: 196608, Color: "#34D399"},
+			"st-done":        {ID: "st-done", Name: "Done", Group: "completed", Sequence: 262144, Color: "#10B981"},
 		},
 		labels: map[string]*fpLabel{},
 		items: map[string]*fpItem{
@@ -124,6 +126,10 @@ func (f *fakeBoard) handler() http.Handler {
 		case r.URL.Path == "/auth/sign-in/":
 			w.Header().Add("Set-Cookie", "sessionid=fake-session; Path=/")
 			w.WriteHeader(http.StatusFound)
+		case r.URL.Path == fpV1Root+"members" || r.URL.Path == fpV1Root+"members/":
+			fpJSON(w, 200, map[string]any{"results": []map[string]any{{
+				"id": "user-qwen", "email": "jarvis-bot2@nathan.homes", "role": 20,
+			}}, "count": 1})
 		case strings.HasPrefix(r.URL.Path, fpV1Root):
 			f.routeV1(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/workspaces/"):
@@ -196,6 +202,7 @@ func (f *fakeBoard) routeV1(w http.ResponseWriter, r *http.Request) {
 			State           *string  `json:"state"`
 			Labels          []string `json:"labels"`
 			DescriptionHTML *string  `json:"description_html"`
+			Assignees       []string `json:"assignees"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -206,6 +213,9 @@ func (f *fakeBoard) routeV1(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.Labels != nil { // this build's PATCH replaces the whole list
 			it.Labels = in.Labels
+		}
+		if in.Assignees != nil {
+			it.Assignees = in.Assignees
 		}
 		if in.DescriptionHTML != nil {
 			it.DescriptionHTML = *in.DescriptionHTML
@@ -418,14 +428,17 @@ func TestDeliverFull(t *testing.T) {
 		}
 	}
 
-	// Three sub-items in Plan review, each with the model label.
+	// Three sub-items in Ready, assigned to the Qwen worker, each with the model label.
 	subs := subItemsOf(fb, "epic-1")
 	if len(subs) != 3 {
 		t.Fatalf("sub-items = %d, want 3", len(subs))
 	}
 	for tid, s := range subs {
-		if s.State != "st-plan-review" {
-			t.Errorf("task %s: state = %s, want Plan review", tid, s.State)
+		if s.State != "st-ready" {
+			t.Errorf("task %s: state = %s, want Ready", tid, s.State)
+		}
+		if len(s.Assignees) != 1 || s.Assignees[0] != "user-qwen" {
+			t.Errorf("task %s: assignees = %v, want [user-qwen]", tid, s.Assignees)
 		}
 		if len(s.Labels) != 1 || s.Labels[0] != labID {
 			t.Errorf("task %s: labels = %v, want [%s]", tid, s.Labels, labID)
@@ -465,8 +478,8 @@ func TestDeliverFull(t *testing.T) {
 	if !strings.Contains(fb.comments["epic-1"][0], wantURL) {
 		t.Errorf("summary comment %q does not carry the page link", fb.comments["epic-1"][0])
 	}
-	if epic.State != "st-plan-review" {
-		t.Errorf("epic state = %s, want Plan review", epic.State)
+	if epic.State != "st-done" {
+		t.Errorf("epic state = %s, want Done", epic.State)
 	}
 }
 
@@ -509,8 +522,8 @@ func TestDeliverConvergesOnRedelivery(t *testing.T) {
 	if n := strings.Count(epic.DescriptionHTML, planPageMarker); n != 1 {
 		t.Errorf("plan-page lines after re-delivery = %d, want 1: %q", n, epic.DescriptionHTML)
 	}
-	if epic.State != "st-plan-review" {
-		t.Errorf("epic state after re-delivery = %s, want Plan review", epic.State)
+	if epic.State != "st-done" {
+		t.Errorf("epic state after re-delivery = %s, want Done", epic.State)
 	}
 	// Labels and relations survived the re-delivery.
 	labID := modelLabelID(fb)
@@ -558,8 +571,8 @@ func TestDeliverConvergesAPartialDelivery(t *testing.T) {
 		t.Fatalf("sub-items = %d, want 3 (t1/t2 reused, t3 new)", len(subs))
 	}
 	for tid, s := range subs {
-		if s.State != "st-plan-review" {
-			t.Errorf("task %s state = %s, want Plan review", tid, s.State)
+		if s.State != "st-ready" {
+			t.Errorf("task %s state = %s, want Ready", tid, s.State)
 		}
 	}
 	if len(fb.pages) != 1 {
@@ -627,8 +640,7 @@ func TestDeliverReplan(t *testing.T) {
 	}
 
 	// t1's card was reused in place and refreshed; t5/t6 are new cards in
-	// Plan review; t2 (Plan review) and t3 (Ready) are deleted; t4
-	// (Backlog) survives.
+	// Ready; t2 and t3 (Ready) are deleted; t4 (Backlog) survives.
 	subs = subItemsOf(fb, "epic-1")
 	if len(subs) != 4 {
 		t.Fatalf("sub-items = %d, want 4 (t1, t4, t5, t6): %v", len(subs), subs)
@@ -638,12 +650,12 @@ func TestDeliverReplan(t *testing.T) {
 		t.Errorf("t1 description %q not refreshed by the re-plan", t1.DescriptionHTML)
 	}
 	for _, tid := range []string{"t1", "t5", "t6"} {
-		if s := subs[tid]; s.State != "st-plan-review" {
-			t.Errorf("task %s state = %s, want Plan review", tid, s.State)
+		if s := subs[tid]; s.State != "st-ready" {
+			t.Errorf("task %s state = %s, want Ready", tid, s.State)
 		}
 	}
 	if _, ok := fb.items[t2ID]; ok {
-		t.Errorf("dropped card t2 (Plan review) not deleted")
+		t.Errorf("dropped card t2 (Ready) not deleted")
 	}
 	if _, ok := fb.items[t3ID]; ok {
 		t.Errorf("dropped card t3 (Ready) not deleted")
@@ -654,11 +666,11 @@ func TestDeliverReplan(t *testing.T) {
 		t.Errorf("card t4 state = %s, want Backlog (untouched)", it.State)
 	}
 
-	// The epic is back in Plan review, its description links the (reused)
+	// The planning card is Done, its description links the (reused)
 	// page exactly once, and the latest comment is the re-plan summary.
 	epic := fb.items["epic-1"]
-	if epic.State != "st-plan-review" {
-		t.Errorf("epic state = %s, want Plan review", epic.State)
+	if epic.State != "st-done" {
+		t.Errorf("epic state = %s, want Done", epic.State)
 	}
 	if n := strings.Count(epic.DescriptionHTML, planPageMarker); n != 1 {
 		t.Errorf("epic description has %d plan-page lines, want 1: %q", n, epic.DescriptionHTML)

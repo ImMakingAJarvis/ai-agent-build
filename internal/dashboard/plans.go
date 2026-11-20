@@ -308,44 +308,42 @@ func (ps *plansState) list(s *Server) ([]planInfo, error) {
 // planJobInstructions is the body of a plan job: the recipe for the worker's
 // round, which turns the uploaded plan into jobs on the queue.
 func planJobInstructions(planID, title, path, name string, size int64) string {
-	return fmt.Sprintf(`A plan file was uploaded from the dashboard, and this job exists so you break it into work on the queue.
+	return fmt.Sprintf(`A plan file was uploaded from the dashboard. File it on the Plane board and stop. Do not break it into jobs yourself. A second planning pass, run by whoever the card is assigned to, does that.
 
 Plan: %s
+Upload id: %s
 Plan file: %s
 (%s, %d bytes)
 
 1. Read the plan file in full. If it is not plain text (pdf, docx, zip,
    image), convert it to text first (pdftotext, unzip, …) — never guess at
    its contents.
-2. Break the plan into jobs: one job per unit of work, each small enough
-   for a single round, with a clear title and concrete acceptance
-   criteria. Copy the relevant plan text into each job's body so the job
-   stands on its own without the plan file.
-3. Create the jobs in the order the work happens, starting from:
+2. Create the Plane project and its planning card. Flags go before the title.
+   Pick a short identifier (letters and digits, e.g. the first letters of the title):
 
-       jarvis-jobs add -id %s-1 -title "<short>" -class build -priority 30 <<'EOF'
-       <job body: goal, acceptance criteria, branch, references>
-       EOF
+       plane-epic create "<title>" --identifier <IDENT> 
 
-   - IDs %s-1, %s-2, … in dependency order.
-   - Priority descending from 30 (30, 29, …) so the first job runs first
-     within its class.
-   - A job that builds on earlier output gets -depends <earlier-id>
-     (e.g. -depends %s-1); independent jobs need no link.
-   - Class build, unless the plan marks a piece as urgent (then fix).
-   - All jobs of this plan share one branch: phase-<short-slug-of-plan>
-     (the first job creates it, the rest reuse it).
-4. Track the breakdown on the kanban: create an epic for the plan (POST
-   /api/kanban/epics on the dashboard at http://localhost:8080) and one
-   task per job (POST /api/kanban/tasks, epic_id from the epic response).
-5. Notify Nathan:
-       jarvis-discord notify "Plan %s: created N jobs (list the ids)"
-6. This job makes no code change and opens no PR: the deliverable is the
-   set of jobs on the queue. End the round with a summary of the created
-   jobs (id + one line each).`,
-		title, path, name, size,
-		planID, planID, planID, planID,
-		title)
+   plane-epic prints the planning card's display id (<IDENT>-1) and adds
+   every workspace member to the project.
+3. Put the whole plan into that card, assign the Qwen worker, and move
+   the card to Planning. Planning plus that assignee is what schedules
+   the planning job. jarvis-bot2 is qwen3.8-27b, the local model.
+
+       jarvis-board describe <IDENT>-1 < %s
+       jarvis-board assign <IDENT>-1 jarvis-bot2@nathan.homes
+       jarvis-board state <IDENT>-1 Planning "filed the uploaded plan"
+
+   To have a different model plan it, assign that user instead of
+   jarvis-bot2: fable-bot@nathan.homes, sonnet-bot@nathan.homes,
+   haiku-bot@nathan.homes, or opus-bot@nathan.homes. Jarvis Big Brain
+   (jarvis-big-brain@nathan.homes) is the future MoE and is not runnable yet.
+4. Notify Nathan with the board link from plane-epic's output:
+       jarvis-discord notify "Plan %s: filed as <IDENT>-1, state Planning, assigned to jarvis-bot2"
+5. This job makes no code change and opens no PR. Do not create queue
+   jobs and do not create the task cards. The planning job does that:
+   it assigns those tasks to jarvis-bot2, sets them Ready, and marks
+   this planning card Done.`,
+		title, planID, path, name, size, path, title)
 }
 
 // planSlug turns a file name into a short lowercase slug for the plan job
