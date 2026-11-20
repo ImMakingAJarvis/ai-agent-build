@@ -37,6 +37,7 @@ secrets. To change memory/eviction, edit that line and
 | `nobrakes:auto_mode` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
 | `nobrakes:nightly_flag` | string | `""` or a UTC date `"YYYY-MM-DD"` | `""` |
 | `nobrakes:full_auto` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
+| `nobrakes:full_auto_reviewer` | string | a reviewer id from `config/review.yaml` | absent (no reviewer stored) |
 | `nobrakes:keep_going` | string | `"on"` or `"off"` | `"off"` (also the read result for a missing or corrupt value — the feature fails safe) |
 | `nobrakes:running` | string | the id of the one auto job currently executing | absent (no auto job running) |
 
