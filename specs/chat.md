@@ -16,7 +16,7 @@ depends_on:
   - to: engine
     why: "classify and chat replies (ENGINE_URL)"
   - to: engine-igpu
-    why: "fallback replies while a job is running"
+    why: "fallback replies while a job is running; !igpu probes its health"
   - to: memory
     why: "RAG context for replies (MEMORY_URL)"
   - to: redis
@@ -26,7 +26,7 @@ depends_on:
   - to: art
     why: "!photocheck runs the art service directly"
   - to: jarvis-jobs
-    why: "!build/!fix/!photo enqueue into the agentjob store"
+    why: "!build/!fix/!igpu/!photo enqueue into the agentjob store"
   - to: agent-run
     why: "!restart/!fixnow signal files; liveness check via pgrep"
 ---
@@ -34,7 +34,8 @@ depends_on:
 ## Purpose
 
 The Discord daemon. Owner DMs are either daemon commands handled in code
-(`!build`, `!fix`, `!fixnow`, `!photo*`, `!automode`/`!auto_mode`,
+(`!build`, `!fix`, `!fixnow`, `!igpu` — a job pinned to the igpu driver —,
+`!photo*`, `!automode`/`!auto_mode`,
 `!fullauto`/`!full_auto`, `!keepgoing`, `!pause`, `!restart`,
 `!restart-service`) or plain language sent to the brain with Hermes
 actions (enqueue_job, set_automode, set_fullauto, submit_capability,
