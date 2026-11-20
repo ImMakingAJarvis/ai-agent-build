@@ -1213,3 +1213,37 @@ func TestFromEnv(t *testing.T) {
 		t.Errorf("baseURL = %q, want the process-env value", c2.baseURL)
 	}
 }
+
+// TestListProjectsFollowsCursor checks that a workspace bigger than one
+// page is returned in full, and that a bare array is still one page.
+func TestListProjectsFollowsCursor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cursor") == "" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"results":           []map[string]string{{"id": "p1", "name": "One", "identifier": "ONE"}},
+				"next_cursor":       "c2",
+				"next_page_results": true,
+				"total_results":     2,
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"results":           []map[string]string{{"id": "p2", "name": "Two", "identifier": "TWO"}},
+			"next_cursor":       "c3",
+			"next_page_results": false,
+			"total_results":     2,
+		})
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, APIKey: "k", Workspace: "jarvis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, err := c.ListProjects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 2 || projects[0].Identifier != "ONE" || projects[1].Identifier != "TWO" {
+		t.Fatalf("projects = %+v", projects)
+	}
+}

@@ -4,8 +4,9 @@
 //  1. the project (created with the given identifier; Plane does not
 //     auto-generate identifiers)
 //  2. the standard board: 8 states + the "epic" label
-//  3. every workspace member added as an editor (viewers cannot move
-//     items)
+//  3. every workspace member added as an editor on every project
+//     (viewers cannot move items; a user added later is picked up here
+//     and by plane-bridge)
 //  4. the epic item itself (Backlog, epic label)
 //  5. PLANE_PROJECTS in the agent env file gains the identifier, and
 //     plane-bridge is restarted so it watches the new project
@@ -14,6 +15,7 @@
 //
 //	plane-epic create <title> --identifier XXX [--description ...]
 //	                          [--no-env] [--no-restart]
+//	plane-epic sync-members
 //
 // Re-running with the same title/identifier is a no-op for everything
 // that already exists. Config comes from the PLANE_* environment,
@@ -34,7 +36,21 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "create" {
+	if len(os.Args) < 2 {
+		usage()
+	}
+	switch os.Args[1] {
+	case "sync-members":
+		if len(os.Args) != 2 {
+			usage()
+		}
+		if err := syncMembers(); err != nil {
+			fmt.Fprintln(os.Stderr, "plane-epic:", err)
+			os.Exit(1)
+		}
+		return
+	case "create":
+	default:
 		usage()
 	}
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
@@ -56,8 +72,32 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   plane-epic create <title> --identifier XXX [--description ...]
-                           [--no-env] [--no-restart]`)
+                           [--no-env] [--no-restart]
+  plane-epic sync-members`)
 	os.Exit(1)
+}
+
+// syncMembers puts every workspace member on every project as an editor.
+func syncMembers() error {
+	c, err := plane.FromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	report, err := planeepic.SyncMembers(ctx, c)
+	printMemberSync(report)
+	return err
+}
+
+func printMemberSync(report planeepic.MemberSync) {
+	fmt.Printf("members: %d editor(s) added across %d project(s)\n", len(report.Added), report.Projects)
+	for _, add := range report.Added {
+		fmt.Printf("  %s %s\n", add.Project, add.Email)
+	}
+	if len(report.Inaccessible) > 0 {
+		fmt.Printf("not editable by this key: %s\n", strings.Join(report.Inaccessible, ", "))
+	}
 }
 
 func run(title, identifier, description string, updateEnv, restart bool) error {
@@ -79,24 +119,14 @@ func run(title, identifier, description string, updateEnv, restart bool) error {
 	}
 	fmt.Println("board: standard states + epic label ensured")
 
-	// Everyone in the workspace can edit the new board.
-	wsMembers, err := c.ListWorkspaceMembers(ctx)
+	// Every workspace member can edit every board, including projects
+	// that already existed and users added after those projects.
+	report, err := planeepic.SyncMembers(ctx, c)
 	if err != nil {
+		printMemberSync(report)
 		return err
 	}
-	var emails []string
-	for _, m := range wsMembers {
-		emails = append(emails, m.Email)
-	}
-	added, skipped, err := planeepic.EnsureMembers(ctx, c, project.ID, emails)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("members: %d editor(s) added", len(added))
-	if len(skipped) > 0 {
-		fmt.Printf(" (%d skipped, not workspace members: %s)", len(skipped), strings.Join(skipped, ", "))
-	}
-	fmt.Println()
+	printMemberSync(report)
 
 	// The epic item: Backlog + epic label, so the board's plan_epic
 	// trigger works on it like any other epic.

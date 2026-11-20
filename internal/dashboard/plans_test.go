@@ -102,7 +102,7 @@ func TestPlanUploadCreatesFileAndJob(t *testing.T) {
 	if j.Class != agentjob.ClassBuild || j.Priority != planDefaultPriority || j.Source != "plan" {
 		t.Fatalf("class/priority/source = %q/%d/%q", j.Class, j.Priority, j.Source)
 	}
-	for _, want := range []string{resp.Path, "jarvis-jobs add -id " + resp.ID + "-1", "-depends " + resp.ID + "-1"} {
+	for _, want := range []string{resp.Path, "plane-epic create", "jarvis-board assign", "jarvis-bot2@nathan.homes", "Planning"} {
 		if !strings.Contains(j.Instructions, want) {
 			t.Errorf("instructions lack %q:\n%s", want, j.Instructions)
 		}

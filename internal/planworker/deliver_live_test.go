@@ -14,9 +14,9 @@ import (
 )
 
 // TestLiveB4Deliver is the B4 acceptance against the real board: a toy
-// epic in a scratch project ends up with a plan page, sub-items in Plan
-// review, blocked-by relations and model: labels, and the epic itself in
-// Plan review. The scratch project is deleted afterwards — the live board
+// epic in a scratch project ends up with a plan page, sub-items in Ready
+// assigned to jarvis-bot2, blocked-by relations and model: labels, and the
+// planning card itself in Done. The scratch project is deleted afterwards — the live board
 // is left exactly as found. Credentials come from the environment (or
 // ~/.config/jarvis/agent.env via FromEnv); without them the test skips,
 // so `go test ./...` stays green off this machine.
@@ -43,10 +43,14 @@ func TestLiveB4Deliver(t *testing.T) {
 	})
 
 	// Fresh scratch projects only get the five default states — create
-	// the one the deliverer needs.
-	pr, err := c.CreateState(ctx, proj.ID, PlanReviewState, "unstarted", "#FBBF24", 131072)
+	// Ready, which the deliverer puts tasks in. Done already exists.
+	ready, err := c.CreateState(ctx, proj.ID, ReadyState, "unstarted", "#22C55E", 115000)
 	if err != nil {
-		t.Fatalf("CreateState %q: %v", PlanReviewState, err)
+		t.Fatalf("CreateState %q: %v", ReadyState, err)
+	}
+	done, err := c.StateByName(ctx, proj.ID, DoneState)
+	if err != nil {
+		t.Fatalf("state %q: %v", DoneState, err)
 	}
 
 	epic, err := c.CreateWorkItem(ctx, proj.ID, plane.WorkItemCreate{
@@ -115,8 +119,8 @@ func TestLiveB4Deliver(t *testing.T) {
 		t.Fatalf("sub-items = %d, want 3 (t1, t2, t3)", len(byTask))
 	}
 	for tid, it := range byTask {
-		if it.State != pr.ID {
-			t.Errorf("task %s: state = %s, want Plan review (%s)", tid, it.State, pr.ID)
+		if it.State != ready.ID {
+			t.Errorf("task %s: state = %s, want Ready (%s)", tid, it.State, ready.ID)
 		}
 		if len(it.Labels) != 1 || it.Labels[0] != label.ID {
 			t.Errorf("task %s: labels = %v, want [%s]", tid, it.Labels, label.ID)
@@ -164,8 +168,8 @@ func TestLiveB4Deliver(t *testing.T) {
 	if !found {
 		t.Errorf("no 'Plan ready' summary comment with the page link on the epic: %+v", comments)
 	}
-	if got.State != pr.ID {
-		t.Errorf("epic state = %s, want Plan review (%s)", got.State, pr.ID)
+	if got.State != done.ID {
+		t.Errorf("planning card state = %s, want Done (%s)", got.State, done.ID)
 	}
 
 	// --- convergence: a second delivery must not duplicate ---

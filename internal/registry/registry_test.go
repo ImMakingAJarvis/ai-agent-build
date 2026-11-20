@@ -33,8 +33,8 @@ func TestLoadRealRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(f.Models) != 10 {
-		t.Fatalf("got %d models, want 10", len(f.Models))
+	if len(f.Models) != 12 {
+		t.Fatalf("got %d models, want 12", len(f.Models))
 	}
 	byID := make(map[string]Model, len(f.Models))
 	for _, m := range f.Models {
@@ -339,7 +339,7 @@ func TestByRoleRealRegistry(t *testing.T) {
 		// qwen3.8-flash-next and glm5.3-flash are planners but disabled,
 		// so they must not appear. claude-fable-5-1 is an enabled
 		// planner-only entry (opt-in cloud planner, chat-1794348211-f033).
-		{"planner", []string{"qwen3.8-27b", "claude-sonnet-5-5", "claude-fable-5-1"}},
+		{"planner", []string{"qwen3.8-27b", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5", "claude-opus-5-5"}},
 		{"executor", []string{"qwen3.8-27b"}},
 		{"reviewer", []string{"claude-sonnet-5-5"}},
 	}

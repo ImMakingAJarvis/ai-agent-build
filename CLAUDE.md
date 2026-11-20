@@ -34,6 +34,15 @@ to the working tree (that satisfies the hook and the vector graph) and
 persist it via the small notes-only commit described in "Keep notes" in the
 agent's own CLAUDE.md.
 
+## Service specs (required)
+
+Every service has a spec in `specs/<id>.md` (standard: `specs/README.md`).
+Read it before you change the service; update it in the same PR when you
+change anything it states; add one in the same PR when you add a compose
+service, a `systemd/` unit or a `cmd/` package. `go test ./specs/` (part
+of `go test ./...`) fails otherwise. The specs draw the System map at
+`/map` on the dashboard (:8080).
+
 ## Kanban: read the task's board entry before building
 
 Before starting a job whose title references a kanban entry (a kanban ID

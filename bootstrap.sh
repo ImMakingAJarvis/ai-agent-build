@@ -475,6 +475,9 @@ How to work:
   available, hand it each well-specified coding task (files, goal, how to
   test) and review what it did; do the planning, reviewing, testing and
   committing yourself.
+- Before you change a service, read its spec (specs/<id>.md). If you
+  add or change a service, add or update its spec in the same PR —
+  go test ./... fails when a service has no spec.
 - Build and test as you go (go build ./..., go test ./...). Do not open a
   PR for code that does not build.
 - A job is done only when every acceptance criterion in it passes AND
