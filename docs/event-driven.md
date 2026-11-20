@@ -514,7 +514,12 @@ never leaves and the call would just time out. Two guardrails:
   window needs the brain stopped, and the window never opens mid-round.
   A capability the catalog does not list is NOT refused: like submit, it
   degrades to the timeout path. An unreadable catalog fails the call
-  (the gate is the point of it).
+  (the gate is the point of it). The catalog is read from
+  `$JARVIS_CAPABILITIES`, else the repo copy when reachable, else the
+  machine-wide mirror `/etc/jarvis/capabilities.yaml` (synced by
+  `scripts/install_mq.sh`) — without that mirror, a `call` from any user
+  other than the agent would refuse on permissions, because the repo
+  copy lives under `/home/agent`.
 - **Timeout ≠ cancel:** `--timeout` only stops waiting. The request stays
   on `cap.<cap>`, the worker still processes it (done-marker and all),
   but its Result is dropped — the private queue is gone, and direct

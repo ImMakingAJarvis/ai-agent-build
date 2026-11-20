@@ -1787,13 +1787,29 @@ func sortedKeysAny(m map[string]any) []string {
 	return out
 }
 
+// catalogRepoPath is the repo copy of the capability catalog. It is the
+// source of truth, but it lives under /home/agent, which local users other
+// than the agent cannot traverse.
+var catalogRepoPath = "/home/agent/ai-agent-build/config/capabilities.yaml"
+
+// catalogMirrorPath is the machine-wide, world-readable copy synced by
+// scripts/install_mq.sh.
+const catalogMirrorPath = "/etc/jarvis/capabilities.yaml"
+
 // catalogDefaultPath is where the capability catalog lives on this
-// machine: $JARVIS_CAPABILITIES, else the repo's config/capabilities.yaml.
+// machine: $JARVIS_CAPABILITIES, else the repo copy when it is reachable,
+// else the machine-wide mirror. The mirror is what makes sync RPC
+// (`jarvis-mq call`) usable off the agent user: the refusal gate is
+// fail-closed, and without a readable catalog a `call` from the owner's
+// desktop refuses on permissions (Nathan's "I still can't RPC", 2026-11-19).
 func catalogDefaultPath() string {
 	if p := os.Getenv("JARVIS_CAPABILITIES"); p != "" {
 		return p
 	}
-	return "/home/agent/ai-agent-build/config/capabilities.yaml"
+	if _, err := os.Stat(catalogRepoPath); err == nil {
+		return catalogRepoPath
+	}
+	return catalogMirrorPath
 }
 
 // capDepths connects to the broker and returns a depth function for cap

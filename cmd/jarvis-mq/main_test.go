@@ -377,3 +377,37 @@ func TestCallFlagValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestCatalogDefaultPathFallback pins the resolution order:
+// $JARVIS_CAPABILITIES > the repo copy (when reachable) > the
+// machine-wide mirror. The mirror fallback is what makes `jarvis-mq call`
+// usable for local users other than the agent: the repo copy lives under
+// /home/agent, which they cannot traverse, and the refusal gate is
+// fail-closed (2026-11-19, "I still can't RPC").
+func TestCatalogDefaultPathFallback(t *testing.T) {
+	t.Setenv("JARVIS_CAPABILITIES", "/tmp/explicit.yaml")
+	if got := catalogDefaultPath(); got != "/tmp/explicit.yaml" {
+		t.Fatalf("env override: got %q, want /tmp/explicit.yaml", got)
+	}
+
+	t.Setenv("JARVIS_CAPABILITIES", "")
+	orig := catalogRepoPath
+	defer func() { catalogRepoPath = orig }()
+
+	// Repo copy unreachable -> the machine-wide mirror.
+	catalogRepoPath = filepath.Join(t.TempDir(), "missing", "capabilities.yaml")
+	if got := catalogDefaultPath(); got != catalogMirrorPath {
+		t.Errorf("unreachable repo path: got %q, want %q", got, catalogMirrorPath)
+	}
+
+	// Repo copy reachable -> the repo copy (the source of truth).
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "capabilities.yaml")
+	if err := os.WriteFile(repo, []byte("capabilities: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalogRepoPath = repo
+	if got := catalogDefaultPath(); got != repo {
+		t.Errorf("reachable repo path: got %q, want %q", got, repo)
+	}
+}
