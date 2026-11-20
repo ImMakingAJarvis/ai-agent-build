@@ -6,7 +6,9 @@ package planeepic
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
@@ -212,4 +214,69 @@ func EnsureMembers(ctx context.Context, c *plane.Client, projectID string, email
 		added = append(added, email)
 	}
 	return added, skipped, nil
+}
+
+// MemberAdd is one editor membership SyncMembers created.
+type MemberAdd struct {
+	Project string // project identifier
+	Email   string
+}
+
+// MemberSync is the result of putting every workspace member on every
+// project. Inaccessible projects are ones this key cannot read (it is
+// not a member); the rest of the workspace is still updated.
+type MemberSync struct {
+	Projects     int
+	Added        []MemberAdd
+	Inaccessible []string
+}
+
+// SyncMembers adds every workspace member to every project as an editor.
+// It is the membership rule for the board: a project created earlier, and
+// a user added to the workspace later, both end up with the full set.
+// Idempotent — someone already on the project is left alone, including
+// their role. A project this key cannot see is listed in Inaccessible
+// and does not fail the sync.
+func SyncMembers(ctx context.Context, c *plane.Client) (MemberSync, error) {
+	wsMembers, err := c.ListWorkspaceMembers(ctx)
+	if err != nil {
+		return MemberSync{}, fmt.Errorf("listing workspace members: %w", err)
+	}
+	var emails []string
+	for _, m := range wsMembers {
+		if strings.TrimSpace(m.Email) == "" {
+			continue
+		}
+		emails = append(emails, m.Email)
+	}
+	projects, err := c.ListProjects(ctx)
+	if err != nil {
+		return MemberSync{}, fmt.Errorf("listing projects: %w", err)
+	}
+	var sync MemberSync
+	sync.Projects = len(projects)
+	var errs []error
+	for _, p := range projects {
+		added, _, err := EnsureMembers(ctx, c, p.ID, emails)
+		if err != nil {
+			var apiErr *plane.APIError
+			if errors.As(err, &apiErr) && (apiErr.Status == http.StatusForbidden || apiErr.Status == http.StatusNotFound) {
+				sync.Inaccessible = append(sync.Inaccessible, projectRef(p))
+				continue
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", projectRef(p), err))
+			continue
+		}
+		for _, email := range added {
+			sync.Added = append(sync.Added, MemberAdd{Project: projectRef(p), Email: email})
+		}
+	}
+	return sync, errors.Join(errs...)
+}
+
+func projectRef(p plane.Project) string {
+	if p.Identifier != "" {
+		return p.Identifier
+	}
+	return p.ID
 }

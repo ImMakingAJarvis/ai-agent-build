@@ -48,6 +48,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/bridge"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/placement"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/plane"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/planeepic"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/planlabels"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/registry"
@@ -232,6 +233,7 @@ func run(log *slog.Logger) error {
 			if err := store.Recover(); err != nil {
 				log.Warn("store recover failed", "err", err)
 			}
+			syncProjectMembers(ctx, log, client)
 			n, err := br.CatchUp(ctx)
 			if err != nil {
 				log.Warn("catch-up sync failed, retrying", "err", err)
@@ -277,6 +279,7 @@ func run(log *slog.Logger) error {
 				log.Warn("store recover failed", "err", err)
 				continue
 			}
+			syncProjectMembers(ctx, log, client)
 			n, err := br.CatchUp(ctx)
 			if err != nil {
 				log.Warn("periodic catch-up failed", "err", err)
@@ -340,6 +343,21 @@ func run(log *slog.Logger) error {
 	case err := <-errCh:
 		return fmt.Errorf("http server: %w", err)
 	}
+}
+
+// syncProjectMembers puts every workspace member on every project as an
+// editor. New projects get the users that already exist; projects that
+// already exist get users added to the workspace later. The catch-up
+// calls this on each pass so the set stays complete without a manual run.
+func syncProjectMembers(ctx context.Context, log *slog.Logger, client *plane.Client) {
+	report, err := planeepic.SyncMembers(ctx, client)
+	if err != nil {
+		log.Warn("project member sync failed", "err", err, "added", len(report.Added))
+	}
+	if err == nil && len(report.Added) == 0 && len(report.Inaccessible) == 0 {
+		return
+	}
+	log.Info("project member sync", "projects", report.Projects, "added", len(report.Added), "inaccessible", report.Inaccessible)
 }
 
 // resolveProject finds the project by id or identifier and returns its id

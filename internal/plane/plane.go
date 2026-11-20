@@ -342,14 +342,31 @@ func (c *Client) CreateProject(ctx context.Context, name, identifier string) (*P
 	return &p, nil
 }
 
-// ListProjects lists the workspace's projects (first page; the workspace
-// has a handful of them).
+// ListProjects lists the workspace's projects, following cursor pages so a
+// workspace that grows past one page is still complete.
 func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
-	var out []Project
-	if err := c.doList(ctx, "GET", c.wsPath("/projects/"), &out); err != nil {
-		return nil, err
+	var all []Project
+	seen := map[string]bool{}
+	path := c.wsPath("/projects/?per_page=100")
+	for page := 0; page < 100; page++ {
+		var batch []Project
+		next, more, err := c.doListPage(ctx, path, &batch)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range batch {
+			if p.ID == "" || seen[p.ID] {
+				continue
+			}
+			seen[p.ID] = true
+			all = append(all, p)
+		}
+		if !more || next == "" {
+			return all, nil
+		}
+		path = c.wsPath("/projects/?per_page=100&cursor=" + url.QueryEscape(next))
 	}
-	return out, nil
+	return all, nil
 }
 
 // DeleteProject deletes a project and everything in it.
@@ -981,6 +998,53 @@ func (c *Client) doSession(ctx context.Context, method, path string, body, out a
 	return lastErr
 }
 
+// doListPage is doList that also returns the cursor for the next page.
+// more is true only when Plane says next_page_results. A bare array has
+// no further page.
+func (c *Client) doListPage(ctx context.Context, path string, out any) (next string, more bool, err error) {
+	if c.apiKey == "" {
+		return "", false, errors.New("plane: APIKey is required")
+	}
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		req, err := c.newRequest(ctx, "GET", path, nil, c.apiKey)
+		if err != nil {
+			return "", false, err
+		}
+		var body []byte
+		body, lastErr = c.executeRaw(req)
+		if !isRateLimited(lastErr) || attempt >= maxRateAttempts-1 {
+			if lastErr != nil {
+				return "", false, lastErr
+			}
+			return decodeListPage(body, out)
+		}
+		if err := waitRateLimit(ctx); err != nil {
+			return "", false, err
+		}
+	}
+}
+
+// decodeListPage unmarshals a v1 list body into out. Envelope responses
+// yield the next cursor; bare arrays are a single page.
+func decodeListPage(body []byte, out any) (next string, more bool, err error) {
+	if err := json.Unmarshal(body, out); err == nil {
+		return "", false, nil
+	}
+	var env struct {
+		Results         json.RawMessage `json:"results"`
+		NextCursor      string          `json:"next_cursor"`
+		NextPageResults bool            `json:"next_page_results"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || env.Results == nil {
+		return "", false, fmt.Errorf("plane: decoding list: %w", err)
+	}
+	if err := json.Unmarshal(env.Results, out); err != nil {
+		return "", false, fmt.Errorf("plane: decoding list: %w", err)
+	}
+	return env.NextCursor, env.NextPageResults, nil
+}
+
 // doList / doSessionList decode list endpoints, which come back as a
 // cursor-paginated envelope {"results": [...]} on the v1 API and as a bare
 // array on some session endpoints.
@@ -1041,17 +1105,9 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any, 
 // execute sends req, mapping non-2xx to *APIError and decoding the body
 // into out when non-nil.
 func (c *Client) execute(req *http.Request, out any) error {
-	resp, err := c.http.Do(req)
+	b, err := c.executeRaw(req)
 	if err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return fmt.Errorf("plane: reading %s %s: %w", req.Method, req.URL.Path, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{Method: req.Method, Path: req.URL.Path, Status: resp.StatusCode, Body: string(b)}
 	}
 	if out != nil && len(b) > 0 {
 		if err := json.Unmarshal(b, out); err != nil {
@@ -1059,6 +1115,24 @@ func (c *Client) execute(req *http.Request, out any) error {
 		}
 	}
 	return nil
+}
+
+// executeRaw sends req and returns the response body. Non-2xx is an
+// *APIError. Reads are capped at 1 MB.
+func (c *Client) executeRaw(req *http.Request) ([]byte, error) {
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("plane: reading %s %s: %w", req.Method, req.URL.Path, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &APIError{Method: req.Method, Path: req.URL.Path, Status: resp.StatusCode, Body: string(b)}
+	}
+	return b, nil
 }
 
 // executeList is execute for list endpoints, accepting both the
