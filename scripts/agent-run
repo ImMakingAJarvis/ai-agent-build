@@ -307,6 +307,14 @@ is_igpu_direct_job() {
 
 msg="${checkpoint:-$(summary "$(cat "$DRIVER" 2>/dev/null || echo agent)" "${status:-?}")}"
 round=0
+# Full-auto start failures: an auto round whose `jarvis-jobs run -auto`
+# exits non-zero within seconds and leaves the job ready never started
+# (Redis refusing the auto-run marker write, a broken store, a missing
+# binary). Without a backoff the loop re-dispatched it at once and posted
+# "Full auto: running ..." to Discord every second (2026-11-20, Redis OOM).
+# start_fail_job/start_fail_n track the streak: the running note is posted
+# once per job, the failure once per streak, and the retry backs off.
+start_fail_job=""; start_fail_n=0
 while :; do
   # NoBrakes (2/6): read the Redis auto_mode flag on every iteration.
   # When it is on and today's nightly window is unprocessed, parked
@@ -349,7 +357,9 @@ while :; do
     fi
     note=""
     auto_run=1
-    notify "Full auto: running ${job_title} (${job_id}) on ${d}."
+    if [[ "$job_id" != "$start_fail_job" ]]; then
+      notify "Full auto: running ${job_title} (${job_id}) on ${d}."
+    fi
   else
     # Photo-tagged jobs have no driver choice: the photo check below runs
     # the job as CODE (the jarvis-photo executor — no model round, not the
@@ -491,7 +501,10 @@ $q"); then
   # auto job — released when the round ends). A supervised round never
   # touches the marker: manual runs are the operator's override.
   if (( auto_run )); then
-    jarvis-jobs run "$job_id" -driver "$d" -round "$(date +%s)-$round" -note "$note" -auto; status=$?
+    run_started=$SECONDS
+    run_err="$CONF/auto-run.err"
+    jarvis-jobs run "$job_id" -driver "$d" -round "$(date +%s)-$round" -note "$note" -auto 2>"$run_err"; status=$?
+    cat "$run_err" >&2 2>/dev/null || true
     # Exit 3 = another auto job holds the marker. Never run a second
     # one: idle-poll and retry next iteration (the holder's round
     # releases the marker when it ends; a stale one is taken over
@@ -503,6 +516,25 @@ $q"); then
       sleep 60
       continue
     fi
+    if (( status != 0 && SECONDS - run_started < 30 )) &&
+       [[ "$(jarvis-jobs list 2>/dev/null | awk -v id="$job_id" '$2 == id {print $1}')" == "ready" ]]; then
+      rm -f "$CONF/current-job"   # no round started — resume must not claim one
+      stop_watcher
+      if [[ "$job_id" != "$start_fail_job" ]]; then
+        start_fail_job="$job_id"; start_fail_n=0
+        reason=$(grep -v '^[[:space:]]*$' "$run_err" 2>/dev/null | tail -n 1 | cut -c1-300)
+        notify "Full auto: couldn't start ${job_title} (${job_id}): ${reason:-exit $status}. Retrying with a backoff; I'll say when it runs (stop: !fullauto off)."
+      fi
+      start_fail_n=$((start_fail_n + 1))
+      backoff=$((30 * start_fail_n)); (( backoff > 600 )) && backoff=600
+      echo "==> full auto: ${job_id} did not start (exit $status); retry in ${backoff}s"
+      sleep "$backoff"
+      continue
+    fi
+    if [[ "$job_id" == "$start_fail_job" ]]; then
+      notify "Full auto: ${job_title} (${job_id}) ran after ${start_fail_n} failed start(s) (exit ${status})."
+    fi
+    start_fail_job=""; start_fail_n=0
   else
     jarvis-jobs run "$job_id" -driver "$d" -round "$(date +%s)-$round" -note "$note"; status=$?
   fi

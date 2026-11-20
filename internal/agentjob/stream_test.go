@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -74,5 +75,28 @@ func TestStreamPublisherMaxLen(t *testing.T) {
 	}
 	if l > streamMaxLen {
 		t.Errorf("xlen=%d > %d", l, streamMaxLen)
+	}
+}
+
+// A running job's stream carries a safety expiry from its first line, so
+// a round that dies before Close cannot pin the stream in Redis forever
+// (one did, 2026-11-20: TTL -1 alongside the 24 h ones that filled Redis).
+func TestStreamPublisherLiveTTL(t *testing.T) {
+	mr := miniredis.RunT(t)
+	p := NewStreamPublisher("redis://"+mr.Addr(), "live")
+	if p == nil {
+		t.Fatal("NewStreamPublisher returned nil")
+	}
+	p.Write([]byte("first\n"))
+	// Close drains; before it, the line may still be queued — wait for it.
+	for i := 0; i < 200 && !mr.Exists(StreamKey("live")); i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if ttl := mr.TTL(StreamKey("live")); ttl <= 0 || ttl > streamLiveTTL {
+		t.Errorf("live ttl=%v, want (0, %v]", ttl, streamLiveTTL)
+	}
+	p.Close()
+	if ttl := mr.TTL(StreamKey("live")); ttl <= 0 || ttl > streamTTL {
+		t.Errorf("closed ttl=%v, want (0, %v]", ttl, streamTTL)
 	}
 }

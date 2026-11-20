@@ -19,7 +19,7 @@ server-sent events from `GET /api/jobs/<id>/live`:
   `--output-format stream-json --verbose --include-partial-messages`, so
   thoughts, tool calls, results and token deltas are JSON lines as they
   happen. Each completed line is XADDed to the job's Redis stream
-  (`jarvis:job:<id>`, `MAXLEN ~ 20000`) by `internal/agentjob/stream.go`.
+  (`jarvis:job:<id>`, `MAXLEN ~ 5000`, the same depth the seed reads) by `internal/agentjob/stream.go`.
   The `redis` compose service carries it: host runners use
   `127.0.0.1:6379` (default), the dashboard container
   `redis://redis:6379` via `JARVIS_REDIS` (docker-compose.yml).
@@ -33,8 +33,10 @@ server-sent events from `GET /api/jobs/<id>/live`:
 - The batch/formatted log view (`handleJobLogHTML`) parses the same
   stream-json lines, merging partial-message deltas, so live and final
   views match.
-- A finished job's stream gets a 24 h TTL when the runner closes it; the
-  `transcript.txt` in the job dir is the durable copy.
+- A running job's stream carries a 6 h safety TTL (refreshed every 500
+  lines, so a crashed round cannot pin it); a finished job's stream gets a
+  1 h TTL when the runner closes it. After that the page falls back to
+  `transcript.txt` in the job dir, the durable copy.
 
 Does not require `agent-run`.
 
