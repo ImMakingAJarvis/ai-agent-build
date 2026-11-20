@@ -43,7 +43,14 @@
 //     skip covers the game itself; the marker covers the gap around it.
 //   - while the brain is still up (brain-out pending) the keepalive
 //     ticks every 5 s — the brain goes out the moment it legally may;
-//     in the steady state (brain out) it goes back to 60 s.
+//     in the steady state (brain out) it goes back to 60 s. Every
+//     stream transition RE-ARMS the keepalive (immediate evaluation +
+//     the interval it returns), so a brain-out that failed at stream
+//     start retries within 5 s instead of waiting out whatever timer
+//     was running (the 2026-11-19 02:02 black stream: the cut round's
+//     retry was up to 60 s away because the transition never re-armed
+//     the timer; the 39 s session ended first, and the VRAM was never
+//     freed).
 //   - the script arms a 4 h watchdog-maintenance window that keeps
 //     jarvis-watchdog from restarting the brain; the keepalive
 //     re-arms it for the life of the game (long sessions outrun 4 h).
@@ -109,6 +116,13 @@ type streamController struct {
 
 	preemptNotified bool // the owner got the "I cut your round" line this session
 
+	// The keepalive cadence (gameKeepalive's two returns): fast while
+	// the brain-out is pending, slow in the steady state and when no
+	// game runs. Fields so a test can run the whole loop in
+	// milliseconds.
+	fastTick time.Duration
+	slowTick time.Duration
+
 	// Test-overridable probes: the brain liveness check and the
 	// watchdog-maintenance status/re-arm (window.go owns the defaults).
 	probeBrain    func(ctx context.Context) bool
@@ -155,6 +169,8 @@ func newStreamController(svc *service, reg *prometheus.Registry, log *slog.Logge
 		sc.gameHold = filepath.Join(home, ".local", "state", "jarvis", "game-hold")
 	}
 	sc.sweepEvery = 30 * time.Second
+	sc.fastTick = 5 * time.Second
+	sc.slowTick = 60 * time.Second
 	reg.MustRegister(sc.active)
 	return sc
 }
@@ -163,7 +179,7 @@ func newStreamController(svc *service, reg *prometheus.Registry, log *slog.Logge
 // is done. Start emits the initial state as well, so a resourced that
 // boots mid-stream takes the game path immediately (the watcher's first
 // StateChange is the current state, not just later transitions). The
-// Adaptive timer drives the game keepalive (brain-out retries,
+// keepalive timer drives the game keepalive (brain-out retries,
 // maintenance re-arm): 5 s while the brain is still up or the window is
 // not the game's yet, 60 s in the steady state — the interval
 // gameKeepalive returns. The stream transitions are event-driven; this
@@ -182,7 +198,18 @@ func (sc *streamController) Run(ctx context.Context) {
 	watch.Start(ch)
 	sc.log.Info("stream watchdog started (game → hold the GPU + stop the brain; desktop → no action)",
 		"game_excludes", cfg.SteamGameExcludes)
-	keepalive := time.NewTimer(60 * time.Second)
+	sc.run(ctx, ch)
+}
+
+// run is Run's loop over a transition channel (the tests feed it their
+// own channel). A stream transition RE-ARMS the keepalive: it can
+// change the brain-out state (a stream_start whose brain-out failed on
+// the round guard needs the fast retry cadence from now, not from
+// whenever the current timer happens to fire). The streamStarted call
+// already attempted the brain-out once; the re-arm's immediate
+// gameKeepalive evaluation is what puts the retry on the fast tick.
+func (sc *streamController) run(ctx context.Context, ch <-chan streamwatcher.StateChange) {
+	keepalive := time.NewTimer(sc.slowTick)
 	defer keepalive.Stop()
 	for {
 		select {
@@ -194,10 +221,30 @@ func (sc *streamController) Run(ctx context.Context) {
 			} else {
 				sc.streamStopped(ctx)
 			}
+			sc.armKeepalive(keepalive, ctx)
 		case <-keepalive.C:
 			keepalive.Reset(sc.gameKeepalive(ctx))
 		}
 	}
+}
+
+// armKeepalive re-evaluates the keepalive right after a stream
+// transition and sets the timer to the interval it returns. This is
+// the fix for the 2026-11-19 02:02 black stream: the game started
+// while a local round was in flight, the round guard aborted the
+// brain-out, and the retry was supposed to land "every 5 s while the
+// brain is up" — but a transition never re-armed the timer, so the
+// retry was up to 60 s away; the session ended 39 s in, and the brain
+// never released its VRAM. Stop+drain before Reset: the timer may
+// have fired into its channel while the transition was being handled.
+func (sc *streamController) armKeepalive(keepalive *time.Timer, ctx context.Context) {
+	if !keepalive.Stop() {
+		select {
+		case <-keepalive.C:
+		default:
+		}
+	}
+	keepalive.Reset(sc.gameKeepalive(ctx))
 }
 
 // streamStarted is one stream_start transition. Desktop streams
@@ -312,29 +359,29 @@ func (sc *streamController) streamStopped(ctx context.Context) {
 // watchdog owns that state, the game just logs it.
 func (sc *streamController) gameKeepalive(ctx context.Context) time.Duration {
 	if !sc.gameActive || sc.svc.window == nil {
-		return 60 * time.Second
+		return sc.slowTick
 	}
 	open, forCaps, _, err := sc.svc.window.swap.State()
 	if err != nil {
 		sc.log.Warn("game keepalive: cannot read the swap state", "err", err)
-		return 5 * time.Second
+		return sc.fastTick
 	}
 	brainUp := sc.probeBrain(ctx)
 	switch {
 	case !open && !brainUp:
 		sc.log.Info("game keepalive: brain down without a window marker — the watchdog owns this, not the game")
-		return 60 * time.Second
+		return sc.slowTick
 	case !open && brainUp:
 		if err := sc.acquireForGame(ctx, "steam game active (keepalive)"); err != nil {
 			sc.log.Error("game keepalive: brain-out failed", "err", err)
 		}
-		return 5 * time.Second
+		return sc.fastTick
 	case open && forContainsGame(forCaps) && brainUp:
 		sc.log.Warn("game keepalive: the brain is up under an open game window (re-armed mid-game?) — re-acquiring")
 		if err := sc.acquireForGame(ctx, "steam game active (keepalive)"); err != nil {
 			sc.log.Error("game keepalive: brain-out failed", "err", err)
 		}
-		return 5 * time.Second
+		return sc.fastTick
 	case open && forContainsGame(forCaps):
 		if !sc.maintainAlive() {
 			if err := sc.maintainRearm(); err != nil {
@@ -343,7 +390,7 @@ func (sc *streamController) gameKeepalive(ctx context.Context) time.Duration {
 				sc.log.Info("game keepalive: watchdog maintenance window re-armed (4h)")
 			}
 		}
-		return 60 * time.Second
+		return sc.slowTick
 	case open:
 		// A photo window is open (queue-triggered, or it opened while
 		// the game ran and ReleaseFromGame left it). The game wants it
@@ -352,9 +399,9 @@ func (sc *streamController) gameKeepalive(ctx context.Context) time.Duration {
 		if err := sc.acquireForGame(ctx, "steam game active (keepalive)"); err != nil {
 			sc.log.Error("game keepalive: brain-out failed", "err", err)
 		}
-		return 5 * time.Second
+		return sc.fastTick
 	}
-	return 60 * time.Second
+	return sc.slowTick
 }
 
 // localRoundsRunning lists the driver-local rounds in flight right now

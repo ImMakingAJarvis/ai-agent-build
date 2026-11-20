@@ -177,7 +177,7 @@ func (w *world) setUnacked(m map[string]int) {
 // plan-default config and two watched (brain-out) capabilities; the
 // depth snapshot covers a wider catalog, as production does (every
 // catalog capability, EVB-30).
-func newTestWindowController(t *testing.T, swap *fakeSwap, w *world, pub Publisher) *windowController {
+func newTestWindowController(t *testing.T, swap SwapRunner, w *world, pub Publisher) *windowController {
 	t.Helper()
 	wc := newWindowController(
 		resources.DefaultWindowConfig(),

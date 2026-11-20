@@ -652,6 +652,116 @@ func TestGameKeepaliveInterval(t *testing.T) {
 	}
 }
 
+// TestRunRearmsKeepaliveAfterFailedBrainOut is the 2026-11-19 02:02
+// black stream, end to end through the loop: the game starts while a
+// local round is in flight, the round guard aborts the brain-out (the
+// cut round is still in flight), and the retry must land on the fast
+// tick. Before the fix a transition never re-armed the keepalive
+// timer, so the retry was up to 60 s away — past the end of the 39 s
+// session — and the brain never released its VRAM.
+func TestRunRearmsKeepaliveAfterFailedBrainOut(t *testing.T) {
+	svc, pub, _, sc := newStreamTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	swap := &fakeFlipSwap{inner: &fakeSwap{failOpenGame: errors.New("local round is in flight — --force does not bypass it")}, n: 2}
+	svc.window = newTestWindowController(t, swap, &world{}, pub)
+	svc.ledger.RefreshBrainLease(18432)
+	sc.localRounds = func() []string { return []string{"chat-1795065917-6256"} }
+	var notices []string
+	sc.notifyOwner = func(msg string) error { notices = append(notices, msg); return nil }
+	// The brain is "up" until the fake swap opens the window (the
+	// brain-out). Both probes derive from the fake so the steady state
+	// never fires a real HTTP probe or the real maintenance exec.
+	brainUpFn := func(context.Context) bool {
+		open, _, _, _ := swap.State()
+		return !open
+	}
+	sc.probeBrain = brainUpFn
+	svc.window.brainUp = brainUpFn
+	sc.maintainAlive = func() bool { return true }
+	// Millisecond ticks; the initial (slow) timer is an hour so it
+	// cannot mask the test — a retry that only lands on it fails the
+	// deadline below.
+	sc.fastTick = 50 * time.Millisecond
+	sc.slowTick = time.Hour
+
+	ch := make(chan streamwatcher.StateChange, 1)
+	go sc.run(ctx, ch)
+	ch <- streamwatcher.StateChange{Stream: streamwatcher.SteamGame}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		open, _, _, _ := swap.State()
+		if open {
+			break
+		}
+		if time.Now().After(deadline) {
+			swap.inner.mu.Lock()
+			calls := swap.inner.openGameCalls
+			swap.inner.mu.Unlock()
+			t.Fatalf("the brain-out never landed (openGameCalls=%d): the retry must reach the fast tick after the transition", calls)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	swap.inner.mu.Lock()
+	calls := swap.inner.openGameCalls
+	swap.inner.mu.Unlock()
+	if calls != 3 {
+		t.Fatalf("openGameCalls = %d, want 3 (stream start + the transition's immediate re-evaluation + the fast-tick retry)", calls)
+	}
+	// The cut was announced exactly once — the immediate re-evaluation
+	// must not re-notify the owner.
+	if len(notices) != 1 {
+		t.Fatalf("owner notices = %d, want 1: %q", len(notices), notices)
+	}
+	b, err := os.ReadFile(filepath.Join(sc.signalDir, "restart-signal"))
+	if err != nil || string(b) != "steam-game" {
+		t.Fatalf("restart-signal = %q (%v), want the fresh-run content", string(b), err)
+	}
+	if !sc.gameHoldActive() {
+		t.Fatal("the game-hold marker must be set while the brain-out is pending")
+	}
+}
+
+// fakeFlipSwap fails its first n OpenGame calls (the round guard while
+// the cut round is still dying) and lets the rest through — the
+// runner's kill lands deterministically between attempts, without a
+// polling goroutine. It is driven by one goroutine (run's loop), so
+// the counter needs no lock of its own.
+type fakeFlipSwap struct {
+	inner *fakeSwap
+	n     int
+	calls int
+}
+
+func (f *fakeFlipSwap) OpenGame(ctx context.Context, reason string) error {
+	f.calls++
+	if f.calls > f.n {
+		f.inner.mu.Lock()
+		f.inner.failOpenGame = nil
+		f.inner.mu.Unlock()
+	}
+	return f.inner.OpenGame(ctx, reason)
+}
+
+func (f *fakeFlipSwap) Open(ctx context.Context, forCaps []string, reason string) error {
+	return f.inner.Open(ctx, forCaps, reason)
+}
+
+func (f *fakeFlipSwap) Close(ctx context.Context, reason string) error {
+	return f.inner.Close(ctx, reason)
+}
+
+func (f *fakeFlipSwap) OpenVoice(ctx context.Context, reason string) error {
+	return f.inner.OpenVoice(ctx, reason)
+}
+
+func (f *fakeFlipSwap) State() (bool, []string, time.Time, error) {
+	return f.inner.State()
+}
+
 // countKeys counts one routing key in an event list.
 func countKeys(keys []string, want string) int {
 	n := 0
