@@ -26,6 +26,11 @@ type fakeLabels struct {
 	labels  map[string][]map[string]string // projectID → labels
 	created int
 	deleted int
+	// pageSize > 0 splits list responses into cursor pages of that size,
+	// the way Plane does; failList makes listing a project return 500.
+	pageSize int
+	failList map[string]bool
+	hidden   map[string]bool // label names left out of list responses
 }
 
 func newFakeLabels() *fakeLabels {
@@ -53,14 +58,41 @@ func (f *fakeLabels) handler() http.Handler {
 		defer f.mu.Unlock()
 		switch {
 		case r.Method == http.MethodGet && lid == "":
-			out := append([]map[string]string(nil), f.labels[pid]...)
-			json.NewEncoder(w).Encode(map[string]any{"results": out, "count": len(out)})
+			if f.failList[pid] {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			var out []map[string]string
+			for _, l := range f.labels[pid] {
+				if !f.hidden[l["name"]] {
+					out = append(out, l)
+				}
+			}
+			if f.pageSize <= 0 {
+				json.NewEncoder(w).Encode(map[string]any{"results": out, "count": len(out)})
+				return
+			}
+			start := 0
+			fmt.Sscan(r.URL.Query().Get("cursor"), &start)
+			end := min(start+f.pageSize, len(out))
+			json.NewEncoder(w).Encode(map[string]any{
+				"results":           out[start:end],
+				"next_cursor":       fmt.Sprint(end),
+				"next_page_results": end < len(out),
+			})
 		case r.Method == http.MethodPost && lid == "":
 			var body struct {
 				Name  string `json:"name"`
 				Color string `json:"color"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
+			for _, l := range f.labels[pid] {
+				if l["name"] == body.Name {
+					w.WriteHeader(http.StatusConflict)
+					json.NewEncoder(w).Encode(map[string]string{"error": "Label with the same name already exists in the project", "id": l["id"]})
+					return
+				}
+			}
 			l := map[string]string{"id": fmt.Sprintf("lbl-%d", len(f.labels[pid])+1), "name": body.Name, "color": body.Color}
 			f.labels[pid] = append(f.labels[pid], l)
 			f.created++
@@ -357,5 +389,57 @@ func TestWatcherBadFileKeepsLastGoodState(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("watcher did not recover from the bad file (syncs=%d)", n)
 		}
+	}
+}
+
+// A plan: label past the first page of a project's labels is still seen —
+// the sync used to re-create it every 15 s and get HTTP 409 (2026-11-20).
+func TestSyncSeesLabelsOnLaterPages(t *testing.T) {
+	fake := newFakeLabels()
+	fake.pageSize = 2
+	c := testClient(t, fake)
+	fake.mu.Lock()
+	fake.labels["p1"] = []map[string]string{
+		{"id": "lbl-1", "name": "epic"},
+		{"id": "lbl-2", "name": "model:m-one"},
+		{"id": "lbl-3", "name": "plan:m-one", "color": Color},
+	}
+	fake.mu.Unlock()
+	if err := Sync(context.Background(), c, []string{"p1"}, parseDoc(t, registryDoc(true, false)), quietLog); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if created, deleted := fake.counts(); created != 0 || deleted != 0 {
+		t.Errorf("counts = %d/%d, want 0/0 (plan:m-one is on page 2)", created, deleted)
+	}
+}
+
+// A 409 on create means the label exists: the sync succeeds instead of
+// failing (and retrying) forever.
+func TestSyncTreatsConflictAsPresent(t *testing.T) {
+	fake := newFakeLabels()
+	fake.hidden = map[string]bool{"plan:m-one": true} // a list that misses it
+	c := testClient(t, fake)
+	fake.mu.Lock()
+	fake.labels["p1"] = []map[string]string{{"id": "lbl-1", "name": "plan:m-one", "color": Color}}
+	fake.mu.Unlock()
+	if err := Sync(context.Background(), c, []string{"p1"}, parseDoc(t, registryDoc(true, false)), quietLog); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if created, _ := fake.counts(); created != 0 {
+		t.Errorf("created = %d, want 0", created)
+	}
+}
+
+// One failing project does not stop the others from being synced.
+func TestSyncKeepsGoingPastAFailingProject(t *testing.T) {
+	fake := newFakeLabels()
+	fake.failList = map[string]bool{"p1": true}
+	c := testClient(t, fake)
+	err := Sync(context.Background(), c, []string{"p1", "p2"}, parseDoc(t, registryDoc(true, false)), quietLog)
+	if err == nil || !strings.Contains(err.Error(), "project p1") {
+		t.Fatalf("Sync err = %v, want the p1 failure reported", err)
+	}
+	if got := fake.names(t, "p2"); len(got) != 1 || got[0] != "plan:m-one" {
+		t.Errorf("p2 labels = %v, want [plan:m-one] despite p1 failing", got)
 	}
 }

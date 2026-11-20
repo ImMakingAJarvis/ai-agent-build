@@ -345,26 +345,35 @@ func (c *Client) CreateProject(ctx context.Context, name, identifier string) (*P
 // ListProjects lists the workspace's projects, following cursor pages so a
 // workspace that grows past one page is still complete.
 func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
-	var all []Project
+	return listAllPages(ctx, c, c.wsPath("/projects/"), func(p Project) string { return p.ID })
+}
+
+// listAllPages reads every cursor page of a v1 list endpoint (base is the
+// path without a query), dropping empty and repeated ids. A bare-array
+// response is one page. It stops after 100 pages as a guard against a
+// server that never ends the cursor.
+func listAllPages[T any](ctx context.Context, c *Client, base string, id func(T) string) ([]T, error) {
+	var all []T
 	seen := map[string]bool{}
-	path := c.wsPath("/projects/?per_page=100")
+	path := base + "?per_page=100"
 	for page := 0; page < 100; page++ {
-		var batch []Project
+		var batch []T
 		next, more, err := c.doListPage(ctx, path, &batch)
 		if err != nil {
 			return nil, err
 		}
-		for _, p := range batch {
-			if p.ID == "" || seen[p.ID] {
+		for _, v := range batch {
+			k := id(v)
+			if k == "" || seen[k] {
 				continue
 			}
-			seen[p.ID] = true
-			all = append(all, p)
+			seen[k] = true
+			all = append(all, v)
 		}
 		if !more || next == "" {
 			return all, nil
 		}
-		path = c.wsPath("/projects/?per_page=100&cursor=" + url.QueryEscape(next))
+		path = base + "?per_page=100&cursor=" + url.QueryEscape(next)
 	}
 	return all, nil
 }
@@ -488,13 +497,10 @@ func (c *Client) AddProjectMember(ctx context.Context, projectID, memberID strin
 
 // --- states -------------------------------------------------------------------
 
-// ListStates lists a project's states, in sequence order (first page).
+// ListStates lists a project's states, in sequence order, following
+// cursor pages.
 func (c *Client) ListStates(ctx context.Context, projectID string) ([]State, error) {
-	var out []State
-	if err := c.doList(ctx, "GET", c.projectPath(projectID, "/states/"), &out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return listAllPages(ctx, c, c.projectPath(projectID, "/states/"), func(s State) string { return s.ID })
 }
 
 // StateByName finds a project state by name, case-insensitively (this
@@ -514,13 +520,13 @@ func (c *Client) StateByName(ctx context.Context, projectID, name string) (*Stat
 
 // --- labels -------------------------------------------------------------------
 
-// ListLabels lists a project's labels (first page).
+// ListLabels lists a project's labels, following cursor pages. It used to
+// read only the first page: in a project with more labels than that, a
+// plan:<model> label on page 2 was invisible — the bridge dropped it from
+// the card (so planning was never queued) and the plan-label sync tried to
+// re-create it every 15 s (HTTP 409, 2026-11-20).
 func (c *Client) ListLabels(ctx context.Context, projectID string) ([]Label, error) {
-	var out []Label
-	if err := c.doList(ctx, "GET", c.projectPath(projectID, "/labels/"), &out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return listAllPages(ctx, c, c.projectPath(projectID, "/labels/"), func(l Label) string { return l.ID })
 }
 
 // CreateLabel creates a label in a project.

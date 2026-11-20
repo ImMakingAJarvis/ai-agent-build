@@ -537,7 +537,16 @@ func (b *Bridge) evaluate(ctx context.Context, projectID string, item *plane.Wor
 	// Assignee + Planning is the plan trigger. The assignee names the
 	// planner. A card that already carries a delivered plan is re-planned.
 	if item.Parent == "" && strings.EqualFold(stateName, "Planning") {
-		if id := b.assigneeModel(ctx, item); id != "" {
+		id := b.assigneeModel(ctx, item)
+		if id == "" && modelID == "" {
+			// Nothing names a planner: say so on the card instead of
+			// skipping it on every catch-up without a trace.
+			b.cfg.Log.Info("planning card not queued", "item", item.ID,
+				"reason", "no assignee is a model bot", "assignees", len(item.Assignees))
+			b.noteOnce(ctx, projectID, item, "bridge: not planning — no assignee is a model bot. "+
+				"Assign the planner (e.g. "+planeassign.QwenEmail+") to start planning.")
+		}
+		if id != "" {
 			if reason := b.plannerBlock(id); reason != "" {
 				b.noteOnce(ctx, projectID, item, "bridge: not planning — "+reason)
 			} else if strings.Contains(item.DescriptionHTML, plane.PlanPageMarker) {
@@ -608,8 +617,17 @@ func hasLabel(names []string, want string) bool {
 // store write is the anchor that makes a redelivery a no-op.
 func (b *Bridge) enqueue(ctx context.Context, projectID, trigger string, item *plane.WorkItem, modelID string, labelNames []string) bool {
 	id := "plane-" + trigger + "-" + item.ID
-	if _, err := b.cfg.Store.Get(id); err == nil {
-		return false // a job for this trigger+item already exists
+	if existing, err := b.cfg.Store.Get(id); err == nil {
+		// A job for this trigger+item already exists. For a plan that
+		// failed, the card would sit in Planning for good with no sign
+		// why, so log and note it.
+		if trigger == TriggerPlan && existing.Status == agentjob.Failed {
+			b.cfg.Log.Info("planning card not queued", "item", item.ID,
+				"reason", "plan job already exists", "job", id, "status", existing.Status)
+			b.noteOnce(ctx, projectID, item, "bridge: not planning — the plan job "+id+
+				" failed. Run jarvis-jobs requeue "+id+" to plan again.")
+		}
+		return false
 	}
 	effort := ""
 	if trigger == TriggerPlan {
@@ -1320,19 +1338,22 @@ func (b *Bridge) invalidateMeta() {
 
 // assigneeModel is the registry id for the card's first assignee that
 // maps to a model, or "" when the card has no such assignee.
+//
+// Every assignee is checked, in order: a card assigned to Nathan and a
+// model bot used to be skipped without a word when Nathan was listed
+// first (BWT-1, 2026-11-20).
 func (b *Bridge) assigneeModel(ctx context.Context, item *plane.WorkItem) string {
-	if len(item.Assignees) == 0 {
-		return ""
+	for _, userID := range item.Assignees {
+		email, err := b.memberEmail(ctx, userID)
+		if err != nil {
+			b.cfg.Log.Warn("assignee lookup failed", "item", item.ID, "err", err)
+			return ""
+		}
+		if id, ok := planeassign.ModelForEmail(email); ok {
+			return id
+		}
 	}
-	email, err := b.memberEmail(ctx, item.Assignees[0])
-	if err != nil || email == "" {
-		return ""
-	}
-	id, ok := planeassign.ModelForEmail(email)
-	if !ok {
-		return ""
-	}
-	return id
+	return ""
 }
 
 // memberEmail resolves a workspace member id to an email, caching the

@@ -62,3 +62,17 @@ and posts fit-check comments.
 - Silent 400 on every webhook: payload shape assumed wrong (2026-10-31).
 - Kept dead publishers after a broker restart (fixed 2026-11-06, PR #173).
 - Plane rate limits (429) on bulk calls — the client backs off.
+- Read only the first page of a project's labels and states: a
+  `plan:`/`model:` label past page 1 was dropped from cards ("no model:
+  label on the card") and the label sync re-created it every 15 s (HTTP
+  409), stopping at that project (2026-11-19 → 11-20). Lists now follow
+  every cursor page; the sync handles each project on its own and counts a
+  409 as present.
+- BWT-1 sat in Planning for ~50 min: ~13 catch-ups evaluated it and
+  queued nothing, with no log line (2026-11-20). The quiet paths were a
+  card with no model-bot assignee, a bot that is not the *first* assignee
+  (only `Assignees[0]` was read), and an earlier plan job for the card
+  already in the store; which one hit BWT-1 was not confirmed. Every
+  assignee is now checked; a card that still is not
+  planned gets one `bridge: not planning — …` comment (no bot assignee,
+  or its plan job failed) and a `planning card not queued` log line.
