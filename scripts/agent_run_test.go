@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,8 +41,23 @@ case "$cmd" in
     cat "$STUB/fullauto" 2>/dev/null || echo off ;;
   automode|keepgoing) echo off ;;
   show) cat "$STUB/show-$1" 2>/dev/null || exit 1 ;;
-  run) echo "run $*" >> "$STUB/log"; echo "$1" >> "$STUB/done"; exit 0 ;;
-  list) while IFS= read -r id; do echo "done $id"; done < "$STUB/done" 2>/dev/null ;;
+  run)
+    echo "run $*" >> "$STUB/log"
+    # runfail-<id> holds how many more starts of that job fail the way a
+    # Redis OOM does: an error on stderr, exit 2, the job left ready.
+    if [[ -f "$STUB/runfail-$1" ]] && (( $(cat "$STUB/runfail-$1") > 0 )); then
+      echo $(( $(cat "$STUB/runfail-$1") - 1 )) > "$STUB/runfail-$1"
+      echo "jarvis-jobs: acquire nobrakes:running: OOM command not allowed when used memory > 'maxmemory'." >&2
+      exit 2
+    fi
+    echo "$1" >> "$STUB/done"; exit 0 ;;
+  list)
+    while IFS= read -r id; do echo "done $id"; done < "$STUB/done" 2>/dev/null
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      id="${line%%$'\t'*}"
+      grep -qx "$id" "$STUB/done" 2>/dev/null || echo "ready $id"
+    done < "$STUB/queue" ;;
   *) echo "jobs $cmd $*" >> "$STUB/log" ;;
 esac
 `
@@ -95,6 +111,7 @@ type agentRunScenario struct {
 	afterAsk map[int][]agentRunJob // the queue once question N is answered
 	answers  []string              // checkpoint answers, in order ("stop" after)
 	fullAuto bool
+	runFail  map[string]int // job id -> how many of its starts fail (exit 2, still ready)
 }
 
 // runAgentRun runs scripts/agent-run in stage 3 against the stubs and
@@ -125,7 +142,7 @@ func runAgentRun(t *testing.T, sc agentRunScenario) []string {
 	}
 	// The loop's whole PATH: the stubs, plus the system tools the script
 	// itself uses. Anything else — every real jarvis-* tool — is not found.
-	for _, tool := range []string{"bash", "cat", "sed", "tr", "grep", "awk", "date", "rm", "mv", "head", "hostname", "whoami"} {
+	for _, tool := range []string{"bash", "cat", "sed", "tr", "grep", "awk", "date", "rm", "mv", "head", "tail", "cut", "hostname", "whoami"} {
 		p, err := exec.LookPath(tool)
 		if err != nil {
 			t.Skipf("%s not available", tool)
@@ -162,6 +179,9 @@ func runAgentRun(t *testing.T, sc agentRunScenario) []string {
 	write(filepath.Join(stub, "done"), "", 0o644)
 	if sc.fullAuto {
 		write(filepath.Join(stub, "fullauto"), "on\n", 0o644)
+	}
+	for id, n := range sc.runFail {
+		write(filepath.Join(stub, "runfail-"+id), strconv.Itoa(n)+"\n", 0o644)
 	}
 	write(filepath.Join(conf, "stage"), "3\n", 0o644)
 
@@ -333,5 +353,54 @@ func TestAgentRunFullAutoRunsIGPUJobOnItsSpecDriver(t *testing.T) {
 	}
 	if indexOf(log, "notify Full auto: running igpu: restart the brain (chat-1) on igpu.") < 0 {
 		t.Errorf("no full-auto dispatch note:\n%s", strings.Join(log, "\n"))
+	}
+}
+
+// Full auto, a job that cannot start (Redis OOM refusing the auto-run
+// marker, 2026-11-20): the loop must not re-dispatch it at once and post
+// "Full auto: running ..." on every iteration. It posts the running note
+// once, the failure once with its reason, and backs off between retries.
+func TestAgentRunFullAutoBacksOffWhenAJobCannotStart(t *testing.T) {
+	log := runAgentRun(t, agentRunScenario{
+		jobs:     []agentRunJob{localJob},
+		queue:    []agentRunJob{localJob},
+		fullAuto: true,
+		runFail:  map[string]int{"j1": 5},
+	})
+	all := strings.Join(log, "\n")
+	// Backoff 30 s, then 60 s — the stub's 60 s sleep turns full auto off,
+	// so the scenario ends at a question after two failed starts.
+	if runs := withPrefix(log, "run j1 "); len(runs) != 2 {
+		t.Fatalf("runs = %q, want 2 (one per backoff step)\n%s", runs, all)
+	}
+	if n := len(withPrefix(log, "notify Full auto: running a local job (j1)")); n != 1 {
+		t.Errorf("running note posted %d times, want once:\n%s", n, all)
+	}
+	fails := withPrefix(log, "notify Full auto: couldn't start a local job (j1)")
+	if len(fails) != 1 || !strings.Contains(fails[0], "OOM command not allowed") {
+		t.Errorf("failure notes = %q, want one carrying the run's error:\n%s", fails, all)
+	}
+	if indexOf(log, "sleep 30") < 0 || indexOf(log, "sleep 60") < indexOf(log, "sleep 30") {
+		t.Errorf("want a 30 s then a 60 s backoff:\n%s", all)
+	}
+}
+
+// Once the job starts after failed starts, the owner hears it ran.
+func TestAgentRunFullAutoReportsRecoveryAfterFailedStart(t *testing.T) {
+	log := runAgentRun(t, agentRunScenario{
+		jobs:     []agentRunJob{localJob},
+		queue:    []agentRunJob{localJob},
+		fullAuto: true,
+		runFail:  map[string]int{"j1": 1},
+	})
+	all := strings.Join(log, "\n")
+	if runs := withPrefix(log, "run j1 "); len(runs) != 2 {
+		t.Fatalf("runs = %q, want a failed start then the real round\n%s", runs, all)
+	}
+	if n := len(withPrefix(log, "notify Full auto: running a local job (j1)")); n != 1 {
+		t.Errorf("running note posted %d times, want once:\n%s", n, all)
+	}
+	if indexOf(log, "notify Full auto: a local job (j1) ran after 1 failed start(s) (exit 0).") < 0 {
+		t.Errorf("no recovery note:\n%s", all)
 	}
 }

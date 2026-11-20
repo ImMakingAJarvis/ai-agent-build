@@ -15,7 +15,9 @@ depends_on: []
 ## Purpose
 
 - Per-job streams `jarvis:job:<id>` (the runner XADDs every stream-json
-  line; the dashboard tails them for the live view).
+  line; the dashboard tails them for the live view). `MAXLEN ~ 5000`,
+  6 h safety TTL while the round runs, 1 h TTL once it ends
+  (`internal/agentjob/stream.go`).
 - NoBrakes flags: `nobrakes:auto_mode`, `nobrakes:full_auto`,
   `nobrakes:keep_going`, `nobrakes:nightly_flag`, `nobrakes:running`.
 - `!fixnow` saves a cut-off round's transcript tail here (24 h TTL).
@@ -46,3 +48,13 @@ depends_on: []
 
 - A container without `JARVIS_REDIS` dials its own loopback and every
   flag write fails (chat, 2026-11-04, PR #155).
+- **Full at maxmemory.** With `noeviction`, a full Redis refuses every
+  write (`OOM command not allowed`) while reads still work: full auto
+  reads "on" but `jarvis-jobs run -auto` cannot take `nobrakes:running`
+  and exits 2. Job streams at 20k entries / 24 h TTL (~7.5 MB each) did
+  this on 2026-11-20 and full auto posted "Full auto: running ..." to
+  Discord every second; the caps are now 5k / 1 h and agent-run backs off
+  a job that cannot start. Check: `redis-cli INFO memory`
+  (`used_memory` vs `maxmemory`); relief: `redis-cli CONFIG SET
+  maxmemory 512mb` (runtime) or delete finished jobs' `jarvis:job:*`
+  streams — the transcripts are the durable copy.

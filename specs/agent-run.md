@@ -88,3 +88,12 @@ confirm the new text is in the prompt.
 - Ran an old script after install (2026-11-06).
 - Supervised dispatch asked "who runs it?" for photo jobs that run as code
   (2026-11-07, PR #191).
+- Full auto re-dispatched a job that could not start (Redis full, so
+  `jarvis-jobs run -auto` could not take the `nobrakes:running` marker and
+  exited 2) with no pause, and posted "Full auto: running ..." to Discord
+  every second (2026-11-20). Now an auto run that exits non-zero within
+  30 s and leaves the job ready counts as a failed start: the running note
+  goes out once per job, the failure once per streak with the run's last
+  stderr line, and retries back off 30 s, 60 s, ... up to 10 min. The
+  run's stderr is copied to `~/.config/jarvis/auto-run.err` and then to
+  agent.log.

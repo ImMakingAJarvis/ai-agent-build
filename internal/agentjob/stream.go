@@ -24,12 +24,25 @@ func StreamAddr() string {
 }
 
 // streamMaxLen bounds each job's stream so finished jobs cannot fill
-// Redis; the transcript file keeps the full durable copy.
-const streamMaxLen = 20000
+// Redis; the transcript file keeps the full durable copy. The live view
+// seeds from the newest lines only, so 5k is plenty. It was 20k (~7.5 MB
+// per job): with a 24 h TTL a busy day's ~35 streams filled the 256 MB
+// noeviction Redis, and the NoBrakes flag writes that share it (the
+// auto-run marker) failed with OOM — full auto then spun on Discord
+// ("Full auto: running ..." every second, 2026-11-20).
+const streamMaxLen = 5000
 
 // streamTTL is how long a finished job's stream survives for late page
-// visits; after that the transcript file is the only copy.
-const streamTTL = 24 * time.Hour
+// visits; after that the dashboard reads the transcript file instead.
+const streamTTL = time.Hour
+
+// streamLiveTTL is the safety expiry a running job's stream carries, so a
+// round that crashes before Close (no streamTTL set) cannot pin its
+// stream in Redis forever. It is refreshed every streamRefreshEvery lines,
+// so a long round keeps its stream while it is still writing.
+const streamLiveTTL = 6 * time.Hour
+
+const streamRefreshEvery = 500
 
 // StreamPublisher is an io.Writer that publishes each completed output
 // line of the agent to the job's Redis stream, where the dashboard reads
@@ -82,18 +95,25 @@ func NewStreamPublisher(addr, jobID string) *StreamPublisher {
 
 // run XADDs each line until Close drains the channel. A failed XADD
 // kills streaming for the rest of the job (one stderr note, no retries).
+// The first line, and every streamRefreshEvery after it, (re)sets the
+// stream's safety expiry (streamLiveTTL).
 func (p *StreamPublisher) run() {
+	n := 0
 	for line := range p.lines {
 		if p.dead.Load() {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		err := p.client.XAdd(ctx, &redis.XAddArgs{
-			Stream:           p.key,
+			Stream: p.key,
 			MaxLen: streamMaxLen,
 			Approx: true,
-			Values:           map[string]any{"data": string(line), "ts": time.Now().UnixMilli()},
+			Values: map[string]any{"data": string(line), "ts": time.Now().UnixMilli()},
 		}).Err()
+		if err == nil && n%streamRefreshEvery == 0 {
+			p.client.Expire(ctx, p.key, streamLiveTTL)
+		}
+		n++
 		cancel()
 		if err != nil {
 			p.dead.Store(true)
