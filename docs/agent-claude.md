@@ -399,3 +399,16 @@ round appends to it. Resolve by keeping ALL entries from both sides
 Then — and only then — Discord-notify with the PR link and finish the
 job done. (Job chat-1793154320-3d8d, 2026-10-27: PR #83 was left
 CONFLICTING and had to be reworked.)
+
+## PR review
+
+- Reviews go to `review.sonnet`, `review.opus`, `review.fable`, or
+  `review.local`. They do not use class `fix` or priority 100.
+- Fable runs only after `!review-release <pr>`.
+- The reviewer may commit on the pull request branch when it holds the
+  token. It does not open a second pull request. It does not merge to
+  `main` unless its id is in `config/review.yaml` `merge_allow`.
+- Comments go on the Plane item, posted with that model's secret. They
+  do not go on GitHub.
+- A revival line in the review log is a bug. Do not delete it to make
+  the evening digest quiet.
