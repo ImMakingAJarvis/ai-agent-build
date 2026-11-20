@@ -14,10 +14,13 @@ working on the running system, or was merged but never deployed.
 1. **Check first that it is not already done.** Search open and merged
    PRs for the job's subject before building. If the work is on main,
    say so with evidence and finish — do not rebuild it.
-2. **Build and test.** `go build ./... && go vet ./... && go test ./...`
+2. **Read the spec of every service you touch** (`specs/<id>.md`, see
+   "Service specs" below) before changing it — it names what the service
+   talks to, where it runs, how to deploy it and how to check it.
+3. **Build and test.** `go build ./... && go vet ./... && go test ./...`
    for Go; `python3 -m py_compile` for the Python services; `bash -n`
    for scripts; `docker compose config -q` after any compose edit.
-3. **Verify live, on the path the owner uses.** Tests are not enough.
+4. **Verify live, on the path the owner uses.** Tests are not enough.
    - Code that runs in a container is checked from **inside that
      container** (`docker exec`), not on the host. The host has tools,
      mounts, env and network names the container lacks (procps, ffmpeg,
@@ -30,7 +33,7 @@ working on the running system, or was merged but never deployed.
      `NOT VERIFIED LIVE: <what, why>` as the first line of the PR body
      and the Discord note, and yield or queue the verifying round. Do
      not leave it as an "Open" line in the notes.
-4. **Deploy what you changed, from main's code.** A merged PR changes
+5. **Deploy what you changed, from main's code.** A merged PR changes
    nothing until the binary, script or image is installed and the
    process restarted. Use the component's `scripts/install_*.sh`; for a
    compose service `docker compose build <svc> && docker compose up -d
@@ -40,13 +43,39 @@ working on the running system, or was merged but never deployed.
    built from a branch that is behind `origin/main`: rebase first. Then
    confirm the running thing is the new one (version, build time, or
    the new behaviour) and say so in the PR.
-5. **Report honestly.** A command that failed is a failed job: finish
+6. **Update the spec in the same PR.** A new service, a new port, env
+   var, dependency, data path, deploy step, live check or failure mode
+   you hit goes into its `specs/<id>.md` in the same PR as the code.
+7. **Report honestly.** A command that failed is a failed job: finish
    with a non-zero code, never 0. Never tell the owner something was
    queued, sent or fixed unless you saw it happen.
-6. **Before killing or deleting, look at the exact target.** Kill by
+8. **Before killing or deleting, look at the exact target.** Kill by
    PID, never `pkill -f`/`pgrep -f … | xargs kill` with a pattern that
    appears in your own job text (your prompt is in your process's
    argv). No globs on `git branch -D`. Never force-push a shared branch.
+
+## Service specs — one per service, kept true
+
+Every service, host unit, CLI and external system has a spec in
+`specs/<id>.md`: YAML front matter (group, kind, status, compose
+services, units, binaries, ports, health probe, `depends_on` with a
+reason) and seven required sections — Purpose, Interfaces,
+Configuration, Data, Deploy, Verify live, Failure modes. The standard
+and the template are `specs/README.md` and `specs/_template.md`.
+
+- **Enforced:** `go test ./...` (package `./specs`) fails when a compose
+  service, a `systemd/` unit or a `cmd/` package has no spec, when a
+  spec names something that no longer exists, when a section is missing
+  or empty, or when a `depends_on` target is not a spec. A PR that adds
+  a service without a spec does not build green.
+- **Find the right spec:** `grep -l "<compose name or cmd/pkg>" specs/*.md`,
+  or open the System map.
+- **Facts only, no secrets.** Leave out what you do not know; name env
+  files and variables, never their values.
+- **The System map** — `http://111.1.2.27:8080/map`, linked from the
+  queue site — is drawn from the specs (embedded in the dashboard
+  binary), with live health from each spec's `health` target. It changes
+  when the dashboard image is rebuilt.
 
 ## Standing rules from the owner
 
