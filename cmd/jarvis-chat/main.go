@@ -289,6 +289,15 @@ func main() {
 					return
 				}
 
+				// !review <pr> <reviewer> requests a PR review (the job
+				// lands on the reviewer's queue; a held Fable review is
+				// released with !review-release <pr>) — Job 5 of
+				// docs/pr-review-build-plan.md (owner-only, same as the
+				// NoBrakes commands above).
+				if handleReview(d, content) {
+					return
+				}
+
 				// !photo / !photoassist / !photocheck generate a photo
 				// with the local art model (prompt expanded by the
 				// thinking mind) and send it back as an attachment.

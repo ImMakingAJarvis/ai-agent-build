@@ -336,6 +336,12 @@ services:
       # !photo reads the generated PNG from the art service's host dir;
       # chat needs it mounted (read-only) to attach it to the DM.
       - /var/lib/jarvis/art:/var/lib/jarvis/art:ro
+      # !review / !fullauto reviewer routing reads the review config
+      # (Job 5 of docs/pr-review-build-plan.md) from /config/review.yaml.
+      - /home/agent/ai-agent-build/config:/config:ro
+      # !review mints a GitHub App installation token from the app key;
+      # read-only, no token file is written (the cache is in-memory).
+      - /home/agent/.config/ghapp:/home/agent/.config/ghapp:ro
 
   dashboard:
     build:
