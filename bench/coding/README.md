@@ -98,3 +98,8 @@ transcribed into Go, not read from files).
   served model under its GGUF name.
 - Exercises are intentionally small (≤ ~2K-token solutions): the battery
   measures *can it write correct code at 128K context*, not throughput.
+- Smoke-tested 2026-11-20 against the iGPU endpoint (:11435,
+  Qwen2.5-3B) to prove the runners work end-to-end before the first
+  4090 window is spent — that is the one sanctioned exception to the
+  "never 11435" rule above; the results are not suite numbers
+  (`~/.local/share/jarvis/bench/moe-128k/_smoke-igpu/`).

@@ -159,4 +159,11 @@ plan uses (`--max-seq-len-override`, `--kv-reserve-tokens`,
 `--memory-ratio`, `--moe-strategy hybrid`, `--moe-cache-auto`); both
 first shards are on disk:
 `Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf` and
-`GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf`.
+`GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf`. The harness was
+smoke-tested end-to-end against the iGPU endpoint (:11435, Qwen2.5-3B —
+a harness check only, not a suite point; JSONs in
+`~/.local/share/jarvis/bench/moe-128k/_smoke-igpu/`): all three runners
+completed — standard 3/3 runs (1373 prompt tokens, ~13 gen tok/s),
+exercises 5/5 executed and graded (2/5 passed, expected of a 3B model),
+needle calibrated and 5/5 positions answered. All 86 exercise reference
+checks pass offline.
