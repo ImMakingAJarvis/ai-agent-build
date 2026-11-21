@@ -159,6 +159,35 @@ paths:
                 $ref: "#/components/schemas/Item"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/items/{id}/artwork/{kind}:
+    get:
+      tags: [items]
+      operationId: getItemArtwork
+      summary: Get an item's cached artwork image
+      description: >
+        Serves one image from the on-disk artwork cache (kind: poster or
+        backdrop). 404 when the item, its metadata or the image file is
+        not there; 400 for any other kind.
+      parameters:
+        - $ref: "#/components/parameters/IntID"
+        - name: kind
+          in: path
+          required: true
+          schema: {type: string, enum: [poster, backdrop]}
+      responses:
+        "200":
+          description: The artwork image
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+            image/png:
+              schema: {type: string, format: binary}
+            image/webp:
+              schema: {type: string, format: binary}
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
 components:
   parameters:
     IntID:
@@ -209,7 +238,7 @@ components:
         type: {type: string, enum: [movies, shows]}
     Item:
       type: object
-      required: [id, library_id, type, title]
+      required: [id, library_id, type, title, metadata, artwork]
       properties:
         id: {type: integer}
         library_id: {type: integer}
@@ -222,6 +251,32 @@ components:
         episode: {type: integer}
         size: {type: integer, format: int64}
         modtime: {type: string, format: date-time}
+        metadata:
+          $ref: "#/components/schemas/Metadata"
+        artwork:
+          $ref: "#/components/schemas/Artwork"
+    Metadata:
+      type: object
+      nullable: true
+      description: >
+        TMDB metadata fetched by the scan (null until it has been fetched;
+        episode artwork is the series' artwork).
+      required: [tmdb_id, kind, overview, rating, air_date]
+      properties:
+        tmdb_id: {type: integer}
+        kind: {type: string, enum: [movie, series, season, episode]}
+        overview: {type: string}
+        rating: {type: number, format: double}
+        air_date: {type: string, description: Release/air date (YYYY-MM-DD, may be empty)}
+    Artwork:
+      type: object
+      nullable: true
+      description: >
+        URLs of the cached artwork images (null when none is cached; a
+        field is absent when only that image is missing).
+      properties:
+        poster: {type: string}
+        backdrop: {type: string}
     Scan:
       type: object
       required: [id, library_id, state, added, updated, skipped]
