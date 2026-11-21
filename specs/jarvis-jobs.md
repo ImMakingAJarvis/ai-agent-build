@@ -61,6 +61,21 @@ from PATH every round, so the next round uses the new binary.
     jarvis-jobs next          # what runs next, in band order
     jarvis-jobs show <id>
 
+## Dependency sweep
+
+A ready job whose dependency is terminally broken — `failed`, `skipped`,
+missing from the store, or itself parked by this sweep (`dep-blocked`) —
+is parked with `state.json` `dep_block: "<dep>:<reason>"` and summary
+`dep-blocked: <dep> is <reason>`, instead of sitting `ready` forever and
+invisible to `next` (the silent plan-to-task deadlock). The sweep runs on
+every `next` / `photo-ready` poll and every status change (`SetStatus`),
+to a fixpoint, so a whole chain behind a failed head parks at every link.
+Re-queueing or finishing the blocker returns its dependents to `ready`
+(`dep_block` cleared). Jobs parked for another reason (nightly, manual
+stop — no `dep_block`) are never touched; their dependents simply wait
+for them as for any unmet dep. `list` appends `[dep-blocked: <dep>:<reason>]`
+to such parked jobs and counts them in the trailing totals line.
+
 ## Failure modes
 
 - Installed from a feature branch that predated `requeue -driver`; the
@@ -70,3 +85,7 @@ from PATH every round, so the next round uses the new binary.
 - `finish` on a ready job is a no-op; use `skip` or `mark-running` first.
 - A job left `ready` after a deferred round is re-picked immediately;
   `yield` with a deadline parks it (2026-11-16).
+- A ready job whose dep failed/skipped/vanished was silently stuck: `next`
+  skipped it and nothing showed why — the queue looked full of work while
+  the loop idled. The dependency sweep (2026-11-20) makes it visible:
+  parked + named blocker.
