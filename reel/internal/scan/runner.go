@@ -4,6 +4,7 @@
 package scan
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -17,13 +18,21 @@ type Result struct {
 	Skipped int
 }
 
-// Run walks the library tree and upserts every candidate into the store.
-// A candidate is added on first sight, updated when any of its metadata
-// (size, mtime, title, season/episode numbers) changed, and skipped when
-// unchanged — that is the incremental rescan. Items the walk no longer
-// sees are kept as they are: the library root may be a partial mount and
-// nothing in Reel deletes media metadata.
+// Run walks the library tree and upserts every candidate into the store,
+// without metadata fetching (the queue handler's no-key path).
 func Run(d *db.DB, lib db.Library) (Result, error) {
+	return RunWith(context.Background(), d, lib, nil)
+}
+
+// RunWith is Run plus optional TMDB metadata: every candidate the walk
+// adds or changes is fetched through f and stored on its item row
+// (best-effort — a fetch failure leaves the item without metadata but
+// never fails the scan). Items the walk skips (unchanged) keep their
+// metadata untouched — that is what makes a rescan of an unchanged
+// library a no-op for the network. Candidates the walk no longer sees
+// are kept as they are: the library root may be a partial mount and
+// nothing in Reel deletes media metadata.
+func RunWith(ctx context.Context, d *db.DB, lib db.Library, f Fetcher) (Result, error) {
 	cands, err := Walk(lib.Path, lib.Type)
 	if err != nil {
 		return Result{}, err
@@ -50,7 +59,7 @@ func Run(d *db.DB, lib db.Library) (Result, error) {
 				item.ParentID = &season.ID
 			}
 		}
-		a, err := upsertItem(d, item)
+		a, id, err := upsertItem(d, item)
 		if err != nil {
 			return r, err
 		}
@@ -61,6 +70,14 @@ func Run(d *db.DB, lib db.Library) (Result, error) {
 			r.Updated++
 		default:
 			r.Skipped++
+		}
+		if f != nil && a != "skipped" {
+			// A renamed item's old metadata is stale: drop it so the
+			// refetch starts clean (a failed refetch leaves none).
+			if a == "updated" {
+				_ = d.DeleteItemMeta(id)
+			}
+			fetchItemMeta(ctx, d, f, c, id)
 		}
 	}
 	return r, nil
@@ -75,11 +92,12 @@ func seasonPathOf(rel string) string {
 	return parts[0] + "/" + parts[1]
 }
 
-// upsertItem inserts or refreshes one candidate and reports what happened.
-func upsertItem(d *db.DB, item db.Item) (string, error) {
+// upsertItem inserts or refreshes one candidate and reports what happened
+// plus the item's id.
+func upsertItem(d *db.DB, item db.Item) (string, int64, error) {
 	existing, err := d.FindItemByPath(item.LibraryID, item.Path)
 	if err != nil && err != db.ErrNotFound {
-		return "", err
+		return "", 0, err
 	}
 	if err == nil {
 		changed := existing.Title != item.Title ||
@@ -89,15 +107,16 @@ func upsertItem(d *db.DB, item db.Item) (string, error) {
 			existing.Season != item.Season ||
 			existing.Episode != item.Episode
 		if !changed {
-			return "skipped", nil
+			return "skipped", existing.ID, nil
 		}
 		if err := d.UpdateItemMeta(existing.ID, item); err != nil {
-			return "", err
+			return "", 0, err
 		}
-		return "updated", nil
+		return "updated", existing.ID, nil
 	}
-	if _, err := d.InsertItem(item); err != nil {
-		return "", err
+	i, err := d.InsertItem(item)
+	if err != nil {
+		return "", 0, err
 	}
-	return "added", nil
+	return "added", i.ID, nil
 }

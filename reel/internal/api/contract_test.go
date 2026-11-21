@@ -31,6 +31,7 @@ type contractCase struct {
 	Body    string
 	Want    int
 	Fields  []string // required on the object (or first array element)
+	Raw     bool     // non-JSON response (artwork images): skip the shape check
 }
 
 var contract = map[string]contractCase{
@@ -40,8 +41,9 @@ var contract = map[string]contractCase{
 	"GET /api/v1/libraries/{id}":       {ReqPath: "/api/v1/libraries/1", Want: 200, Fields: []string{"id", "name", "path", "type"}},
 	"POST /api/v1/libraries/{id}/scan": {ReqPath: "/api/v1/libraries/1/scan", Want: 202, Fields: []string{"id", "library_id", "state"}},
 	"GET /api/v1/libraries/{id}/scan":  {ReqPath: "/api/v1/libraries/1/scan", Want: 200, Fields: []string{"id", "library_id", "state", "added", "updated", "skipped"}},
-	"GET /api/v1/items":                {Query: "library_id=1&type=movie", Want: 200, Fields: []string{"id", "library_id", "type", "title"}},
-	"GET /api/v1/items/{id}":           {ReqPath: "/api/v1/items/1", Want: 200, Fields: []string{"id", "library_id", "type", "title"}},
+	"GET /api/v1/items":                {Query: "library_id=1&type=movie", Want: 200, Fields: []string{"id", "library_id", "type", "title", "metadata"}},
+	"GET /api/v1/items/{id}":           {ReqPath: "/api/v1/items/1", Want: 200, Fields: []string{"id", "library_id", "type", "title", "metadata", "artwork"}},
+	"GET /api/v1/items/{id}/artwork/{kind}": {ReqPath: "/api/v1/items/1/artwork/poster", Want: 200, Raw: true},
 }
 
 func openSpec(t *testing.T) specDoc {
@@ -97,7 +99,26 @@ func TestContract(t *testing.T) {
 	firstScan, _ := d.CreateScan(libMovies.ID)
 	_ = d.FinishScan(firstScan.ID, db.ScanDone, 1, 0, 0, "")
 
-	ts := httptest.NewServer(api.New(d).Handler())
+	// Item 1 (the movie) has fetched metadata and cached artwork; the
+	// season and episode (items 2, 3) have neither — the artwork 404
+	// negative case below.
+	artDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(artDir, "artwork"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name := range map[string]string{"101-poster.jpg": "fake-poster", "101-backdrop.jpg": "fake-backdrop"} {
+		if err := os.WriteFile(filepath.Join(artDir, "artwork", name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Item 1 is the first inserted row (the movie).
+	_ = d.UpsertItemMeta(1, db.ItemMeta{
+		TMDBID: 101, Kind: "movie", Overview: "A giant rabbit takes on three rodents.",
+		Rating: 8.1, AirDate: "2008-04-30",
+		PosterKey: "101-poster.jpg", BackdropKey: "101-backdrop.jpg",
+	})
+
+	ts := httptest.NewServer(api.NewWith(d, nil, artDir).Handler())
 	defer ts.Close()
 
 	doc := openSpec(t)
@@ -132,7 +153,9 @@ func TestContract(t *testing.T) {
 			if res.StatusCode != cc.Want {
 				t.Fatalf("%s: status %d, want %d (body %s)", key, res.StatusCode, cc.Want, b)
 			}
-			checkShape(t, b, cc.Fields)
+			if !cc.Raw {
+				checkShape(t, b, cc.Fields)
+			}
 		}
 	}
 
@@ -144,6 +167,9 @@ func TestContract(t *testing.T) {
 	}{
 		{"GET", "/api/v1/libraries/999999", 404, "error"},
 		{"GET", "/api/v1/items?type=banana", 400, "error"},
+		// The season (item 2) has no fetched metadata, hence no artwork.
+		{"GET", "/api/v1/items/2/artwork/poster", 404, "error"},
+		{"GET", "/api/v1/items/1/artwork/banana", 400, "error"},
 		{"POST", "/api/v1/libraries/999999/scan", 404, "error"},
 		// The POST case above left library 1 with a queued scan (no queue
 		// behind this server): a second start conflicts.
