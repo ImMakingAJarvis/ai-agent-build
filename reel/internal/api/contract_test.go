@@ -34,12 +34,14 @@ type contractCase struct {
 }
 
 var contract = map[string]contractCase{
-	"GET /health":                   {Want: 200, Fields: []string{"status", "version"}},
-	"GET /api/v1/libraries":         {Want: 200},
-	"POST /api/v1/libraries":        {Body: `{"name":"CI Movies","path":"/data/ci","type":"movies"}`, Want: 201, Fields: []string{"id", "name", "path", "type"}},
-	"GET /api/v1/libraries/{id}":    {ReqPath: "/api/v1/libraries/1", Want: 200, Fields: []string{"id", "name", "path", "type"}},
-	"GET /api/v1/items":             {Query: "library_id=1&type=movie", Want: 200, Fields: []string{"id", "library_id", "type", "title"}},
-	"GET /api/v1/items/{id}":        {ReqPath: "/api/v1/items/1", Want: 200, Fields: []string{"id", "library_id", "type", "title"}},
+	"GET /health":                      {Want: 200, Fields: []string{"status", "version"}},
+	"GET /api/v1/libraries":            {Want: 200},
+	"POST /api/v1/libraries":           {Body: `{"name":"CI Movies","path":"/data/ci","type":"movies"}`, Want: 201, Fields: []string{"id", "name", "path", "type"}},
+	"GET /api/v1/libraries/{id}":       {ReqPath: "/api/v1/libraries/1", Want: 200, Fields: []string{"id", "name", "path", "type"}},
+	"POST /api/v1/libraries/{id}/scan": {ReqPath: "/api/v1/libraries/1/scan", Want: 202, Fields: []string{"id", "library_id", "state"}},
+	"GET /api/v1/libraries/{id}/scan":  {ReqPath: "/api/v1/libraries/1/scan", Want: 200, Fields: []string{"id", "library_id", "state", "added", "updated", "skipped"}},
+	"GET /api/v1/items":                {Query: "library_id=1&type=movie", Want: 200, Fields: []string{"id", "library_id", "type", "title"}},
+	"GET /api/v1/items/{id}":           {ReqPath: "/api/v1/items/1", Want: 200, Fields: []string{"id", "library_id", "type", "title"}},
 }
 
 func openSpec(t *testing.T) specDoc {
@@ -89,6 +91,11 @@ func TestContract(t *testing.T) {
 	_, _ = d.InsertItem(db.Item{LibraryID: libMovies.ID, Type: "movie", Title: "Big Buck Bunny", Path: "/bbb.mkv"})
 	season, _ := d.InsertItem(db.Item{LibraryID: libShows.ID, Type: "season", Title: "Season 1", Path: "/s1"})
 	_, _ = d.InsertItem(db.Item{LibraryID: libShows.ID, Type: "episode", Title: "Episode 1", Path: "/e1", ParentID: &season.ID})
+	// A finished scan for the movies library: GET /scan has a 200 case no
+	// matter which endpoint the walk hits first, and a finished scan does
+	// not block the POST case (only queued/running scans do).
+	firstScan, _ := d.CreateScan(libMovies.ID)
+	_ = d.FinishScan(firstScan.ID, db.ScanDone, 1, 0, 0, "")
 
 	ts := httptest.NewServer(api.New(d).Handler())
 	defer ts.Close()
@@ -130,11 +137,23 @@ func TestContract(t *testing.T) {
 	}
 
 	// Negative shapes: 404 and 400 carry the spec's Error object.
-	for _, tc := range []struct{ method, path string; want int; field string }{
+	for _, tc := range []struct {
+		method, path string
+		want         int
+		field        string
+	}{
 		{"GET", "/api/v1/libraries/999999", 404, "error"},
 		{"GET", "/api/v1/items?type=banana", 400, "error"},
+		{"POST", "/api/v1/libraries/999999/scan", 404, "error"},
+		// The POST case above left library 1 with a queued scan (no queue
+		// behind this server): a second start conflicts.
+		{"POST", "/api/v1/libraries/1/scan", 409, "error"},
 	} {
-		res, err := http.Get(ts.URL + tc.path)
+		req, err := http.NewRequest(tc.method, ts.URL+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}

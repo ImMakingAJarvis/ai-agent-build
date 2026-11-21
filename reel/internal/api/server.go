@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,19 +15,32 @@ import (
 // Version is the API version advertised on /health.
 const Version = "0.1.0"
 
+// ScanRunner enqueues the job that runs a created scan. cmd/reeld wires
+// it to the RabbitMQ publisher; a server built without one (contract
+// tests, no-broker dev) leaves scans in the queued state.
+type ScanRunner interface {
+	EnqueueScan(ctx context.Context, libraryID, scanID int64) error
+}
+
 // Server serves the Reel API over the given store.
 type Server struct {
-	db  *db.DB
-	mux *http.ServeMux
+	db       *db.DB
+	scanJobs ScanRunner
+	mux      *http.ServeMux
 }
 
 // New wires the routes from openapi.yaml onto a mux.
-func New(d *db.DB) *Server {
-	s := &Server{db: d, mux: http.NewServeMux()}
+func New(d *db.DB) *Server { return NewWithRunner(d, nil) }
+
+// NewWithRunner wires the routes with a scan enqueuer (nil = no queue).
+func NewWithRunner(d *db.DB, runner ScanRunner) *Server {
+	s := &Server{db: d, scanJobs: runner, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/v1/libraries", s.handleListLibraries)
 	s.mux.HandleFunc("POST /api/v1/libraries", s.handleCreateLibrary)
 	s.mux.HandleFunc("GET /api/v1/libraries/{id}", s.handleGetLibrary)
+	s.mux.HandleFunc("POST /api/v1/libraries/{id}/scan", s.handleStartScan)
+	s.mux.HandleFunc("GET /api/v1/libraries/{id}/scan", s.handleScanStatus)
 	s.mux.HandleFunc("GET /api/v1/items", s.handleListItems)
 	s.mux.HandleFunc("GET /api/v1/items/{id}", s.handleGetItem)
 	return s
@@ -115,6 +129,77 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, l)
+}
+
+// handleStartScan: POST /api/v1/libraries/{id}/scan — create the scan
+// row and enqueue the job. 409 while a scan is already queued or running
+// (one scan per library at a time), 404 for an unknown library.
+func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	lib, err := s.db.GetLibrary(id)
+	if errors.Is(err, db.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "library not found")
+		return
+	}
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err := s.db.ActiveScan(lib.ID); err == nil {
+		httpError(w, http.StatusConflict, "a scan is already queued or running")
+		return
+	} else if !errors.Is(err, db.ErrNotFound) {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	scan, err := s.db.CreateScan(lib.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if s.scanJobs != nil {
+		if err := s.scanJobs.EnqueueScan(r.Context(), lib.ID, scan.ID); err != nil {
+			// The queue rejected the job: make the status endpoint tell
+			// the truth instead of leaving the scan queued forever.
+			_ = s.db.FinishScan(scan.ID, db.ScanError, 0, 0, 0, "enqueue: "+err.Error())
+			httpError(w, http.StatusBadGateway, "could not enqueue the scan")
+			return
+		}
+	}
+	writeJSON(w, http.StatusAccepted, scan)
+}
+
+// handleScanStatus: GET /api/v1/libraries/{id}/scan — the library's most
+// recent scan (404 when it has never been scanned).
+func (s *Server) handleScanStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	lib, err := s.db.GetLibrary(id)
+	if errors.Is(err, db.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "library not found")
+		return
+	}
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	scan, err := s.db.LatestScan(lib.ID)
+	if errors.Is(err, db.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "library has not been scanned")
+		return
+	}
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, scan)
 }
 
 func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {

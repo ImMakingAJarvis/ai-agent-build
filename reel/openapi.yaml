@@ -68,6 +68,53 @@ paths:
                 $ref: "#/components/schemas/Library"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/libraries/{id}/scan:
+    post:
+      tags: [libraries]
+      operationId: startLibraryScan
+      summary: Start a library scan
+      description: >
+        Enqueues a scan job on the reel.scan queue (reeld consumes it).
+        One scan per library at a time — a second POST while one is queued
+        or running returns 409.
+      parameters:
+        - $ref: "#/components/parameters/IntID"
+      responses:
+        "202":
+          description: Scan accepted and enqueued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scan"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          description: The scan queue rejected the job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    get:
+      tags: [libraries]
+      operationId: getLibraryScan
+      summary: Latest scan status for a library
+      parameters:
+        - $ref: "#/components/parameters/IntID"
+      responses:
+        "200":
+          description: The most recent scan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scan"
+        "404":
+          description: No scan for this library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /api/v1/items:
     get:
       tags: [items]
@@ -132,6 +179,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Conflict (a scan is already queued or running)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
   schemas:
     Health:
       type: object
@@ -164,6 +217,24 @@ components:
         title: {type: string}
         path: {type: string}
         parent_id: {type: integer, nullable: true}
+        year: {type: integer}
+        season: {type: integer}
+        episode: {type: integer}
+        size: {type: integer, format: int64}
+        modtime: {type: string, format: date-time}
+    Scan:
+      type: object
+      required: [id, library_id, state, added, updated, skipped]
+      properties:
+        id: {type: integer}
+        library_id: {type: integer}
+        state: {type: string, enum: [queued, running, done, error]}
+        started_at: {type: string, format: date-time}
+        finished_at: {type: string, format: date-time}
+        added: {type: integer}
+        updated: {type: integer}
+        skipped: {type: integer}
+        error: {type: string}
     Error:
       type: object
       required: [error]
