@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS scans (
 	error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_scans_library ON scans(library_id);
+CREATE TABLE IF NOT EXISTS item_meta (
+	item_id INTEGER PRIMARY KEY REFERENCES items(id),
+	tmdb_id INTEGER NOT NULL DEFAULT 0,
+	kind TEXT NOT NULL DEFAULT '',
+	overview TEXT NOT NULL DEFAULT '',
+	rating REAL NOT NULL DEFAULT 0,
+	air_date TEXT NOT NULL DEFAULT '',
+	poster_key TEXT NOT NULL DEFAULT '',
+	backdrop_key TEXT NOT NULL DEFAULT ''
+);
 `
 
 // migrate brings databases created before the item-metadata columns
@@ -361,6 +371,53 @@ func (d *DB) ActiveScan(libraryID int64) (Scan, error) {
 		return Scan{}, ErrNotFound
 	}
 	return s, err
+}
+
+// ItemMeta is one item's fetched TMDB metadata. PosterKey and BackdropKey
+// are file names in the on-disk artwork cache ("" when the image is
+// absent); they are not API fields — the artwork endpoints derive the
+// URLs from the item id.
+type ItemMeta struct {
+	ItemID      int64   `json:"item_id,omitempty"`
+	TMDBID      int64   `json:"tmdb_id"`
+	Kind        string  `json:"kind"`
+	Overview    string  `json:"overview"`
+	Rating      float64 `json:"rating"`
+	AirDate     string  `json:"air_date"`
+	PosterKey   string  `json:"-"`
+	BackdropKey string  `json:"-"`
+}
+
+const metaColumns = "item_id, tmdb_id, kind, overview, rating, air_date, COALESCE(poster_key,''), COALESCE(backdrop_key,'')"
+
+// UpsertItemMeta stores (or refreshes) the item's metadata.
+func (d *DB) UpsertItemMeta(itemID int64, m ItemMeta) error {
+	_, err := d.Exec(
+		`INSERT INTO item_meta (item_id, tmdb_id, kind, overview, rating, air_date, poster_key, backdrop_key)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(item_id) DO UPDATE SET tmdb_id = excluded.tmdb_id, kind = excluded.kind,
+		   overview = excluded.overview, rating = excluded.rating, air_date = excluded.air_date,
+		   poster_key = excluded.poster_key, backdrop_key = excluded.backdrop_key`,
+		itemID, m.TMDBID, m.Kind, m.Overview, m.Rating, m.AirDate, m.PosterKey, m.BackdropKey)
+	return err
+}
+
+// GetItemMeta returns the item's metadata (ErrNotFound when it has none
+// yet — the scan has not fetched it, or the fetch failed).
+func (d *DB) GetItemMeta(itemID int64) (ItemMeta, error) {
+	var m ItemMeta
+	err := d.QueryRow(`SELECT `+metaColumns+` FROM item_meta WHERE item_id = ?`, itemID).
+		Scan(&m.ItemID, &m.TMDBID, &m.Kind, &m.Overview, &m.Rating, &m.AirDate, &m.PosterKey, &m.BackdropKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ItemMeta{}, ErrNotFound
+	}
+	return m, err
+}
+
+// DeleteItemMeta drops the item's metadata (a renamed item is refetched).
+func (d *DB) DeleteItemMeta(itemID int64) error {
+	_, err := d.Exec(`DELETE FROM item_meta WHERE item_id = ?`, itemID)
+	return err
 }
 
 // StartScan marks a queued scan running (stamps started_at).

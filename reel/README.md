@@ -44,6 +44,29 @@ stream sets `game: false` and never pauses) and polls resourced's
 While paused, an arriving scan delivery is held unacked and runs after the
 stream ends; a scan already running finishes first.
 
+## Metadata & artwork (TMDB)
+
+Scans fetch metadata (title/year, overview, rating, air date, poster,
+backdrop) from the TMDB v3 API (`internal/tmdb`) and store it on the item
+(`item_meta`; exposed as the `metadata` field on the item endpoints).
+Movies match on title + year, shows on the folder name — an exact
+(case-folded) match wins, otherwise TMDB's own relevance ranking is the
+fuzzy fallback.
+
+- **Key:** `TMDB_API_KEY` or `REEL_TMDB_KEY` (env only — never in the
+  repo). Without a key, scans run without metadata.
+- **Cache:** on disk under `REEL_CACHE_DIR` (default `<db dir>/cache`) —
+  the NAS media mounts are read-only, so the cache lives on the box next
+  to the database, not on the NAS. Meta is one JSON file per lookup under
+  `meta/`; poster (w500) and backdrop (w1280) images under `artwork/`,
+  served by `GET /api/v1/items/{id}/artwork/{kind}` (episode artwork is
+  the series' artwork).
+- **Cache-first:** a second scan of an unchanged library makes zero
+  network calls; an item whose file changed is refetched. A 429 is waited
+  out via `X-RateLimit-Reset` / `Retry-After` and retried (≤3 waits).
+- **Best effort:** a fetch failure leaves the item without metadata and
+  is logged — it never fails the scan.
+
 ## Test library
 
 `testdata/` is a permanent, tiny generated library (ffmpeg clips, both
