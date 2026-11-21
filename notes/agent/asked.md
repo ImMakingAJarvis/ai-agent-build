@@ -126,3 +126,4 @@
 - 2026-11-18T17:21Z Nathan: find the optimal MoE cache size at 128K context for all MoE models, results to the benchmark page, install a model as thinker/planner/coder if it's a good coder; coding exercises as part of the benchmark
 - 2026-11-18T18:12Z Nathan, home 2026-11-18: wants to test the voice chat (sent him PWA + /voice/chat URLs after the ffmpeg fix)
 - 2026-11-20T22:29Z Nathan: is the 48" LG OLED TV (111.1.2.167) spying? Wanted an RE plan ('Reverse Engineering Anything'); plan delivered (PR #278), execution queued on his go
+- 2026-11-21T02:42Z Nathan: check the prompt/context window continuously before each turn; add compressing and trimming unneeded context so work goes on for longer
