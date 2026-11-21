@@ -173,7 +173,9 @@ func cleanEpisodeTitle(s string) string {
 // that contains at least one media file (recursively).
 func seasonDirs(root string) []Candidate {
 	var out []Candidate
-	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	// Walk already read this tree successfully above: a failure here (a
+	// permission change mid-scan) yields no season items, not an error.
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil
 		}
@@ -188,7 +190,8 @@ func seasonDirs(root string) []Candidate {
 			return nil
 		}
 		hasMedia := false
-		filepath.WalkDir(path, func(p string, fd fs.DirEntry, e error) error {
+		// A failed walk just means no visible media in this directory.
+		_ = filepath.WalkDir(path, func(p string, fd fs.DirEntry, e error) error {
 			if e == nil && !fd.IsDir() && IsMedia(fd.Name()) {
 				hasMedia = true
 			}
