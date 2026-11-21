@@ -17,7 +17,7 @@
 
 ## Context and VRAM
 - The engine loads `models/qwen3.8-chat-template.jinja` (installed at `/opt/jarvis-engine/templates/`) via `--chat-template-file`. Claude Code compatibility: non-leading system messages render in place; jinja `reasoning_effort` values the template does not know (`unknown`, `max`, `auto`) clamp to `xhigh` instead of HTTP 500. Per-job effort is `off|low|medium|high` (`jarvis-jobs add|run -effort`, `enqueue --effort`). Coding defaults to medium; voice/chat send `chat_template_kwargs.enable_thinking=false`. `agent-local` maps that onto Claude Code `--effort` (never `--reasoning-effort`, which Claude 2.1 rejects) and `CLAUDE_CODE_EFFORT_LEVEL`; `off` sets `CLAUDE_CODE_DISABLE_THINKING=1`. `high`/`max` become jinja `xhigh`.
-- Context 131072 tokens (128K). `--ctx-size 131072` on the llama.cpp server.
+- Context 131072 tokens (128K). `--ctx-size 131072` on the llama.cpp server. The context-guard hook measures the real prompt size before every tool call in a round and trims/blocks at 65/75/85% — `docs/context-window.md`.
 - `nvidia-smi`: ~18.5 GB of 24.5 GB used (about 6 GB headroom), decode ~48 tok/s (Q6_K was ~17 tok/s). Nothing else big should use the GPU while the brain is loaded.
 - Thinking is on by default for this model; that can be slow but helps decisions.
 

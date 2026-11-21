@@ -429,6 +429,29 @@ Then — and only then — Discord-notify with the PR link and finish the
 job done. (Job chat-1793154320-3d8d, 2026-10-27: PR #83 was left
 CONFLICTING and had to be reworked.)
 
+## Context window guard — what the block means
+
+Local-brain rounds run inside the engine's fixed window (128K brain,
+32K iGPU). A PreToolUse hook
+(`scripts/context-guard-hook.sh`, `docs/context-window.md`) measures
+the real prompt size before every tool call. At ≥65% and ≥75% of the
+window it nudges you (small reads, pipe output through head/tail, write
+progress to notes/). At ≥85% (hard) it **blocks** context-heavy tools —
+Read, WebFetch, WebSearch, Agent, and large Bash commands — and the
+block message is your instruction:
+
+- **Yield** the job with `jarvis-jobs yield $JARVIS_JOB_ID --note ...
+  --in-flight ... --next ...` when it can wait (a corr, a review, a
+  window) — the continuation is the precondition, fill all three.
+- **End the round now**: write the state to `notes/` (files changed,
+  decisions, exact next steps) and stop calling tools. The loop
+  checkpoints; the next round resumes from the notes.
+- Only when nearly done: tiny steps until the harness auto-compacts.
+
+`jarvis-*` helpers, git/gh, and Write/Edit are never blocked — you can
+always compress or exit. Never fight the block by re-trying the same
+read in a shell command; that is exactly the growth it stops.
+
 ## PR review
 
 - Reviews go to `review.sonnet`, `review.opus`, `review.fable`, or

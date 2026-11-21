@@ -14,6 +14,14 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash scripts/context-guard-hook.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "bash scripts/owner-message-hook.sh"
           }
         ]

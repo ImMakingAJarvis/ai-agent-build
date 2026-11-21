@@ -23,6 +23,10 @@ nvidia-smi / journalctl. Prints a snapshot of the stack:
      `docker compose config` declares: a stale container calling a dead or
      wrong engine URL. Advisory — shown only when there is drift and it does
      not change the exit code.
+  8. Context window — the running round's prompt size against its engine
+     window, as measured by the context-guard hook before its last tool
+     call (~/.local/state/jarvis/context-window.json). Shown only while a
+     round is reporting; advisory — it never changes the exit code.
 
 Known engines are checked even when down, so a dead engine is reported
 rather than silently missing:
@@ -48,6 +52,7 @@ import re
 import subprocess
 import sys
 import urllib.request
+from datetime import datetime, timezone
 
 KNOWN_ENGINES = [
     # (label, kind, name, hint shown in the report)
@@ -340,6 +345,16 @@ def swap_state():
     return {"brain": brain or "?", "maintenance": maint or "unknown"}
 
 
+def context_state():
+    """Last context-window measurement written by the context-guard hook."""
+    path = os.path.expanduser("~/.local/state/jarvis/context-window.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
 def known_engine_states(container_ids):
     """State of each known engine (both are docker containers now)."""
     states = []
@@ -509,6 +524,7 @@ def build_report(include_stopped):
     report["services"] = services_states()
     report["queue"] = queue_counts()
     report["swap"] = swap_state()
+    report["context"] = context_state()
     report["compose_drift"] = compose_env_drift(report["containers"])
     for name, state in report["services"].items():
         if state != "active":
@@ -620,6 +636,24 @@ def print_human(r):
     sw = r.get("swap")
     if sw:
         print(f"Swap: brain={sw['brain']}  maintenance={sw['maintenance']}")
+        print()
+
+    cx = r.get("context")
+    if cx:
+        stale = ""
+        try:
+            ts = datetime.fromisoformat(str(cx.get("ts", "")).replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - ts).total_seconds() > 900:
+                stale = " (stale)"
+        except (ValueError, TypeError):
+            pass
+        def _k(n):
+            return f"{n/1024:.1f}K" if n >= 1024 else str(n)
+        print(f"Context window (last check){stale}:")
+        print(f"  job={cx.get('job_id', '?')} model={cx.get('model', '?')} "
+              f"{_k(cx.get('prompt_tokens', 0))}/{_k(cx.get('window', 0))} "
+              f"({cx.get('pct', '?')}%) tier={cx.get('tier', '?')}  "
+              f"({cx.get('ts', '?')})")
         print()
 
     if r["ok"]:

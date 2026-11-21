@@ -6,9 +6,9 @@ group: agent
 kind: host-service
 status: active
 units: [agent-run.service]
-binaries: [scripts/agent-run, scripts/agent-local, scripts/agent-resume, scripts/agent-reboot, scripts/agent-run-restart, scripts/install_agent_run.sh, scripts/notes-stop-hook.sh, scripts/owner-message-hook.sh, scripts/brain-guard-hook.sh, scripts/gh-pr-wait, scripts/jarvis-stack-status, scripts/install_claude_md.sh]
+binaries: [scripts/agent-run, scripts/agent-local, scripts/agent-resume, scripts/agent-reboot, scripts/agent-run-restart, scripts/install_agent_run.sh, scripts/notes-stop-hook.sh, scripts/owner-message-hook.sh, scripts/brain-guard-hook.sh, scripts/context-guard-hook.sh, scripts/gh-pr-wait, scripts/jarvis-stack-status, scripts/install_claude_md.sh]
 ports: ["— (no listener)"]
-docs: [docs/agent-run.md, docs/agent-claude.md, docs/nobrakes/safety.md]
+docs: [docs/agent-run.md, docs/agent-claude.md, docs/context-window.md, docs/nobrakes/safety.md]
 depends_on:
   - to: jarvis-jobs
     why: "jarvis-jobs next/run/finish — the job store is its queue"
@@ -41,7 +41,10 @@ RESUME blocks when the job was parked or preempted).
 
 - Drivers: `local` (brain), `igpu`, `sonnet`, `opus`, `superagent`.
 - Hooks in `.claude/settings.json`: notes Stop hook, owner-message hook
-  (PreToolUse + Stop), brain-guard hook (PreToolUse, Bash).
+  (PreToolUse + Stop), brain-guard hook (PreToolUse, Bash),
+  context-window guard hook (PreToolUse, all tools — measures the prompt
+  size every turn; at ≥85% of the engine window it blocks the
+  context-heavy tools, `docs/context-window.md`).
 - Signal files in `~/.config/jarvis/`: `restart-signal`, pause/stop;
   inhibit file `/var/lib/jarvis/agent-run.disabled`.
 - `agent-run-restart [--now]` — restart now if idle, else after the round.
@@ -60,6 +63,9 @@ RESUME blocks when the job was parked or preempted).
 - Log: `~/.local/state/jarvis/agent.log`.
 - Last driver: `~/.config/jarvis/driver` (a reboot resumes on it).
 - Job transcripts: `~/.local/share/jarvis/jobs/<id>/transcript.txt`.
+- Context window: `~/.local/state/jarvis/context-window.json` (last
+  measurement by the context-guard hook; read by `jarvis-stack-status`)
+  and `context-window.log` (throttled history, rotates at 500 KB).
 
 ## Deploy
 
