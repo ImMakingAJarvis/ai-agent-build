@@ -233,11 +233,21 @@ func defaultCommand(driver, prompt, effort string) *exec.Cmd {
 		env = stripEnv(env, "LOCAL_MODEL")
 		env = stripEnv(env, "LOCAL_CONTEXT_TOKENS")
 		env = stripEnv(env, "CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+		env = stripEnv(env, "CLAUDE_CODE_DISABLE_CLAUDE_MDS")
 		env = append(env,
 			"ENGINE_URL="+igpuURL(),
 			"LOCAL_MODEL="+ModelFor("igpu"),
 			"LOCAL_CONTEXT_TOKENS="+igpuContextTokens(),
 			"CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384",
+			// The repo + global CLAUDE.md files cost ~13K tokens of the
+			// 32K iGPU window; with them, the round prompt (brief +
+			// snapshot + caps + job) plus the conversation overflowed the
+			// 3B's context — "Prompt is too long" in ~2 s (job
+			// chat-1795017563-20e9, 2026-11-19; MoE 128K suite stall).
+			// The stage3-igpu brief is self-contained and carries the
+			// standing rules the CLAUDE.md files would have provided, so
+			// iGPU rounds run without them.
+			"CLAUDE_CODE_DISABLE_CLAUDE_MDS=1",
 		)
 	}
 	if canon == queue.EffortOff {
