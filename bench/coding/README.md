@@ -5,8 +5,9 @@ Harness for the "optimal cache size at 128K context" benchmark
 dependency-free (stdlib only), all talking OpenAI-compatible
 `/chat/completions` — the FreeToken `ft serve` box on **port 11436**
 while it is up. The 4090 must be free of the brain engine for the
-suite, so the runners are executed by the **igpu-driver round**, never
-from a local brain round.
+suite, so the runners are executed by the **sonnet-driver round**
+(the iGPU 3B model cannot take the round prompt — see the plan's
+driver correction), never from a local brain round.
 
 ## Components
 
@@ -82,7 +83,7 @@ python3 run_exercises.py ... --out <dir>/exercises.json
 python3 needle_128k.py ... --out <dir>/needle.json
 ```
 
-The igpu round transcribes the JSONs into the point's results doc
+The sonnet round transcribes the JSONs into the point's results doc
 (`docs/benchmarks/moe-128k-<model>-<point>md` style, per the plan) and a
 follow-up local round adds the numbers to the dashboard's `/benchmarks`
 page (`internal/dashboard/moebench.go` — a static report, numbers are

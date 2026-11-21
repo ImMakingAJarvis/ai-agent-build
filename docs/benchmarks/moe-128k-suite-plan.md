@@ -66,10 +66,11 @@ speed-vs-cache table.
 
 ## Method (per point)
 
-1. `docker compose stop engine` — **only from an igpu-driver round**
-   (the local brain round never stops the brain; this job is requeued
-   `-driver igpu` for the GPU phase). Verify ~24 GB free of the 24,564
-   MiB card. The iGPU helper (`jarvis-engine-igpu`, :11435) stays up.
+1. `docker compose stop engine` — **only from a sonnet-driver round**
+   (the local brain round never stops the brain; the job runs
+   `-driver sonnet` for the GPU phase — see the driver correction
+   below). Verify ~24 GB free of the 24,564 MiB card. The iGPU helper
+   (`jarvis-engine-igpu`, :11435) stays up.
 2. Start `ft serve` with 128K context. Base invocation (first shard as
    model path, port 11436 — never 11435):
 
@@ -136,5 +137,26 @@ the point docs are the durable progress record.
 | Round | Driver | Work |
 |---|---|---|
 | 1 (2026-11-18) | local | Harness (exercises + 3 runners) + this plan + CTX project — the PR this doc lives in |
-| 2+ | igpu | The 12 ladder points (brain stop/restore per point) |
+| 2+ | **sonnet** | The 12 ladder points (brain stop/restore per point) |
 | final | local | Summary + dashboard section + good-coder decision + install if warranted |
+
+## Driver correction (2026-11-20)
+
+The GPU phase runs on **sonnet**, not igpu. The igpu driver's 3B model
+(32K ctx) cannot take the round prompt: `chat-1795017563-20e9` failed in
+~2 s with "Prompt is too long" (2026-11-19), as the earlier
+`moe-bench-200` point had. Every completed VRAM-sweep point
+(`moe-bench-100/150/250`) ran on sonnet — a cloud round is free to stop
+the brain container (the watchdog re-arms it; `ft serve` must be killed
+by PID first, per Safety). `chat-1795017563-20e9` was requeued
+`-driver sonnet` on 2026-11-20. Note the iGPU **engine** (:11435) stays
+up through every point — "igpu" in the old table was a confusion of the
+two.
+
+**Pre-flight (2026-11-20, local round):** `ft` and `ninja` are in
+`/home/agent/ftvenv/bin`; the installed `ft serve` has every flag this
+plan uses (`--max-seq-len-override`, `--kv-reserve-tokens`,
+`--memory-ratio`, `--moe-strategy hybrid`, `--moe-cache-auto`); both
+first shards are on disk:
+`Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf` and
+`GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf`.
