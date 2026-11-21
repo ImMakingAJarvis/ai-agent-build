@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -19,15 +20,19 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/reel/internal/db"
 	"github.com/ImMakingAJarvis/ai-agent-build/reel/internal/reelq"
 	"github.com/ImMakingAJarvis/ai-agent-build/reel/internal/scan"
+	"github.com/ImMakingAJarvis/ai-agent-build/reel/internal/tmdb"
 )
 
 // Config is the server configuration. File fields are JSON names; env vars
-// REEL_ADDR / REEL_DB / RABBITMQ_URL / REEL_RESOURCED override the file values.
+// REEL_ADDR / REEL_DB / RABBITMQ_URL / REEL_RESOURCED / TMDB_API_KEY /
+// REEL_CACHE_DIR override the file values.
 type Config struct {
 	Addr      string `json:"addr"`
 	DBPath    string `json:"db_path"`
 	AMQPURL   string `json:"amqp_url"`
 	Resourced string `json:"resourced"` // resourced HTTP base (GET /state)
+	TmdbKey   string `json:"tmdb_key"`  // TMDB v3 API key (env-only; never in the repo)
+	CacheDir  string `json:"cache_dir"` // on-disk metadata/artwork cache
 }
 
 func loadConfig() (Config, error) {
@@ -58,6 +63,20 @@ func loadConfig() (Config, error) {
 	if v := os.Getenv("REEL_RESOURCED"); v != "" {
 		cfg.Resourced = v
 	}
+	if v := os.Getenv("REEL_TMDB_KEY"); v != "" {
+		cfg.TmdbKey = v
+	}
+	if v := os.Getenv("TMDB_API_KEY"); v != "" {
+		cfg.TmdbKey = v
+	}
+	if v := os.Getenv("REEL_CACHE_DIR"); v != "" {
+		cfg.CacheDir = v
+	}
+	if cfg.CacheDir == "" {
+		// The NAS media mounts are read-only, so the cache lives on this
+		// box next to the database file (documented in the README).
+		cfg.CacheDir = filepath.Join(filepath.Dir(cfg.DBPath), "cache")
+	}
 	return cfg, nil
 }
 
@@ -85,9 +104,10 @@ func (q *queueRunner) setPublisher(p *reelq.Publisher) {
 }
 
 // scanHandler is the consumer's job handler: run the scan for the library
-// and close the scan row out with its counters or the error.
-func scanHandler(d *db.DB) reelq.Handler {
-	return func(_ context.Context, j reelq.ScanJob) error {
+// (fetching TMDB metadata through f when one is wired) and close the scan
+// row out with its counters or the error.
+func scanHandler(d *db.DB, f scan.Fetcher) reelq.Handler {
+	return func(ctx context.Context, j reelq.ScanJob) error {
 		lib, err := d.GetLibrary(j.LibraryID)
 		if err != nil {
 			return fmt.Errorf("library %d: %w", j.LibraryID, err)
@@ -95,7 +115,7 @@ func scanHandler(d *db.DB) reelq.Handler {
 		if err := d.StartScan(j.ScanID); err != nil {
 			return err
 		}
-		res, err := scan.Run(d, lib)
+		res, err := scan.RunWith(ctx, d, lib, f)
 		if err != nil {
 			_ = d.FinishScan(j.ScanID, db.ScanError, res.Added, res.Updated, res.Skipped, err.Error())
 			return err
@@ -119,10 +139,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	runner := &queueRunner{}
-	go bootQueue(ctx, cfg, d, runner)
+	var fetcher scan.Fetcher
+	cache, err := tmdb.NewCache(cfg.CacheDir)
+	if err != nil {
+		log.Fatalf("open cache dir %s: %v", cfg.CacheDir, err)
+	}
+	if cfg.TmdbKey != "" {
+		fetcher = tmdb.New(cfg.TmdbKey, cache)
+		log.Printf("TMDB metadata enabled (cache %s)", cfg.CacheDir)
+	} else {
+		log.Printf("no TMDB key (TMDB_API_KEY / REEL_TMDB_KEY) — scans run without metadata")
+	}
 
-	srv := api.NewWithRunner(d, runner)
+	runner := &queueRunner{}
+	go bootQueue(ctx, cfg, d, runner, fetcher)
+
+	srv := api.NewWith(d, runner, cfg.CacheDir)
 	log.Printf("listening on %s (db %s)", cfg.Addr, cfg.DBPath)
 	if err := srv.Listen(cfg.Addr); err != nil {
 		log.Fatal(err)
@@ -134,7 +166,7 @@ func main() {
 // consumer and the stream watcher for the life of the process. A game
 // stream already active at startup is picked up by the /state poll, so
 // the consumer starts paused when it should be.
-func bootQueue(ctx context.Context, cfg Config, d *db.DB, runner *queueRunner) {
+func bootQueue(ctx context.Context, cfg Config, d *db.DB, runner *queueRunner, fetcher scan.Fetcher) {
 	var pub *reelq.Publisher
 	for {
 		var err error
@@ -157,7 +189,7 @@ func bootQueue(ctx context.Context, cfg Config, d *db.DB, runner *queueRunner) {
 	runner.setPublisher(pub)
 	defer func() { _ = pub.Close() }()
 
-	cons := reelq.NewConsumer(cfg.AMQPURL, scanHandler(d))
+	cons := reelq.NewConsumer(cfg.AMQPURL, scanHandler(d, fetcher))
 	if reelq.StreamActive(ctx, cfg.Resourced) {
 		log.Printf("a game stream is active — the scan queue starts paused")
 		cons.Pause()
