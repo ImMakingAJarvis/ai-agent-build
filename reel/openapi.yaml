@@ -267,7 +267,7 @@ components:
         kind: {type: string, enum: [movie, series, season, episode]}
         overview: {type: string}
         rating: {type: number, format: double}
-        air_date: {type: string, description: Release/air date (YYYY-MM-DD, may be empty)}
+        air_date: {type: string, description: "Release/air date (YYYY-MM-DD, may be empty)"}
     Artwork:
       type: object
       nullable: true
