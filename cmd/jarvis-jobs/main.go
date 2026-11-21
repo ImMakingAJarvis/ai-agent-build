@@ -991,7 +991,11 @@ func stopJob(store *agentjob.Store, id string) error {
 // per-status totals for the *unfiltered* set, so a view truncated by head or
 // a pager still reveals how many jobs exist beyond what was shown.
 func cmdList(store *agentjob.Store, args []string, w io.Writer) error {
+	// Recover first (as before: list also reaped dead owners), then sweep.
 	if err := store.Recover(); err != nil {
+		return err
+	}
+	if _, err := store.SweepDeps(); err != nil {
 		return err
 	}
 	jobs, err := store.List()
@@ -1003,14 +1007,22 @@ func cmdList(store *agentjob.Store, args []string, w io.Writer) error {
 		filter = args[0]
 	}
 	counts := map[string]int{}
+	depBlocked := 0
 	for _, j := range jobs {
 		counts[j.Status]++
+		if j.Status == agentjob.Parked && j.DepBlock != "" {
+			depBlocked++
+		}
 	}
 	for _, j := range jobs {
 		if filter != "" && j.Status != filter {
 			continue
 		}
-		fmt.Fprintf(w, "%-10s %-40s %s %s\n", j.Status, j.ID, j.Title, j.PRURL)
+		line := fmt.Sprintf("%-10s %-40s %s %s", j.Status, j.ID, j.Title, j.PRURL)
+		if j.Status == agentjob.Parked && j.DepBlock != "" {
+			line += "  [dep-blocked: " + j.DepBlock + "]"
+		}
+		fmt.Fprintln(w, line)
 	}
 	var parts []string
 	for _, st := range []string{agentjob.Ready, agentjob.Parked, agentjob.Claimed,
@@ -1019,6 +1031,12 @@ func cmdList(store *agentjob.Store, args []string, w io.Writer) error {
 		if n := counts[st]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, st))
 		}
+	}
+	if depBlocked > 0 {
+		// Trailing, so scripts that split the line on the status fields
+		// (jarvis-stack-status reads the first field of each row) are
+		// unaffected.
+		parts = append(parts, fmt.Sprintf("%d dep-blocked", depBlocked))
 	}
 	fmt.Fprintf(w, "# %d jobs: %s\n", len(jobs), strings.Join(parts, ", "))
 	return nil

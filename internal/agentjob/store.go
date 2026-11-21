@@ -190,6 +190,14 @@ type State struct {
 	// (continuation.md, plan task 13).
 	WaitingSince string `json:"waiting_since,omitempty"`
 	WaitNote     string `json:"wait_note,omitempty"`
+	// DepBlock (parked status): set by the dependency sweep (SweepDeps)
+	// when a ready job cannot run because one of its dependencies is
+	// terminally broken. Format "<dep-id>:<reason>" with reason one of
+	// failed, skipped, missing, or dep-blocked (the dep is itself
+	// parked by this sweep). While set the job stays parked and out of the
+	// active queue; the sweep clears it and returns the job to ready as
+	// soon as no dependency is broken (the blocker was requeued or done).
+	DepBlock string `json:"dep_block,omitempty"`
 }
 
 // Job is a spec plus its state.
@@ -489,6 +497,111 @@ func DepsMet(j Job, status map[string]string) bool {
 	return true
 }
 
+// DepBlocker reports the dependency that makes j unrunnable right now and
+// why: a dep whose status is failed or skipped (terminal, and not done), a
+// dep that has no entry in the store at all (reason "missing"), or a dep
+// that is itself parked by the dependency sweep (reason "dep-blocked" —
+// the transitive case: a chain deadlocks at its head, and every link below
+// it is stuck behind it). A dep in any other state (ready, claimed,
+// running, waiting, paused, or parked for another reason such as the
+// nightly gate or a manual stop) merely delays j: it waits for the dep in
+// the queue, it is not blocked by it. Returns the dep id and the reason,
+// or ("", "") when j is not dep-blocked.
+func DepBlocker(j Job, status, depBlock map[string]string) (string, string) {
+	for _, d := range j.DependsOn {
+		st, ok := status[d]
+		if !ok {
+			return d, "missing"
+		}
+		switch {
+		case st == Failed || st == Skipped:
+			return d, st
+		case st == Parked && depBlock[d] != "":
+			return d, "dep-blocked"
+		}
+	}
+	return "", ""
+}
+
+// SweepDeps keeps the queue honest about dependency-blocked jobs. Before
+// it existed, a plan-to-task chain behind a failed or missing task
+// deadlocked silently: the dependents sat ready forever, Next could never
+// pick them (DepsMet requires done), and the queue counted them as
+// runnable work the loop would never do.
+//
+// The sweep runs in both directions:
+//
+//   - a READY job with a broken dependency (failed / skipped / missing /
+//     transitively dep-blocked) is parked with DepBlock set, so it leaves
+//     the active queue and `list` names the blocker;
+//   - a PARKED job whose DepBlock is set is returned to READY as soon as
+//     no dependency is broken: the blocker was requeued (ready) or marked
+//     done. A done dep unblocks through the normal DepsMet gate — the job
+//     then runs, or waits in the queue for its remaining deps.
+//
+// Jobs parked for any other reason (nightly gate, manual stop) carry no
+// DepBlock and are never touched. The pass runs to a fixpoint, so a chain
+// A <- B <- C behind a failed head parks at every link, not only the one
+// next to the head. It uses setState directly so that sweeping never
+// re-enters itself through SetStatus. It does not reap dead owners
+// (Recover): the sweep only looks at dependency health, and a stand-in
+// round (mark-running) legitimately holds a running job with no live PID.
+// The poll paths (NextExcluding, PhotoReady) recover before sweeping.
+// Returns the jobs whose state changed (empty when the queue is already
+// honest).
+func (s *Store) SweepDeps() ([]Job, error) {
+	jobs, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	status := map[string]string{}
+	depBlock := map[string]string{}
+	for _, j := range jobs {
+		status[j.ID] = j.Status
+		if j.Status == Parked {
+			depBlock[j.ID] = j.DepBlock
+		}
+	}
+	var changed []Job
+	for {
+		pass := 0
+		for i := range jobs {
+			j := &jobs[i]
+			switch {
+			case j.Status == Ready:
+				if dep, reason := DepBlocker(*j, status, depBlock); dep != "" {
+					j.Status = Parked
+					j.DepBlock = dep + ":" + reason
+					j.Summary = "dep-blocked: " + dep + " is " + reason
+					if err := s.setState(j.ID, j.State); err != nil {
+						return changed, err
+					}
+					status[j.ID] = Parked
+					depBlock[j.ID] = j.DepBlock
+					changed = append(changed, *j)
+					pass++
+				}
+			case j.Status == Parked && j.DepBlock != "":
+				if dep, _ := DepBlocker(*j, status, depBlock); dep == "" {
+					j.Status = Ready
+					j.DepBlock = ""
+					j.Summary = ""
+					if err := s.setState(j.ID, j.State); err != nil {
+						return changed, err
+					}
+					status[j.ID] = Ready
+					depBlock[j.ID] = ""
+					changed = append(changed, *j)
+					pass++
+				}
+			}
+		}
+		if pass == 0 {
+			return changed, nil
+		}
+	}
+}
+
 // Next returns the next ready job whose dependencies are all done, or nil.
 // Next returns the next runnable job: ready, dependencies done.
 func (s *Store) Next() (*Job, error) { return s.NextExcluding(nil) }
@@ -496,9 +609,15 @@ func (s *Store) Next() (*Job, error) { return s.NextExcluding(nil) }
 // NextExcluding is Next, but never returns a job whose id is in exclude.
 // The CLI uses it to skip jobs whose driver's engine is down (docs/brain-
 // swap.md): while the brain is off for a photo window, local jobs stay
-// ready and the worker idles on them instead of burning a dead round.
+// ready and the worker idles on them instead of burning a dead round. It
+// sweeps dependencies first: the agent-run loop polls this on every idle
+// tick, so a blocker that got requeued or done between polls unblocks its
+// dependents here, and a newly failed task parks its dependents here.
 func (s *Store) NextExcluding(exclude map[string]bool) (*Job, error) {
 	if err := s.Recover(); err != nil {
+		return nil, err
+	}
+	if _, err := s.SweepDeps(); err != nil {
 		return nil, err
 	}
 	jobs, err := s.List()
@@ -532,9 +651,14 @@ func (s *Store) NextExcluding(exclude map[string]bool) (*Job, error) {
 // done, in List() (run) order. This is the batch the agent-run watcher
 // brackets with ONE brain-swap window: it opens the window for the batch,
 // runs each photo job's iGPU round, and closes it when the batch drains.
-// jarvis-jobs photo-ready prints their ids comma-separated.
+// jarvis-jobs photo-ready prints their ids comma-separated. It sweeps
+// dependencies like NextExcluding: a photo job whose dep died must be
+// parked, not offered into a swap window that would fail.
 func (s *Store) PhotoReady() ([]Job, error) {
 	if err := s.Recover(); err != nil {
+		return nil, err
+	}
+	if _, err := s.SweepDeps(); err != nil {
 		return nil, err
 	}
 	jobs, err := s.List()
@@ -592,8 +716,17 @@ func (s *Store) Claim(id, round, driver string) (Job, error) {
 	return j, s.setState(id, j.State)
 }
 
-// SetStatus overwrites a job's state (skip, requeue, results).
-func (s *Store) SetStatus(id string, st State) error { return s.setState(id, st) }
+// SetStatus overwrites a job's state (skip, requeue, results). The
+// dependency sweep follows: the new status may unblock dependents (ready,
+// done) or block them (failed, skipped), and the queue has to reflect that
+// immediately rather than on the next poll.
+func (s *Store) SetStatus(id string, st State) error {
+	if err := s.setState(id, st); err != nil {
+		return err
+	}
+	_, err := s.SweepDeps()
+	return err
+}
 
 // Pause transitions a running job to paused. It is idempotent: if the job
 // is already paused nothing changes and nil is returned. The paused job can
