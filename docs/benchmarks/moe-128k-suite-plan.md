@@ -54,8 +54,10 @@ Three components per cache point, all against `ft serve` on :11436
 
 Same free-VRAM targets as the VRAM sweeps (± 40 MB, `--memory-ratio`
 calibrated per start): **400, 300, 250, 200, 150, 100 MB** — one Plane
-item each per model, parented to CTX-1 (12 items total; the GPU round
-creates them in the order it runs them and posts progress comments).
+item each per model, parented to CTX-1 (12 items total, **CTX-2…CTX-13**,
+created up front in ladder order by the 2026-11-21 decomposition round).
+Each igpu point job posts progress on its own item (see Driver
+correction #2).
 
 Run order per model (minimize restarts, validate the harness first):
 **400 → 100 → 200 → 250 → 300 → 150**. If 400 MB cannot serve 128K at all,
@@ -66,11 +68,12 @@ speed-vs-cache table.
 
 ## Method (per point)
 
-1. `docker compose stop engine` — **only from a sonnet-driver round**
-   (the local brain round never stops the brain; the job runs
-   `-driver sonnet` for the GPU phase — see the driver correction
-   below). Verify ~24 GB free of the 24,564 MiB card. The iGPU helper
-   (`jarvis-engine-igpu`, :11435) stays up.
+1. `docker compose stop engine` — done **inside the point script**
+   (`scripts/moe-128k-point.sh`), which runs from an igpu point job.
+   (The rule is that the *local brain round* never stops the brain; an
+   igpu/sonnet round may. See Driver correction #2.) Verify ~24 GB free
+   of the 24,564 MiB card. The iGPU helper (`jarvis-engine-igpu`,
+   :11435) stays up.
 2. Start `ft serve` with 128K context. Base invocation (first shard as
    model path, port 11436 — never 11435):
 
@@ -137,7 +140,8 @@ the point docs are the durable progress record.
 | Round | Driver | Work |
 |---|---|---|
 | 1 (2026-11-18) | local | Harness (exercises + 3 runners) + this plan + CTX project — the PR this doc lives in |
-| 2+ | **sonnet** | The 12 ladder points (brain stop/restore per point) |
+| 2 (2026-11-21) | local | Decomposition: the point script, 12 chained igpu point jobs, CTX-2…13 Plane items (this PR) |
+| 3+ | **igpu** | The 12 ladder points — one self-contained point job each, running `scripts/moe-128k-point.sh <slug> <N>` |
 | final | local | Summary + dashboard section + good-coder decision + install if warranted |
 
 ## Driver correction (2026-11-20)
@@ -152,6 +156,41 @@ by PID first, per Safety). `chat-1795017563-20e9` was requeued
 `-driver sonnet` on 2026-11-20. Note the iGPU **engine** (:11435) stays
 up through every point — "igpu" in the old table was a confusion of the
 two.
+
+## Driver correction #2 (2026-11-21) — decomposition to iGPU point jobs
+
+Nathan asked (job `chat-1795228874-940b`) to break the suite into single
+tasks small enough that the iGPU (3B, 32K ctx) can run each, via the
+event-driven system. The 2026-11-20 sonnet correction is **superseded** —
+the GPU phase now runs as **12 chained igpu point jobs**, one per ladder
+point. Two things make it fit:
+
+1. **Slim iGPU rounds.** `agent-local` now sets
+   `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` for igpu rounds (run.go,
+   `defaultCommand`), skipping the repo + global CLAUDE.md files. That
+   drops the round from ≈34.6K tokens (over the 3B's 32K window → "Prompt
+   is too long" in ~2 s) to ≈21.6K first turn, which fits. The
+   `stage3-igpu` brief is self-contained and carries the standing rules the
+   CLAUDE.md files would have provided. Live-verified 2026-11-21:
+   `agent-local check` against :11435 passes (the 3B drives the Bash tool
+   in a slim round).
+2. **One self-contained point per round.** Each ladder point is a single
+   script, `scripts/moe-128k-point.sh <slug> <N>` (installed to
+   `/usr/local/lib/jarvis/moe-128k-point.sh`), that does the whole point —
+   stop the brain, start `ft serve` with the calibrated `--memory-ratio`,
+   run the three runners, restore + verify the brain, write the point doc.
+   The 3B makes a handful of tool calls (run the script, read the SUMMARY
+   line, post the board comment, finish); it never reasons over the bench
+   output.
+
+The 12 point jobs (`moe128k-<slug>-<N>`, `-driver igpu -effort off`) are
+chained with `-depends` in ladder order (400 → 100 → 200 → 250 → 300 →
+150 per model, qwen before glm) so a failed point parks the rest
+(stop-on-failure). A final `moe128k-summary` local job depends on the last
+point and does the per-model summary + dashboard + good-coder decision.
+Plane items **CTX-2…CTX-13** (created in the same ladder order) track each
+point; each job comments/dones its own item, or moves it to `Blocked` on
+failure.
 
 **Pre-flight (2026-11-20, local round):** `ft` and `ninja` are in
 `/home/agent/ftvenv/bin`; the installed `ft serve` has every flag this

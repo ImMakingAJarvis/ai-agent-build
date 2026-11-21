@@ -40,7 +40,14 @@ into memory.
 - `JARVIS_DATA_DIR` (default `~/.local/share/jarvis`), `JARVIS_CONF`,
   `JARVIS_REDIS`, `RABBITMQ_URL`.
 - Round env it sets: `JARVIS_JOB_ID`, `JARVIS_REPLY_QUEUE`, `JARVIS_MODEL`,
-  plus the driver's own env (must not be dropped — PR #191).
+  plus the driver's own env (must not be dropped — PR #191). For the `igpu`
+  driver specifically: `ENGINE_URL` (the iGPU, :11435),
+  `LOCAL_MODEL=jarvis-igpu`, `LOCAL_CONTEXT_TOKENS=32768`,
+  `CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384`, and
+  `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` — the last skips the repo + global
+  CLAUDE.md files (~13K tokens) so the slim round fits the 3B's 32K window
+  (run.go `defaultCommand`; fixes the iGPU "Prompt is too long" stall, job
+  `chat-1795017563-20e9`).
 
 ## Data
 
