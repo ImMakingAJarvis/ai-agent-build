@@ -22,6 +22,8 @@ depends_on:
     why: "switchboard_* metrics"
   - to: resourced
     why: "lease and window metrics"
+  - to: kafka
+    why: "kafka_* exporter metrics (jarvis-kafka-exporter:9308)"
 ---
 
 ## Purpose

@@ -55,3 +55,9 @@ scrape_configs:
       # Host systemd service (EVB-27); the container is gone. Reached via
       # host.docker.internal (extra_hosts host-gateway in the service).
       - targets: ["host.docker.internal:9104"]
+
+  # Kafka broker (RabbitMQ→Kafka shadow, plan phase 0): topic offsets,
+  # consumer group lag. In-repo exporter (cmd/kafka-exporter).
+  - job_name: "kafka"
+    static_configs:
+      - targets: ["jarvis-kafka-exporter:9308"]
