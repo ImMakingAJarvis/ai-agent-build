@@ -103,6 +103,34 @@ services:
     ports:
       - "127.0.0.1:9308:9308"
 
+  # Kafka shadow phase 1 (docs/kafka-migration-plan.md §5): the dual-write
+  # mirror. kq.mirror is bound "#" on the tasks and events exchanges — the
+  # exchange fan-out is the tap, no publisher changes. Every delivery is
+  # written to the same-named Kafka topic with header source=amqp and a
+  # per-queue watermark goes to kq.watermark (the rollback path, plan §7).
+  # The state file is bind-mounted so host-side `jarvis-kq parity` and the
+  # dashboard tile read the same accounting. A stuck mirror only holds
+  # kq.mirror: the live AMQP consumer path is upstream of the tap.
+  kshadow:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/kshadow }
+    image: jarvis/kshadow:local
+    container_name: jarvis-kshadow
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      KAFKA_BROKERS: "kafka:9093"
+      KSHADOW_STATE: /data/kshadow-state.json
+    volumes:
+      - /home/agent/.local/share/jarvis/kshadow:/data
+
   # Live job stream: the agent runner XADDs the agent's stream-json output
   # as it happens (internal/agentjob/stream.go); the dashboard tails it for
   # GET /jobs/{id} live views (internal/dashboard/live.go). It is also the
@@ -557,6 +585,9 @@ services:
       # service, reached through host-gateway.
       RESOURCED_URL: http://host.docker.internal:9104
       RABBITMQ_URL: amqp://jarvis:jarvis-local@rabbitmq:5672
+      # Kafka shadow tile (GET /html/kafka-shadow): parity report over
+      # kshadow's state file + the management API + a Kafka scan.
+      KAFKA_BROKERS: kafka:9093
       # Live job streams (see the redis service above); unset means the
       # dashboard falls back to tailing transcript files.
       JARVIS_REDIS: redis://redis:6379
