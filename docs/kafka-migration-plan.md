@@ -240,6 +240,24 @@ per-topic history table (recent records, click-through to payload).
 Prometheus gains `kafka_exporter` in place of the rabbitmq exporter.
 Raw escape hatch: `docker exec` + `kcat` in the kafka container.
 
+*As built (kafka-tools-1):* the modify side landed as planned, with the
+dead-letter mechanics spelled out. `dead` records carry their original
+queue/reason/attempts in `x-death-*` headers; requeue republishes to the
+original queue with a `kq-requeued` marker header, and requeue/drop each
+append a marker to `kq.dead.dropped` — a record is hidden from `dead`
+and the dashboard once marked (`--all` shows it). Control
+(pause/resume/throttle) writes `kq.control` records (key = group) — a
+log, so it sticks across restarts; `rebalance` is the one Admin API call
+in the set. During the dual-run the queues page shows the Kafka tile
+*alongside* the AMQP queues — the re-point completes when the shadow
+gate passes, not before. Prometheus gained the in-repo
+`kafka-exporter` job (`jarvis-kafka-exporter:9308`); the rabbitmq job
+stays until cutover. One client bug worth keeping: a bounded read with a
+zero-MaxWait fetch blocks until the conn deadline (30 s), past the
+caller's context, so the next dial in the sequence failed with a fake
+"lookup … i/o timeout" — `kq.ReadRange` now derives its deadline from
+ctx and fetches with MaxWait 1 s (live-verified: ListDead 58 s → 2 s).
+
 ## 5. Shadow mode (the safe path)
 
 **Phase 0 — bring-up.** `kafka` compose service + `specs/kafka.md`.
@@ -337,6 +355,18 @@ Two safeguards, both in the plan from the start:
    an existing id as a no-op; the Kafka consumer must honour the same
    rule for every family (a consumer that re-sees an id it already
    acked skips it). This is what makes `seek`/`replay` safe too.
+
+*As built (kafka-tools-1):* `jarvis-kq rollback <queue> [--dry-run]`
+implements safeguard 1. The boundary is kshadow's state file (per-
+message `last_id`), falling back to the newest `kq.watermark` record.
+Popping with `reject_requeue_false` drops up to and including the
+boundary; if the queue drains first, the boundary was never mirrored
+and every popped message is republished to its original exchange (the
+mgmt API's publish takes base64 only) with exit 3. `--dry-run` pops one
+message with requeue — requeue puts it back at the *head* of the queue,
+so one pop is all a dry run can show — and classifies the oldest
+message. Live-verified on a test queue: boundary-deeper and
+oldest-is-boundary (both dry + real); the exit-3 path is by inspection.
 
 Whole-broker rollback (Kafka itself is dead): flip every family off —
 AMQP is still the source of truth for families not yet cut over, and

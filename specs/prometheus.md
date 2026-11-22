@@ -59,3 +59,8 @@ per-month buckets; the all-time token total lives in the token ledger).
   PR #113).
 - Quoted metric names with colons parse as strings in PromQL — write
   them unquoted.
+- A bind-mounted config rewritten in place (new inode) while the
+  container runs — the container keeps serving the old unlinked inode
+  (visible as `…//deleted` in `/proc/self/mountinfo`) and reload picks
+  up nothing. `docker compose up -d --force-recreate` the service
+  (found 2026-11-22: the kafka job was absent for 11 days this way).

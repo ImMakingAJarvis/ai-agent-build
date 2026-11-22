@@ -23,7 +23,10 @@ reviewer inboxes (review.*), capability queues (jobs.gpu/cpu/igpu), cadence
 queues (sched.*), and dead, events and kq.watermark with 30-day retention
 (everything else 7-day). kq.watermark carries the phase-1 shadow watermarks
 (sees kshadow). `jarvis-kq` is the inspection/modify CLI (topics, depth,
-peek, tail, groups, lag, history, describe, send, purge, drop, parity);
+peek, tail, groups, lag, history, describe, send, purge, drop, parity, and
+the modify side: pop, seek, replay, requeue, edit, dead / dead-requeue /
+dead-drop, pause/resume/throttle/rebalance on `kq.control`, and rollback —
+the AMQP purge up to the kshadow mirror boundary, plan §7);
 `kafka-exporter` feeds Prometheus.
 
 ## Interfaces
@@ -45,13 +48,21 @@ peek, tail, groups, lag, history, describe, send, purge, drop, parity);
   `delete.topic.enable=true`, `log.retention.hours=168` (7d default),
   `min.insync.replicas=1`, `num.partitions=1`, 1g heap.
 - `docker/kafka/init-topics.sh` (kafka-init, one-shot after the broker is
-  healthy): creates the 23 static topics with per-topic retention
-  (30d for dead/events/kq.watermark) — idempotent.
+  healthy): creates the 25 static topics with per-topic retention
+  (30d for dead/events/kq.watermark/kq.control/kq.dead.dropped) —
+  idempotent (re-run verified 2026-11-22).
 - Exporter env: `KAFKA_BROKERS`, `LISTEN_ADDR`, `POLL_INTERVAL`.
 
 ## Data
 
 - Named volume `kafka_data` at /bitnami/kafka (KRaft logs + metadata).
+- `kq.control`: the group control log (pause/resume/throttle/rebalance
+  records, key = consumer group). A log record, so a control sticks
+  across consumer restarts; the phase-3 consumer SDK applies the newest
+  record per group on every poll.
+- `kq.dead.dropped`: one marker record per dead record that was requeued
+  or dropped (value = the dead offset). `jarvis-kq dead` and the
+  dashboard hide marked records; `--all` shows them.
 
 ## Deploy
 
@@ -79,3 +90,8 @@ in 2025 and the old `bitnami/kafka` name no longer resolves — same image.
   fails on leader and group dials — the advertised host it receives is
   unreachable where the client runs. Host: 127.0.0.1:9092; containers:
   kafka:9093.
+- A kafka-go bounded read with a zero-MaxWait fetch blocks until the
+  conn deadline (30 s), not the caller's context — a read at the log end
+  then outlives the context, and the *next* dial in the sequence fails
+  with a fake "lookup … i/o timeout" (fixed 2026-11-22: ctx-derived
+  deadline + explicit MaxWait 1 s in `kq.ReadRange`).
