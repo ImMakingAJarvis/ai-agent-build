@@ -642,6 +642,14 @@
   <div id="kafka-shadow-section" hx-get="/html/kafka-shadow" hx-trigger="load, every 60s" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Kafka shadow</div><div class="empty-state">Loading&hellip;</div></div>
   </div>
+  <!-- Kafka queues: topics/depth/lag from the Admin API (plan §4). -->
+  <div id="kafka-queues-section" hx-get="/html/kafka-queues" hx-trigger="load, every 30s" hx-swap="innerHTML">
+    <div class="section"><div class="section-title">Kafka queues</div><div class="empty-state">Loading&hellip;</div></div>
+  </div>
+  <!-- Kafka history: per-topic record table with click-through payload. -->
+  <div id="kafka-history-section" hx-get="/html/kafka-history" hx-trigger="load" hx-swap="innerHTML">
+    <div class="section"><div class="section-title">Kafka history</div><div class="empty-state">Loading&hellip;</div></div>
+  </div>
   <div id="jobs-section" hx-get="/html/jobs-section" hx-trigger="load" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Cost Tracking</div><div class="empty-state">Loading&hellip;</div></div>
   </div>

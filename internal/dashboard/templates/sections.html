@@ -172,6 +172,123 @@
 </div>
 {{end}}
 
+{{define "kafka-queues-section"}}
+<!-- Kafka queues: topics/depth/lag from the Kafka Admin API (plan §4).
+     Refreshes every 30s; the snapshot is cached 20s server-side. -->
+<div class="section kafka-queues-section" id="kafka-queues-data"
+     {{- if .At }} data-at="{{ .At.UTC.Format "2006-01-02T15:04:05Z07:00" }}"{{ end }}>
+  <div class="section-title">Kafka queues <span class="machine-detail" id="kafka-queues-at"></span></div>
+  {{- if .Err }}
+  <div class="error-state">Kafka: {{ .Err }}</div>
+  {{- else }}
+  {{- if .Topics }}
+  <table>
+    <tr><th>topic</th><th>first</th><th>last</th><th>depth</th></tr>
+    {{- range .Topics }}
+    <tr><td>{{ .Name }}</td><td>{{ .First }}</td><td>{{ .Last }}</td><td>{{ .Depth }}</td></tr>
+    {{- end }}
+  </table>
+  {{- else }}
+  <div class="machine-detail">no topics yet</div>
+  {{- end }}
+  {{- if .Groups }}
+  <table>
+    <tr><th>group</th><th>lag</th></tr>
+    {{- range .Groups }}
+    <tr><td>{{ .Group }}</td><td>{{ .Lag }}</td></tr>
+    {{- end }}
+  </table>
+  {{- end }}
+  <div class="machine-detail">depth = log end − first offset (retention may make first &gt; 0) · group lag = uncommitted records</div>
+  {{- end }}
+  <script>
+    (function () {
+      var el = document.getElementById('kafka-queues-data');
+      var at = el && el.getAttribute('data-at');
+      var span = el && document.getElementById('kafka-queues-at');
+      if (at && span) span.textContent = new Date(at).toLocaleString();
+    })();
+  </script>
+</div>
+{{end}}
+
+{{define "kafka-history-section"}}
+<!-- Kafka history: per-topic record table with click-through to the
+     payload (plan §4). Loads once per page load; the Load button re-fetches. -->
+<div class="section kafka-history-section">
+  <div class="section-title">Kafka history</div>
+  {{- if .Err }}
+  <div class="error-state">Kafka: {{ .Err }}</div>
+  {{- else }}
+  <div class="pending-meta">
+    topic
+    <select id="kafka-history-topic">
+      {{- range .Topics }}
+      <option value="{{ . }}">{{ . }}</option>
+      {{- else }}
+      <option value="">no topics</option>
+      {{- end }}
+    </select>
+    <button class="btn" onclick="loadKafkaHistory()">Load</button>
+  </div>
+  <div id="kafka-history-table"><div class="machine-detail">pick a topic to see its last records</div></div>
+  <div class="machine-detail">click a row for the full record (headers + payload)</div>
+  <script>
+  async function loadKafkaHistory() {
+    var sel = document.getElementById('kafka-history-topic');
+    var out = document.getElementById('kafka-history-table');
+    if (!sel || !sel.value) { out.innerHTML = '<div class="machine-detail">no topics</div>'; return; }
+    out.innerHTML = '<div class="machine-detail">loading…</div>';
+    try {
+      var resp = await fetch('/api/kafka/history?topic=' + encodeURIComponent(sel.value) + '&n=20');
+      if (!resp.ok) { out.innerHTML = '<div class="error-state">load failed: ' + esc(resp.status) + '</div>'; return; }
+      var rows = await resp.json();
+      if (!rows.length) { out.innerHTML = '<div class="machine-detail">no records</div>'; return; }
+      var html = '<table><tr><th>offset</th><th>time</th><th>key</th><th>value</th></tr>';
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        var t = r.time ? new Date(r.time).toLocaleString() : '';
+        html += '<tr style="cursor:pointer" onclick="kafkaHistoryClick(\'' + esc(sel.value) + '\', '
+              + r.offset + ', this)">'
+              + '<td>' + r.offset + '</td><td>' + t + '</td>'
+              + '<td>' + esc(r.key || '') + '</td>'
+              + '<td class="pending-id">' + esc(String(r.value || '').slice(0, 120)) + '</td></tr>';
+      }
+      out.innerHTML = html + '</table>';
+    } catch (e) { out.innerHTML = '<div class="error-state">' + esc(String(e)) + '</div>'; }
+  }
+  async function kafkaHistoryClick(topic, offset, row) {
+    var open = document.querySelector('.kafka-hist-payload');
+    if (open) {
+      if (open.closest('tr').previousElementSibling === row) { open.closest('tr').remove(); return; }
+      open.closest('tr').remove();
+    }
+    var tr = document.createElement('tr');
+    var td = document.createElement('td');
+    td.colSpan = 4;
+    td.innerHTML = '<pre class="kafka-hist-payload">loading…</pre>';
+    tr.appendChild(td);
+    row.after(tr);
+    try {
+      var resp = await fetch('/api/kafka/record?topic=' + encodeURIComponent(topic) + '&offset=' + offset);
+      if (!resp.ok) throw new Error('record fetch failed: ' + resp.status);
+      var rec = await resp.json();
+      var pre = td.querySelector('pre');
+      var h = Object.keys(rec.headers || {});
+      var head = h.length ? 'headers:\n' + h.map(function (k) { return '  ' + k + ': ' + rec.headers[k]; }).join('\n') + '\n' : 'headers: (none)\n';
+      pre.textContent = head + 'payload:\n' + rec.value;
+    } catch (e) {
+      var pre2 = td.querySelector('pre');
+      pre2.textContent = 'error: ' + e;
+      pre2.classList.add('error-state');
+    }
+  }
+  (function () { var sel = document.getElementById('kafka-history-topic'); if (sel && sel.value) loadKafkaHistory(); })();
+  </script>
+  {{- end }}
+</div>
+{{end}}
+
 {{define "pending-section"}}
 <!-- Pending Jobs Detail -->
 <div class="section">
@@ -249,34 +366,30 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
     <button class="btn" id="dead-refresh-btn" onclick="refreshDead()">Refresh</button>
   </div>
   <div id="dead-content">
-    <div class="empty-state">Click Refresh to load dead letters from the dead queue.</div>
+    <div class="empty-state">Click Refresh to load dead letters (AMQP dead queue + Kafka dead topic).</div>
   </div>
 </div>
 
 <script>
+// Dead letters from both brokers: the AMQP dead queue and the Kafka `dead`
+// topic. Each source is fetched independently (allSettled) — either broker
+// may be down without hiding the other's letters.
 async function refreshDead() {
   const container = document.getElementById('dead-content');
   const btn = document.getElementById('dead-refresh-btn');
   container.innerHTML = '<div class="empty-state">Loading&hellip;</div>';
   btn.disabled = true;
-  try {
-    const resp = await fetch('/api/dead-letters');
-    if (!resp.ok) {
-      container.innerHTML = '<div class="error-state">Failed to load: ' + resp.status + '</div>';
-      btn.disabled = false;
-      return;
-    }
-    const data = await resp.json();
-    if (!data || data.length === 0) {
-      container.innerHTML = '<div class="empty-state">No dead letters — nothing has been rejected.</div>';
-      btn.disabled = false;
-      return;
-    }
-    let html = '';
-    for (const dl of data) {
+  const [amqp, kafka] = await Promise.allSettled([
+    fetch('/api/dead-letters').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+    fetch('/api/kafka/dead').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+  ]);
+  let html = '', empty = true;
+  if (amqp.status === 'fulfilled') {
+    for (const dl of (amqp.value || [])) {
+      empty = false;
       html += '<div class="pending-row">';
       html += '<div><span class="pending-id">' + esc(dl.queue) + '</span>';
-      html += '<span class="pending-meta"> &middot; ' + esc(dl.routing_key) + '</span></div>';
+      html += '<span class="pending-meta"> &middot; ' + esc(dl.routing_key) + ' &middot; <b>AMQP</b></span></div>';
       html += '<div class="pending-meta">reason=' + esc(dl.reason);
       if (dl.count > 1) html += ' &middot; dead-lettered ' + dl.count + 'x';
       if (dl.dead_at) html += ' &middot; ' + esc(dl.dead_at);
@@ -287,9 +400,33 @@ async function refreshDead() {
       html += '<button class="btn" onclick="deadAction(\'' + esc(dl.id) + '\', \'drop\')">Drop</button>';
       html += '</div></div>';
     }
+  } else {
+    html += '<div class="error-state">AMQP dead queue: ' + esc(amqp.reason && amqp.reason.message || amqp.reason) + '</div>';
+  }
+  if (kafka.status === 'fulfilled') {
+    for (const d of (kafka.value || [])) {
+      empty = false;
+      html += '<div class="pending-row">';
+      html += '<div><span class="pending-id">offset ' + d.offset + '</span>';
+      html += '<span class="pending-meta"> &middot; ' + esc(d.queue) + ' &middot; <b>KAFKA</b></span></div>';
+      html += '<div class="pending-meta">reason=' + esc(d.reason);
+      if (d.attempts > 0) html += ' &middot; attempts=' + d.attempts;
+      if (d.time) html += ' &middot; ' + new Date(d.time).toLocaleString();
+      if (d.at) html += ' &middot; dead-at ' + esc(d.at);
+      html += '</div>';
+      if (d.value) html += '<div class="pending-prompt" title="' + esc(d.value) + '">' + esc(d.value.slice(0, 200)) + '</div>';
+      html += '<div class="pending-meta">';
+      html += '<button class="btn" onclick="kafkaDeadAction(' + d.offset + ', \'requeue\')">Requeue</button> ';
+      html += '<button class="btn" onclick="kafkaDeadAction(' + d.offset + ', \'drop\')">Drop</button>';
+      html += '</div></div>';
+    }
+  } else {
+    html += '<div class="error-state">Kafka dead topic: ' + esc(kafka.reason && kafka.reason.message || kafka.reason) + '</div>';
+  }
+  if (empty && amqp.status === 'fulfilled' && kafka.status === 'fulfilled') {
+    container.innerHTML = '<div class="empty-state">No dead letters — nothing has been rejected.</div>';
+  } else {
     container.innerHTML = html;
-  } catch (e) {
-    container.innerHTML = '<div class="error-state">Error: ' + esc(e.message) + '</div>';
   }
   btn.disabled = false;
 }
@@ -298,6 +435,17 @@ async function deadAction(id, action) {
   btns.forEach(b => b.disabled = true);
   try {
     const resp = await fetch('/api/dead-letters/' + encodeURIComponent(id) + '/' + action, {method: 'POST'});
+    if (!resp.ok) alert('Failed: ' + resp.status + ' ' + (await resp.text()));
+  } catch (e) {
+    alert('Failed: ' + e.message);
+  }
+  refreshDead();
+}
+async function kafkaDeadAction(offset, action) {
+  const btns = document.querySelectorAll('#dead-content .btn');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const resp = await fetch('/api/kafka/dead/' + offset + '/' + action, {method: 'POST'});
     if (!resp.ok) alert('Failed: ' + resp.status + ' ' + (await resp.text()));
   } catch (e) {
     alert('Failed: ' + e.message);

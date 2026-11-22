@@ -280,6 +280,12 @@ type Server struct {
 	kshadowRep   *ks.Report
 	kshadowAt    time.Time
 
+	// Kafka view (kafka.go): the cached topic/group snapshot behind the
+	// kafka-queues and kafka-history sections.
+	kafkaMu     sync.Mutex
+	kafkaSnap   kafkaSnapshot
+	kafkaSnapAt time.Time
+
 	// Pre-compiled templates (parsed once at startup).
 	tmpl *template.Template
 
@@ -497,6 +503,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/dead-letters", s.handleDeadLetters)
 	mux.HandleFunc("POST /api/dead-letters/{id}/requeue", s.handleDeadLetterRequeue)
 	mux.HandleFunc("POST /api/dead-letters/{id}/drop", s.handleDeadLetterDrop)
+	mux.HandleFunc("GET /html/kafka-queues", s.handleKafkaQueuesHTML)
+	mux.HandleFunc("GET /html/kafka-history", s.handleKafkaHistoryHTML)
+	mux.HandleFunc("GET /api/kafka/topics", s.handleKafkaTopicsAPI)
+	mux.HandleFunc("GET /api/kafka/history", s.handleKafkaHistoryAPI)
+	mux.HandleFunc("GET /api/kafka/record", s.handleKafkaRecordAPI)
+	mux.HandleFunc("GET /api/kafka/dead", s.handleKafkaDead)
+	mux.HandleFunc("POST /api/kafka/dead/{offset}/requeue", s.handleKafkaDeadRequeue)
+	mux.HandleFunc("POST /api/kafka/dead/{offset}/drop", s.handleKafkaDeadDrop)
 	mux.HandleFunc("GET /api/approvals", s.handleApprovals)
 	mux.HandleFunc("POST /api/approvals", s.handleApprovalAction)
 	mux.HandleFunc("POST /api/owner-message", s.handleOwnerMessage)
