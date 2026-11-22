@@ -123,9 +123,9 @@ var _ = queue.DecodeEvent
 // queue. Seq is kshadow's per-queue count of messages mirrored so far, so
 // two messages without ids still order by seq.
 type watermark struct {
-	Queue      string    `json:"queue"`
-	Exchange   string    `json:"exchange"`
-	MessageID  string    `json:"message_id"`
-	Seq        int64     `json:"seq"`
-	At         time.Time `json:"at"`
+	Queue     string    `json:"queue"`
+	Exchange  string    `json:"exchange"`
+	MessageID string    `json:"message_id"`
+	Seq       int64     `json:"seq"`
+	At        time.Time `json:"at"`
 }

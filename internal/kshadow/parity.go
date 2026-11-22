@@ -22,8 +22,8 @@ type Row struct {
 	Consumed  int64     `json:"consumed"`  // mgmt deliver − baseline
 	Ready     int64     `json:"ready"`
 	Unacked   int64     `json:"unacked"`
-	Dropped   int64     `json:"dropped"`   // Published − Written
-	Mismatch  int64     `json:"mismatch"`  // sampled read-backs whose body differed
+	Dropped   int64     `json:"dropped"`  // Published − Written
+	Mismatch  int64     `json:"mismatch"` // sampled read-backs whose body differed
 	LastID    string    `json:"last_id,omitempty"`
 	LastAt    time.Time `json:"last_at,omitempty"`
 	Lag       string    `json:"lag,omitempty"` // now − LastAt, e.g. "3s"
@@ -41,9 +41,9 @@ type Report struct {
 // Parity builds a Report from kshadow's persisted state, the RabbitMQ
 // management API and an independent scan of the shadow topics.
 type Parity struct {
-	State  *State
-	Admin  *Admin
-	Kafka  *kq.Client
+	State *State
+	Admin *Admin
+	Kafka *kq.Client
 }
 
 // Report builds the parity report for every queue kshadow has seen.

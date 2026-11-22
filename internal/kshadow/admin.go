@@ -102,10 +102,12 @@ func (a *Admin) QueueStats(ctx context.Context, queue string) (MgmtStats, error)
 			Publish int64 `json:"publish"`
 			Deliver int64 `json:"deliver"`
 		} `json:"message_stats"`
-		MessagesReady        int64 `json:"messages_ready"`
+		MessagesReady          int64 `json:"messages_ready"`
 		MessagesUnacknowledged int64 `json:"messages_unacknowledged"`
 	}
-	p := path.Join("/api/queues", a.vhost, queue)
+	// path.Join would swallow a "/" vhost segment (it cleans empties);
+	// the mgmt API wants it URL-encoded in the path.
+	p := path.Join("/api/queues", url.PathEscape(a.vhost), queue)
 	if err := a.get(ctx, p, &q); err != nil {
 		return MgmtStats{}, err
 	}

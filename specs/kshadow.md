@@ -96,6 +96,10 @@ within a couple of minutes of the first tasks/events traffic.
 - RabbitMQ management API unreachable: baselines cannot be taken or
   refreshed; parity falls back to the tap's own seq and renders consumed
   as "-".
+- The logical `events` aggregate has no AMQP queue of that name: its
+  mgmt lookup 404s and kshadow backs off 60s between retries (no
+  per-message retries). Parity renders CONSUMED "-" there — the tap's
+  seq is the aggregate's published count.
 - A broker restart resets the management counters below the captured
   baselines; parity then reads the window "since the restart" (published
   may show as 0 or negative → "-"). Reboot kshadow after a broker restart

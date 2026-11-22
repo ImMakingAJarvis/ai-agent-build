@@ -48,13 +48,37 @@ func (c *Client) Writer(ctx context.Context, topic string) (*Writer, error) {
 }
 
 // Send produces one record and returns the partition and offset it landed
-// on (kafka-go fills them in on success — exact, no log-end guessing).
+// on. kafka-go does not write the produced offset back to the caller's
+// Message (it fills only its internal batch copy — v0.4.51's
+// WriteMessages leaves msg.Partition/msg.Offset at zero), so the offset is
+// read back as the record's partition's log end minus one. Exact while the
+// caller is the sole producer to the topic, which the shadow mirror is.
 func (w *Writer) Send(ctx context.Context, key, value []byte, headers []kafka.Header) (int, int64, error) {
 	msg := kafka.Message{Key: key, Value: value, Headers: headers}
 	if err := w.w.WriteMessages(ctx, msg); err != nil {
-		return 0, -1, err
+		return -1, -1, err
 	}
-	return int(msg.Partition), msg.Offset, nil
+	md, err := w.c.Metadata(ctx, []string{w.w.Topic})
+	if err != nil {
+		return -1, -1, err
+	}
+	t := md.Topics[0]
+	if t.Error != nil {
+		return -1, -1, t.Error
+	}
+	partitions := make([]int, len(t.Partitions))
+	for i, p := range t.Partitions {
+		partitions[i] = p.ID
+	}
+	partition := partitions[0]
+	if len(partitions) > 1 {
+		partition = int((&kafka.Hash{}).Balance(msg, partitions...))
+	}
+	after, err := w.c.LastOffsets(ctx, w.w.Topic)
+	if err != nil {
+		return -1, -1, err
+	}
+	return partition, after[partition] - 1, nil
 }
 
 // Close flushes and closes the underlying writer.

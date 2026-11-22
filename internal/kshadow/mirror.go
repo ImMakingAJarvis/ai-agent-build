@@ -21,18 +21,19 @@ import (
 // cannot be written is requeued and retried — it never leaves the shadow
 // un-written, which is the whole point of the phase-1 gate).
 type Mirror struct {
-	amqpURL    string
-	kafka      *kq.Client
-	state      *State
-	statePath  string
-	admin      *Admin
-	log        *log.Logger
+	amqpURL     string
+	kafka       *kq.Client
+	state       *State
+	statePath   string
+	admin       *Admin
+	log         *log.Logger
 	sampleEvery int // read-back one of every Nth write (0 = no sampling)
 
-	mu       sync.Mutex
-	writers  map[string]*kq.Writer
-	lastWM   map[string]time.Time // per-queue last watermark write
-	lastSave time.Time
+	mu          sync.Mutex
+	writers     map[string]*kq.Writer
+	lastWM      map[string]time.Time // per-queue last watermark write
+	lastSave    time.Time
+	baseBackoff map[string]time.Time // per-queue last failed baseline attempt
 }
 
 // NewMirror builds a Mirror. statePath is where the accounting survives
@@ -51,6 +52,7 @@ func NewMirror(amqpURL string, kafka *kq.Client, state *State, statePath string,
 		sampleEvery: sampleEvery,
 		writers:     map[string]*kq.Writer{},
 		lastWM:      map[string]time.Time{},
+		baseBackoff: map[string]time.Time{},
 	}
 }
 
@@ -128,18 +130,26 @@ func (m *Mirror) handle(ctx context.Context, ch *amqp.Channel, d amqp.Delivery) 
 
 	// Capture the management baselines on first sight — before counting
 	// this message — so "published since baseline" includes it, exactly
-	// matching the tap's seq.
+	// matching the tap's seq. (If the broker later restarts, its counters
+	// reset below the baseline and parity's window reads as "since the
+	// restart".) Queues that do not exist in mgmt — the logical events
+	// aggregate has no AMQP queue — back off 60s instead of 404ing on
+	// every delivery; parity shows CONSUMED "-" for them, which is the
+	// honest answer.
 	if m.admin != nil {
 		m.mu.Lock()
 		fresh := q.BaselinePub == 0
+		backed := !m.baseBackoff[attr.Queue].IsZero() && time.Since(m.baseBackoff[attr.Queue]) < 60*time.Second
 		m.mu.Unlock()
-		if fresh {
-			// (If the broker later restarts, its counters reset below the
-			// baseline and parity's window reads as "since the restart".)
+		if fresh && !backed {
 			if st, err := m.admin.QueueStats(ctx, attr.Queue); err == nil {
 				m.mu.Lock()
 				q.BaselinePub = st.Published
 				q.BaselineDeliver = st.Delivered
+				m.mu.Unlock()
+			} else {
+				m.mu.Lock()
+				m.baseBackoff[attr.Queue] = time.Now()
 				m.mu.Unlock()
 			}
 		}

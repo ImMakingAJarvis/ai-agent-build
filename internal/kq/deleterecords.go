@@ -33,7 +33,7 @@ type deleteRecordsRequest struct {
 }
 
 type deleteRecordsRequestTopic struct {
-	Name       string                        `kafka:"min=v0,max=v1"`
+	Name       string                          `kafka:"min=v0,max=v1"`
 	Partitions []deleteRecordsRequestPartition `kafka:"min=v0,max=v1"`
 }
 
@@ -51,20 +51,20 @@ func (r *deleteRecordsRequest) ApiKey() protocol.ApiKey { return protocol.Delete
 // dropped from every per-version decoder (the wire would then be misread,
 // e.g. the throttle INT32 decoded as a zero topic count).
 type deleteRecordsResponse struct {
-	ThrottleTimeMs int32                    `kafka:"min=v0,max=v1"`
+	ThrottleTimeMs int32                        `kafka:"min=v0,max=v1"`
 	Topics         []deleteRecordsResponseTopic `kafka:"min=v0,max=v1"`
 }
 
 type deleteRecordsResponseTopic struct {
-	Name       string                       `kafka:"min=v0,max=v1"`
+	Name       string                           `kafka:"min=v0,max=v1"`
 	Partitions []deleteRecordsResponsePartition `kafka:"min=v0,max=v1"`
 }
 
 type deleteRecordsResponsePartition struct {
-	PartitionIndex  int32  `kafka:"min=v0,max=v1"`
-	LowWatermark    int64  `kafka:"min=v0,max=v1"`
-	OffsetErrorCode int16  `kafka:"min=v0,max=v1"`
-	OffsetTimestamp int64  `kafka:"min=v0,max=v0"`
+	PartitionIndex  int32 `kafka:"min=v0,max=v1"`
+	LowWatermark    int64 `kafka:"min=v0,max=v1"`
+	OffsetErrorCode int16 `kafka:"min=v0,max=v1"`
+	OffsetTimestamp int64 `kafka:"min=v0,max=v0"`
 }
 
 // ApiKey is DeleteRecords.

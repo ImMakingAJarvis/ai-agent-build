@@ -4,7 +4,7 @@ import "testing"
 
 func TestAttribute(t *testing.T) {
 	cases := []struct {
-		key string
+		key  string
 		want Attribution
 	}{
 		// task-family keys are their own queue names
