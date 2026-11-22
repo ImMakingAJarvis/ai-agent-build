@@ -85,12 +85,25 @@ the topology mapping above + the tooling. No service outside
 ### 3.1 Broker
 
 - Single node, **KRaft** (no Zookeeper), compose service `kafka`
-  (`bitnami/kafka`, KRaft mode), named volume `kafka_data`.
-  ~1–2 GB JVM; the host has 46 GB RAM free.
-- `9092` bound to `127.0.0.1` on the host for the CLI; containers use
-  the service name. `delete.topic.enable=true`,
-  `auto.create.topics.enable=true` (constrained by the naming
-  convention in §3.5).
+  (`bitnamilegacy/kafka:3.7` — Bitnami moved its Docker Hub org in
+  2025 and the `bitnami/kafka` name no longer resolves), named volume
+  `kafka_data`. ~1–2 GB JVM; the host has 46 GB RAM free.
+- **Two client listeners** — a Kafka client follows the *advertised*
+  host for partition leaders and group queries, so one name cannot
+  serve both sides of the compose boundary:
+  - `EXTERNAL` on `127.0.0.1:9092`, advertised as `127.0.0.1:9092`
+    (host clients: `jarvis-kq`, the Go live tests);
+  - `PLAINTEXT` on `kafka:9093`, advertised as `kafka:9093`
+    (in-container clients: `kafka-init`, `kafka-exporter`).
+  The KRaft controller listens on `9094` (quorum voters
+  `0@kafka:9094`); internal, never a client path. A client on the wrong
+  side of the boundary succeeds on bootstrap metadata, then fails on
+  leader and group dials.
+- `delete.topic.enable=true`, `auto.create.topics.enable=true`
+  (constrained by the naming convention in §3.5).
+- Prometheus metrics come from `kafka-exporter`, a small in-repo Go
+  service (`cmd/kafka-exporter`, :9308) — the usual exporter images are
+  pull-denied on this box.
 - Retention: worker/review/jobs/sched/mailbox topics 7 days,
   `flow.*`/`cap.*` 7 days, `dead` 30 days, `events` 30 days.
   `min.insync.replicas=1` (single node).
