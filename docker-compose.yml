@@ -1066,6 +1066,15 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    environment:
+      # Anonymous read-only access (Nathan's call, 2026-11-21): the login
+      # wall kept everyone out — 13 days of logs, zero successful logins —
+      # while the rest of the stack (Prometheus :9090, dashboard :8080) is
+      # already open on the LAN. Viewer role: dashboards are viewable
+      # without a session; admin login (admin/admin) still works to edit.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_AUTH_ANONYMOUS_ORG_NAME: "Main Org."
     volumes:
       - ./docker/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       # grafana/dashboard.json is provisioned from the repo (the file
