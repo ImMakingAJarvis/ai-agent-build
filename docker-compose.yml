@@ -30,6 +30,79 @@ services:
       - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-jarvis}
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS:-jarvis-local}
 
+  # ---------------- Kafka (RabbitMQ→Kafka shadow, plan phase 0) ----------------
+  # KRaft single node, no Zookeeper. bitnamilegacy/kafka:3.7 is the same
+  # bitnami/kafka:3.7 image — bitnami moved its Docker Hub org to
+  # "bitnamilegacy" in 2025 and the old name no longer resolves.
+  kafka:
+    image: bitnamilegacy/kafka:3.7
+    container_name: jarvis-kafka
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    environment:
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      # Two client-facing listeners: clients follow the *advertised* host for
+      # partition leaders and group queries, so one name cannot serve both
+      # sides of the compose boundary. EXTERNAL advertises 127.0.0.1:9092 for
+      # host clients (jarvis-kq, go tests); PLAINTEXT advertises kafka:9093
+      # for in-container clients (kafka-exporter, kafka-init). CONTROLLER is
+      # the KRaft quorum port, never a client path.
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9094
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9093,CONTROLLER://:9094,EXTERNAL://:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9093,EXTERNAL://127.0.0.1:9092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      # docs/kafka-migration-plan.md §3.1
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_DELETE_TOPIC_ENABLE=true
+      - KAFKA_CFG_LOG_RETENTION_HOURS=168
+      - KAFKA_CFG_MIN_INSYNC_REPLICAS=1
+      - KAFKA_CFG_NUM_PARTITIONS=1
+      - KAFKA_HEAP_OPTS=-Xms1g -Xmx1g
+    healthcheck:
+      test: ["CMD", "/opt/bitnami/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "127.0.0.1:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 30s
+  # One-shot: creates the static topic set (idempotent) after the broker is
+  # healthy. Re-runs on every `up` because restart is "no".
+  kafka-init:
+    image: bitnamilegacy/kafka:3.7
+    container_name: jarvis-kafka-init
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./docker/kafka:/opt/jarvis-kafka-init:ro
+    entrypoint: ["/bin/bash", "/opt/jarvis-kafka-init/init-topics.sh"]
+  # In-repo exporter: the usual kafka-exporter images (danielmtaylor, dpkp,
+  # landoop) are unavailable on this box (Docker Hub pull denied), so
+  # cmd/kafka-exporter serves the same metric names on :9308.
+  kafka-exporter:
+    build:
+      context: .
+      dockerfile: docker/jarvis-go/Dockerfile
+      args: { BIN: cmd/kafka-exporter }
+    image: jarvis/kafka-exporter:local
+    container_name: jarvis-kafka-exporter
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: "kafka:9093"
+      LISTEN_ADDR: ":9308"
+      POLL_INTERVAL: 15s
+    ports:
+      - "127.0.0.1:9308:9308"
+
   # Live job stream: the agent runner XADDs the agent's stream-json output
   # as it happens (internal/agentjob/stream.go); the dashboard tails it for
   # GET /jobs/{id} live views (internal/dashboard/live.go). It is also the
@@ -1118,6 +1191,7 @@ services:
 
 volumes:
   rabbitmq_data:
+  kafka_data:
   redis_data:
   prometheus_data:
   grafana_data:
