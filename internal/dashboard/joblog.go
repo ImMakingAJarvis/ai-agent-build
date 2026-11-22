@@ -54,6 +54,7 @@ func jobLogFuncs() template.FuncMap {
 		"slotRuntime":    SlotRuntime,
 		"jobPath":        JobPath,
 		"divGB":          DivGB,
+		"minus":          minusInt,
 	}
 }
 

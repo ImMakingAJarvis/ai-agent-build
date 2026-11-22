@@ -28,6 +28,8 @@ depends_on:
     why: "VRAM numbers on the machine panel"
   - to: resourced
     why: "lease and window state on the machine panel"
+  - to: kshadow
+    why: "Kafka shadow tile: kshadow's state file + management API + Kafka scan"
 ---
 
 ## Purpose
@@ -35,23 +37,39 @@ depends_on:
 The queue site Nathan uses. Static shell + async sections: queue (bands,
 drag to reorder, edit, photo band), agent jobs with live/human-readable
 logs, Talk box and Stop, machine panel (loaded models, swap window,
-VRAM), kanban board + comments, plan upload, dead letters, secrets
-(write-only), MoE benchmarks, and the **System map** (`/map`), drawn from
-`specs/`.
+VRAM), the Kafka shadow parity tile, kanban board + comments, plan upload,
+dead letters, secrets (write-only), MoE benchmarks, and the **System map**
+(`/map`), drawn from `specs/`.
 
 ## Interfaces
 
 - Pages: `/`, `/jobs/{id}`, `/logs`, `/kanban`, `/secrets`,
   `/benchmarks`, `/map`.
+- HTMX sections: `/html/machine`, `/html/kafka-shadow` (the Kafka shadow
+  parity tile — kshadow's state + management counters + a scan of the
+  `source=amqp` records; cached 60s server-side), `/html/kafka-queues`
+  (the Kafka side of the queues page — topics/depth/lag from the Admin
+  API, snapshot cached 20 s server-side) and `/html/kafka-history`
+  (per-topic record table, click-through to the payload), the
+  job/agent-job sections.
 - APIs: `/api/queue*`, `/api/jobs*`, `/api/owner-message`,
   `/api/kanban/*`, `/api/plans`, `/api/dead-letters*`, `/api/secrets*`,
-  `/api/photo/*`, `/api/map`, `/api/map/health`, `/api/map/spec/{id}`.
+  `/api/photo/*`, `/api/map`, `/api/map/health`, `/api/map/spec/{id}`,
+  `/api/kafka/topics`, `/api/kafka/history?topic=&n=`,
+  `/api/kafka/record?topic=&offset=`, `/api/kafka/dead` and
+  `POST /api/kafka/dead/{offset}/requeue|drop` (the `dead` topic joins
+  the AMQP dead letters in the Dead Letters section, with requeue/drop
+  buttons).
 
 ## Configuration
 
 - Compose env: `ENGINE_URL`, `IGPU_URL`, `ART_URL`, `JARVIS_REDIS`,
-  `RABBITMQ_URL`, `NVIDIA_EXPORTER_URL`, `RESOURCED_URL`, `JARVIS_CONF`;
+  `RABBITMQ_URL`, `KAFKA_BROKERS` (kshadow + the Kafka queues/history/
+  dead tiles; default `kafka:9093`), `NVIDIA_EXPORTER_URL`,
+  `RESOURCED_URL`, `JARVIS_CONF`;
   `env_file: agent.env`; `extra_hosts: host.docker.internal:host-gateway`.
+- Kafka shadow tile state path: `~/.local/share/jarvis/kshadow/kshadow-state.json`
+  (kshadow's bind-mounted `/data`); `KSHADOW_STATE` overrides.
 - Templates and specs are embedded at build time — a template or spec
   change needs an image rebuild.
 
@@ -73,6 +91,8 @@ container runs.
 
     curl -s -o /dev/null -w '%{http_code}\n' http://111.1.2.27:8080/
     curl -s http://111.1.2.27:8080/api/map | head -c 200
+    curl -s -o /dev/null -w '%{http_code}\n' http://111.1.2.27:8080/html/kafka-queues
+    curl -s http://111.1.2.27:8080/api/kafka/topics | head -c 200
 
 Open the changed page from another device on the LAN.
 
@@ -85,3 +105,8 @@ Open the changed page from another device on the LAN.
   render (fixed 2026-11-05, PR #169).
 - RabbitMQ connection was never started, silently disabling queue views
   (fixed 2026-11-08, EVB-10).
+- `renderSection` swallowed the `ExecuteTemplate` error (bare 500, no
+  log) and a handler once passed an un-called closure as the template
+  data — "can't evaluate field At in type func() interface {}"
+  (2026-11-22). The render error now goes to stderr; pass the data map
+  itself, never a closure.

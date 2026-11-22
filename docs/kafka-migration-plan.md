@@ -85,12 +85,25 @@ the topology mapping above + the tooling. No service outside
 ### 3.1 Broker
 
 - Single node, **KRaft** (no Zookeeper), compose service `kafka`
-  (`bitnami/kafka`, KRaft mode), named volume `kafka_data`.
-  ~1–2 GB JVM; the host has 46 GB RAM free.
-- `9092` bound to `127.0.0.1` on the host for the CLI; containers use
-  the service name. `delete.topic.enable=true`,
-  `auto.create.topics.enable=true` (constrained by the naming
-  convention in §3.5).
+  (`bitnamilegacy/kafka:3.7` — Bitnami moved its Docker Hub org in
+  2025 and the `bitnami/kafka` name no longer resolves), named volume
+  `kafka_data`. ~1–2 GB JVM; the host has 46 GB RAM free.
+- **Two client listeners** — a Kafka client follows the *advertised*
+  host for partition leaders and group queries, so one name cannot
+  serve both sides of the compose boundary:
+  - `EXTERNAL` on `127.0.0.1:9092`, advertised as `127.0.0.1:9092`
+    (host clients: `jarvis-kq`, the Go live tests);
+  - `PLAINTEXT` on `kafka:9093`, advertised as `kafka:9093`
+    (in-container clients: `kafka-init`, `kafka-exporter`).
+  The KRaft controller listens on `9094` (quorum voters
+  `0@kafka:9094`); internal, never a client path. A client on the wrong
+  side of the boundary succeeds on bootstrap metadata, then fails on
+  leader and group dials.
+- `delete.topic.enable=true`, `auto.create.topics.enable=true`
+  (constrained by the naming convention in §3.5).
+- Prometheus metrics come from `kafka-exporter`, a small in-repo Go
+  service (`cmd/kafka-exporter`, :9308) — the usual exporter images are
+  pull-denied on this box.
 - Retention: worker/review/jobs/sched/mailbox topics 7 days,
   `flow.*`/`cap.*` 7 days, `dead` 30 days, `events` 30 days.
   `min.insync.replicas=1` (single node).
@@ -227,6 +240,24 @@ per-topic history table (recent records, click-through to payload).
 Prometheus gains `kafka_exporter` in place of the rabbitmq exporter.
 Raw escape hatch: `docker exec` + `kcat` in the kafka container.
 
+*As built (kafka-tools-1):* the modify side landed as planned, with the
+dead-letter mechanics spelled out. `dead` records carry their original
+queue/reason/attempts in `x-death-*` headers; requeue republishes to the
+original queue with a `kq-requeued` marker header, and requeue/drop each
+append a marker to `kq.dead.dropped` — a record is hidden from `dead`
+and the dashboard once marked (`--all` shows it). Control
+(pause/resume/throttle) writes `kq.control` records (key = group) — a
+log, so it sticks across restarts; `rebalance` is the one Admin API call
+in the set. During the dual-run the queues page shows the Kafka tile
+*alongside* the AMQP queues — the re-point completes when the shadow
+gate passes, not before. Prometheus gained the in-repo
+`kafka-exporter` job (`jarvis-kafka-exporter:9308`); the rabbitmq job
+stays until cutover. One client bug worth keeping: a bounded read with a
+zero-MaxWait fetch blocks until the conn deadline (30 s), past the
+caller's context, so the next dial in the sequence failed with a fake
+"lookup … i/o timeout" — `kq.ReadRange` now derives its deadline from
+ctx and fetches with MaxWait 1 s (live-verified: ListDead 58 s → 2 s).
+
 ## 5. Shadow mode (the safe path)
 
 **Phase 0 — bring-up.** `kafka` compose service + `specs/kafka.md`.
@@ -244,6 +275,24 @@ records a per-queue **watermark** (last mirrored message id, on topic
 tile + `jarvis-kq parity`): mirrored count vs consumed count per
 queue, sample payload diff, shadow lag. Gate: 48 h, zero mismatch,
 lag bounded.
+
+*As built (kafka-shadow-1):* `kshadow` is its own compose service
+(`specs/kshadow.md`), not the switchboard container — a mirror bug
+should never take the switchboard down. Attribution is by routing-key
+shape (`internal/kshadow/attribution.go`): task-family keys and
+`*.inbox` go to a topic named after the queue, `sched.<cadence>.*` go
+to the single `events` topic with the routing key in a header. Message
+ids: the AMQP id when set, else the JSON `id`/`correlation_id`/
+`job_id` field, else a hash of the body. Watermarks throttle to one
+write per 5 s per queue, with a final flush on shutdown (rollback must
+never see a stale id). A write that fails 6×5 s is Nacked and requeued
+— `kq.mirror` has no DLX by design, so an un-mirrored message waits on
+the mirror queue instead of leaking into `dead`. Parity reads kshadow's
+state file (bind-mounted `/data`) plus the management API (baselines
+captured on first sight of each queue) plus an independent scan of the
+`source=amqp` records — three independent counts, so a gap between any
+two localizes the leak. `jarvis-kq parity` exits 0/1/2/3 for
+ok/mismatch-or-dropped/lag>5m/state-unreadable.
 
 **Phase 2 — shadow consume (dry-run).** `kshadow` gains a
 dry-run consumer per family: it reads the mirrored Kafka topics and
@@ -306,6 +355,18 @@ Two safeguards, both in the plan from the start:
    an existing id as a no-op; the Kafka consumer must honour the same
    rule for every family (a consumer that re-sees an id it already
    acked skips it). This is what makes `seek`/`replay` safe too.
+
+*As built (kafka-tools-1):* `jarvis-kq rollback <queue> [--dry-run]`
+implements safeguard 1. The boundary is kshadow's state file (per-
+message `last_id`), falling back to the newest `kq.watermark` record.
+Popping with `reject_requeue_false` drops up to and including the
+boundary; if the queue drains first, the boundary was never mirrored
+and every popped message is republished to its original exchange (the
+mgmt API's publish takes base64 only) with exit 3. `--dry-run` pops one
+message with requeue — requeue puts it back at the *head* of the queue,
+so one pop is all a dry run can show — and classifies the oldest
+message. Live-verified on a test queue: boundary-deeper and
+oldest-is-boundary (both dry + real); the exit-3 path is by inspection.
 
 Whole-broker rollback (Kafka itself is dead): flip every family off —
 AMQP is still the source of truth for families not yet cut over, and

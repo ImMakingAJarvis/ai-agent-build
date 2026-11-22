@@ -222,6 +222,7 @@
     vertical-align: top;
   }
   tr:hover td { background: var(--card-hover); }
+  .kshadow-bad { color: var(--red); font-weight: 600; }
   .status-completed { color: var(--green); }
   .status-failed { color: var(--red); }
   .status-running { color: var(--yellow); }
@@ -636,6 +637,18 @@
   <!-- Machine: loaded model, brain-swap state, VRAM, what's on hold. -->
   <div id="machine-section" hx-get="/html/machine" hx-trigger="load, every 5s" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Machine</div><div class="empty-state">Loading&hellip;</div></div>
+  </div>
+  <!-- Kafka shadow: phase-1 dual-write mirror parity (AMQP tap → Kafka). -->
+  <div id="kafka-shadow-section" hx-get="/html/kafka-shadow" hx-trigger="load, every 60s" hx-swap="innerHTML">
+    <div class="section"><div class="section-title">Kafka shadow</div><div class="empty-state">Loading&hellip;</div></div>
+  </div>
+  <!-- Kafka queues: topics/depth/lag from the Admin API (plan §4). -->
+  <div id="kafka-queues-section" hx-get="/html/kafka-queues" hx-trigger="load, every 30s" hx-swap="innerHTML">
+    <div class="section"><div class="section-title">Kafka queues</div><div class="empty-state">Loading&hellip;</div></div>
+  </div>
+  <!-- Kafka history: per-topic record table with click-through payload. -->
+  <div id="kafka-history-section" hx-get="/html/kafka-history" hx-trigger="load" hx-swap="innerHTML">
+    <div class="section"><div class="section-title">Kafka history</div><div class="empty-state">Loading&hellip;</div></div>
   </div>
   <div id="jobs-section" hx-get="/html/jobs-section" hx-trigger="load" hx-swap="innerHTML">
     <div class="section"><div class="section-title">Cost Tracking</div><div class="empty-state">Loading&hellip;</div></div>
