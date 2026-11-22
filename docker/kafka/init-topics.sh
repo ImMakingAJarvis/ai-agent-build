@@ -47,6 +47,12 @@ declare -a TOPICS=(
     # shadow watermarks (one per mirrored queue, keyed by queue): 30 days —
     # the phase-4 rollback path (plan §7) replays from them
     "kq.watermark $RETENTION_30D"
+    # group control log (pause/resume/throttle/rebalance, plan §4): 30 days —
+    # a control sticks while the topic retains it
+    "kq.control $RETENTION_30D"
+    # dead-drop markers (offset of each dropped dead record): 30 days,
+    # matching the dead topic so a marker never outlives its record
+    "kq.dead.dropped $RETENTION_30D"
 )
 
 for entry in "${TOPICS[@]}"; do
