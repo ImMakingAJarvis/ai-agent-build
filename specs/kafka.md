@@ -20,9 +20,10 @@ The target broker of the RabbitMQ→Kafka migration
 static topic set that mirrors the AMQP queues: worker queues with
 per-priority families (voice/.p10, image/.p10, coding/.p5, background/.p10),
 reviewer inboxes (review.*), capability queues (jobs.gpu/cpu/igpu), cadence
-queues (sched.*), and dead+events with 30-day retention (everything else
-7-day). `jarvis-kq` is the inspection/modify CLI (topics, depth, peek,
-tail, groups, lag, history, describe, send, purge, drop);
+queues (sched.*), and dead, events and kq.watermark with 30-day retention
+(everything else 7-day). kq.watermark carries the phase-1 shadow watermarks
+(sees kshadow). `jarvis-kq` is the inspection/modify CLI (topics, depth,
+peek, tail, groups, lag, history, describe, send, purge, drop, parity);
 `kafka-exporter` feeds Prometheus.
 
 ## Interfaces
@@ -44,8 +45,8 @@ tail, groups, lag, history, describe, send, purge, drop);
   `delete.topic.enable=true`, `log.retention.hours=168` (7d default),
   `min.insync.replicas=1`, `num.partitions=1`, 1g heap.
 - `docker/kafka/init-topics.sh` (kafka-init, one-shot after the broker is
-  healthy): creates the 22 static topics with per-topic retention
-  (30d for dead/events) — idempotent.
+  healthy): creates the 23 static topics with per-topic retention
+  (30d for dead/events/kq.watermark) — idempotent.
 - Exporter env: `KAFKA_BROKERS`, `LISTEN_ADDR`, `POLL_INTERVAL`.
 
 ## Data

@@ -28,6 +28,8 @@ depends_on:
     why: "VRAM numbers on the machine panel"
   - to: resourced
     why: "lease and window state on the machine panel"
+  - to: kshadow
+    why: "Kafka shadow tile: kshadow's state file + management API + Kafka scan"
 ---
 
 ## Purpose
@@ -35,14 +37,18 @@ depends_on:
 The queue site Nathan uses. Static shell + async sections: queue (bands,
 drag to reorder, edit, photo band), agent jobs with live/human-readable
 logs, Talk box and Stop, machine panel (loaded models, swap window,
-VRAM), kanban board + comments, plan upload, dead letters, secrets
-(write-only), MoE benchmarks, and the **System map** (`/map`), drawn from
-`specs/`.
+VRAM), the Kafka shadow parity tile, kanban board + comments, plan upload,
+dead letters, secrets (write-only), MoE benchmarks, and the **System map**
+(`/map`), drawn from `specs/`.
 
 ## Interfaces
 
 - Pages: `/`, `/jobs/{id}`, `/logs`, `/kanban`, `/secrets`,
   `/benchmarks`, `/map`.
+- HTMX sections: `/html/machine`, `/html/kafka-shadow` (the Kafka shadow
+  parity tile — kshadow's state + management counters + a scan of the
+  `source=amqp` records; cached 60s server-side), the job/agent-job
+  sections.
 - APIs: `/api/queue*`, `/api/jobs*`, `/api/owner-message`,
   `/api/kanban/*`, `/api/plans`, `/api/dead-letters*`, `/api/secrets*`,
   `/api/photo/*`, `/api/map`, `/api/map/health`, `/api/map/spec/{id}`.
@@ -50,8 +56,11 @@ VRAM), kanban board + comments, plan upload, dead letters, secrets
 ## Configuration
 
 - Compose env: `ENGINE_URL`, `IGPU_URL`, `ART_URL`, `JARVIS_REDIS`,
-  `RABBITMQ_URL`, `NVIDIA_EXPORTER_URL`, `RESOURCED_URL`, `JARVIS_CONF`;
+  `RABBITMQ_URL`, `KAFKA_BROKERS` (Kafka shadow tile; default
+  `kafka:9093`), `NVIDIA_EXPORTER_URL`, `RESOURCED_URL`, `JARVIS_CONF`;
   `env_file: agent.env`; `extra_hosts: host.docker.internal:host-gateway`.
+- Kafka shadow tile state path: `~/.local/share/jarvis/kshadow/kshadow-state.json`
+  (kshadow's bind-mounted `/data`); `KSHADOW_STATE` overrides.
 - Templates and specs are embedded at build time — a template or spec
   change needs an image rebuild.
 

@@ -258,6 +258,24 @@ tile + `jarvis-kq parity`): mirrored count vs consumed count per
 queue, sample payload diff, shadow lag. Gate: 48 h, zero mismatch,
 lag bounded.
 
+*As built (kafka-shadow-1):* `kshadow` is its own compose service
+(`specs/kshadow.md`), not the switchboard container — a mirror bug
+should never take the switchboard down. Attribution is by routing-key
+shape (`internal/kshadow/attribution.go`): task-family keys and
+`*.inbox` go to a topic named after the queue, `sched.<cadence>.*` go
+to the single `events` topic with the routing key in a header. Message
+ids: the AMQP id when set, else the JSON `id`/`correlation_id`/
+`job_id` field, else a hash of the body. Watermarks throttle to one
+write per 5 s per queue, with a final flush on shutdown (rollback must
+never see a stale id). A write that fails 6×5 s is Nacked and requeued
+— `kq.mirror` has no DLX by design, so an un-mirrored message waits on
+the mirror queue instead of leaking into `dead`. Parity reads kshadow's
+state file (bind-mounted `/data`) plus the management API (baselines
+captured on first sight of each queue) plus an independent scan of the
+`source=amqp` records — three independent counts, so a gap between any
+two localizes the leak. `jarvis-kq parity` exits 0/1/2/3 for
+ok/mismatch-or-dropped/lag>5m/state-unreadable.
+
 **Phase 2 — shadow consume (dry-run).** `kshadow` gains a
 dry-run consumer per family: it reads the mirrored Kafka topics and
 logs what it *would* do (deliver to worker, wake job X, run cap Y),
