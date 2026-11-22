@@ -114,6 +114,13 @@ func messageID(amqpMessageID string, body []byte) string {
 	return "h" + hex.EncodeToString(sum[:8])
 }
 
+// MessageID is the mirror's per-message identity, exported for the
+// rollback path (plan §7): jarvis-kq rollback matches the popped AMQP
+// message against the last mirrored id using exactly these rules.
+func MessageID(amqpMessageID string, body []byte) string {
+	return messageID(amqpMessageID, body)
+}
+
 // decodeEventID is unused by the mirror (the body is copied verbatim); the
 // probe above covers it. It exists so queue.DecodeEvent stays the reference
 // for event bodies and this file does not open a second decoding path.

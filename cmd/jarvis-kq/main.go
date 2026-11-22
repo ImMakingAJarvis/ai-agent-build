@@ -65,6 +65,32 @@ func main() {
 		err = cmdPurge(ctx, c, rest)
 	case "drop":
 		err = cmdDrop(ctx, c, rest)
+	case "pop":
+		err = cmdPop(ctx, c, rest)
+	case "seek":
+		err = cmdSeek(ctx, c, rest)
+	case "replay":
+		err = cmdReplay(ctx, c, rest)
+	case "requeue":
+		err = cmdRequeue(ctx, c, rest)
+	case "edit":
+		err = cmdEdit(ctx, c, rest)
+	case "dead":
+		err = cmdDead(ctx, c, rest)
+	case "dead-requeue":
+		err = cmdDeadRequeue(ctx, c, rest)
+	case "dead-drop":
+		err = cmdDeadDrop(ctx, c, rest)
+	case "pause":
+		err = cmdControl(ctx, c, rest, "pause", false)
+	case "resume":
+		err = cmdControl(ctx, c, rest, "resume", false)
+	case "throttle":
+		err = cmdControl(ctx, c, rest, "throttle", true)
+	case "rebalance":
+		err = cmdControl(ctx, c, rest, "rebalance", false)
+	case "rollback":
+		os.Exit(cmdRollback(ctx, c, rest))
 	case "parity":
 		os.Exit(cmdParity(ctx, c, rest))
 	case "-h", "--help", "help":
@@ -94,14 +120,32 @@ func usage() {
   history <topic> --since 2h [-n 50]
                                   records since a duration or RFC3339 time
   describe <topic>                partitions, leaders, retention, config
-  send <topic> (--body S | --payload k=v ...) [--key K] [--priority N]
+  send <topic> (--body S | --payload k=v ...) [--key K] [--priority N] [--header k=v ...]
   purge <topic>                   delete all records in the topic
   drop <topic>                    delete the topic itself
+  pop <group> <topic> [-n 10]     consume n messages for the group, commit
+  seek <group> <topic> (--to N | --to ts | --earliest | --latest) [--p 0]
+                                  external OffsetCommit (group need not run)
+  replay <topic> [--from off|ts] [--to off|ts] [--to-topic T] [-n 500]
+                                  read the slice, republish it
+  requeue <topic> <offset|corr> [--to-topic T]
+                                  republish one record (by offset or id)
+  edit <topic> <offset> --set k=v ... [--to-topic T]
+                                  republish the record with JSON keys set
+  dead [-n 20] [--all]            list dead records (kq.dead.dropped hidden)
+  dead-requeue <offset>           republish to the original queue
+  dead-drop <offset>              mark dropped (stays in the log)
+  pause|resume <group> [topic]    kq.control record (phase-3 SDK honours it)
+  throttle <group> <rate> [topic] kq.control rate limit (messages/s)
+  rebalance <group> [topic]       report group state, ask for a rebalance
+  rollback <queue> [--dry-run]    purge the AMQP queue to the mirror boundary
+                                  (exit 0 = clean, 3 = undetermined requeued)
   parity [--max-lag 5m] [--json]  AMQP vs Kafka shadow parity per queue
                                   (exit 1 = mismatch, 2 = lag, 3 = kshadow down)
 
 environment: KAFKA_BROKERS (default 127.0.0.1:9092)
-           : RABBITMQ_URL, KSHADOW_STATE (kshadow's state file, for parity)
+           : RABBITMQ_URL, KSHADOW_STATE (kshadow's state file, for
+             parity and rollback)
 `)
 }
 
@@ -550,10 +594,12 @@ func cmdSend(ctx context.Context, c *kq.Client, args []string) error {
 	fs.Var(&payload, "payload", "k=v pair for a JSON payload (repeatable)")
 	key := fs.String("key", "", "record key")
 	priority := fs.Int("priority", -1, "priority as a record header")
+	var headers0 kvFlags
+	fs.Var(&headers0, "header", "record header k=v (repeatable; e.g. x-death-reason=rejected)")
 	topic, rest, ok := splitPos(args)
 	fs.Parse(rest)
 	if !ok {
-		return errors.New("usage: send <topic> (--body S | --payload k=v ...) [--key K] [--priority N]")
+		return errors.New("usage: send <topic> (--body S | --payload k=v ...) [--key K] [--priority N] [--header k=v ...]")
 	}
 	value, err := buildBody(*body, payload)
 	if err != nil {
@@ -562,6 +608,13 @@ func cmdSend(ctx context.Context, c *kq.Client, args []string) error {
 	var headers []kafka.Header
 	if *priority >= 0 {
 		headers = append(headers, kafka.Header{Key: "priority", Value: []byte(strconv.Itoa(*priority))})
+	}
+	for _, hv := range headers0 {
+		eq := strings.IndexByte(hv, '=')
+		if eq <= 0 {
+			return fmt.Errorf("bad --header %q (want k=v)", hv)
+		}
+		headers = append(headers, kafka.Header{Key: hv[:eq], Value: []byte(hv[eq+1:])})
 	}
 	partition, offset, err := c.Send(ctx, topic, []byte(*key), value, headers)
 	if err != nil {
