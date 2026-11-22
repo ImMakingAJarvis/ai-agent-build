@@ -135,3 +135,33 @@ func TestLiveGroupsAndFetch(t *testing.T) {
 		t.Fatalf("unknown group has committed state: %+v", committed)
 	}
 }
+
+// TestLiveWriterSendOffsets guards the bug that broke the phase-1 gate:
+// kafka-go's WriteMessages fills the produced offset only on its internal
+// batch copy, never on the caller's Message, so Writer.Send must read the
+// offset back from the log — two consecutive Sends must land on
+// consecutive offsets (not both 0).
+func TestLiveWriterSendOffsets(t *testing.T) {
+	c := liveClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	topic := liveTopic(t)
+
+	w, err := c.Writer(ctx, topic)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	defer w.Close()
+
+	var prev int64 = -1
+	for i := 0; i < 3; i++ {
+		_, off, err := w.Send(ctx, []byte("k"), []byte("v"), nil)
+		if err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+		if off != prev+1 {
+			t.Fatalf("send %d: offset %d, want %d (kafka-go does not fill the caller's Message)", i, off, prev+1)
+		}
+		prev = off
+	}
+}

@@ -3,8 +3,8 @@
 # (docs/kafka-migration-plan.md §3.2). Idempotent: --if-not-exists, so it
 # can run on every broker start. Topic names and retention come from the
 # plan: per-priority families get a base topic plus one per live priority;
-# dead and events keep 30 days, everything else 7 days; single partition,
-# min.insync.replicas=1.
+# dead, events and kq.watermark keep 30 days, everything else 7 days;
+# single partition, min.insync.replicas=1.
 set -euo pipefail
 
 # In-container clients use the PLAINTEXT listener (kafka:9093); the host
@@ -44,6 +44,9 @@ declare -a TOPICS=(
     # dead letters + events: 30 days
     "dead $RETENTION_30D"
     "events $RETENTION_30D"
+    # shadow watermarks (one per mirrored queue, keyed by queue): 30 days —
+    # the phase-4 rollback path (plan §7) replays from them
+    "kq.watermark $RETENTION_30D"
 )
 
 for entry in "${TOPICS[@]}"; do

@@ -138,6 +138,40 @@
 </div>
 {{end}}
 
+{{define "kafka-shadow-section"}}
+<!-- Kafka shadow: phase-1 dual-write mirror parity (AMQP tap → Kafka).
+     Refreshes every 60s; the expensive Kafka scan is cached server-side. -->
+<div class="section kafka-shadow-section">
+  <div class="section-title">Kafka shadow</div>
+  <div class="machine-swap machine-tone-{{ .StatusClass }}">
+    <span class="machine-dot"></span>{{ .Status }}
+    {{- if .Report }}<span class="machine-detail"> — {{ len .Report.Rows }} queues{{ if .UpFor }} · up {{ .UpFor }}{{ end }}</span>{{ end }}
+    {{- if .Err }}<span class="machine-detail"> — {{ .Err }}</span>{{ end }}
+  </div>
+  {{- if .Report }}
+  {{- if .Report.Rows }}
+  <table>
+    <tr><th>queue</th><th>exchange</th><th>published</th><th>mirrored</th><th>written</th><th>consumed</th><th>dropped</th><th>mismatch</th><th>lag</th></tr>
+    {{- range .Report.Rows }}
+    <tr{{ if or (gt .Dropped 0) (gt .Mismatch 0) }} class="kshadow-bad"{{ end }}>
+      <td>{{ .Queue }}</td><td>{{ .Exchange }}</td>
+      <td>{{ minus .Published }}</td><td>{{ minus .Mirrored }}</td><td>{{ .Written }}</td><td>{{ minus .Consumed }}</td>
+      <td{{ if gt .Dropped 0 }} class="kshadow-bad"{{ end }}>{{ minus .Dropped }}</td>
+      <td{{ if gt .Mismatch 0 }} class="kshadow-bad"{{ end }}>{{ .Mismatch }}</td>
+      <td>{{ .Lag }}</td>
+    </tr>
+    {{- end }}
+  </table>
+  <div class="machine-detail">published/consumed since kshadow's first sight of each queue · mirrored = source=amqp records scanned on the Kafka topic · lag = time since the last mirrored message</div>
+  {{- else }}
+  <div class="machine-detail">no queues mirrored yet — waiting for first traffic on the tasks and events exchanges</div>
+  {{- end }}
+  {{- else if not .Err }}
+  <div class="machine-detail">kshadow has not started (no state file)</div>
+  {{- end }}
+</div>
+{{end}}
+
 {{define "pending-section"}}
 <!-- Pending Jobs Detail -->
 <div class="section">

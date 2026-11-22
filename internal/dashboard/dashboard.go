@@ -26,6 +26,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/art"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/inbox"
+	ks "github.com/ImMakingAJarvis/ai-agent-build/internal/kshadow"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/models"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/queue"
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/slots"
@@ -271,6 +272,14 @@ type Server struct {
 	windowPath   string
 	httpClient   *http.Client
 
+	// Kafka shadow tile (kshadow.go): the parity report's sources and its
+	// 60s cache.
+	kafkaBrokers []string
+	kshadowState string
+	kshadowMu    sync.Mutex
+	kshadowRep   *ks.Report
+	kshadowAt    time.Time
+
 	// Pre-compiled templates (parsed once at startup).
 	tmpl *template.Template
 
@@ -309,6 +318,20 @@ func New() *Server {
 	amqpURL := os.Getenv("RABBITMQ_URL")
 	if amqpURL == "" {
 		amqpURL = "amqp://jarvis:jarvis-local@localhost:5672"
+	}
+
+	// Kafka shadow tile (kshadow.go). Inside the compose stack the broker is
+	// reached by service name on the in-container listener; on the host the
+	// default is the published port. kshadow's state file is bind-mounted
+	// from the same directory the CLI reads, so the tile and `jarvis-kq
+	// parity` agree.
+	kafkaBrokers := strings.Split(os.Getenv("KAFKA_BROKERS"), ",")
+	if len(kafkaBrokers) == 1 && kafkaBrokers[0] == "" {
+		kafkaBrokers = []string{"kafka:9093"}
+	}
+	kshadowState := os.Getenv("KSHADOW_STATE")
+	if kshadowState == "" {
+		kshadowState = filepath.Join(home, ".local", "share", "jarvis", "kshadow", "kshadow-state.json")
 	}
 
 	// Machine panel endpoints (machine.go). In the compose stack the iGPU
@@ -357,6 +380,7 @@ func New() *Server {
 		"slotRuntime":    SlotRuntime,
 		"jobPath":        JobPath,
 		"divGB":          DivGB,
+		"minus":          minusInt,
 	}
 	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
@@ -385,6 +409,8 @@ func New() *Server {
 		swapLog:      filepath.Join(stateDir, "swap.log"),
 		windowPath:   filepath.Join(stateDir, "swap-window.json"),
 		httpClient:   &http.Client{Timeout: probeTimeout},
+		kafkaBrokers: kafkaBrokers,
+		kshadowState: kshadowState,
 	}
 }
 
@@ -460,6 +486,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /html/lightweight", s.handleLightweightHTML)
 	mux.HandleFunc("GET /html/machine", s.handleMachineHTML)
+	mux.HandleFunc("GET /html/kafka-shadow", s.handleKafkaShadowHTML)
 	mux.HandleFunc("GET /html/jobs-section", s.handleJobsSectionHTML)
 	mux.HandleFunc("GET /html/recent-jobs", s.handleRecentJobsMore)
 	mux.HandleFunc("GET /html/agent-jobs-section", s.handleAgentJobsSectionHTML)

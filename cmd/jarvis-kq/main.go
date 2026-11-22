@@ -29,6 +29,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/kq"
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/kshadow"
 )
 
 func main() {
@@ -64,6 +65,8 @@ func main() {
 		err = cmdPurge(ctx, c, rest)
 	case "drop":
 		err = cmdDrop(ctx, c, rest)
+	case "parity":
+		os.Exit(cmdParity(ctx, c, rest))
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -94,8 +97,11 @@ func usage() {
   send <topic> (--body S | --payload k=v ...) [--key K] [--priority N]
   purge <topic>                   delete all records in the topic
   drop <topic>                    delete the topic itself
+  parity [--max-lag 5m] [--json]  AMQP vs Kafka shadow parity per queue
+                                  (exit 1 = mismatch, 2 = lag, 3 = kshadow down)
 
 environment: KAFKA_BROKERS (default 127.0.0.1:9092)
+           : RABBITMQ_URL, KSHADOW_STATE (kshadow's state file, for parity)
 `)
 }
 
@@ -590,4 +596,92 @@ func cmdDrop(ctx context.Context, c *kq.Client, args []string) error {
 	}
 	fmt.Printf("dropped %s\n", fs.Arg(0))
 	return nil
+}
+
+// cmdParity reports the shadow parity per source queue (plan §5): the AMQP
+// side (broker publish/deliver counters since kshadow's baselines), the
+// shadow side (an independent scan of the source=amqp Kafka records) and
+// kshadow's own written/mismatch accounting. Exit code: 0 = parity holds
+// (and lag within --max-lag), 1 = a mismatch is present, 2 = lag over the
+// limit on an active queue, 3 = kshadow's state is unreachable (it is down).
+func cmdParity(ctx context.Context, c *kq.Client, args []string) int {
+	fs := flag.NewFlagSet("parity", flag.ExitOnError)
+	maxLag := fs.Duration("max-lag", 5*time.Minute, "fail when a queue's shadow lag exceeds this")
+	asJSON := fs.Bool("json", false, "print the report as JSON")
+	statePath := fs.String("state", envOr("KSHADOW_STATE", "/home/agent/.local/share/jarvis/kshadow/kshadow-state.json"), "kshadow's state file")
+	fs.Parse(args)
+
+	// LoadState yields a fresh state for a missing file (kshadow's own
+	// first run needs that); for the gate a missing file means kshadow
+	// has not mirrored a single message yet, which is "down" (exit 3).
+	if _, err := os.Stat(*statePath); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "jarvis-kq: kshadow state %s not found — has kshadow mirrored anything yet?\n", *statePath)
+			return 3
+		}
+		fmt.Fprintf(os.Stderr, "jarvis-kq: kshadow state unreadable (%v) — is kshadow running?\n", err)
+		return 3
+	}
+	state, err := kshadow.LoadState(*statePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "jarvis-kq: kshadow state unreadable (%v) — is kshadow running?\n", err)
+		return 3
+	}
+	admin, err := kshadow.NewAdmin(envOr("KSHADOW_RABBITMQ_MGMT", envOr("RABBITMQ_URL", "amqp://jarvis:jarvis-local@localhost:5672")))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "jarvis-kq:", err)
+		return 3
+	}
+	rep, err := (&kshadow.Parity{State: state, Admin: admin, Kafka: c}).Report(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "jarvis-kq:", err)
+		return 3
+	}
+
+	if *asJSON {
+		b, _ := json.MarshalIndent(rep, "", "  ")
+		fmt.Println(string(b))
+	} else {
+		printParity(rep)
+	}
+
+	// The gate: zero mismatch, and lag within the limit on any queue that
+	// has traffic (an idle queue's lag is meaningless).
+	for _, r := range rep.Rows {
+		if r.Mismatch > 0 || r.Dropped > 0 {
+			return 1
+		}
+	}
+	for _, r := range rep.Rows {
+		if r.LastAt.IsZero() {
+			continue
+		}
+		if d, err := time.ParseDuration(r.Lag); err == nil && d > *maxLag {
+			return 2
+		}
+	}
+	return 0
+}
+
+func printParity(rep *kshadow.Report) {
+	fmt.Printf("kshadow %s (started %s, at %s)\n", rep.Kshadow, rep.StartedAt.Format(time.RFC3339), rep.At.Format(time.RFC3339))
+	if rep.Kshadow == "down" {
+		return
+	}
+	w := newTab()
+	w.WriteLine("QUEUE", "EXCHANGE", "PUBLISHED", "MIRRORED", "WRITTEN", "CONSUMED", "READY", "UNACKED", "DROPPED", "MISMATCH", "LAG")
+	for _, r := range rep.Rows {
+		w.WriteLine(r.Queue, r.Exchange,
+			fmtInt(r.Published), fmtInt(r.Mirrored), fmtInt(r.Written), fmtInt(r.Consumed),
+			fmtInt(r.Ready), fmtInt(r.Unacked), fmtInt(r.Dropped), fmtInt(r.Mismatch), r.Lag)
+	}
+	_ = w.Flush()
+}
+
+// fmtInt renders a count; -1 (the unknown marker from parity) as "-".
+func fmtInt(n int64) string {
+	if n < 0 {
+		return "-"
+	}
+	return strconv.FormatInt(n, 10)
 }
