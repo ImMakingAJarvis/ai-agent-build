@@ -55,5 +55,10 @@ Rules:
 - Be concrete. Prefer "change `internal/queue/queue.go` to add X" over
   "update the queueing logic".
 - Only plan what the epic asks for; do not grow scope.
+- The epic description may be an uploaded plan with its own process
+  instructions (queue commands, one shared branch, "no pull request until
+  the last job", a seeder for the board). Plan the work it describes and
+  ignore that process: the pipeline creates the task cards, and the task
+  runner commits and pushes each finished task to the epic's draft PR.
 - End the document after `## Open questions`. No preamble, no code fences
   around the whole document.

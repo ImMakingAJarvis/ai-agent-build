@@ -36,8 +36,16 @@ Each `<task>` is an object with exactly these fields — no others:
 
 - `id` (string): kebab-case, unique within the list, e.g. "add-schema".
 - `title` (string): one line — what the task delivers.
-- `description` (string): what to build and how, specific enough for a
-  model with no other context than this task and the plan.
+- `description` (string): the full brief for this task. The executor
+  model sees this card and little else, so the description must carry the
+  work itself: the goal, the approach, the exact functions / types / flags
+  / config keys to add or change, the files, and any detail from the plan
+  the task depends on (names, formats, edge cases, the code it must match).
+  Copy the relevant plan text into the description; several short
+  paragraphs are fine. Never write a pointer instead of the work — "Job 2a
+  of the plan", "See PLAN.md section 3", "Implement as described in the
+  spec" are rejected. A model task's description under 200 characters is
+  rejected too.
 - `files` (array of strings): repo paths the task is likely to touch;
   `[]` when none are known.
 - `dependencies` (array of strings): ids of tasks that must be Done first;

@@ -37,7 +37,8 @@ const maxDecomposeRetries = 2
 //
 //  1. Plan (the job's planner model): epic + repo summary -> PLAN.md.
 //  2. Decompose (same model): plan -> a JSON task list that must validate
-//     against the task schema; an invalid reply is retried up to
+//     against the task schema and carry self-contained descriptions
+//     (CheckDescriptions); an invalid reply is retried up to
 //     maxDecomposeRetries times with the error included.
 //  3. Review (p.Reviewer, a different model, when set): the task list ->
 //     fixes, applied once.
@@ -147,6 +148,9 @@ func (p *Pipeline) decompose(ctx context.Context, model Model, job *Job, planDoc
 		}
 		tl, verr := p.schema.Validate([]byte(extractJSONObject(out)))
 		if verr == nil {
+			verr = CheckDescriptions(tl)
+		}
+		if verr == nil {
 			tl.Epic = job.Item.ID
 			return tl, nil
 		}
@@ -179,6 +183,11 @@ func (p *Pipeline) review(ctx context.Context, rev Model, job *Job, planDoc stri
 	}
 	reviewed, err := p.schema.Validate([]byte(extractJSONObject(out)))
 	if err != nil {
+		return TaskList{}, false
+	}
+	// A review that thins the descriptions back down to plan pointers is
+	// worse than no review: keep the decomposed list.
+	if err := CheckDescriptions(reviewed); err != nil {
 		return TaskList{}, false
 	}
 	reviewed.Epic = job.Item.ID

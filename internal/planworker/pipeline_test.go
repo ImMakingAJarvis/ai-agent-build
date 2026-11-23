@@ -45,10 +45,18 @@ func (m *scriptModel) Chat(ctx context.Context, msgs []models.ChatMessage) (stri
 func (m *scriptModel) Release(ctx context.Context) error { return nil }
 
 const (
-	planDoc       = "# Plan\n\n## Goal\nbuild the thing\n"
-	validTasks    = `{"epic":"ignored","tasks":[` + oneTask + `]}`
-	badSizeTasks  = `{"epic":"ignored","tasks":[{"id":"a","title":"t","description":"d","acceptance_check":"x","size":"L","executor_model":"m"}]}`
-	reviewedTasks = `{"epic":"ignored","tasks":[{"id":"a","title":"t (reviewed)","description":"d","acceptance_check":"go test ./...","size":"S","executor_model":"m"}]}`
+	planDoc = "# Plan\n\n## Goal\nbuild the thing\n"
+	// pipeDesc is a description long and concrete enough to pass
+	// CheckDescriptions, so the pipeline tests exercise the schema and the
+	// review path rather than the description rule.
+	pipeDesc      = "Add a GET /health handler to internal/dashboard/dashboard.go that returns 200 with a JSON body whose ok field is true. Register it on the existing mux next to /api/jobs, and add TestHealth in dashboard_test.go that calls it through httptest and checks the status and body."
+	pipeTask      = `{"id":"a","title":"t","description":"` + pipeDesc + `","acceptance_check":"go test ./...","size":"S","executor_model":"m"}`
+	validTasks    = `{"epic":"ignored","tasks":[` + pipeTask + `]}`
+	badSizeTasks  = `{"epic":"ignored","tasks":[{"id":"a","title":"t","description":"` + pipeDesc + `","acceptance_check":"x","size":"L","executor_model":"m"}]}`
+	reviewedTasks = `{"epic":"ignored","tasks":[{"id":"a","title":"t (reviewed)","description":"` + pipeDesc + `","acceptance_check":"go test ./...","size":"S","executor_model":"m"}]}`
+	// pointerTasks passes the schema but its description only points at
+	// the plan — the description rule must send it back.
+	pointerTasks = `{"epic":"ignored","tasks":[{"id":"a","title":"t","description":"Job 2a of docs/pr-review-build-plan.md.","acceptance_check":"go test ./...","size":"S","executor_model":"m"}]}`
 )
 
 func newTestPipeline(t *testing.T, repoRoot string) *Pipeline {
@@ -107,7 +115,7 @@ func TestPipelineHappyPath(t *testing.T) {
 			t.Errorf("decompose prompt missing %q", want)
 		}
 	}
-	if !strings.Contains(rev.prompts[0], oneTask) {
+	if !strings.Contains(rev.prompts[0], pipeTask) {
 		t.Errorf("review prompt does not carry the task list:\n%s", rev.prompts[0])
 	}
 }
@@ -280,5 +288,44 @@ func TestPipelineReplanComments(t *testing.T) {
 	}
 	if !strings.Contains(first.prompts[0], "(no comments)") {
 		t.Errorf("first plan prompt missing (no comments):\n%s", first.prompts[0])
+	}
+}
+
+// TestPipelineDecomposeRetriesPointerDescription: a task list that is
+// schema-valid but whose description only points at the plan is retried
+// with the reason, and the self-contained reply wins.
+func TestPipelineDecomposeRetriesPointerDescription(t *testing.T) {
+	plan := &scriptModel{id: "planner-a", replies: []string{planDoc, pointerTasks, validTasks}}
+	p := newTestPipeline(t, "")
+
+	out, err := p.Plan(context.Background(), plan, testJob("planner-a"))
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if out.Tasks.Tasks[0].Description != pipeDesc {
+		t.Fatalf("description = %q, want the retried one", out.Tasks.Tasks[0].Description)
+	}
+	retry := plan.prompts[2]
+	for _, want := range []string{"Your previous reply was invalid", `task "a"`, "at least 200"} {
+		if !strings.Contains(retry, want) {
+			t.Errorf("retry prompt missing %q:\n%s", want, retry)
+		}
+	}
+}
+
+// TestPipelineReviewThinDescriptionKeepsDecomposed: a review that replaces
+// the descriptions with plan pointers is discarded.
+func TestPipelineReviewThinDescriptionKeepsDecomposed(t *testing.T) {
+	plan := &scriptModel{id: "planner-a", replies: []string{planDoc, validTasks}}
+	rev := &scriptModel{id: "cloud-a", replies: []string{pointerTasks}}
+	p := newTestPipeline(t, "")
+	p.Reviewer = rev
+
+	out, err := p.Plan(context.Background(), plan, testJob("planner-a"))
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if out.Reviewed || out.Tasks.Tasks[0].Description != pipeDesc {
+		t.Fatalf("out = %+v, want the decomposed list kept", out)
 	}
 }

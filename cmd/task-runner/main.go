@@ -20,6 +20,8 @@
 //	TASK_RUNNER_REPO      repo root the worktrees live under
 //	                      (default /home/agent/ai-agent-build)
 //	TASK_RUNNER_MODELS_FILE  model registry (default <repo>/config/models.yaml)
+//	TASK_RUNNER_PRS       "off" stops the runner opening the epic's draft PR
+//	                      (default on: gh + ghapp-token, docs/github-access.md)
 //	JARVIS_DATA_DIR       agent job store dir (default ~/.local/share/jarvis —
 //	                      the same store plane-bridge writes into)
 //	SUNSHINE_ENDPOINT / STEAM_ENDPOINT  optional extras for the game
@@ -151,6 +153,12 @@ func run(log *slog.Logger) error {
 		// round. Normal cards never touch it.
 		Caps: taskrunner.NewQueueCapabilityClient(conn),
 		Log:  log,
+	}
+	// Epic PRs (C3): a draft PR per epic branch, opened after the first
+	// pushed task and marked ready when every task is Done.
+	// TASK_RUNNER_PRS=off turns it off.
+	if !strings.EqualFold(envOr("TASK_RUNNER_PRS", "on"), "off") {
+		runner.PRs = taskrunner.GHPRClient{Repo: repo}
 	}
 
 	// Settle the job's store entry from the run result. A missing entry
