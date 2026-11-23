@@ -381,7 +381,7 @@ func (d *Deliverer) summaryComment(ctx context.Context, projectID, epicID string
 func taskDescriptionHTML(t Task) string {
 	var b strings.Builder
 	b.WriteString("<p>" + planTaskMarker + t.ID + "</p>\n")
-	b.WriteString("<p><strong>What to build:</strong> " + html.EscapeString(t.Description) + "</p>\n")
+	b.WriteString("<p><strong>What to build:</strong> " + cardText(t.Description) + "</p>\n")
 	if len(t.Files) > 0 {
 		b.WriteString("<p><strong>Files:</strong> " + html.EscapeString(strings.Join(t.Files, ", ")) + "</p>\n")
 	}
@@ -395,6 +395,15 @@ func taskDescriptionHTML(t Task) string {
 	b.WriteString("<p><strong>Size:</strong> " + html.EscapeString(t.Size) + " &middot; <strong>Executor:</strong> " +
 		html.EscapeString(placement.ModelLabel(t.ExecutorModel)) + "</p>")
 	return b.String()
+}
+
+// cardText escapes a multi-line value for a card paragraph, keeping its
+// line breaks as <br> (ParseTaskCard turns them back into newlines). The
+// value is escaped first, so a literal "<br>" in it stays "&lt;br&gt;" and
+// the round trip is exact.
+func cardText(s string) string {
+	s = strings.ReplaceAll(strings.TrimSpace(s), "\r\n", "\n")
+	return strings.ReplaceAll(html.EscapeString(s), "\n", "<br>")
 }
 
 // markerValue returns the value of a "<marker><value>" occurrence in s,

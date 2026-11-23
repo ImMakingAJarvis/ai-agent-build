@@ -31,6 +31,10 @@ background (the highest non-empty queue is always unpaused). Text jobs
 run on the model `pickModel` chooses; `image` messages become photo-tagged
 agent jobs; `plan_epic`/`replan_epic` jobs run the Plan → Decompose →
 Review pipeline (`prompts/`, `config/models.yaml`) and deliver to Plane.
+A decompose (or review) reply whose task descriptions are under 200
+characters or only point at the plan ("Job 2a of the plan") is rejected
+and retried (`planworker.CheckDescriptions`): every task card carries its
+full brief, with line breaks kept as `<br>`.
 `enqueue` is the test-publish CLI. Not the same queue as the agentjob
 store that agent-run pulls from (docs/system-frame.md §4.2).
 

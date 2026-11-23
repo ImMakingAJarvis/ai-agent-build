@@ -96,6 +96,10 @@ type Runner struct {
 	// CapabilityTimeout bounds the wait for a capability's Result. Zero
 	// means DefaultCapabilityTimeout.
 	CapabilityTimeout time.Duration
+	// PRs opens the epic's draft PR after the first pushed task and marks
+	// it ready when the last task is Done (C3). Nil disables PRs (tests,
+	// a repo without GitHub).
+	PRs PRClient
 	// Log receives progress; nil is fine.
 	Log *slog.Logger
 }
@@ -263,7 +267,7 @@ func (r *Runner) Run(ctx context.Context, job *Job) (Result, error) {
 		herr := r.Harness.Run(ctx, taskWt, prompt, task.Files)
 		passed, output := r.Checks.Check(ctx, taskWt, task.AcceptanceCheck)
 		if herr == nil && passed {
-			return r.finish(ctx, job, card, epicBranch, epicWt, taskWt, taskBranch, modelID, doneID, attempt)
+			return r.finish(ctx, job, card, epic, epicCode, epicBranch, epicWt, taskWt, taskBranch, modelID, doneID, attempt)
 		}
 		if herr != nil {
 			output = fmt.Sprintf("harness: %v\n%s", herr, output)
@@ -389,9 +393,10 @@ func (r *Runner) moveToDone(ctx context.Context, projectID, itemID, doneID strin
 }
 
 // finish commits the task worktree, merges it into the epic branch,
-// records NOTES.md, pushes, cleans up, and moves the card to Done.
-func (r *Runner) finish(ctx context.Context, job *Job, card *plane.WorkItem,
-	epicBranch, epicWt, taskWt, taskBranch, modelID, doneID string, attempt int) (Result, error) {
+// records NOTES.md, pushes, cleans up, moves the card to Done, and keeps
+// the epic's draft PR up to date (publishEpic).
+func (r *Runner) finish(ctx context.Context, job *Job, card, epic *plane.WorkItem,
+	epicCode, epicBranch, epicWt, taskWt, taskBranch, modelID, doneID string, attempt int) (Result, error) {
 	sha, err := r.commitTask(ctx, taskWt, card.SequenceID, card.Name)
 	if err != nil {
 		return Result{}, fmt.Errorf("commit: %w", err)
@@ -401,7 +406,7 @@ func (r *Runner) finish(ctx context.Context, job *Job, card *plane.WorkItem,
 		return Result{}, fmt.Errorf("merge into %s: %v (%s)", epicBranch, err, out)
 	}
 	r.appendNote(epicWt, job, card, sha)
-	r.pushEpic(epicBranch)
+	pushErr := r.pushEpic(epicBranch)
 	if err := r.cleanupTask(ctx, taskWt, taskBranch); err != nil {
 		r.logf("cleanup task worktree: %v (the merge already landed)", err)
 	}
@@ -419,6 +424,16 @@ func (r *Runner) finish(ctx context.Context, job *Job, card *plane.WorkItem,
 	}
 	r.comment(ctx, job.Board.ProjectID, card.ID, fmt.Sprintf("%s: done (attempt %d/%d) — commit %s, merged into %s",
 		modelID, attempt, r.MaxAttempts, sha[:7], epicBranch))
+	if errors.Is(pushErr, errNoRemote) {
+		// No remote (toy repo): nothing to push, no PR.
+	} else if pushErr != nil {
+		// The merge is local only: say so on the card instead of leaving
+		// it in the journal, and skip the PR (it would not have the work).
+		r.comment(ctx, job.Board.ProjectID, card.ID, fmt.Sprintf(
+			"taskrunner: push of %s failed — the commit is on the box only: %v", epicBranch, pushErr))
+	} else {
+		r.publishEpic(ctx, job.Board.ProjectID, epic, epicCode, epicBranch, doneID, card.ID)
+	}
 	return Result{Passed: true, Summary: fmt.Sprintf("done — commit %s, merged into %s", sha[:7], epicBranch)}, nil
 }
 
@@ -449,15 +464,22 @@ func (r *Runner) appendNote(epicWt string, job *Job, card *plane.WorkItem, sha s
 	}
 }
 
-// pushEpic pushes the epic branch to origin when the repo has one
-// (best effort: the toy repos in the live test have no remote).
-func (r *Runner) pushEpic(epicBranch string) {
+// errNoRemote is pushEpic's "nothing to push to" — not a failure (the toy
+// repos in the live test have no remote), but there is no PR either.
+var errNoRemote = errors.New("no origin remote")
+
+// pushEpic pushes the epic branch to origin. A repo without an origin
+// returns errNoRemote; a failed push returns the git error, which finish
+// reports on the card.
+func (r *Runner) pushEpic(epicBranch string) error {
 	if _, err := gitRun(context.Background(), r.Repo, "remote", "get-url", "origin"); err != nil {
-		return
+		return errNoRemote
 	}
 	if out, err := gitRun(context.Background(), r.Repo, "push", "origin", epicBranch); err != nil {
 		r.logf("push %s: %v (%s)", epicBranch, err, out)
+		return fmt.Errorf("%v (%s)", err, tail(out, 500))
 	}
+	return nil
 }
 
 func (r *Runner) commitTask(ctx context.Context, taskWt string, seq int, title string) (string, error) {

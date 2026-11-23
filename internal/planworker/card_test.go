@@ -108,3 +108,27 @@ func TestParseTaskCardEscapedLabel(t *testing.T) {
 		t.Errorf("Description lost the escaped text: %q", got.Description)
 	}
 }
+
+// TestParseTaskCardMultiline: a multi-paragraph description keeps its line
+// breaks through the card (rendered as <br>, read back as newlines), and a
+// literal "<br>" in the text survives as text.
+func TestParseTaskCardMultiline(t *testing.T) {
+	in := Task{ID: "multi", Description: "First paragraph.\n\nSecond: keep the literal <br> tag.\nThird line.",
+		AcceptanceCheck: "go test ./...", Size: "S", ExecutorModel: "m"}
+	html := taskDescriptionHTML(in)
+	if !strings.Contains(html, "First paragraph.<br><br>Second") {
+		t.Fatalf("line breaks not rendered: %s", html)
+	}
+	got, err := ParseTaskCard(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != in.Description {
+		t.Fatalf("description = %q, want %q", got.Description, in.Description)
+	}
+	// Plane's editor may re-save the break as <br />.
+	got, err = ParseTaskCard(strings.ReplaceAll(html, "<br>", "<br />"))
+	if err != nil || got.Description != in.Description {
+		t.Fatalf("after editor re-save: %q, %v", got.Description, err)
+	}
+}

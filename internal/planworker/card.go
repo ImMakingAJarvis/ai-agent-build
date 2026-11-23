@@ -28,7 +28,7 @@ func ParseTaskCard(desc string) (*Task, error) {
 	if !ok {
 		return nil, fmt.Errorf("task card %s: no What to build", id)
 	}
-	t.Description = html.UnescapeString(strings.TrimSpace(v))
+	t.Description = html.UnescapeString(strings.TrimSpace(brToNewline(v)))
 	if t.Description == "" {
 		return nil, fmt.Errorf("task card %s: empty What to build", id)
 	}
@@ -97,4 +97,13 @@ func splitCardList(v string) []string {
 		}
 	}
 	return out
+}
+
+// brToNewline undoes cardText's line breaks. Plane's editor may also save
+// a break as <br/> or <br />, so all three spellings are accepted.
+func brToNewline(v string) string {
+	for _, br := range []string{"<br />", "<br/>", "<br>"} {
+		v = strings.ReplaceAll(v, br, "\n")
+	}
+	return v
 }

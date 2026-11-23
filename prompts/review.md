@@ -27,6 +27,12 @@ Epic: {{EPIC_TITLE}}
    `acceptance_check` must be a test name or shell command that exists (or
    will exist, as part of the task) and can be run on the repo. Replace a
    vague or non-existent check with a real one for that task.
+4. Descriptions that do not stand on their own: the executor gets the
+   card's description and little else. A description that points at the
+   plan ("Job 2a of the plan", "see section 3") or is too thin to build
+   from must be rewritten with the relevant plan text copied in — the
+   goal, the approach, the names and the files. Never shorten a
+   description.
 
 Leave everything that is already correct exactly as it is. Change only what
 the checks above require.

@@ -69,9 +69,12 @@ reaches Ready (by approval or by hand).
      for this path is C2, next in the queue.)
    - **Dependency not Done** → the card waits; it runs as soon as its
      blockers are Done.
-6. **Epic done → PR to main.** When every sub-item is Done, one PR from
-   the epic branch is opened and linked on the epic (C3, also queued
-   after C2). Until that lands, the epic branch is the unit of review.
+6. **One draft PR per epic, updated per task.** After the first task
+   is merged and pushed, the runner opens a draft PR from `epics/<code>`
+   to `main` and links it on the epic. Every later task lands on it as
+   one more pushed commit, so finished parts are visible on GitHub while
+   the rest runs. When every sub-item is Done the PR is marked ready for
+   review (C3). A failed push is commented on the card.
 
 ## Running a single task by hand (no planning)
 
