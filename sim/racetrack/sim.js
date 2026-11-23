@@ -39,6 +39,20 @@ const Track = {
     return Math.abs(this.distToCenterline(x, y) - this.r) <= this.halfW - margin;
   },
 
+  // The circuit's bounding box: the extent of the whole road band, x from
+  // -(a + r + halfW) to +(a + r + halfW) (spine plus both arc bulges), y
+  // from -(r + halfW) to +(r + halfW). The camera (camera.js) frames its
+  // top-down view on this box, so the circuit determines where the camera
+  // is.
+  bounds() {
+    return {
+      minX: -(this.a + this.r + this.halfW),
+      maxX: this.a + this.r + this.halfW,
+      minY: -(this.r + this.halfW),
+      maxY: this.r + this.halfW,
+    };
+  },
+
   // Collision: clamp (x, y) into the road band, keeping the point at
   // least carRadius from both edges. Returns { x, y, hit } with hit one
   // of null | "outer" | "inner".

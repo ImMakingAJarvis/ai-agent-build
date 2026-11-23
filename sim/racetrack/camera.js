@@ -1,67 +1,85 @@
 // camera.js — the RAC fake camera (docs/sim-racetrack.md, RAC-3).
 //
-// A small black-and-white pixel grid of the scene ahead of the car, as seen
-// from the car. It is a pure function of {car, track}: the page renders it
-// into the "CAM" panel (page.js) and the logic circuit (RAC-4) reads it via
-// camera.grid() / camera.pixel(row, col). No DOM here — the same code runs in
-// node (camera.test.js) and in the browser.
+// A small black-and-white pixel grid of the WHOLE circuit seen from directly
+// above — a top-down view of everything, not the car's forward view. The
+// camera is fixed in the world, and the circuit (the track's geometry)
+// determines where it is: its field of view is the track's bounding box
+// (track.bounds()). As the car drives, the road stays put and the car — a
+// black dot, like the black rectangle on the main canvas — moves across the
+// grid, so the logic circuit (RAC-4) sees the track and where the car is in
+// it.
+//
+// Pure function of {car, track}: the page renders it into the "CAM" panel
+// (page.js) and the circuit reads it via camera.grid() /
+// camera.pixel(row, col). No DOM here — the same code runs in node
+// (camera.test.js) and in the browser.
 //
 // Coordinate convention (fixed — the circuit and the later RAC jobs rely on
 // it, so do not change it):
 //   - grid[row][col]
-//   - row 0 = NEAREST to the car ... row (rows-1) = farthest (depth)
-//   - col 0 = LEFTMOST in the view ... col (cols-1) = rightmost
-//   - 1 = road/track present at that point, 0 = no road (wall / off-track)
+//   - row 0 = TOP of the view (world y = minY) ... row (rows-1) = bottom
+//   - col 0 = LEFTMOST (world x = minX) ... col (cols-1) = rightmost
+//     (the same screen orientation as the main top-down canvas: x grows
+//      right, y grows down)
+//   - 1 = road/track present at that point, 0 = no road (wall/off-track) —
+//     or the car itself (the car is black, so its pixel reads 0)
 //
-// Each pixel samples one world point in the car's forward view:
+// Each pixel samples one world point in the view:
 //
-//     p = car.pos + forward * depth(row) + right * lateral(col)
+//     x = minX + (col  / (cols - 1)) * (maxX - minX)
+//     y = minY + (row  / (rows - 1)) * (maxY - minY)
 //
-// where forward = (cos h, sin h) is the car's heading and right is the
-// car's right side, 90° clockwise from forward (canvas y grows down, so
-// right = (-sin h, cos h) — checked against all four cardinal headings).
-// A pixel is road iff track.onRoad(p), the same test the drivable band uses,
-// so the camera sees exactly the road the car can drive on.
+// where {minX, minY, maxX, maxY} is track.bounds() grown by `margin` px, so
+// the whole circuit (including its outer road edge) fits in the grid. A
+// pixel is road iff track.onRoad(p), the same test the drivable band uses.
+// The car is drawn as the single 0 pixel at the sample point nearest its
+// center (pass car = null for the road pattern without the car).
 
 "use strict";
 
 const DEFAULTS = {
-  cols: 16,        // across the field of view (col 0 leftmost ... col 15 rightmost)
-  rows: 8,         // depth (row 0 nearest ... row 7 farthest)
-  nearDist: 12,    // px ahead of the car sampled by row 0
-  farDist: 220,    // px ahead of the car sampled by the last row
-  lateralHalf: 80, // px to the left/right edge sampled by col 0 / the last col
+  cols: 16,        // across the view (col 0 leftmost ... col 15 rightmost)
+  rows: 8,         // top to bottom (row 0 top ... row 7 bottom)
+  margin: 8,       // px the track's bounding box is grown, per side
 };
 
-// Pure: the rows x cols B/W grid for a car at (car.x, car.y) with
-// car.heading, given a track (it only needs track.onRoad(x, y)). Returns
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// Pure: the rows x cols B/W top-down grid of the whole circuit, with the car
+// as a black dot. `car` may be null for the road pattern alone. Returns
 // number[][] with grid[row][col] in {0, 1}.
 function computeGrid(car, track, opts) {
   const o = Object.assign({}, DEFAULTS, opts || {});
-  const { cols, rows, nearDist, farDist, lateralHalf } = o;
-  const fx = Math.cos(car.heading);
-  const fy = Math.sin(car.heading);
-  const rx = -Math.sin(car.heading); // car's right side (canvas y grows down)
-  const ry = Math.cos(car.heading);
+  const { cols, rows, margin } = o;
+  const b = track.bounds();
+  const minX = b.minX - margin, maxX = b.maxX + margin;
+  const minY = b.minY - margin, maxY = b.maxY + margin;
+  const sx = (c) => cols > 1 ? minX + (c / (cols - 1)) * (maxX - minX)
+                             : (minX + maxX) / 2;
+  const sy = (r) => rows > 1 ? minY + (r / (rows - 1)) * (maxY - minY)
+                             : (minY + maxY) / 2;
   const grid = new Array(rows);
   for (let r = 0; r < rows; r++) {
-    const depth = nearDist + (r / (rows - 1)) * (farDist - nearDist);
     const row = new Array(cols);
-    for (let c = 0; c < cols; c++) {
-      const lateral = 2 * lateralHalf * (c / (cols - 1) - 0.5);
-      const px = car.x + fx * depth + rx * lateral;
-      const py = car.y + fy * depth + ry * lateral;
-      row[c] = track.onRoad(px, py) ? 1 : 0;
-    }
+    for (let c = 0; c < cols; c++)
+      row[c] = track.onRoad(sx(c), sy(r)) ? 1 : 0;
     grid[r] = row;
+  }
+  // The car: a black dot at the sample point nearest its center.
+  if (car) {
+    const ci = clamp(Math.round((car.x - minX) / ((maxX - minX) / (cols - 1))),
+                     0, cols - 1);
+    const ri = clamp(Math.round((car.y - minY) / ((maxY - minY) / (rows - 1))),
+                     0, rows - 1);
+    grid[ri][ci] = 0;
   }
   return grid;
 }
 
 // A live camera bound to a car + track. grid() re-samples on every call, so
-// it tracks the car as it moves and turns; pixel(row, col) is the
-// convenience accessor the circuit uses. Both are pure reads of the current
-// car state.
+// the car's dot tracks the car as it moves (the road stays put); pixel(row,
+// col) is the convenience accessor the circuit uses. Both are pure reads of
+// the current car state.
 function makeCamera(car, track, opts) {
   const o = Object.assign({}, DEFAULTS, opts || {});
   function grid() { return computeGrid(car, track, o); }
