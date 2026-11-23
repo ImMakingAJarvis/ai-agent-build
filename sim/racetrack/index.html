@@ -7,22 +7,45 @@
 <style>
   html, body {
     margin: 0;
-    height: 100%;
+    min-height: 100%;
     background: #000;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 10px;
   }
-  canvas {
+  #track {
     background: #000;
     max-width: 100vw;
-    max-height: 100vh;
+  }
+  /* The CAM panel: the fake camera's B/W grid, below the track. */
+  .cam-panel {
+    border: 2px solid #fff;
+    padding: 6px 10px;
+    background: #000;
+  }
+  .cam-label {
+    color: #fff;
+    font: 14px monospace;
+    text-align: center;
+    margin-bottom: 4px;
+  }
+  #cam {
+    display: block;
+    background: #000;
+    image-rendering: pixelated;
   }
 </style>
 </head>
 <body>
   <canvas id="track"></canvas>
+  <div class="cam-panel">
+    <div class="cam-label">CAM — what the car sees ahead (1 = road)</div>
+    <canvas id="cam"></canvas>
+  </div>
   <script src="sim.js"></script>
+  <script src="camera.js"></script>
   <script src="page.js"></script>
 </body>
 </html>
