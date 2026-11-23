@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -56,6 +58,16 @@ func (s *Server) kshadowReport() (*ks.Report, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The phase-2 dry-run section (its state sits next to the mirror's).
+	if _, serr := os.Stat(filepath.Join(filepath.Dir(s.kshadowState), "kshadow-dryrun.json")); serr == nil {
+		if dst, derr := ks.LoadDryRunState(filepath.Join(filepath.Dir(s.kshadowState), "kshadow-dryrun.json")); derr == nil {
+			deadNew := dst.DeadNew
+			if st, aerr := admin.QueueStats(context.Background(), "dead"); aerr == nil && dst.DeadBase > 0 {
+				deadNew = st.Ready + st.Unacked + st.Delivered - dst.DeadBase
+			}
+			rep.DryRun = ks.DryRunReportFromState(dst, deadNew)
+		}
+	}
 	s.kshadowMu.Lock()
 	s.kshadowRep, s.kshadowAt = rep, time.Now()
 	s.kshadowMu.Unlock()
@@ -94,8 +106,18 @@ func kshadowStatus(rep *ks.Report) (string, string) {
 			return "mismatch", "bad"
 		}
 	}
+	if rep.DryRun != nil {
+		for _, r := range rep.DryRun.Families {
+			if r.Unmatched > 0 || r.Inversions > 0 {
+				return "mismatch", "bad"
+			}
+		}
+	}
+	// Lag is judged on the `events` aggregate only (see cmdParity): a
+	// bursty queue's now−last-message gap is its quiet time, not the
+	// mirror's, so it would keep the tile on "lag" most of the day.
 	for _, r := range rep.Rows {
-		if !r.LastAt.IsZero() {
+		if r.Queue == "events" && !r.LastAt.IsZero() {
 			if d, err := time.ParseDuration(r.Lag); err == nil && d > 5*time.Minute {
 				return "lag", "warn"
 			}

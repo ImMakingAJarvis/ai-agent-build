@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/kq"
@@ -41,10 +42,33 @@ func main() {
 	if err != nil {
 		logf.Fatalf("management client: %v", err)
 	}
-	m := kshadow.NewMirror(amqpURL, kq.New(brokers), state, statePath, admin, sampleEvery, logf)
-	logf.Printf("kshadow starting (kafka=%s state=%s sample-every=%d)", brokers, statePath, sampleEvery)
-	if err := m.Run(ctx); err != nil && ctx.Err() == nil {
-		logf.Fatalf("mirror: %v", err)
+	kafka := kq.New(brokers)
+	m := kshadow.NewMirror(amqpURL, kafka, state, statePath, admin, sampleEvery, logf)
+
+	// Phase 2: the shadow dry-run runs alongside the mirror (plan §5),
+	// with its own state file next to the mirror's.
+	dryPath := envOr("KSHADOW_DRYRUN_STATE", filepath.Join(filepath.Dir(statePath), "kshadow-dryrun.json"))
+	dryState, err := kshadow.LoadDryRunState(dryPath)
+	if err != nil {
+		logf.Fatalf("load dry-run state: %v", err)
+	}
+	dry := kshadow.NewDryRun(brokers, kafka, admin, dryState, dryPath, logf)
+
+	logf.Printf("kshadow starting (kafka=%s state=%s dry-run=%s sample-every=%d)", brokers, statePath, dryPath, sampleEvery)
+	errMirror := make(chan error, 1)
+	go func() { errMirror <- m.Run(ctx) }()
+	errDry := make(chan error, 1)
+	go func() { errDry <- dry.Run(ctx) }()
+	var runErr error
+	var src string
+	select {
+	case runErr = <-errMirror:
+		src = "mirror"
+	case runErr = <-errDry:
+		src = "dry-run"
+	}
+	if runErr != nil && ctx.Err() == nil {
+		logf.Fatalf("%s: %v", src, runErr)
 	}
 	logf.Printf("kshadow stopped")
 }

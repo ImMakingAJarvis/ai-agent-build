@@ -166,6 +166,9 @@
   {{- else }}
   <div class="machine-detail">no queues mirrored yet — waiting for first traffic on the tasks and events exchanges</div>
   {{- end }}
+  {{- if .Report.DryRun }}
+  <div class="machine-detail"{{ if ne .Report.DryRun.Gate "ok" }} style="color:#e05252"{{ end }}>dry-run gate (phase 2): {{ .Report.DryRun.Gate }} · dead-letter since start: {{ .Report.DryRun.DeadNew }} — full table: <code>jarvis-kq parity</code></div>
+  {{- end }}
   {{- else if not .Err }}
   <div class="machine-detail">kshadow has not started (no state file)</div>
   {{- end }}
