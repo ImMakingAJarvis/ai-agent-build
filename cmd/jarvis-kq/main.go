@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -662,7 +663,15 @@ func cmdParity(ctx context.Context, c *kq.Client, args []string) int {
 	maxLag := fs.Duration("max-lag", 5*time.Minute, "fail when a queue's shadow lag exceeds this")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
 	statePath := fs.String("state", envOr("KSHADOW_STATE", "/home/agent/.local/share/jarvis/kshadow/kshadow-state.json"), "kshadow's state file")
+	dryrunPath := fs.String("dryrun-state", envOr("KSHADOW_DRYRUN_STATE", ""), "the dry-run's state file (default: kshadow-dryrun.json next to --state)")
 	fs.Parse(args)
+
+	// The phase-2 dry-run section: its state lives next to the mirror's
+	// state file; a missing file means the dry-run has not started yet
+	// (the phase-1 gate still stands on its own).
+	if *dryrunPath == "" {
+		*dryrunPath = filepath.Join(filepath.Dir(*statePath), "kshadow-dryrun.json")
+	}
 
 	// LoadState yields a fresh state for a missing file (kshadow's own
 	// first run needs that); for the gate a missing file means kshadow
@@ -690,6 +699,19 @@ func cmdParity(ctx context.Context, c *kq.Client, args []string) int {
 		fmt.Fprintln(os.Stderr, "jarvis-kq:", err)
 		return 3
 	}
+	if _, serr := os.Stat(*dryrunPath); serr == nil {
+		if dst, derr := kshadow.LoadDryRunState(*dryrunPath); derr == nil {
+			deadNew := dst.DeadNew
+			if st, aerr := admin.QueueStats(ctx, "dead"); aerr == nil {
+				if dst.DeadBase > 0 {
+					deadNew = st.Ready + st.Unacked + st.Delivered - dst.DeadBase
+				} else {
+					deadNew = 0
+				}
+			}
+			rep.DryRun = kshadow.DryRunReportFromState(dst, deadNew)
+		}
+	}
 
 	if *asJSON {
 		b, _ := json.MarshalIndent(rep, "", "  ")
@@ -698,11 +720,19 @@ func cmdParity(ctx context.Context, c *kq.Client, args []string) int {
 		printParity(rep)
 	}
 
-	// The gate: zero mismatch, and lag within the limit on any queue that
-	// has traffic (an idle queue's lag is meaningless).
+	// The gate: zero mismatch (parity or dry-run), and lag within the
+	// limit on any queue that has traffic (an idle queue's lag is
+	// meaningless).
 	for _, r := range rep.Rows {
 		if r.Mismatch > 0 || r.Dropped > 0 {
 			return 1
+		}
+	}
+	if rep.DryRun != nil {
+		for _, r := range rep.DryRun.Families {
+			if r.Unmatched > 0 || r.Inversions > 0 {
+				return 1
+			}
 		}
 	}
 	for _, r := range rep.Rows {
@@ -729,6 +759,22 @@ func printParity(rep *kshadow.Report) {
 			fmtInt(r.Ready), fmtInt(r.Unacked), fmtInt(r.Dropped), fmtInt(r.Mismatch), r.Lag)
 	}
 	_ = w.Flush()
+
+	if rep.DryRun != nil {
+		dr := rep.DryRun
+		fmt.Printf("\ndry-run: gate %q (started %s, dead-letter arrivals since start: %d)\n",
+			dr.Gate, dr.StartedAt.Format(time.RFC3339), dr.DeadNew)
+		w2 := newTab()
+		w2.WriteLine("FAMILY", "SEEN", "MATCHED", "LATE", "STALE", "UNMATCHED", "INVERSIONS", "WOULD_EXPIRE", "MALFORMED", "LAST")
+		for _, r := range dr.Families {
+			if r.Seen == 0 && r.LastAt.IsZero() {
+				continue
+			}
+			w2.WriteLine(r.Family, fmtInt(r.Seen), fmtInt(r.Matched), fmtInt(r.Late), fmtInt(r.Stale),
+				fmtInt(r.Unmatched), fmtInt(r.Inversions), fmtInt(r.WouldExpire), fmtInt(r.Malformed), r.LastAction)
+		}
+		_ = w2.Flush()
+	}
 }
 
 // fmtInt renders a count; -1 (the unknown marker from parity) as "-".

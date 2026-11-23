@@ -303,6 +303,25 @@ the parity report. This is where the priority routing (§3.2) and the
 janitor (§3.3) get proven against live traffic without touching the
 live path. Gate: 7 days, every "would do" matches a real event.
 
+*As built (kafka-cutover):* the dry-run runs inside the kshadow
+container (`internal/kshadow/dryrun.go`) with its own state file
+(`kshadow-dryrun.json` next to the mirror's). Fresh readers start at
+log end (pre-gate test traffic does not count); topics that appear
+mid-gate and persisted offsets start at log start/persisted offset.
+Match modes per family: `event` (cap/jobs/worker — a `job.*` event with
+the envelope's id), `agent` (flow/mailboxes — an `agent.<job-id>.*`
+event; flow's job id comes from the topic name, mailboxes' from
+`wake_job`), `depth` (events/sched/review — well-formedness only). The
+worker family mirrors the real worker: one lane per base queue
+(voice/fix/image/coding/background), prefetch 1, polling
+`[X.pN, X]` in order, with inversions counted within a 5-minute
+concurrency window. The janitor sweep (30s) counts would-expire entries
+and compares dead-queue arrivals (mgmt counters minus the first-sweep
+baseline) against them. `jarvis-kq parity` exits 1 when any family has
+an unmatched would-do or an inversion; the dashboard tile shows the
+gate line. Dedupe by message id (§7.2) makes restarts and replays
+idempotent.
+
 **Phase 3 — per-family cut-over.** Each family flips with an env
 switch (`KQUEUE_<FAMILY>=on|off`, default off) read by
 `internal/queue`'s consumer and publisher. Order, lowest risk first:

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -56,6 +58,16 @@ func (s *Server) kshadowReport() (*ks.Report, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The phase-2 dry-run section (its state sits next to the mirror's).
+	if _, serr := os.Stat(filepath.Join(filepath.Dir(s.kshadowState), "kshadow-dryrun.json")); serr == nil {
+		if dst, derr := ks.LoadDryRunState(filepath.Join(filepath.Dir(s.kshadowState), "kshadow-dryrun.json")); derr == nil {
+			deadNew := dst.DeadNew
+			if st, aerr := admin.QueueStats(context.Background(), "dead"); aerr == nil && dst.DeadBase > 0 {
+				deadNew = st.Ready + st.Unacked + st.Delivered - dst.DeadBase
+			}
+			rep.DryRun = ks.DryRunReportFromState(dst, deadNew)
+		}
+	}
 	s.kshadowMu.Lock()
 	s.kshadowRep, s.kshadowAt = rep, time.Now()
 	s.kshadowMu.Unlock()
@@ -92,6 +104,13 @@ func kshadowStatus(rep *ks.Report) (string, string) {
 	for _, r := range rep.Rows {
 		if r.Mismatch > 0 || r.Dropped > 0 {
 			return "mismatch", "bad"
+		}
+	}
+	if rep.DryRun != nil {
+		for _, r := range rep.DryRun.Families {
+			if r.Unmatched > 0 || r.Inversions > 0 {
+				return "mismatch", "bad"
+			}
 		}
 	}
 	for _, r := range rep.Rows {

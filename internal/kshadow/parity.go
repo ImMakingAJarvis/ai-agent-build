@@ -2,6 +2,7 @@ package kshadow
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -32,10 +33,71 @@ type Row struct {
 // Report is the whole parity snapshot (`jarvis-kq parity` and the
 // dashboard tile both render it).
 type Report struct {
-	At        time.Time `json:"at"`
-	StartedAt time.Time `json:"started_at"` // kshadow first-seen time
-	Kshadow   string    `json:"kshadow"`    // "up" or "down"
-	Rows      []Row     `json:"rows"`
+	At        time.Time      `json:"at"`
+	StartedAt time.Time      `json:"started_at"` // kshadow first-seen time
+	Kshadow   string         `json:"kshadow"`    // "up" or "down"
+	Rows      []Row          `json:"rows"`
+	DryRun    *DryRunReport  `json:"dry_run,omitempty"` // phase-2 gate (nil when the dry-run has not started)
+}
+
+// DryRunRow is one family's dry-run accounting (phase 2, plan §5).
+type DryRunRow struct {
+	Family      string    `json:"family"`
+	Mode        string    `json:"mode"`
+	Seen        int64     `json:"seen"`
+	Matched     int64     `json:"matched"`
+	Late        int64     `json:"late"` // matched after the stale window
+	Stale       int64     `json:"stale"`
+	Unmatched   int64     `json:"unmatched"` // still waiting on a real event
+	Inversions  int64     `json:"inversions"` // priority/FIFO violations (worker family)
+	WouldExpire int64     `json:"would_expire"` // simulated TTL expiries (janitor, plan §3.3)
+	Malformed   int64     `json:"malformed"`
+	LastAction  string    `json:"last_action,omitempty"`
+	LastAt      time.Time `json:"last_at,omitempty"`
+}
+
+// DryRunReport is the dry-run's gate snapshot.
+type DryRunReport struct {
+	At        time.Time   `json:"at"`
+	StartedAt time.Time   `json:"started_at"`
+	Families  []DryRunRow `json:"families"`
+	DeadNew   int64       `json:"dead_new"` // dead-letter arrivals since start (the real side)
+	Gate      string      `json:"gate"`     // "ok" or what the 7-day gate is waiting on
+}
+
+// DryRunReportFromState builds the dry-run report from persisted state.
+func DryRunReportFromState(st *DryRunState, deadNew int64) *DryRunReport {
+	rep := &DryRunReport{At: time.Now().UTC(), StartedAt: st.StartedAt, DeadNew: deadNew, Gate: "ok"}
+	for _, f := range Families() {
+		row := DryRunRow{Family: f.Name, Mode: f.Mode}
+		if c, ok := st.Families[f.Name]; ok {
+			row.Seen, row.Matched, row.Late, row.Stale = c.Seen, c.Matched, c.Late, c.Stale
+			row.Inversions, row.WouldExpire, row.Malformed = c.Inversions, c.WouldExpire, c.Malformed
+			row.LastAction, row.LastAt = c.LastAction, c.LastAt
+		}
+		row.Unmatched = row.Stale - row.Late
+		if row.Unmatched < 0 {
+			row.Unmatched = 0
+		}
+		if row.Unmatched > 0 {
+			rep.Gate = gateIssue(rep.Gate,
+				fmt.Sprintf("%s: %d would-do without a real event", f.Name, row.Unmatched))
+		}
+		if row.Inversions > 0 {
+			rep.Gate = gateIssue(rep.Gate,
+				fmt.Sprintf("%s: %d priority inversions", f.Name, row.Inversions))
+		}
+		rep.Families = append(rep.Families, row)
+	}
+	return rep
+}
+
+// gateIssue appends a second problem to a non-"ok" gate string.
+func gateIssue(cur, add string) string {
+	if cur != "ok" {
+		return cur + "; " + add
+	}
+	return add
 }
 
 // Parity builds a Report from kshadow's persisted state, the RabbitMQ
