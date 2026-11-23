@@ -1,0 +1,4 @@
+
+The swept variable is the free-VRAM target left after the engine allocates
+weights, KV cache, expert cache, and runtime overhead. The ladder points are:
+

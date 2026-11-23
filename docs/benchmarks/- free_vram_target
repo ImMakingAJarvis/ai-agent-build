@@ -1,0 +1,29 @@
+
+where `runtime_overhead` includes CUDA context, allocator slack, Triton
+autotune scratch, and other engine-side memory not directly exposed as a
+benchmark parameter.
+
+Because the exact resolved expert-cache size depends on the model, quant,
+engine version, and runtime overhead, each benchmark point must record the
+actual resolved `moe_cache_size` from the engine log or `ft ctl`.
+
+### Ladder table
+
+| Ladder point | Free-VRAM target | KV reservation | Expert-cache mapping | Expected role |
+|---|---:|---:|---|---|
+| 400 MB | 400 MiB | 131072 tokens | Smallest expert cache in the suite; maximum headroom | Baseline validation that the model can serve 131072 tokens at all |
+| 300 MB | 300 MiB | 131072 tokens | Larger expert cache than 400 MB; still conservative | Expected optimal point for GLM 5.3 Flash if its runtime scratch needs ~256 MiB |
+| 250 MB | 250 MiB | 131072 tokens | Larger expert cache than 300 MB; tighter headroom | Borderline point; expected failure or instability for GLM if scratch exceeds budget |
+| 200 MB | 200 MiB | 131072 tokens | Larger expert cache than 250 MB; reduced headroom | Tests whether the model can use more expert cache without OOM |
+| 150 MB | 150 MiB | 131072 tokens | Larger expert cache than 200 MB; aggressive headroom | Tests near-floor operation for models with low runtime overhead |
+| 100 MB | 100 MiB | 131072 tokens | Largest expert cache in the suite; minimum headroom | If this point passes, it is the optimal point for that model |
+
+The ladder is intentionally ordered from safe to aggressive. A point that
+fails because of OOM, engine startup failure, KV allocation failure, or a
+suite component error is a real result. A smaller free-VRAM target cannot be
+assumed to work if a larger free-VRAM target cannot serve 131072 tokens.
+
+## Expected optimal cache size
+
+The optimal cache size for a model is defined as:
+
