@@ -758,3 +758,4 @@ Append-only decisions from each task of `PLAN.md` (one section per task, in orde
   catch-up; 03:03 — the new task-runner picked it up, the TST-3 card
   moved to In Progress, and the run started (the C1 loop end-to-end, the
   first Plane task executed by the loop).
+- CTX-3: Write MoE 128K context suite plan documentation — done 2026-11-23 (commit d025c1e)
