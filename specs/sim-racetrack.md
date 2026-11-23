@@ -23,17 +23,19 @@ that shows the 16x8 B/W pixel grid of the whole circuit from directly
 above — a top-down view, framed on the track's bounding box, with the
 car as a black dot (RAC-3).
 Plain JS, no build step, no framework — strictly two colors (black
-background, white road; the car is black on the road). Later RAC jobs add
-the logic-gate engine (RAC-4, which consumes the camera's grid), the
-circuit editor (RAC-5) and the demo circuit (RAC-6) into the same
+background, white road; the car is black on the road). The headless
+logic-gate engine (RAC-4, `gates.js`) consumes the camera's grid and
+drives the car's controls; it is not on the page yet — RAC-5 (the
+circuit editor) and RAC-6 (the demo circuit) add the rest into the same
 directory.
 
 ## Interfaces
 
 - `http://111.1.2.27:8200/` — the page (LAN address). Serves
   `index.html`, `sim.js` (the pure track/car core), `camera.js` (the
-  pure fake-camera core) and `page.js` (canvas + keys + the CAM panel)
-  from the image.
+  pure fake-camera core), `gates.js` (the pure logic-gate circuit
+  engine, RAC-4) and `page.js` (canvas + keys + the CAM panel) from
+  the image.
 - The fake camera (RAC-3) is a pure function of `{car, track}`:
   `camera.grid() -> number[][]` (16 cols x 8 rows, `grid[row][col]`,
   row 0 = top of the view, col 0 = leftmost, `1 = road / 0 = wall or
@@ -43,6 +45,16 @@ directory.
   road stays put and the car is a black dot at the sample point nearest
   its center, so the panel updates as the car drives. RAC-4 (the
   logic-gate engine) consumes `grid()`/`pixel()`.
+- The logic-gate engine (RAC-4, `gates.js`) is a pure function, headless
+  (no DOM): `Gates.step(circuit, cameraGrid) -> { throttle, steerLeft,
+  steerRight }` (each 0/1), topological evaluation of a gate graph.
+  Gate set: NOT (1-input), AND, OR, NAND, NOR, XOR, XNOR (2-input).
+  Circuit = `{ gates: { id: { type, in: [source, ...] } },
+  outputs: { throttle, steerLeft, steerRight } }`; a source is a gate
+  id, a camera pixel `cam.r<row>.c<col>` (the RAC-3 grid), or a
+  constant `const.1`/`const.0`. `Gates.values(circuit, cameraGrid)`
+  additionally returns every gate's live output (for the RAC-5
+  editor). Not wired into the page yet.
 - No API, no state, no other services.
 
 ## Configuration
@@ -81,6 +93,13 @@ http://111.1.2.27:8200/sim.js | head -3` shows the current file head.
   `page.test.js` (the grid is not deep-equal to the initial one after
   driving — the car's dot moved); the pixels themselves need a human
   browser.
+- Headless gates (no browser): `node --test
+  sim/racetrack/gates.test.js` — full truth table for every gate, a
+  hand-built circuit with known `step()` outputs, outputs wired
+  straight from pixels/constants, purity (no mutation of circuit or
+  grid), `cam.r<row>.c<col>` names against the real RAC-3 grid, and
+  the wiring errors (cycle, unknown gate type, wrong input count,
+  unknown source, pixel out of grid, missing output).
 
 ## Failure modes
 
