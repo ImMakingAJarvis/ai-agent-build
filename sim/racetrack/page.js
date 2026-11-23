@@ -20,13 +20,16 @@ function makePage(canvas, camCanvas) {
   // (canvas y grows down, so the bottom of the track is +y).
   const car = Car.create(Track.a, Track.r, Math.PI);
 
-  // The fake camera: a pure read of the car + track (camera.js). grid()
-  // re-samples every call, so it follows the car as it moves and turns.
+  // The fake camera: a pure read of the car + track (camera.js) — a
+  // top-down view of the whole circuit, framed on the track's bounding box.
+  // grid() re-samples every call, so the car's dot follows the car.
   const camera = Camera.makeCamera(car, Track);
 
-  // The CAM panel: render the B/W grid to its own small canvas. Row 0 (the
-  // nearest) is drawn at the bottom, like a forward-facing view; col 0
-  // (leftmost) on the left. 1 = road -> white, 0 = wall -> black.
+  // The CAM panel: render the B/W grid to its own small canvas.
+  // Top-down orientation, like the main canvas: row 0 (world top) at the
+  // top, col 0 (leftmost) on the left. 1 = road -> white, 0 = wall ->
+  // black; the car's black dot is part of the grid, so the panel updates
+  // as the car drives.
   const CELL = 16;
   let camCtx = null;
   if (camCanvas) {
@@ -85,14 +88,14 @@ function makePage(canvas, camCanvas) {
   }
 
   // Paint the fake camera's B/W grid into the CAM panel (one block per
-  // pixel; only the two colors #000 / #fff).
+  // pixel; only the two colors #000 / #fff), top-down orientation.
   function drawCam() {
     if (!camCtx) return;
     const g = camera.grid();
     for (let r = 0; r < camera.rows; r++) {
       for (let c = 0; c < camera.cols; c++) {
         camCtx.fillStyle = g[r][c] ? "#fff" : "#000";
-        camCtx.fillRect(c * CELL, (camera.rows - 1 - r) * CELL, CELL, CELL);
+        camCtx.fillRect(c * CELL, r * CELL, CELL, CELL);
       }
     }
   }

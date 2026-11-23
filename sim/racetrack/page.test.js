@@ -109,8 +109,9 @@ const off = Math.abs(Track.distToCenterline(page.car.x, page.car.y) - Track.r)
   - Track.halfW;
 assert.ok(off <= 1e-6, "the car is still on the road");
 
-// The camera followed the car: after driving and turning, its grid is not
-// the initial one (the CAM panel updates live as the car moves).
+// The camera followed the car: the top-down road stays put, but the car's
+// dot moved, so the grid is not the initial one (the CAM panel updates
+// live as the car drives).
 assert.notDeepStrictEqual(cam0, page.camera.grid(),
   "the camera grid changed as the car drove and turned");
 
