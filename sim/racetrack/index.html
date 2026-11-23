@@ -36,6 +36,58 @@
     background: #000;
     image-rendering: pixelated;
   }
+  /* The CIRCUIT panel (RAC-5): the circuit editor, below the CAM panel. */
+  .circuit-panel {
+    border: 2px solid #fff;
+    padding: 6px 10px 10px;
+    background: #000;
+    width: 980px;
+    max-width: 100vw;
+  }
+  .circuit-label {
+    color: #fff;
+    font: 14px monospace;
+    text-align: center;
+    margin-bottom: 4px;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 6px;
+  }
+  .btn {
+    background: #000;
+    color: #fff;
+    border: 1px solid #fff;
+    font: 13px monospace;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+  .btn.active {
+    background: #fff;
+    color: #000;
+  }
+  .sep { color: #fff; font: 13px monospace; padding: 0 4px; }
+  #circuit-json {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    background: #000;
+    color: #fff;
+    border: 1px solid #fff;
+    font: 12px monospace;
+    padding: 4px;
+    margin-top: 6px;
+    resize: vertical;
+  }
+  #circuit {
+    display: block;
+    background: #000;
+    max-width: 100%;
+  }
 </style>
 </head>
 <body>
@@ -44,8 +96,34 @@
     <div class="cam-label">CAM — top-down view of the whole circuit (1 = road, dot = car)</div>
     <canvas id="cam"></canvas>
   </div>
+  <div class="circuit-panel">
+    <div class="circuit-label">CIRCUIT — tap a camera pixel (or a gate / constant), then a pin or an output, to wire it; AUTO makes the car obey the circuit</div>
+    <div class="toolbar">
+      <button class="btn gate-tool" data-gate="NOT">NOT</button>
+      <button class="btn gate-tool" data-gate="AND">AND</button>
+      <button class="btn gate-tool" data-gate="OR">OR</button>
+      <button class="btn gate-tool" data-gate="NAND">NAND</button>
+      <button class="btn gate-tool" data-gate="NOR">NOR</button>
+      <button class="btn gate-tool" data-gate="XOR">XOR</button>
+      <button class="btn gate-tool" data-gate="XNOR">XNOR</button>
+      <button class="btn" id="editor-delete">DEL</button>
+      <span class="sep">|</span>
+      <button class="btn" id="mode-manual">MANUAL</button>
+      <button class="btn" id="mode-auto">AUTO</button>
+      <button class="btn" id="sim-reset">RESET</button>
+      <span class="sep">|</span>
+      <button class="btn" id="circuit-save">SAVE</button>
+      <button class="btn" id="circuit-load">LOAD</button>
+    </div>
+    <canvas id="circuit"></canvas>
+    <textarea id="circuit-json" rows="3" spellcheck="false"
+      placeholder="circuit JSON — SAVE fills this, LOAD reads it (e.g. { &quot;gates&quot;: {}, &quot;outputs&quot;: { &quot;throttle&quot;: &quot;const.0&quot;, ... } })"></textarea>
+  </div>
   <script src="sim.js"></script>
   <script src="camera.js"></script>
+  <script src="gates.js"></script>
+  <script src="circuit.js"></script>
   <script src="page.js"></script>
+  <script src="editor.js"></script>
 </body>
 </html>

@@ -100,7 +100,14 @@ function makePage(canvas, camCanvas) {
     }
   }
 
+  // RAC-5: the circuit editor registers a pre-frame hook so it can
+  // re-evaluate the circuit and (in AUTO mode) replace the key input
+  // BEFORE Car.step reads it — the car then obeys step(), in place of
+  // the keys.
+  let frameHook = null;
+
   function frame(dt) {
+    if (frameHook) frameHook(dt);
     Car.step(car, input, dt);
     draw();
   }
@@ -115,6 +122,14 @@ function makePage(canvas, camCanvas) {
     draw,
     keydown(code) { keys.add(code); readKeys(); },
     keyup(code) { keys.delete(code); readKeys(); },
+    onFrame(fn) { frameHook = fn; },
+    setInput(v) { Object.assign(input, v); },
+    // Back to the start line, stopped (the editor's RESET button).
+    reset() {
+      Object.assign(car, Car.create(Track.a, Track.r, Math.PI));
+      keys.clear();
+      readKeys();
+    },
   };
 }
 
