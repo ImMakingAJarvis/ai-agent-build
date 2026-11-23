@@ -19,7 +19,9 @@ depends_on: []
 Piece one and two of the race-car simulator (RAC,
 `docs/sim-racetrack.md`): a top-down black-and-white race track with a
 car you drive around using the arrow keys, plus a fake-camera "CAM" panel
-that shows the 16x8 B/W pixel grid of what the car sees ahead (RAC-3).
+that shows the 16x8 B/W pixel grid of the whole circuit from directly
+above — a top-down view, framed on the track's bounding box, with the
+car as a black dot (RAC-3).
 Plain JS, no build step, no framework — strictly two colors (black
 background, white road; the car is black on the road). Later RAC jobs add
 the logic-gate engine (RAC-4, which consumes the camera's grid), the
@@ -34,9 +36,12 @@ directory.
   from the image.
 - The fake camera (RAC-3) is a pure function of `{car, track}`:
   `camera.grid() -> number[][]` (16 cols x 8 rows, `grid[row][col]`,
-  row 0 = nearest, col 0 = leftmost, `1 = road / 0 = wall`) and
-  `camera.pixel(row, col) -> 0|1`. The CAM panel re-renders it each
-  frame, so it updates as the car moves and turns. RAC-4 (the
+  row 0 = top of the view, col 0 = leftmost, `1 = road / 0 = wall or
+  the car`) and `camera.pixel(row, col) -> 0|1`. The view is a
+  fixed top-down look at the whole circuit, framed on
+  `Track.bounds()` — the circuit determines where the camera is; the
+  road stays put and the car is a black dot at the sample point nearest
+  its center, so the panel updates as the car drives. RAC-4 (the
   logic-gate engine) consumes `grid()`/`pixel()`.
 - No API, no state, no other services.
 
@@ -67,12 +72,15 @@ http://111.1.2.27:8200/sim.js | head -3` shows the current file head.
   collision) and `node sim/racetrack/page.test.js` (the real key
   handlers drive the car through the fake DOM).
 - Headless camera: `node --test sim/racetrack/camera.test.js` — pins the
-  grid convention (straight = center cols road / outer cols wall, the
-  90-degree turn shifts the pattern, facing a wall = all 0) and that
-  `grid()`/`pixel()` agree and follow the car.
-- The CAM panel's live update as the car turns is asserted in
+  grid convention (top-down map of the whole circuit: road ring with an
+  empty infield, symmetric; the car is a black dot at the sample point
+  nearest its center; moving the car moves the dot, the road and the
+  heading do not change the pattern) and that `grid()`/`pixel()` agree
+  and follow the car.
+- The CAM panel's live update as the car drives is asserted in
   `page.test.js` (the grid is not deep-equal to the initial one after
-  driving); the pixels themselves need a human browser.
+  driving — the car's dot moved); the pixels themselves need a human
+  browser.
 
 ## Failure modes
 
