@@ -109,7 +109,7 @@ within a couple of minutes of the first tasks/events traffic.
 
 ## Verify live
 
-    jarvis-kq parity                      # exit 0 = zero mismatch, lag < 5m, dry-run gate ok
+    jarvis-kq parity                      # exit 0 = zero mismatch (parity + dry-run), events lag < 5m
     jarvis-kq parity --json | head -c 400
     curl -s http://111.1.2.27:8080/html/kafka-shadow | head -c 300
     docker exec jarvis-kafka /opt/bitnami/kafka/bin/kafka-consumer.sh --bootstrap-server 127.0.0.1:9092 --from-beginning --max-messages 1 --property print.properties=true kq.watermark

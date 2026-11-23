@@ -37,11 +37,20 @@ func TestKshadowStatus(t *testing.T) {
 		t.Errorf("mismatch: %s/%s", st, cls)
 	}
 
+	// lag is judged on the events aggregate (the continuously active
+	// queue) — a bursty queue 6 min from its last message is idle, not
+	// a stalled mirror
 	lag := &ks.Report{Kshadow: "up", Rows: []ks.Row{
-		{Queue: "voice", Lag: "6m0s", LastAt: now.Add(-6 * time.Minute)},
+		{Queue: "events", Lag: "6m0s", LastAt: now.Add(-6 * time.Minute)},
 	}}
 	if st, cls := kshadowStatus(lag); st != "lag" || cls != "warn" {
 		t.Errorf("lag: %s/%s", st, cls)
+	}
+	quiet := &ks.Report{Kshadow: "up", Rows: []ks.Row{
+		{Queue: "voice", Published: 4, Mirrored: 4, Written: 4, Lag: "6m0s", LastAt: now.Add(-6 * time.Minute)},
+	}}
+	if st, cls := kshadowStatus(quiet); st != "ok" || cls != "good" {
+		t.Errorf("quiet bursty queue: %s/%s", st, cls)
 	}
 	// an idle queue (never seen) is not lagging
 	idle := &ks.Report{Kshadow: "up", Rows: []ks.Row{{Queue: "dead"}}}

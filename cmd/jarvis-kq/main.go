@@ -660,7 +660,7 @@ func cmdDrop(ctx context.Context, c *kq.Client, args []string) error {
 // limit on an active queue, 3 = kshadow's state is unreachable (it is down).
 func cmdParity(ctx context.Context, c *kq.Client, args []string) int {
 	fs := flag.NewFlagSet("parity", flag.ExitOnError)
-	maxLag := fs.Duration("max-lag", 5*time.Minute, "fail when a queue's shadow lag exceeds this")
+	maxLag := fs.Duration("max-lag", 5*time.Minute, "fail when the events aggregate's shadow lag exceeds this")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
 	statePath := fs.String("state", envOr("KSHADOW_STATE", "/home/agent/.local/share/jarvis/kshadow/kshadow-state.json"), "kshadow's state file")
 	dryrunPath := fs.String("dryrun-state", envOr("KSHADOW_DRYRUN_STATE", ""), "the dry-run's state file (default: kshadow-dryrun.json next to --state)")
@@ -720,9 +720,15 @@ func cmdParity(ctx context.Context, c *kq.Client, args []string) int {
 		printParity(rep)
 	}
 
-	// The gate: zero mismatch (parity or dry-run), and lag within the
-	// limit on any queue that has traffic (an idle queue's lag is
-	// meaningless).
+	// The gate: zero mismatch (parity or dry-run), and shadow lag within
+	// the limit. Lag runs on the `events` aggregate only — the one
+	// continuously active queue, whose now−last-mirrored gap is a true
+	// shadow-lag signal. The per-queue lag of the bursty work queues
+	// (per-job cap.*/flow.*/worker lanes) measures their quiet time, not
+	// the mirror's — a queue that went idle 20 min ago "lags" 20 min
+	// with a perfectly healthy mirror, and it would pin this gate red
+	// most of the day. Those queues are gated by Mismatch above
+	// (published vs mirrored), which is the real behind-ness count.
 	for _, r := range rep.Rows {
 		if r.Mismatch > 0 || r.Dropped > 0 {
 			return 1
@@ -736,7 +742,7 @@ func cmdParity(ctx context.Context, c *kq.Client, args []string) int {
 		}
 	}
 	for _, r := range rep.Rows {
-		if r.LastAt.IsZero() {
+		if r.Queue != "events" || r.LastAt.IsZero() {
 			continue
 		}
 		if d, err := time.ParseDuration(r.Lag); err == nil && d > *maxLag {

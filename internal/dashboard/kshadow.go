@@ -113,8 +113,11 @@ func kshadowStatus(rep *ks.Report) (string, string) {
 			}
 		}
 	}
+	// Lag is judged on the `events` aggregate only (see cmdParity): a
+	// bursty queue's now−last-message gap is its quiet time, not the
+	// mirror's, so it would keep the tile on "lag" most of the day.
 	for _, r := range rep.Rows {
-		if !r.LastAt.IsZero() {
+		if r.Queue == "events" && !r.LastAt.IsZero() {
 			if d, err := time.ParseDuration(r.Lag); err == nil && d > 5*time.Minute {
 				return "lag", "warn"
 			}
