@@ -1220,6 +1220,27 @@ services:
       - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
     command: ["3001"]
 
+  # ---------------- Race-car sim (RAC, docs/sim-racetrack.md) ----------------
+  # Static page: a top-down black-and-white track with an arrow-key car.
+  # Plain JS, no build step — the Dockerfile just copies sim/racetrack/
+  # into nginx. Served on the LAN (port 8200 per the RAC plan) so it can
+  # be driven from any device on the box. Stateless; later RAC jobs add
+  # the camera, gate engine, editor and demo into the same directory.
+  sim-racetrack:
+    build:
+      context: .
+      dockerfile: docker/sim-racetrack/Dockerfile
+    image: jarvis/sim-racetrack:local
+    container_name: jarvis-sim-racetrack
+    restart: unless-stopped
+    ports:
+      - "8200:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
 volumes:
   rabbitmq_data:
   kafka_data:
