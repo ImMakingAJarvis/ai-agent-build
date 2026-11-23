@@ -1,7 +1,7 @@
 ---
 id: sim-racetrack
 name: Race-car sim (RAC)
-summary: The RAC sim's static page — a top-down B/W race track with an arrow-key car, served on :8200.
+summary: The RAC sim's static page — a top-down B/W race track with an arrow-key car and a fake-camera "CAM" panel, served on :8200.
 group: face
 kind: container
 status: active
@@ -16,19 +16,28 @@ depends_on: []
 
 ## Purpose
 
-First piece of the race-car simulator (RAC, `docs/sim-racetrack.md`): a
-top-down black-and-white race track with a car you drive around using the
-arrow keys. Plain JS, no build step, no framework — strictly two colors
-(black background, white road; the car is black on the road). Later RAC
-jobs add the fake camera (RAC-3), the logic-gate engine (RAC-4), the
+Piece one and two of the race-car simulator (RAC,
+`docs/sim-racetrack.md`): a top-down black-and-white race track with a
+car you drive around using the arrow keys, plus a fake-camera "CAM" panel
+that shows the 16x8 B/W pixel grid of what the car sees ahead (RAC-3).
+Plain JS, no build step, no framework — strictly two colors (black
+background, white road; the car is black on the road). Later RAC jobs add
+the logic-gate engine (RAC-4, which consumes the camera's grid), the
 circuit editor (RAC-5) and the demo circuit (RAC-6) into the same
 directory.
 
 ## Interfaces
 
 - `http://111.1.2.27:8200/` — the page (LAN address). Serves
-  `index.html`, `sim.js` (the pure track/car core) and `page.js`
-  (canvas + keys) from the image.
+  `index.html`, `sim.js` (the pure track/car core), `camera.js` (the
+  pure fake-camera core) and `page.js` (canvas + keys + the CAM panel)
+  from the image.
+- The fake camera (RAC-3) is a pure function of `{car, track}`:
+  `camera.grid() -> number[][]` (16 cols x 8 rows, `grid[row][col]`,
+  row 0 = nearest, col 0 = leftmost, `1 = road / 0 = wall`) and
+  `camera.pixel(row, col) -> 0|1`. The CAM panel re-renders it each
+  frame, so it updates as the car moves and turns. RAC-4 (the
+  logic-gate engine) consumes `grid()`/`pixel()`.
 - No API, no state, no other services.
 
 ## Configuration
@@ -57,6 +66,13 @@ http://111.1.2.27:8200/sim.js | head -3` shows the current file head.
   sim/racetrack/sim.test.js` (full lap, on-road invariant, wall
   collision) and `node sim/racetrack/page.test.js` (the real key
   handlers drive the car through the fake DOM).
+- Headless camera: `node --test sim/racetrack/camera.test.js` — pins the
+  grid convention (straight = center cols road / outer cols wall, the
+  90-degree turn shifts the pattern, facing a wall = all 0) and that
+  `grid()`/`pixel()` agree and follow the car.
+- The CAM panel's live update as the car turns is asserted in
+  `page.test.js` (the grid is not deep-equal to the initial one after
+  driving); the pixels themselves need a human browser.
 
 ## Failure modes
 
