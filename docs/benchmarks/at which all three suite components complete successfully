@@ -1,0 +1,32 @@
+
+In other words, the suite prefers the largest expert-cache size that still
+completes the full 131072-token battery.
+
+Expected outcomes:
+
+| Model | Expected optimal free-VRAM point | Expected optimal cache size |
+|---|---|---|
+| Qwen 3.8 Flash Next | 100 MB if it completes; otherwise 150 MB, 200 MB, 250 MB, 300 MB, or 400 MB | The resolved `moe_cache_size` at the lowest passing point |
+| GLM 5.3 Flash | 300 MB, because GLM's KDA Triton autotune scratch needs roughly 256 MiB | The resolved `moe_cache_size` at the 300 MB point if it passes; otherwise the next higher passing point |
+
+The recorded answer is not the free-VRAM target. The recorded answer is the
+engine-resolved `moe_cache_size` in MiB at the optimal point.
+
+## Test battery
+
+Each ladder point runs three components against the local `ft serve` endpoint
+on port 11436.
+
+### 1. Standard 3-run prompt
+
+The standard prompt is the same `moe-sweep-prompt.txt` used by the earlier
+VRAM sweeps. It is a code-review-style prompt and is run three times per
+ladder point.
+
+Rules:
+
+- Run 1 is cold.
+- Runs 2 and 3 are warm.
+- Prompt throughput is measured from a `max_tokens=1` call.
+- Generation throughput is calculated as:
+

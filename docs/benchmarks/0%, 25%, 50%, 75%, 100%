@@ -1,0 +1,29 @@
+
+Scoring is exact containment: the model's answer must contain the needle
+string. A position that errors, times out, truncates, or fails to contain the
+needle is a real result and is recorded.
+
+The needle test is the primary proof that the 131072-token context is usable
+at the tested expert-cache size.
+
+## Execution method
+
+For each ladder point:
+
+1. Stop the brain engine only from the GPU/sonnet/igpu point job.
+2. Verify that the GPU has enough free memory before starting the benchmark.
+3. Start `ft serve` on port 11436 with:
+   - the model's first GGUF shard,
+   - `--moe-strategy hybrid`,
+   - `--moe-cache-auto`,
+   - `--max-seq-len-override 131072`,
+   - `--kv-reserve-tokens 131072`,
+   - the calibrated `--memory-ratio` for the ladder point.
+4. Record the resolved `moe_cache_size` and KV capacity from the engine log
+   or `ft ctl`.
+5. Run the three suite components:
+   - standard 3-run prompt,
+   - coding battery,
+   - 128K needle test.
+6. Write results to:
+

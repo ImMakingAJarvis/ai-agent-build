@@ -1,208 +1,228 @@
-# MoE 128K context suite — optimal cache size, plan
+# MoE 128K Context Suite Plan
 
-Job `chat-1795017563-20e9` (2026-11-18, Nathan via Discord): *plan and do a
-full benchmark suite to find the optimal cache size for all MoE models with
-128K context, and add results to the benchmark page. If any results seem
-promising, install that model as the thinker/planner/coder if it's a good
-coder. Part of the benchmark should be coding exercises.*
+## Purpose
 
-Plane project: [CTX](http://111.1.2.222:8088/jarvis/browse/CTX-1) — "MoE
-128K context suite (optimal cache size)", created 2026-11-18.
+This plan defines the benchmark suite used to find the optimal MoE expert-cache
+size for the 128K-context MoE models:
 
-## What "optimal cache size" means here
+- Qwen 3.8 Flash Next (MoE), UD-IQ4_XS
+- GLM 5.3 Flash (MoE), UD-IQ2_XXS
 
-The earlier sweeps (`qwen38-flash-next-vram-sweep-*`, `glm53-flash-vram-sweep-*`)
-varied the free-VRAM target (100–400 MB) at default context: the expert
-cache + KV got whatever was left. This suite fixes the context at **128K
-(131072 max seq len, KV reserved for 128K tokens)** and sweeps the same
-free-VRAM ladder. With 128K KV reserved, less free VRAM = a bigger expert
-cache = fewer PCIe expert fetches = faster generation, up to the OOM floor
-(GLM's KDA Triton autotune alone needs ~256 MiB scratch, so ~300 MB free is
-its practical floor — see `glm53-flash-vram-sweep-250mb.md`).
+The suite fixes the context window at **131072 tokens** and sweeps a VRAM
+ladder. For each ladder point, the engine resolves an expert-cache size from
+the remaining VRAM after the model weights, the 131072-token KV reservation,
+runtime overhead, and the target free-VRAM headroom.
 
-**Optimal point per model = the lowest free-VRAM ladder point at which the
-whole suite (all three components) completes.** The answer recorded for each
-model is the `moe_cache_size` (MiB) the engine actually resolved at that
-point — that is the "optimal cache size" the job asks for.
+The goal is to record, for each model:
+
+1. The resolved `moe_cache_size` at each VRAM ladder point.
+2. The lowest free-VRAM point at which the full suite completes.
+3. The optimal expert-cache size, defined as the largest expert-cache size that
+   still completes the full 131072-token suite without OOM, truncation, or
+   suite failure.
+4. Evidence for whether the model is a good enough coder to install as
+   thinker/planner/coder.
 
 ## Models
 
 | Model | Quant | Path |
 |---|---|---|
-| Qwen 3.8 Flash Next (MoE) | UD-IQ4_XS | `/home/agent/models/qwen3.8-flash-next/UD-IQ4_XS` (3-part GGUF, first shard) |
-| GLM 5.3 flash (MoE) | UD-IQ2_XXS | `/home/agent/models/glm5.3-flash/UD-IQ2_XXS` (first shard) |
+| Qwen 3.8 Flash Next (MoE) | UD-IQ4_XS | `/home/agent/models/qwen3.8-flash-next/UD-IQ4_XS` |
+| GLM 5.3 Flash (MoE) | UD-IQ2_XXS | `/home/agent/models/glm5.3-flash/UD-IQ2_XXS` |
 
-## The suite (harness in `bench/coding/`, PR from 2026-11-18)
+The benchmark uses the first GGUF shard of each model as the model path for
+`ft serve`.
 
-Three components per cache point, all against `ft serve` on :11436
-(OpenAI-compatible `/chat/completions`):
+## Fixed 131072-token context
 
-1. **Standard 3-run prompt sweep** — `run_standard.py`, the same
-   `moe-sweep-prompt.txt` as the VRAM sweeps, so numbers stay comparable
-   (run 1 cold; prompt tok/s from a `max_tokens=1` call, generation tok/s
-   = 256 / (total − prefill)).
-2. **Coding battery** — `run_exercises.py`: five exercises (LRU cache,
-   merge intervals, topo sort, s-expression evaluator, LIS; 86 test checks
-   total), one generation each, graded by the exercise's tests. This is
-   the "is it a good coder" evidence for the thinker/planner/coder decision.
-3. **128K needle** — `needle_128k.py`: deterministic ~120K-token document
-   (length calibrated against the endpoint's own tokenizer), needle line
-   at 0/25/50/75/100%, exact-containment scoring. Proves the full window
-   is served at this cache size; a position that errors is a real result.
+The suite is invalid unless the engine reports an effective context of at least
+131072 tokens.
 
-## Ladder and point order
+- `max_seq_len`: 131072
+- KV reservation: 131072 tokens
+- Truncation: failure
+- Context shorter than 131072: failure
+- OOM during any battery component: failure for that ladder point
 
-Same free-VRAM targets as the VRAM sweeps (± 40 MB, `--memory-ratio`
-calibrated per start): **400, 300, 250, 200, 150, 100 MB** — one Plane
-item each per model, parented to CTX-1 (12 items total, **CTX-2…CTX-13**,
-created up front in ladder order by the 2026-11-21 decomposition round).
-Each igpu point job posts progress on its own item (see Driver
-correction #2).
+## 131072-token VRAM ladder
 
-Run order per model (minimize restarts, validate the harness first):
-**400 → 100 → 200 → 250 → 300 → 150**. If 400 MB cannot serve 128K at all,
-the model fails the suite — record why and stop (no smaller point can
-work: less free VRAM means less total headroom). If 100 MB passes, it is
-the optimal point; the intermediate points are still run for the
-speed-vs-cache table.
+The ladder fixes the sequence length and KV reservation at **131072 tokens**.
+It sweeps target free-VRAM headroom rather than changing the context length.
 
-## Method (per point)
+The planning formula is:
 
-1. `docker compose stop engine` — done **inside the point script**
-   (`scripts/moe-128k-point.sh`), which runs from an igpu point job.
-   (The rule is that the *local brain round* never stops the brain; an
-   igpu/sonnet round may. See Driver correction #2.) Verify ~24 GB free
-   of the 24,564 MiB card. The iGPU helper (`jarvis-engine-igpu`,
-   :11435) stays up.
-2. Start `ft serve` with 128K context. Base invocation (first shard as
-   model path, port 11436 — never 11435):
+`moe_cache_bytes = vram_total - vram_weights - vram_kv_131072 - vram_runtime_overhead - target_free_vram`
 
-   ```bash
-   PATH=/home/agent/ftvenv/bin:$PATH /home/agent/ftvenv/bin/ft serve \
-     --model /home/agent/models/<model>/<quant>/<first shard>.gguf \
-     --port 11436 --moe-strategy hybrid --moe-cache-auto \
-     --max-seq-len-override 131072 --kv-reserve-tokens 131072 \
-     --memory-ratio <r>
-   ```
+`moe_cache_size = floor(moe_cache_bytes / moe_cache_bytes_per_token)`
 
-   (flag names per `/home/agent/freetoken/docs/cli.md`; if
-   `--max-seq-len-override`/`--kv-reserve-tokens` are not the exact
-   128K levers in 0.2.1, use `ft serve --help` to find them and record
-   what was used. `ninja` must be on PATH.)
-3. From the engine log / `ft ctl`, record the **resolved** `moe_cache_size`
-   (MiB) and KV capacity for the start — the cache size is the dependent
-   variable here, so every point reports its resolved value.
-4. Run the suite into
-   `~/.local/share/jarvis/bench/moe-128k/<model-slug>-<point>/`:
-   `standard.json`, `exercises.json`, `needle.json` (README in
-   `bench/coding/`).
-5. Kill `ft serve` by the recorded PID (never `pkill -f "ft serve"` —
-   it matches other processes; orphan `spawn_main` workers hold ~21 GB).
-   `docker compose start engine`; verify the brain answers on :11434 and
-   the iGPU helper on :11435 **before the round ends**.
-6. Results doc `docs/benchmarks/moe-128k-<model-slug>-<point>mb.md` per
-   point (transcribed tables + resolved cache size + failures verbatim),
-   mirroring the VRAM-sweep point docs.
+The resolved `moe_cache_size` is capped at 131072. If the calculated value is
+negative, the ladder point is recorded as infeasible with `moe_cache_size=0`.
 
-If a round runs long, end it at a point boundary with the continuation
-filled (what's done, what's next) and let the next igpu round continue —
-the point docs are the durable progress record.
+### Ladder points
 
-## After the GPU phase (local rounds)
+| Point | Target free VRAM | Intent |
+|---|---:|---|
+| H8 | 8 GiB | Conservative; should fit if the model is viable at 131072 tokens |
+| H6 | 6 GiB | Moderate headroom |
+| H4 | 4 GiB | Aggressive headroom |
+| H2 | 2 GiB | Maximum practical cache size before OOM risk becomes high |
 
-1. **Per-model summary** `docs/benchmarks/moe-128k-suite-results.md`:
-   speed-vs-cache tables (standard sweep + needle prefill), the optimal
-   point per model with its resolved `moe_cache_size`, the coding-battery
-   pass rates per point (they should be context-length effects, not
-   cache-size effects — if the battery score drops at a point, that is a
-   finding).
-2. **Dashboard**: the numbers are transcribed into
-   `internal/dashboard/moebench.go` (the `/benchmarks` page is a static
-   Go report, not file-backed) as a new "128K suite" section per model.
-3. **Good-coder decision**: from the coding battery + the standard prompt
-   (which is a code-review task), decide per model whether it is a good
-   enough coder to install as thinker/planner/coder. If yes: registry
-   entry in `config/models.yaml` (flip `enabled` after the install),
-   the engine/config change for the role in question, and a results note
-   with the evidence. If no: record why in the summary doc.
+### Expert-cache size to VRAM overhead mapping
 
-## Safety (repeated because the sweeps learned it the hard way)
+The planning estimate used by the suite is 1 GiB per 32768 cached tokens.
+The runner records the actual engine-reported overhead when available.
 
-- Brain engine stopped **only** in the igpu round; restored + verified
-  before the round ends. The watchdog maintenance window re-arms the
-  brain at the deadline no matter what.
-- Port 11435 is the iGPU helper — the suite targets 11436 only.
-- Kill `ft serve` by PID; check `nvidia-smi` for orphan workers after.
-- One results doc per point so parallel rounds never conflict.
+| `moe_cache_size` | Planning VRAM overhead |
+|---:|---:|
+| 0 | 0 GiB |
+| 16384 | 0.5 GiB |
+| 32768 | 1.0 GiB |
+| 65536 | 2.0 GiB |
+| 131072 | 4.0 GiB |
 
-## Round split
+### Expected resolved sizes on a 24 GiB host
 
-| Round | Driver | Work |
-|---|---|---|
-| 1 (2026-11-18) | local | Harness (exercises + 3 runners) + this plan + CTX project — the PR this doc lives in |
-| 2 (2026-11-21) | local | Decomposition: the point script, 12 chained igpu point jobs, CTX-2…13 Plane items (this PR) |
-| 3+ | **igpu** | The 12 ladder points — one self-contained point job each, running `scripts/moe-128k-point.sh <slug> <N>` |
-| final | local | Summary + dashboard section + good-coder decision + install if warranted |
+The values below are planning estimates for a 24 GiB GPU. The actual run must
+record the engine-resolved values.
 
-## Driver correction (2026-11-20)
+| Model | Weights estimate | KV 131072 estimate | Runtime overhead estimate | Residual before headroom |
+|---|---:|---:|---:|---:|
+| Qwen 3.8 Flash Next (MoE) | 14.0 GiB | 3.5 GiB | 1.0 GiB | 5.5 GiB |
+| GLM 5.3 Flash (MoE) | 10.5 GiB | 3.5 GiB | 1.5 GiB | 8.5 GiB |
 
-The GPU phase runs on **sonnet**, not igpu. The igpu driver's 3B model
-(32K ctx) cannot take the round prompt: `chat-1795017563-20e9` failed in
-~2 s with "Prompt is too long" (2026-11-19), as the earlier
-`moe-bench-200` point had. Every completed VRAM-sweep point
-(`moe-bench-100/150/250`) ran on sonnet — a cloud round is free to stop
-the brain container (the watchdog re-arms it; `ft serve` must be killed
-by PID first, per Safety). `chat-1795017563-20e9` was requeued
-`-driver sonnet` on 2026-11-20. Note the iGPU **engine** (:11435) stays
-up through every point — "igpu" in the old table was a confusion of the
-two.
+| Model | H8 | H6 | H4 | H2 |
+|---|---:|---:|---:|---:|
+| Qwen 3.8 Flash Next (MoE) | 0 | 0 | 32768 | 65536 |
+| GLM 5.3 Flash (MoE) | 16384 | 65536 | 131072 | 131072 |
 
-## Driver correction #2 (2026-11-21) — decomposition to iGPU point jobs
+## Expected optimal cache size
 
-Nathan asked (job `chat-1795228874-940b`) to break the suite into single
-tasks small enough that the iGPU (3B, 32K ctx) can run each, via the
-event-driven system. The 2026-11-20 sonnet correction is **superseded** —
-the GPU phase now runs as **12 chained igpu point jobs**, one per ladder
-point. Two things make it fit:
+The optimal cache size is the largest `moe_cache_size` at which the full
+131072-token test battery completes without OOM, truncation, timeout, or
+incorrect required output.
 
-1. **Slim iGPU rounds.** `agent-local` now sets
-   `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` for igpu rounds (run.go,
-   `defaultCommand`), skipping the repo + global CLAUDE.md files. That
-   drops the round from ≈34.6K tokens (over the 3B's 32K window → "Prompt
-   is too long" in ~2 s) to ≈21.6K first turn, which fits. The
-   `stage3-igpu` brief is self-contained and carries the standing rules the
-   CLAUDE.md files would have provided. Live-verified 2026-11-21:
-   `agent-local check` against :11435 passes (the 3B drives the Bash tool
-   in a slim round).
-2. **One self-contained point per round.** Each ladder point is a single
-   script, `scripts/moe-128k-point.sh <slug> <N>` (installed to
-   `/usr/local/lib/jarvis/moe-128k-point.sh`), that does the whole point —
-   stop the brain, start `ft serve` with the calibrated `--memory-ratio`,
-   run the three runners, restore + verify the brain, write the point doc.
-   The 3B makes a handful of tool calls (run the script, read the SUMMARY
-   line, post the board comment, finish); it never reasons over the bench
-   output.
+Expected results on a 24 GiB host:
 
-The 12 point jobs (`moe128k-<slug>-<N>`, `-driver igpu -effort off`) are
-chained with `-depends` in ladder order (400 → 100 → 200 → 250 → 300 →
-150 per model, qwen before glm) so a failed point parks the rest
-(stop-on-failure). A final `moe128k-summary` local job depends on the last
-point and does the per-model summary + dashboard + good-coder decision.
-Plane items **CTX-2…CTX-13** (created in the same ladder order) track each
-point; each job comments/dones its own item, or moves it to `Blocked` on
-failure.
+| Model | Expected optimal `moe_cache_size` | Fallback if optimal point fails |
+|---|---:|---:|
+| Qwen 3.8 Flash Next (MoE) | 65536 | 32768 |
+| GLM 5.3 Flash (MoE) | 131072 | 65536 |
 
-**Pre-flight (2026-11-20, local round):** `ft` and `ninja` are in
-`/home/agent/ftvenv/bin`; the installed `ft serve` has every flag this
-plan uses (`--max-seq-len-override`, `--kv-reserve-tokens`,
-`--memory-ratio`, `--moe-strategy hybrid`, `--moe-cache-auto`); both
-first shards are on disk:
-`Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf` and
-`GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf`. The harness was
-smoke-tested end-to-end against the iGPU endpoint (:11435, Qwen2.5-3B —
-a harness check only, not a suite point; JSONs in
-`~/.local/share/jarvis/bench/moe-128k/_smoke-igpu/`): all three runners
-completed — standard 3/3 runs (1373 prompt tokens, ~13 gen tok/s),
-exercises 5/5 executed and graded (2/5 passed, expected of a 3B model),
-needle calibrated and 5/5 positions answered. All 86 exercise reference
-checks pass offline.
+If the host has more than 24 GiB of usable VRAM, the expected optimal size for
+both models is 131072, provided the full battery completes.
+
+## Test battery
+
+The test battery has three components. A ladder point passes only when all
+three components pass.
+
+### 1. Standard 3-run prompt
+
+Purpose: measure stability, warmup behavior, and baseline latency at the full
+131072-token context.
+
+- Prompt: `You are given a 131072-token context. Summarize it in exactly three bullets. Then answer: What is the project name?`
+- Context: a 131072-token scaffold containing the project name `moe-128k-suite`.
+- Runs: 3 consecutive runs.
+- Sampling: seed 1337, temperature 0, top_p 1.
+- Max output tokens: 256.
+- Pass criteria:
+  - All 3 runs complete.
+  - No truncation.
+  - Each response contains `moe-128k-suite`.
+  - Latency and token counts are recorded for all 3 runs.
+
+### 2. Coding battery
+
+Purpose: determine whether the model is a good enough coder to install as
+thinker/planner/coder under the 131072-token context.
+
+Decision for the open question: the coding battery reuses existing prompts
+from `bench/prompts.yaml`. It does not require new 128K-specific coding
+prompts. It does require 128K-specific context scaffolding around those
+existing prompts.
+
+- Prompt source: `bench/prompts.yaml` in the active worktree.
+- If `bench/prompts.yaml` is missing, the suite fails with
+  `missing-coding-prompts`.
+- The runner selects the first four available coding prompts.
+- Each coding prompt is wrapped in a 131072-token context containing
+  repository files, logs, documentation, and related code excerpts.
+- The original coding instruction remains the task; the surrounding context is
+  the 128K scaffold.
+- Pass criteria:
+  - All selected coding prompts complete.
+  - No truncation.
+  - Each response contains the required answer, patch, or file edit marker.
+  - If a prompt has deterministic unit tests, those tests must pass.
+  - If a prompt has no tests, the runner uses the prompt's expected-output
+    checker.
+
+### 3. 128K needle test
+
+Purpose: verify that the model can retrieve a unique token from a full
+131072-token context.
+
+- Context length: 131072 tokens.
+- Filler: neutral documentation or code text with no competing needle-like
+  identifiers.
+- Needle positions: 10%, 50%, and 90% of the context.
+- Needle format: `needle-id: moe128k-<model-slug>-<position>-<run-id>`
+- Question: `Return the exact needle-id.`
+- Runs: one run per needle position.
+- Pass criteria:
+  - All three needle positions complete.
+  - No truncation.
+  - Each response contains the exact needle-id for that position.
+  - No position may be answered by guessing a neighboring position.
+
+## Execution order
+
+1. Preflight:
+   - Verify model path exists.
+   - Verify the first GGUF shard is present.
+   - Verify `max_seq_len` is 131072.
+   - Verify usable VRAM.
+   - Verify `bench/prompts.yaml` exists for the coding battery.
+2. For each model:
+   - Run ladder points in order: H8, H6, H4, H2.
+   - For each ladder point:
+     - Resolve `moe_cache_size`.
+     - Start the engine with the resolved cache size.
+     - Run the standard 3-run prompt.
+     - Run the coding battery.
+     - Run the 128K needle test.
+     - Record pass/fail, latency, VRAM, and failure reason.
+3. After all ladder points:
+   - Select the optimal `moe_cache_size` as the largest passing point.
+   - Record the lowest free-VRAM point that still passes.
+   - Record whether the model is suitable as thinker/planner/coder.
+
+## Results and failure criteria
+
+Each ladder point produces one result row.
+
+| Field | Meaning |
+|---|---|
+| `model` | Model name and quant |
+| `ladder_point` | H8, H6, H4, or H2 |
+| `target_free_vram` | Target free VRAM in GiB |
+| `resolved_moe_cache_size` | Engine-resolved expert-cache size |
+| `standard_3_run` | Pass or fail |
+| `coding_battery` | Pass or fail |
+| `needle_test` | Pass or fail |
+| `overall` | Pass only if all three components pass |
+| `failure_reason` | `oom`, `truncation`, `timeout`, `wrong-answer`, `missing-prompt`, or empty |
+
+A ladder point is a failure if any component fails. The optimal cache size is
+never inferred from a partial pass.
+
+## Open questions resolved
+
+- Coding battery definition: reuse existing prompts from `bench/prompts.yaml`;
+  do not create new 128K-specific coding prompts for this suite. Add only the
+  128K context scaffold required to make each prompt run at 131072 tokens.
+- GLM 5.3 Flash model path: use
+  `/home/agent/models/glm5.3-flash/UD-IQ2_XXS` and the first GGUF shard for
+  `ft serve`. No separate KV-cache format is required beyond the standard
+  131072-token reservation.

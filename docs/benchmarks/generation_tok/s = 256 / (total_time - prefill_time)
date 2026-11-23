@@ -1,0 +1,56 @@
+
+The standard prompt provides a comparable speed signal across ladder points
+and across models. It also contributes to the good-coder decision because it
+is a code-review task.
+
+### 2. Coding battery
+
+The coding battery is a fixed set of five self-contained coding exercises:
+
+1. LRU cache
+2. Merge intervals
+3. Topological sort
+4. S-expression evaluator
+5. Longest increasing subsequence
+
+The battery contains 86 test checks in total. Each exercise is generated once
+per ladder point and graded by the exercise's tests.
+
+The coding battery measures whether the model can produce correct code under
+the benchmark harness. It is not a long-context test. The 128K long-context
+behavior is measured separately by the 128K needle test.
+
+#### Open question resolution: existing prompts versus new 128K-specific prompts
+
+The coding battery **reuses the existing coding exercise prompts** and does
+**not** require new 128K-specific coding prompts.
+
+The five exercises are short, self-contained, and test coding ability rather
+than long-context retrieval. Adding 128K-specific coding prompts would confound
+two separate questions:
+
+1. Can the model code correctly?
+2. Can the model serve and retrieve from a 131072-token context?
+
+This suite separates those questions:
+
+- The coding battery answers question 1.
+- The 128K needle test answers question 2.
+
+If `bench/prompts.yaml` exists in the worktree, the coding battery may read
+the exercise prompts from there. If it is absent from the main root, the
+canonical prompts are the five exercise definitions in `bench/coding/`. In
+either case, no new 128K-specific coding prompts are required for this suite.
+
+### 3. 128K needle test
+
+The 128K needle test verifies that the full 131072-token window is actually
+served at the current cache size.
+
+The test uses a deterministic document of approximately 120K tokens. The
+document length is calibrated against the endpoint's own tokenizer so that the
+prompt fits within the 131072-token reservation without relying on an external
+token estimate.
+
+A needle line is inserted at five positions:
+

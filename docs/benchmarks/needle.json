@@ -1,0 +1,18 @@
+{
+  "model": "",
+  "quant": "",
+  "ladder_point": "",
+  "free_vram_target_mb": 0,
+  "moe_cache_size_mib": 0,
+  "kv_capacity_tokens": 0,
+  "document_tokens": 0,
+  "needle": "",
+  "positions": [
+    {"pct": 0,   "passed": false, "error": null},
+    {"pct": 25,  "passed": false, "error": null},
+    {"pct": 50,  "passed": false, "error": null},
+    {"pct": 75,  "passed": false, "error": null},
+    {"pct": 100, "passed": false, "error": null}
+  ],
+  "all_passed": false
+}
