@@ -45,19 +45,29 @@ would change — flagged in the Discord note so he can correct it.
 
 ## Fake camera (RAC-3)
 
-- Captures a small **black-and-white pixel grid** from the car's forward view.
-  Default **16 cols × 8 rows** (configurable).
+- Captures a small **black-and-white pixel grid** of the **whole circuit,
+  seen from directly above** — a top-down view of everything. Corrected per
+  Nathan (2026-11-22): the camera was not the car's forward view; the
+  circuit determines where the camera is, so it looks down on the circuit's
+  bounding box (`track.bounds()`). Default **16 cols × 8 rows**
+  (configurable).
 - **Coordinate convention (fixed, documented in code):**
-  - `col 0` = leftmost … `col 15` = rightmost (across the field of view).
-  - `row 0` = nearest to the car … `row 7` = farthest (depth).
-  - Value `1` = road/track present, `0` = no road (wall/off-track).
-- Rendered as a small "camera" panel on the page (blocky B/W pixels), updating
-  live as the car moves/turns.
+  - `row 0` = top of the view (world minY) … `row 7` = bottom.
+  - `col 0` = leftmost (world minX) … `col 15` = rightmost.
+    (Same screen orientation as the main top-down canvas.)
+  - Value `1` = road/track present, `0` = no road (wall/off-track) — or the
+    car itself: the car is a black dot (like the black rectangle on the
+    main canvas) at the sample point nearest its center.
+- Rendered as a small "camera" panel on the page (blocky B/W pixels): the
+  road stays put and the car's dot moves, so the panel updates live.
 - **JS API for the circuit:**
   - `camera.grid()` → `number[][]`, `grid[row][col]`, 0/1.
   - `camera.pixel(row, col)` → 0/1.
 - The camera is a pure function of `{car, track}` so it is unit-testable
   headless.
+- Because the view is fixed (not car-relative), a driving circuit must
+  locate the car's dot in the grid first — the wall-follower sketch in
+  RAC-6 (written for a forward view) is re-derived for the top-down camera.
 
 ## Logic-gate engine (RAC-4)
 
@@ -89,7 +99,9 @@ would change — flagged in the Discord note so he can correct it.
 ## Demo + docs (RAC-6)
 
 - A pre-wired **wall-follower** circuit that drives the car around the track
-  on its own. Sketch (tuned by the builder in the harness):
+  on its own. Sketch (written for a forward view; re-derive it for the
+  top-down camera first — the circuit must locate the car's dot; tuned by
+  the builder in the harness):
   - Reduce the left and right halves of a front row into one bit each
     (OR-reduce a few pixels) → "road on the left?", "road on the right?".
   - `steerLeft  = roadOnRight AND NOT roadOnLeft` (track is to the right →
