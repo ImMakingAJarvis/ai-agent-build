@@ -54,8 +54,11 @@ Three components per cache point, all against `ft serve` on :11436
 
 Same free-VRAM targets as the VRAM sweeps (± 40 MB, `--memory-ratio`
 calibrated per start): **400, 300, 250, 200, 150, 100 MB** — one Plane
-item each per model, parented to CTX-1 (12 items total, **CTX-2…CTX-13**,
-created up front in ladder order by the 2026-11-21 decomposition round).
+item each per model, parented to CTX-1 (12 items total, **CTX-5…CTX-16**
+— three CTX items pre-existed, so the ladder starts at CTX-5, not
+CTX-2; the authoritative mapping is `/usr/local/lib/jarvis/ctx-refs.txt`,
+e.g. **glm5.3-flash 400 MB = CTX-11**), created up front in ladder
+order by the 2026-11-21 decomposition round.
 Each igpu point job posts progress on its own item (see Driver
 correction #2).
 
@@ -188,9 +191,9 @@ chained with `-depends` in ladder order (400 → 100 → 200 → 250 → 300 →
 150 per model, qwen before glm) so a failed point parks the rest
 (stop-on-failure). A final `moe128k-summary` local job depends on the last
 point and does the per-model summary + dashboard + good-coder decision.
-Plane items **CTX-2…CTX-13** (created in the same ladder order) track each
-point; each job comments/dones its own item, or moves it to `Blocked` on
-failure.
+Plane items **CTX-5…CTX-16** (created in the same ladder order; the
+mapping in `ctx-refs.txt`) track each point; each job comments/dones its
+own item, or moves it to `Blocked` on failure.
 
 **Pre-flight (2026-11-20, local round):** `ft` and `ninja` are in
 `/home/agent/ftvenv/bin`; the installed `ft serve` has every flag this
@@ -206,3 +209,57 @@ completed — standard 3/3 runs (1373 prompt tokens, ~13 gen tok/s),
 exercises 5/5 executed and graded (2/5 passed, expected of a 3B model),
 needle calibrated and 5/5 positions answered. All 86 exercise reference
 checks pass offline.
+
+## Decomposition #3 (2026-11-23) — one point = launcher + checker + sonnet fallback
+
+The 2026-11-22 attempt (`notes/ideas/moe-128k-readout.md`) showed a 3B
+iGPU round cannot babysit a 30–90 min blocking script: four of the six
+"done" qwen jobs never ran the script at all, and the glm-400 round
+thrashed its context while polling. One ladder point is now three small
+jobs, each one blocking command, with no model round ever watching the
+bench:
+
+- `moe128k-<short>-<mb>-run` (igpu, priority 90) — runs
+  `scripts/moe-128k-launch.sh <slug> <mb>`: preflights, then starts
+  `moe-128k-point.sh` **detached** under `setsid nohup timeout -k 900 3h`
+  (the point survives the round ending; the 3 h cap + TERM trap keeps a
+  hung suite from holding the brain stopped past the watchdog window).
+  The launcher waits until the brain is actually stopped ("VRAM freed"
+  in the point log) before printing `LAUNCHED`, so the sequential loop
+  cannot start a brain round onto a mid-stop engine.
+- `moe128k-<short>-<mb>-check` (igpu, priority 80) — runs
+  `scripts/moe-128k-check.sh <slug> <mb>`: blocks up to 4 h on the
+  point's `SUMMARY` line, prints one `VERDICT=` (OK / FAILED /
+  LAUNCH_FAILED / NEVER_LAUNCHED / NO_SUMMARY / STILL_RUNNING) plus
+  `SONNET=<status>`. The round acts on the verdict only: OK →
+  `jarvis-board done CTX-<n>`; failure → `Blocked` + Discord notify +
+  requeue the fallback if parked. The loop skips igpu jobs while the
+  brain is down, so the checker only runs after the point restored the
+  engine — "immediately after" without any polling.
+- `moe128k-<short>-<mb>-sonnet` (sonnet, priority 95, **parked**) — the
+  fallback, requeued only when an attempt failed. The point's own EXIT
+  trap calls `scripts/moe-128k-done.sh` (the done hook, `MOE_DONE_HOOK`
+  exported by the launcher) from the detached process — not from any
+  model round — so a launcher or checker round that OOMs or thrashes its
+  context cannot strand the chain. rc 0 → requeue the checker;
+  rc ≠ 0 → requeue the sonnet job, which records the iGPU failure on the
+  board and re-runs `moe-128k-point.sh` directly on the cloud driver.
+
+**No `-depends` between the three.** A `failed` dep blocks its
+dependents forever (the dep-block sweep only re-parks ready jobs), so a
+run→check→sonnet dependency chain would deadlock on the first failure.
+Ordering is by priority (run 90 > check 80; sonnet 95 fires only when
+requeued from parked) plus the done-hook firing. The hook requeues only
+jobs that are `parked` or `failed`, so it fires at most once per
+attempt.
+
+Preflight hardening in `moe-128k-point.sh` (all three 11-22 runs died on
+one failed `curl :11434`): the brain-up check retries 10 × 60 s;
+preflight failures `pfail` into `point.log` (stderr no longer lives only
+in the dead round's terminal); the watchdog maintain window is 4 h
+(3 h cap + 15 min cleanup). The launcher rotates a stale `point.log` to
+`point.log.prev-<ts>` before a new attempt, so the checker can never
+match an old attempt's `SUMMARY` line.
+
+First point under this decomposition: **glm5.3-flash 400 MB (CTX-11)**,
+the decisive point and the head of the blocked chain.
