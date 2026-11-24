@@ -76,7 +76,7 @@ fi
 # The brain must be up (the point stops it). Retry: a photo swap window or a
 # transient engine blip should ride out, not kill the launch. 10 x 60 s.
 i=0
-until curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; do
+until curl -sf http://127.0.0.1:11434/health >/dev/null 2>&1; do
   i=$((i + 1))
   if (( i >= 10 )); then
     echo "LAUNCH_FAILED reason=brain (:11434) not up after 10 min"

@@ -56,7 +56,12 @@ if [[ ! -f "$LOGF" ]]; then
     [[ -f "$LOGF" ]] && break
     sleep 60
   done
-  [[ -f "$LOGF" ]] || verdict NEVER_LAUNCHED 1
+  if [[ ! -f "$LOGF" ]]; then
+    # The launcher may have failed its preflight while we waited: it
+    # touches launch-failed before exiting. Report the real reason.
+    [[ -f "$OUT/launch-failed" ]] && verdict LAUNCH_FAILED 1
+    verdict NEVER_LAUNCHED 1
+  fi
 fi
 
 # Keep this attempt's log under a stable name so a fallback re-run cannot

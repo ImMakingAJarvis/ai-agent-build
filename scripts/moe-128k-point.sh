@@ -93,10 +93,10 @@ restore_verify() {
   $COMPOSE start engine >/dev/null 2>&1 || true
   local i ok=1
   for i in $(seq 1 90); do
-    curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
+    curl -sf http://127.0.0.1:11434/health >/dev/null 2>&1 && break
     sleep 5
   done
-  curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 || ok=0
+  curl -sf http://127.0.0.1:11434/health >/dev/null 2>&1 || ok=0
   curl -sf http://127.0.0.1:11435/v1/models >/dev/null 2>&1 || ok=0
   if (( ok )); then log "brain :11434 + iGPU helper :11435 verified up"; else
     log "ENGINE RESTORE FAILED (brain or iGPU not answering)"; return 1
@@ -166,7 +166,7 @@ command -v ninja >/dev/null 2>&1 || PATH=/home/agent/ftvenv/bin:$PATH
 # window or a transient engine blip at launch must not kill the point (the
 # 11-22 points all died on one failed curl).
 i=0
-until curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; do
+until curl -sf http://127.0.0.1:11434/health >/dev/null 2>&1; do
   i=$((i + 1))
   (( i >= 10 )) && pfail "brain (:11434) not up after 10 min — refusing to start"
   log "preflight: brain (:11434) not answering yet (try $i/10), waiting 60 s"
