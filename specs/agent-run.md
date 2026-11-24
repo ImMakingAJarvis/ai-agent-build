@@ -53,6 +53,11 @@ RESUME blocks when the job was parked or preempted).
 
 - Unit `EnvironmentFile`: `~/.config/jarvis/agent.env`; drop-ins in
   `systemd/agent-run.service.d/` (effort, output tokens).
+- `ANTHROPIC_API_KEY` in `agent.env` authenticates the paid drivers
+  (sonnet/opus run the `claude` binary with it; the unit reads the file
+  once at start). The current value is the `claude-api-key` secret
+  (`jarvis-secrets get claude-api-key`): after a rotation, update the env
+  file and run `agent-run-restart` (it defers to after the running round).
 - Briefs: `~/.config/jarvis/stage3-<driver>.txt`, written by
   `bootstrap.sh` (the source of truth for their text).
 - Standing instructions: repo `CLAUDE.md` + `~/.claude/CLAUDE.md`
@@ -103,3 +108,8 @@ confirm the new text is in the prompt.
   stderr line, and retries back off 30 s, 60 s, ... up to 10 min. The
   run's stderr is copied to `~/.config/jarvis/auto-run.err` and then to
   agent.log.
+- A rotated key left in the secret store but not in `agent.env`: paid
+  driver rounds died on their first API call with 401 "Invalid API key"
+  (2026-11-14, review job for PR #253; fixed 2026-11-24, job
+  chat-1795515224-5027 — env file updated from the `claude-api-key`
+  secret, unit restarted via `agent-run-restart`).
