@@ -67,6 +67,7 @@ mkdir -p "$OUT"
 POINT_RC=0        # 0 until proven otherwise; cleanup reads it
 POINT_FAIL=""     # reason for a non-zero exit
 FT_PID=""
+echo $$ > "$OUT/point.pid"   # the launcher and checker track this pid
 R_USED=""         # memory-ratio actually used for the completed start
 F_FREE=""         # free VRAM (MiB) measured after load, for the completed start
 CALIB_NOTE="no correction needed"
@@ -139,21 +140,42 @@ cleanup() {
   local s="FAILED ${POINT_FAIL}"
   (( POINT_RC == 0 )) && s="OK r=$R_USED free=${F_FREE}MiB $CALIB_NOTE"
   echo "SUMMARY moe-128k $SLUG ${TARGET_MB}mb: $s" | tee -a "$OUT/point.log"
+  # Fire the follow-up jobs from HERE, not from a model round: the launcher
+  # and checker rounds can die (iGPU OOM / context), but this trap always
+  # runs. OK -> the checker verifies; FAILED -> the sonnet fallback re-runs.
+  if [[ -n "${MOE_DONE_HOOK:-}" && -x "${MOE_DONE_HOOK}" ]]; then
+    "$MOE_DONE_HOOK" "$SLUG" "$TARGET_MB" "$POINT_RC" >>"$OUT/hook.log" 2>&1 || true
+  fi
   exit "$rc"
 }
 trap cleanup EXIT
+# A hard kill from the launcher's timeout cap must still run cleanup (kill ft,
+# restore the brain). TERM exits through the EXIT trap.
+trap 'POINT_FAIL="killed by signal (timeout cap?)"; exit 124' TERM INT
 
 # ------------------------------------------------------------ pre-flight --
-[[ -x "$FT" ]] || { echo "ft not found at $FT" >&2; exit 2; }
+# Preflight failures go to point.log as well as stderr: a detached point has
+# no terminal, and the 11-22 runs lost their preflight stderr with the dead
+# round.
+pfail() { echo "PREFLIGHT $*" >&2; echo "PREFLIGHT $*" >> "$OUT/point.log"; exit 2; }
+[[ -x "$FT" ]] || pfail "ft not found at $FT"
 command -v ninja >/dev/null 2>&1 || PATH=/home/agent/ftvenv/bin:$PATH
 [[ -f "$REPO/bench/coding/run_standard.py" && -f "$REPO/docs/benchmarks/moe-sweep-prompt.txt" ]] \
   || { echo "harness or prompt file missing in $REPO" >&2; exit 2; }
-curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 \
-  || { echo "brain (:11434) is not up — unexpected state, refusing to start" >&2; exit 2; }
-if curl -sf http://127.0.0.1:11436/v1/models >/dev/null 2>&1; then
-  echo ":11436 already answers — another ft serve is running; refusing to start" >&2; exit 2
-fi
-jarvis-watchdog maintain 2h "moe-128k point $SLUG ${TARGET_MB}mb" >/dev/null 2>&1 \
+# The brain must be up (this point stops it). Retry 10 x 60 s: a photo swap
+# window or a transient engine blip at launch must not kill the point (the
+# 11-22 points all died on one failed curl).
+i=0
+until curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; do
+  i=$((i + 1))
+  (( i >= 10 )) && pfail "brain (:11434) not up after 10 min — refusing to start"
+  log "preflight: brain (:11434) not answering yet (try $i/10), waiting 60 s"
+  sleep 60
+done
+curl -sf http://127.0.0.1:11436/v1/models >/dev/null 2>&1 \
+  && pfail ":11436 already answers — another ft serve is running"
+# The window must outlive the launcher's 3 h cap + 15 min cleanup grace.
+jarvis-watchdog maintain 4h "moe-128k point $SLUG ${TARGET_MB}mb" >/dev/null 2>&1 \
   || log "warning: could not open a watchdog maintenance window"
 
 # ------------------------------------------------------------------ run --
