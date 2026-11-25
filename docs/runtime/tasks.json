@@ -578,7 +578,7 @@
     {
       "id": "m4-1-loopd-api",
       "title": "M4.1 loopd daemon and its HTTP API",
-      "description": "loopd serves POST /v1/tasks, GET /v1/tasks/{id}, cancel, messages, approvals, GET /v1/state, GET /v1/events (server-sent events), /metrics, /healthz. Bearer token from a mounted 0600 file. Joins the compose network, publishes on 127.0.0.1 only. Remove the 'loop' profile gate. Check the image can do everything a round does today (git push with the GitHub app token, gh, go build and test, the jarvis-* CLIs) and report anything that cannot run in the container.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "loopd serves POST /v1/tasks, GET /v1/tasks/{id}, cancel, messages, approvals, GET /v1/state, GET /v1/events (server-sent events), /metrics, /healthz. Bearer token from a mounted 0600 file. Joins the compose network, publishes on 127.0.0.1 only. Remove the 'loop' profile gate. Check the image can do everything a round does today (git push with the GitHub app token, gh, go build and test, the jarvis-* CLIs) and report anything that cannot run in the container.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -588,7 +588,7 @@
     {
       "id": "m4-2-permissions",
       "title": "M4.2 Permission rules: allow, deny, ask",
-      "description": "runtime/perm: a pure Decide(rules, call) returning Allow, Deny or Ask. Inside the task's workspace file tools and shell are allowed; allowlist rules are {tool, pattern} pairs from config; the deny list refuses; everything else asks. Workspace is a git worktree per task on a mounted volume (reuse internal/taskrunner worktree code). The container's only writable mounts are the workspace volume, the job store and the snapshot directory.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "runtime/perm: a pure Decide(rules, call) returning Allow, Deny or Ask. Inside the task's workspace file tools and shell are allowed; allowlist rules are {tool, pattern} pairs from config; the deny list refuses; everything else asks. Workspace is a git worktree per task on a mounted volume (reuse internal/taskrunner worktree code). The container's only writable mounts are the workspace volume, the job store and the snapshot directory.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -598,7 +598,7 @@
     {
       "id": "m4-3-async-approvals",
       "title": "M4.3 Approvals as events: a waiting task holds no slot",
-      "description": "An operation that needs approval is stored as awaiting_approval; the job waits with reason approval and holds no slot. The answer arrives through the API as approval.decided and either starts the operation or returns 'denied: <note>' as that tool call's result. Reminder after 1 h, optional expiry. Test: 20 jobs parked on approvals hold zero slots, survive a restart, one is approved and resumes.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "An operation that needs approval is stored as awaiting_approval; the job waits with reason approval and holds no slot. The answer arrives through the API as approval.decided and either starts the operation or returns 'denied: <note>' as that tool call's result. Reminder after 1 h, optional expiry. Test: 20 jobs parked on approvals hold zero slots, survive a restart, one is approved and resumes.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -608,7 +608,7 @@
     {
       "id": "m4-4-claim-and-discord",
       "title": "M4.4 loopd claims driver:loop jobs; Discord approver",
-      "description": "loopd claims ready jobs whose driver is loop straight from the store with the existing Claim; jarvis-jobs next skips them so agent-run never sees them. Finished tasks record summary and PR link through the store's existing finish path. Stop, pause and restart signals for a loop job go to the cancel endpoint. A Discord approver posts the request with buttons through the jarvis-discord path and calls the approval endpoint.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "loopd claims ready jobs whose driver is loop straight from the store with the existing Claim; jarvis-jobs next skips them so agent-run never sees them. Finished tasks record summary and PR link through the store's existing finish path. Stop, pause and restart signals for a loop job go to the cancel endpoint. A Discord approver posts the request with buttons through the jarvis-discord path and calls the approval endpoint.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -618,7 +618,7 @@
     {
       "id": "m4-5-coexistence",
       "title": "M4.5 Do not overlap with Claude Code rounds on slot 0",
-      "description": "Until M5 the runtime and Claude Code rounds share slot 0. The runtime does not schedule while the job store shows a running job on the local driver. jarvis-jobs next skips local jobs while the runtime has unfinished tasks, using the same marker-file mechanism as the game hold.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Until M5 the runtime and Claude Code rounds share slot 0. The runtime does not schedule while the job store shows a running job on the local driver. jarvis-jobs next skips local jobs while the runtime has unfinished tasks, using the same marker-file mechanism as the game hold.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -628,7 +628,7 @@
     {
       "id": "m4-6-caller-audit",
       "title": "M4.6 Audit every caller of the brain; pin the unpinned",
-      "description": "List every caller of the brain (cmd/worker, internal/planworker, cmd/jarvis-ha, scripts/voice_service.py, cmd/jarvis-chat, cmd/jarvis-reply, cmd/superagent) and whether it pins a slot. Change unpinned callers to pin the chat slot. Output: docs/runtime/engine-callers.md.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "List every caller of the brain (cmd/worker, internal/planworker, cmd/jarvis-ha, scripts/voice_service.py, cmd/jarvis-chat, cmd/jarvis-reply, cmd/superagent) and whether it pins a slot. Change unpinned callers to pin the chat slot. Output: docs/runtime/engine-callers.md.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -638,7 +638,7 @@
     {
       "id": "m4-7-gate-b",
       "title": "M4.7 Gate B: a real build job on the brain through driver loop",
-      "description": "One real build job with driver: loop runs on the brain to an open PR, with a shell call over 10 s and one approval answered from Discord. Record tick count, idle-while-ready and wall time in docs/runtime/gate-b.md. Sonnet runs and judges this.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "One real build job with driver: loop runs on the brain to an open PR, with a shell call over 10 s and one approval answered from Discord. Record tick count, idle-while-ready and wall time in docs/runtime/gate-b.md. Sonnet runs and judges this.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -648,7 +648,7 @@
     {
       "id": "m4-8-first-ui-pages",
       "title": "M4.8 First two UI pages, read-only: Overview and Waiting",
-      "description": "Mock-ups for Nathan to approve first. Then the Overview page (a card per slot, waiting counts by reason, next five tasks, loaded models, alerts) and the Waiting page (every task that is not running, grouped by what it waits on, how long, snapshot location). Pages read only the loopd API and its event stream. Server-rendered Go templates, no Node build step.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Mock-ups for Nathan to approve first. Then the Overview page (a card per slot, waiting counts by reason, next five tasks, loaded models, alerts) and the Waiting page (every task that is not running, grouped by what it waits on, how long, snapshot location). Pages read only the loopd API and its event stream. Server-rendered Go templates, no Node build step.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -658,7 +658,7 @@
     {
       "id": "m4-9-instructions-hooks-notes",
       "title": "M4.9 Obey CLAUDE.md, the hooks and the notes rules",
-      "description": "Config instruction_files loaded into every root task's fixed system prompt: the driver brief (stage3-loop.txt), the agent instructions, the repo CLAUDE.md, any CLAUDE.md or AGENTS.md in the working directory. A hook runner that reads .claude/settings.json and runs the three existing hooks unchanged (same JSON on stdin, exit code 2 blocks). A task cannot finish while a stop hook blocks. notes/ and the jarvis-notes, jarvis-board, jarvis-discord, jarvis-kanban CLIs work inside the container; memory_search is ported.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Config instruction_files loaded into every root task's fixed system prompt: the driver brief (stage3-loop.txt), the agent instructions, the repo CLAUDE.md, any CLAUDE.md or AGENTS.md in the working directory. A hook runner that reads .claude/settings.json and runs the three existing hooks unchanged (same JSON on stdin, exit code 2 blocks). A task cannot finish while a stop hook blocks. notes/ and the jarvis-notes, jarvis-board, jarvis-discord, jarvis-kanban CLIs work inside the container; memory_search is ported.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -668,7 +668,7 @@
     {
       "id": "m4-10-agent-loop-md",
       "title": "M4.10 docs/agent-loop.md: the loop edition of the agent instructions",
-      "description": "docs/agent-claude.md teaches workarounds for a blocking harness (yield and wake by hand, the photo-window swap protocol, the machine snapshot). Write docs/agent-loop.md with the same standing rules and those sections replaced by the tool that now does the job. Nathan reviews it before Gate B. Sonnet writes this.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "docs/agent-claude.md teaches workarounds for a blocking harness (yield and wake by hand, the photo-window swap protocol, the machine snapshot). Write docs/agent-loop.md with the same standing rules and those sections replaced by the tool that now does the job. Nathan reviews it before Gate B. Sonnet writes this.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -678,7 +678,7 @@
     {
       "id": "m5-1-priority-aging",
       "title": "M5.1 Numeric priority and aging",
-      "description": "Effective priority = base + aging_rate x minutes waited, capped one below the lowest reservation threshold. Default map (config): voice 100, chat 90, fix 70, build 50, background 20. Pure function sched.Decide, simulated-clock tests.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Effective priority = base + aging_rate x minutes waited, capped one below the lowest reservation threshold. Default map (config): voice 100, chat 90, fix 70, build 50, background 20. Pure function sched.Decide, simulated-clock tests.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -688,7 +688,7 @@
     {
       "id": "m5-2-reservations-lending",
       "title": "M5.2 Reserved capacity and lending",
-      "description": "Config reservations: [{slots: 1, min_priority: 90}]. An idle reserved slot may run lower-priority work, marked preemptible, and is taken back when qualifying work is ready.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Config reservations: [{slots: 1, min_priority: 90}]. An idle reserved slot may run lower-priority work, marked preemptible, and is taken back when qualifying work is ready.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -698,7 +698,7 @@
     {
       "id": "m5-3-preemption",
       "title": "M5.3 Preemption and anti-thrash rules",
-      "description": "Preempt when the candidate's effective priority exceeds the running task's by priority_gap and the running task has had min_run_ms. Preempting cancels the stream and discards the partial reply. A per-slot swap_budget suspends non-reserved preemption. Ties: warm KV first, then resuming over new, then age.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Preempt when the candidate's effective priority exceeds the running task's by priority_gap and the running task has had min_run_ms. Preempting cancels the stream and discards the partial reply. A per-slot swap_budget suspends non-reserved preemption. Ties: warm KV first, then resuming over new, then age.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -708,7 +708,7 @@
     {
       "id": "m5-4-context-budget",
       "title": "M5.4 Context budget across slots",
-      "description": "If slots share one context (M0 decision), Decide refuses an assignment that would overflow it and first erases the least recently used idle warm slot.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "If slots share one context (M0 decision), Decide refuses an assignment that would overflow it and first erases the least recently used idle warm slot.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -718,7 +718,7 @@
     {
       "id": "m5-5-own-all-slots",
       "title": "M5.5 The runtime owns every slot; chat and voice go through it",
-      "description": "POST /v1/chat: a one-tick task with no tools, streamed, at chat priority. jarvis-reply, the Hermes chat client and the voice service call it instead of the engine and keep their iGPU fallback. On the box, a Discord message during a loop build gets its reply and the build resumes from its warm slot or snapshot.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "POST /v1/chat: a one-tick task with no tools, streamed, at chat priority. jarvis-reply, the Hermes chat client and the voice service call it instead of the engine and keep their iGPU fallback. On the box, a Discord message during a loop build gets its reply and the build resumes from its warm slot or snapshot.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -728,7 +728,7 @@
     {
       "id": "m5-6-scheduler-explains",
       "title": "M5.6 The scheduler explains itself; Queue page",
-      "description": "Decide returns, for every ready task, its position and the reason in words. GET /v1/queue serves it. The Queue page shows the full order with reasons, drag to reorder, change priority, hold or release, and the backlog as a separate list.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Decide returns, for every ready task, its position and the reason in words. GET /v1/queue serves it. The Queue page shows the full order with reasons, drag to reorder, change priority, hold or release, and the backlog as a separate list.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -738,7 +738,7 @@
     {
       "id": "m6-1-registry-fields",
       "title": "M6.1 Registry and catalog fields",
-      "description": "Add registry fields load_seconds, capabilities, arch (dense | moe | looped), kv_type, tool_protocol, start, stop. Correct the brain's entry, which still says engine: ollama.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Add registry fields load_seconds, capabilities, arch (dense | moe | looped), kv_type, tool_protocol, start, stop. Correct the brain's entry, which still says engine: ollama.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -748,7 +748,7 @@
     {
       "id": "m6-2-brain-suspension",
       "title": "M6.2 Brain suspension: park tasks with snapshots across a swap",
-      "description": "Suspend(model): stop assigning ticks, let running ticks finish for up to suspend_grace then preempt, snapshot every warm slot, move tasks to waiting reason model, publish model.suspended. Resume makes them ready; restore is lazy. POST /v1/models/{id}/suspend and /resume.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Suspend(model): stop assigning ticks, let running ticks finish for up to suspend_grace then preempt, snapshot every warm slot, move tasks to waiting reason model, publish model.suspended. Resume makes them ready; restore is lazy. POST /v1/models/{id}/suspend and /resume.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -758,7 +758,7 @@
     {
       "id": "m6-3-resourced-uses-it",
       "title": "M6.3 resourced and jarvis-swap call suspend and resume",
-      "description": "jarvis-swap out calls suspend before docker stop jarvis-engine; in calls resume after /health is 200. For loop tasks this replaces 'refuse while a round runs' and 'cut the round for a game'. Add min_residency. Update specs/resourced.md and docs/brain-swap.md. Sonnet only: it stops the brain.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "jarvis-swap out calls suspend before docker stop jarvis-engine; in calls resume after /health is 200. For loop tasks this replaces 'refuse while a round runs' and 'cut the round for a game'. Add min_residency. Update specs/resourced.md and docs/brain-swap.md. Sonnet only: it stops the brain.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -768,7 +768,7 @@
     {
       "id": "m6-4-capability-ops",
       "title": "M6.4 Capabilities as operations",
-      "description": "A capability tool whose operation publishes the existing v2 envelope to cap.<name> with the operation id as correlation id and a per-task reply queue; the Result becomes op.done with artifact paths. Capabilities marked needs_brain_out now work from inside a task.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "A capability tool whose operation publishes the existing v2 envelope to cap.<name> with the operation id as correlation id and a per-task reply queue; the Result becomes op.done with artifact paths. Capabilities marked needs_brain_out now work from inside a task.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -778,7 +778,7 @@
     {
       "id": "m6-5-devices-poststeps",
       "title": "M6.5 Devices, continuations, post-steps",
-      "description": "Each registered device has its own Engine and slot set; a task's model selects the engine, so the iGPU helper runs alongside the 4090. Optional post_step on the envelope. On the box: a brain task requests an image, the brain is suspended, the image model runs, the task resumes with the file path and its context.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Each registered device has its own Engine and slot set; a task's model selects the engine, so the iGPU helper runs alongside the 4090. Optional post_step on the envelope. On the box: a brain task requests an image, the brain is suspended, the image model runs, the task resumes with the file path and its context.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -788,7 +788,7 @@
     {
       "id": "m7-1-snapshot-tiers",
       "title": "M7.1 Snapshots in RAM first, copied to disk behind",
-      "description": "ram_dir (tmpfs) and disk_dir. The engine's --slot-save-path points at ram_dir (compose change for jarvis-engine, sonnet only). A write-behind goroutine copies each snapshot to disk and fsyncs. Restore from RAM, else disk to RAM first, else re-prefill.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "ram_dir (tmpfs) and disk_dir. The engine's --slot-save-path points at ram_dir (compose change for jarvis-engine, sonnet only). A write-behind goroutine copies each snapshot to disk and fsyncs. Restore from RAM, else disk to RAM first, else re-prefill.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -798,7 +798,7 @@
     {
       "id": "m7-2-ram-budget",
       "title": "M7.2 Snapshot RAM budget with least-recently-used eviction",
-      "description": "snapshot_ram_cap_mb. Over the cap, the least recently used snapshots leave RAM once their disk copy exists; snapshots of tasks waiting on an approval go first.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "snapshot_ram_cap_mb. Over the cap, the least recently used snapshots leave RAM once their disk copy exists; snapshots of tasks waiting on an approval go first.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -808,7 +808,7 @@
     {
       "id": "m7-3-unified-budget",
       "title": "M7.3 One memory budget for weights and snapshots",
-      "description": "Extend the ledger with holders for snapshots and for swapped-out weights. Snapshots go to disk first, weights are evicted last. Lock resident weights in memory if the engine supports it (M0.3).\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Extend the ledger with holders for snapshots and for swapped-out weights. Snapshots go to disk first, weights are evicted last. Lock resident weights in memory if the engine supports it (M0.3).\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -818,7 +818,7 @@
     {
       "id": "m8-1-task-trees",
       "title": "M8.1 Subtasks with packed briefs",
-      "description": "Tool spawn_task(brief, inputs, model?, priority?). The child's first message is a packed brief, never the parent's history. The parent waits with reason child. The child's result comes back as one capped tool result; its transcript is archived; read_archive(task_id, query) reads it.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Tool spawn_task(brief, inputs, model?, priority?). The child's first message is a packed brief, never the parent's history. The parent waits with reason child. The child's result comes back as one capped tool result; its transcript is archived; read_archive(task_id, query) reads it.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -828,7 +828,7 @@
     {
       "id": "m8-2-error-side-tasks",
       "title": "M8.2 Errors become side-tasks",
-      "description": "Config on_error: when a tool result is an error larger than error_inline_bytes, or the same call failed error_repeat times, spawn a fix child that gets the error by handle and the approaches already tried. The parent sees one status line.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Config on_error: when a tool result is an error larger than error_inline_bytes, or the same call failed error_repeat times, spawn a fix child that gets the error by handle and the approaches already tried. The parent sees one status line.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -838,7 +838,7 @@
     {
       "id": "m8-3-compaction",
       "title": "M8.3 Compaction as a fallback for long conversations",
-      "description": "Only for tasks marked long-lived. Past compact_at, the oldest messages are replaced by a summary and the snapshot is invalidated.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Only for tasks marked long-lived. Past compact_at, the oldest messages are replaced by a summary and the snapshot is invalidated.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -848,7 +848,7 @@
     {
       "id": "m8-4-heartbeat-cancel",
       "title": "M8.4 Heartbeat, timeout and cancelling a task tree",
-      "description": "No output for heartbeat_silence means hung. On timeout kill the process group and return a short result. cancel.requested cascades to every descendant. Tools marked NeedsGPU take a ledger lease first.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "No output for heartbeat_silence means hung. On timeout kill the process group and return a short result. cancel.requested cascades to every descendant. Tools marked NeedsGPU take a ledger lease first.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -858,7 +858,7 @@
     {
       "id": "m8-5-long-operations",
       "title": "M8.5 Long operations: kill on stall, not on duration; download tool",
-      "description": "A long operation is hung only when it makes no progress for stall_timeout (default 10 min). download(url, path, sha256?) resumes with range requests, reports progress, checks free disk space, verifies size or checksum, retries a stall by resuming. Long operations survive a daemon restart.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "A long operation is hung only when it makes no progress for stall_timeout (default 10 min). download(url, path, sha256?) resumes with range requests, reports progress, checks free disk space, verifies size or checksum, retries a stall by resuming. Long operations survive a daemon restart.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -868,7 +868,7 @@
     {
       "id": "m8-6-repo-map",
       "title": "M8.6 Repo map",
-      "description": "repo_map(paths?, budget_tokens): a compact ranked summary of a workspace (files, top-level symbols, signatures), cached per commit. Go first with the standard library parser; other languages fall back to file names and a regex. Each child brief gets about 2000 tokens of it.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "repo_map(paths?, budget_tokens): a compact ranked summary of a workspace (files, top-level symbols, signatures), cached per commit. Go first with the standard library parser; other languages fall back to file names and a regex. Each child brief gets about 2000 tokens of it.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -878,7 +878,7 @@
     {
       "id": "m9-1-plugin-contract",
       "title": "M9.1 Plugin contract",
-      "description": "A plugin is a separate process using the HTTP API and event stream. Document it with the Discord approver as the worked example.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "A plugin is a separate process using the HTTP API and event stream. Document it with the Discord approver as the worked example.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -888,7 +888,7 @@
     {
       "id": "m9-2-plane-sync",
       "title": "M9.2 Plane as an event-synced UI",
-      "description": "Outward: a listener with its own durable queue on the events exchange creates the Plane item when a task is created and updates it on status, comment and result. Inward: plane-bridge turns each webhook into an event that creates, schedules, updates or cancels the internal task. Echo guard so the listener's own writes do not come back as new tasks. The plan pipeline's direct write to Plane is removed.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Outward: a listener with its own durable queue on the events exchange creates the Plane item when a task is created and updates it on status, comment and result. Inward: plane-bridge turns each webhook into an event that creates, schedules, updates or cancels the internal task. Echo guard so the listener's own writes do not come back as new tasks. The plan pipeline's direct write to Plane is removed.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -898,7 +898,7 @@
     {
       "id": "m9-3-cards-as-tasks",
       "title": "M9.3 Task-runner cards run as runtime tasks; remove Aider",
-      "description": "Worktree, acceptance check, merge and epic PR logic stay; the Aider round is replaced by a runtime task; Aider and its Python environment are removed.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Worktree, acceptance check, merge and epic PR logic stay; the Aider round is replaced by a runtime task; Aider and its Python environment are removed.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -908,7 +908,7 @@
     {
       "id": "m9-4-router",
       "title": "M9.4 Router: work item to capability, model and priority",
-      "description": "A routes table in config first, a brain classification as fallback. Start from internal/router.PickModel and the Hermes fast classifier.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "A routes table in config first, a brain classification as fallback. Start from internal/router.PickModel and the Hermes fast classifier.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -918,7 +918,7 @@
     {
       "id": "m9-5-mcp",
       "title": "M9.5 MCP client and server",
-      "description": "Client: MCP servers in config appear as tools; each call is an operation. Server: loopd exposes submit, status and approve as MCP tools.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Client: MCP servers in config appear as tools; each call is an operation. Server: loopd exposes submit, status and approve as MCP tools.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -928,7 +928,7 @@
     {
       "id": "m9-6-web-ui",
       "title": "M9.6 Web UI, complete",
-      "description": "Connections graph, task detail, models and memory, config editor, plugins, secrets (encrypted at rest), history. Login and HTTPS beyond localhost. Mock-ups for Nathan first. The old dashboard is retired page by page.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Connections graph, task detail, models and memory, config editor, plugins, secrets (encrypted at rest), history. Login and HTTPS beyond localhost. Mock-ups for Nathan first. The old dashboard is retired page by page.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -938,7 +938,7 @@
     {
       "id": "m9-7-built-in-chat",
       "title": "M9.7 Built-in chat that turns a plan into tasks",
-      "description": "Scope with Nathan after M9.6.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Scope with Nathan after M9.6.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -948,7 +948,7 @@
     {
       "id": "l1-review-loop",
       "title": "L1 Review loop",
-      "description": "On task.done a review child is queued automatically with a fresh context, on a different model when one is available. Outcomes: approve, request changes, escalate. review_max_rounds bounds the loop.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "On task.done a review child is queued automatically with a fresh context, on a different model when one is available. Outcomes: approve, request changes, escalate. review_max_rounds bounds the loop.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -958,7 +958,7 @@
     {
       "id": "l2-fix-memory",
       "title": "L2 Fix memory",
-      "description": "Records of symptom, fix that worked, attempts that did not, with confidence. Matches are hints for the fix child, never truth.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "Records of symptom, fix that worked, attempts that did not, with confidence. Matches are hints for the fix child, never truth.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
@@ -968,11 +968,118 @@
     {
       "id": "l3-architectures",
       "title": "L3 MoE and vLLM engines",
-      "description": "A MoE engine adapter with hot-in-VRAM and pinned-in-RAM sizes as separate ledger entries. A vLLM adapter with no slot save. Scheduler uses measured tokens per second per model.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "description": "A MoE engine adapter with hot-in-VRAM and pinned-in-RAM sizes as separate ledger entries. A vLLM adapter with no slot save. Scheduler uses measured tokens per second per model.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. EVERY card that adds or changes code must also add or extend tests: name the test file and list the test cases in the card, and make the acceptance check the command that runs them. Full text: the 'Implementation plan' tab of the spec doc.",
       "files": [],
       "dependencies": [],
       "acceptance_check": "split into cards; this item itself is not executed",
       "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "bm-1-suite",
+      "title": "B1 Benchmark suite: six fixed jobs, three scenarios, one script",
+      "description": "Goal: a fixed benchmark we can run before and after each milestone, to see whether the runtime is actually better than Claude Code rounds on the local brain. Nothing here depends on the runtime; it must run today.\n\nDo:\n1. Fixtures under docs/runtime/bench/fixtures/, each a tiny self-contained directory with its own check command:\n - edit-small: a Go module with one failing test; the job fixes one function. Check: go test ./...\n - slow-test: the same kind of bug, but the test suite takes about 60 s (a sleep in TestMain). Check: go test ./...\n - slow-command: the job must run './fetch.sh' (which sleeps 120 s and then writes data.txt) and then write the number of lines of data.txt into answer.txt. Check: test \"$(cat answer.txt)\" = \"$(wc -l < data.txt | tr -d ' ')\"\n - multi-file: rename a function used in five files. Check: go build ./... && ! grep -rn OldName .\n - big-log: './build.sh' prints about 200 KB of log with ONE real error line in the middle; the job fixes the cause. Check: ./build.sh\n - docs: write a README section describing the three exported functions of a small package. Check: grep -c for the three names in README.md equals 3.\n2. docs/runtime/bench/suite.json: for each job its id, instructions (plain words, the same text for every driver), fixture directory and check command; and three scenarios: S1 = each job alone, one after another; S2 = all six queued at the same moment; S3 = S2 plus five chat messages sent 60 s apart while it runs.\n3. scripts/bench_runtime.sh <driver> <scenario> <out.json>: copies the fixtures to a fresh temp workspace, creates the jobs for that driver (read docs/agent-run.md and cmd/jarvis-jobs for how to add and run a job on a named driver without the Discord checkpoint), waits for them, runs each check, and writes out.json with, per job: status, check passed, wall seconds, kWh from the job store; and for the whole run: wall seconds, jobs passed, GPU utilisation average and VRAM peak (Prometheus at :9090, the nvidia exporter metrics), prompt and generated tokens (difference of the llamacpp counters on the engine's /metrics before and after), seconds the GPU was under 10 percent busy while a job was unfinished, and for S3 the reply time of each chat message. Tag every job 'bench'.\n4. scripts/bench_runtime_test.sh: runs the script with driver 'fake' (a mode that marks jobs done without a model) to prove the collection and the JSON shape work.\n5. docs/runtime/bench/README.md: what each number means and how to run it.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/bench/suite.json",
+        "docs/runtime/bench/README.md",
+        "docs/runtime/bench/fixtures/",
+        "scripts/bench_runtime.sh",
+        "scripts/bench_runtime_test.sh"
+      ],
+      "dependencies": [],
+      "acceptance_check": "bash -n scripts/bench_runtime.sh && bash scripts/bench_runtime_test.sh && python3 -c \"import json;d=json.load(open('docs/runtime/bench/suite.json'));assert len(d['jobs'])==6 and len(d['scenarios'])==3\"",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "bm-2-baseline",
+      "title": "B2 Baseline: run the suite on Claude Code (local driver) before anything changes",
+      "description": "Goal: the 'before' numbers. Without them nobody can say later whether the runtime is better.\n\nDo: when the job queue is empty, run scripts/bench_runtime.sh local S1, then S2, then S3, each twice (the model is not deterministic; two runs show the spread). Keep the six out.json files under docs/runtime/bench/results/ named local-<scenario>-<run>.json. Write docs/runtime/bench/baseline-local.md with one table per scenario: per job pass or fail and wall seconds for both runs; then the run totals: wall seconds, jobs passed out of 6, GPU busy average, seconds the GPU sat under 10 percent while work was unfinished, prompt tokens and generated tokens, kWh, and for S3 the median and worst chat reply time. End with the line 'Baseline recorded: <date>'. Post the totals to the epic: jarvis-board comment --model sonnet ELR-1 \"<three lines>\".\nThis takes hours of brain time. Tell Nathan before you start (jarvis-discord notify --item ELR-1) and do not run it while he has real jobs queued.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/bench/baseline-local.md",
+        "docs/runtime/bench/results/"
+      ],
+      "dependencies": [
+        "bm-1-suite"
+      ],
+      "acceptance_check": "grep -q '^Baseline recorded: ' docs/runtime/bench/baseline-local.md && test $(ls docs/runtime/bench/results/local-S*.json | wc -l) -ge 6",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "bm-3-after-gate-a",
+      "title": "B3 After Gate A: do two jobs really overlap? (loopctl vs baseline)",
+      "description": "Goal: the first real comparison. The runtime's core claim is that a job waiting on a slow command does not block the next job.\n\nDo: with loopctl run (card M3.6a) run the two slow jobs of the suite together, slow-test and slow-command, on slot 0, twice. Take the same two jobs from the baseline S1 results (run one after the other on the local driver). Write docs/runtime/bench/after-m3.md: a table with, for baseline and for loopctl: wall seconds for both jobs together, both checks passed or not, prompt tokens evaluated, seconds the GPU sat under 10 percent while work was unfinished, and for loopctl the idle_while_ready_seconds it prints. Then say in plain words what happened: did the second job run during the first one's wait, and did the first job's second tick reuse its cache or re-read its whole prompt. End with exactly one line: 'Better than baseline: yes', 'Better than baseline: no' or 'Better than baseline: mixed', followed by one sentence of why. If the answer is no or mixed, post it to the epic and notify Nathan before any M4 card is started.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/bench/after-m3.md"
+      ],
+      "dependencies": [
+        "m3-6b-gate-a-live",
+        "bm-2-baseline"
+      ],
+      "acceptance_check": "grep -qE '^Better than baseline: (yes|no|mixed)' docs/runtime/bench/after-m3.md",
+      "size": "S",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "bm-4-after-gate-b",
+      "title": "B4 After Gate B: the whole suite on driver loop against the baseline",
+      "description": "Goal: the main comparison, on real jobs through the real daemon.\n\nDo: run scripts/bench_runtime.sh loop S1, S2 and S3, twice each, results under docs/runtime/bench/results/loop-m4-<scenario>-<run>.json. Write docs/runtime/bench/after-m4.md with the same tables as baseline-local.md, baseline and loop side by side, plus from loopd's /metrics: idle_while_ready seconds, snapshot saves and restores, warm hits. Call out three numbers on top: jobs passed (loop vs baseline), S2 wall time (loop vs baseline), seconds of idle GPU with work unfinished (loop vs baseline). A lower pass count than the baseline is a failure of the milestone whatever the speed: say so. End with one line 'Better than baseline: yes|no|mixed' and one sentence of why; post it to the epic and notify Nathan.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/bench/after-m4.md",
+        "docs/runtime/bench/results/"
+      ],
+      "dependencies": [
+        "m4-7-gate-b",
+        "bm-2-baseline"
+      ],
+      "acceptance_check": "grep -qE '^Better than baseline: (yes|no|mixed)' docs/runtime/bench/after-m4.md",
+      "size": "S",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "bm-5-after-m5",
+      "title": "B5 After M5: chat reply time under load, and what a preemption costs",
+      "description": "Goal: check the scheduling policy does what it promises: a chat message is answered fast while builds run, and the build loses little.\n\nDo: run scenario S3 on driver loop twice (results loop-m5-S3-<run>.json). Write docs/runtime/bench/after-m5.md: median and worst chat reply time for baseline, for after-m4 and for now; how many times a build was preempted; for each preemption the seconds until that build was generating again and whether it came back from a warm slot, a snapshot or a full re-read; S2 wall time now against after-m4 (the policy must not make throughput worse by more than 10 percent). End with 'Better than baseline: yes|no|mixed' and one sentence of why; post it to the epic and notify Nathan.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/bench/after-m5.md"
+      ],
+      "dependencies": [
+        "m5-5-own-all-slots",
+        "bm-4-after-gate-b"
+      ],
+      "acceptance_check": "grep -qE '^Better than baseline: (yes|no|mixed)' docs/runtime/bench/after-m5.md",
+      "size": "S",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "bm-6-after-m6",
+      "title": "B6 After M6: what a model swap costs a running job",
+      "description": "Goal: compare a swap with the runtime against today's behaviour, where a round is refused or cut and starts again from nothing.\n\nDo: start the multi-file job on driver loop; when it has run at least three ticks, request one image (the image.generate capability) so the brain must be swapped out. Measure: seconds from the request to the image file; seconds from the image file to the job generating again; whether the job continued with its earlier context (its next tick's prompt tokens evaluated, against its total context); whether its check passes at the end. Do the same on the local driver for comparison (today the photo waits for the round to end, or the round is cut: record which happened and the total time for both pieces of work). Run each twice. Write docs/runtime/bench/after-m6.md with the table and end with 'Better than baseline: yes|no|mixed' and one sentence of why; post it to the epic and notify Nathan. This card stops the brain: open a maintenance window first.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/bench/after-m6.md"
+      ],
+      "dependencies": [
+        "m6-5-devices-poststeps",
+        "bm-4-after-gate-b"
+      ],
+      "acceptance_check": "grep -qE '^Better than baseline: (yes|no|mixed)' docs/runtime/bench/after-m6.md",
+      "size": "S",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "bm-7-after-m7",
+      "title": "B7 After M7: restore from RAM against restore from disk",
+      "description": "Goal: check that keeping snapshots in RAM is worth its memory.\n\nDo: for contexts of about 8000, 32000 and 100000 tokens, park a job and resume it three ways: snapshot in the RAM tier, snapshot on disk only, no snapshot (full re-read). Record seconds from 'ready' to the first generated token for each. Repeat the M6 swap measurement once with the RAM tier on. Write docs/runtime/bench/after-m7.md with the table, the RAM used by the snapshots, and one line 'RAM tier worth it: yes|no' with the reason; post it to the epic and notify Nathan.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/bench/after-m7.md"
+      ],
+      "dependencies": [
+        "m7-2-ram-budget",
+        "bm-6-after-m6"
+      ],
+      "acceptance_check": "grep -qE '^RAM tier worth it: (yes|no)' docs/runtime/bench/after-m7.md",
+      "size": "S",
       "executor_model": "claude-sonnet-5-5"
     }
   ]
