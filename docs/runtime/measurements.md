@@ -29,3 +29,19 @@ Measured 2026-11-25 on the live brain (llama.cpp `b1-7170cad4d`, `--parallel 2 -
 | (f) | Two tools, a prompt needing both: two `tool_calls` in one message? | Yes. One assistant message with two `tool_calls` (`get_weather {"city":"Paris"}`, `get_time {"city":"Tokyo"}`), `finish_reason` `tool_calls`; `reasoning_content` is a separate field and `content` is empty. The streamed version carries both calls as deltas and ends with `finish_reason:"tool_calls"` and `[DONE]`. Raw replies: `fixtures/toolcalls.json`, `fixtures/toolcalls.sse`. | `POST /v1/chat/completions` with the two tools, `temperature 0`, once with and once with `"stream":true`. |
 
 Decision 4 is not affected: (c) restore-after-restart and (d) are both yes.
+
+## Reload time
+
+Seconds from `docker start jarvis-engine` until `GET 127.0.0.1:11434/health` returns 200, after `docker stop jarvis-engine` and a 10 s wait (weights in the OS page cache):
+
+| run | seconds |
+|---|---|
+| 1 | 3.85 |
+| 2 | 3.81 |
+| 3 | 3.83 |
+
+mean: 3.83 s
+
+mlock flag: yes
+
+`llama-server --help` lists `--mlock` (force the model to stay in RAM) and `--mmap`/`--no-mmap`; the brain does not pass `--mlock`. Measured 2026-11-25 inside a maintenance window; no `plane-run_task-*` job was running before or after the three runs, so none was repeated.
