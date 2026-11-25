@@ -111,7 +111,7 @@ submit() { # submit <id>
   instr=${instr//\{dir\}/$ws/$id}
   now >"$state/$id.start"
   "$JJ" add -id "$(jid "$id")" -title "bench $id ($scenario)" -driver "$driver_arg" \
-    -tags bench -source bench -class background -instructions "$instr" >/dev/null
+    -tags bench -source bench -class build -priority 50 -instructions "$instr" >/dev/null
 }
 
 jstatus() { "$JJ" show "$(jid "$1")" 2>/dev/null | awk '/^status:/ {print $2; exit}'; }
