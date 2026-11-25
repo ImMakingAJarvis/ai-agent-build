@@ -1,0 +1,979 @@
+{
+  "epic": "ELR-1",
+  "tasks": [
+    {
+      "id": "m0-1-measure-slots",
+      "title": "M0.1 Measure slot save, restore and re-prefill on the brain",
+      "description": "Goal: numbers for how long it takes to save and restore a llama.cpp slot, and how fast the brain re-reads a prompt, so later cards can choose thresholds.\n\nDo: write scripts/measure_slots.sh, modelled on scripts/engine-try.sh (which already times a save and a restore on a small model). Against the live brain at http://127.0.0.1:11434, for prompt sizes of about 8000, 32000 and 100000 tokens: (1) send the prompt to slot 0 with \"id_slot\":0 and \"cache_prompt\":true and max_tokens 1; record prompt tokens and seconds (this is re-prefill speed, tokens per second). (2) POST /slots/0?action=save with {\"filename\":\"measure-<size>.bin\"}; record seconds and the file size in /var/lib/jarvis/slots. (3) POST /slots/0?action=erase, then action=restore with the same filename; record seconds. (4) Repeat steps 2-3 once with the snapshot file copied to a tmpfs directory to see if RAM is faster to read (if the engine can only read its --slot-save-path, say so and skip). Delete the measure-*.bin files at the end.\n\nWrite the results to docs/runtime/measurements.md under a heading '## Save, restore, re-prefill' as one table: size, snapshot MB, save s, restore s, re-prefill tokens/s. Under it write one line starting 'snapshot_min_tokens:' with the prompt size below which re-prefill is faster than save plus restore.\n\nRun it only when no agent job is running (jarvis-jobs show; nothing in status running on driver local).\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "scripts/measure_slots.sh",
+        "docs/runtime/measurements.md"
+      ],
+      "dependencies": [],
+      "acceptance_check": "bash -n scripts/measure_slots.sh && grep -q '^snapshot_min_tokens:' docs/runtime/measurements.md",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m0-2-engine-behaviours",
+      "title": "M0.2 Verify six engine behaviours the design depends on",
+      "description": "Goal: six yes/no facts about the pinned llama.cpp build, each with the command that showed it. The runtime design depends on them.\n\nDo: add a section '## Engine behaviours' to docs/runtime/measurements.md with a table of six rows. First column is the letter in brackets, then the question, the answer, and the command or request used.\n(a) With --kv-unified and --parallel 2, how is the 131072-token context shared between slots: can one slot use all of it, and what happens when both slots together exceed it?\n(b) A request with no id_slot: which slot does it land on when slot 0 holds a cached prompt and slot 1 is idle? And when both hold cached prompts?\n(c) Does a snapshot saved from slot 0 restore after 'docker restart jarvis-engine'? Does it restore into slot 1?\n(d) Start a long generation on slot 0, close the HTTP connection after a few tokens, then send the same prompt again with cache_prompt true: is the prompt still cached (prompt tokens evaluated near zero)?\n(e) Send a two-turn chat where the first assistant turn included reasoning. Is the earlier reasoning kept in the prompt on the second turn, and does the second request reuse the cache?\n(f) POST /v1/chat/completions with two tools defined and a prompt that needs both: does the reply carry two tool_calls in one message? Save the raw JSON of the reply in docs/runtime/fixtures/toolcalls.json and the raw SSE lines of the streamed version in docs/runtime/fixtures/toolcalls.sse (later cards use them as test fixtures).\n\nIf (c) restore-after-restart or (d) is 'no', write 'STOP: design decision 4 needs review' at the top of the file and send jarvis-discord notify with that line.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/measurements.md",
+        "docs/runtime/fixtures/toolcalls.json",
+        "docs/runtime/fixtures/toolcalls.sse"
+      ],
+      "dependencies": [
+        "m0-1-measure-slots"
+      ],
+      "acceptance_check": "test $(grep -cE '^\\| \\((a|b|c|d|e|f)\\)' docs/runtime/measurements.md) -eq 6 && test -s docs/runtime/fixtures/toolcalls.sse",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m0-3-reload-time",
+      "title": "M0.3 Measure brain reload time with a warm page cache",
+      "description": "Goal: how long the brain takes to come back after a stop, when its weights are still in the OS page cache. This sets the minimum time a model swap can take.\n\nDo: open a maintenance window (jarvis-watchdog maintain 30m). Three times: docker stop jarvis-engine, wait 10 s, docker start jarvis-engine, and time until curl -s 127.0.0.1:11434/health returns 200. Also run '/opt/jarvis-engine/bin/llama-server --help | grep -i mlock' (find the binary path from docker-compose.yml if it differs) and record whether a memory-lock flag exists. Add a section '## Reload time' to docs/runtime/measurements.md with the three timings, the mean, and one line 'mlock flag: yes|no'. Close the maintenance window (jarvis-watchdog maintain off) and confirm /health is 200.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/measurements.md"
+      ],
+      "dependencies": [
+        "m0-2-engine-behaviours"
+      ],
+      "acceptance_check": "grep -q '^## Reload time' docs/runtime/measurements.md && grep -qE '^mlock flag: (yes|no)' docs/runtime/measurements.md",
+      "size": "S",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m0-4-decide-thresholds",
+      "title": "M0.4 Read the measurements and set the thresholds",
+      "description": "Goal: turn the M0 numbers into the config defaults the next cards use, and decide whether the plan can continue as written.\n\nDo: read docs/runtime/measurements.md. Add a section '## Decisions' with one line each, in this exact form:\n'Decision: snapshot_min_tokens = <n>' (below this, do not save; re-prefill instead),\n'Decision: slots share context = yes|no' (from behaviour a),\n'Decision: unpinned requests are unsafe = yes|no' (from b; yes means every caller must pin a slot),\n'Decision: snapshots survive restart = yes|no' (from c),\n'Decision: cancel keeps prompt cache = yes|no' (from d),\n'Decision: keep reasoning in history = yes|no' (from e; choose the one that reuses the cache),\n'Decision: min_residency_seconds = <n>' (at least 20 times the mean reload time).\nThen one line 'Plan status: continue' or 'Plan status: stop, because ...'. Post the Decisions section to the epic with jarvis-board comment --model sonnet ELR-1 \"<text>\" and send jarvis-discord notify --item ELR-1 with the plan status line.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/measurements.md"
+      ],
+      "dependencies": [
+        "m0-3-reload-time"
+      ],
+      "acceptance_check": "test $(grep -c '^Decision: ' docs/runtime/measurements.md) -ge 7 && grep -q '^Plan status: ' docs/runtime/measurements.md",
+      "size": "S",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m1-1a-skeleton",
+      "title": "M1.1a Skeleton: runtime/ directory, loopd and loopctl stubs, spec",
+      "description": "Goal: empty but building homes for the new code. No behaviour yet.\n\nDo:\n1. Create runtime/doc.go: 'package runtime' with a comment 'Package runtime is the event-loop agent runtime (plan: Plane project ELR).'\n2. Create cmd/loopd/main.go: package main. It reads LOOPD_ADDR (default \":9110\"), serves GET /healthz returning 200 and the text \"ok\", and logs \"loopd listening on <addr>\". Use only net/http and log. Before using 9110 run: grep -rn 9110 docker-compose.yml specs/ . If anything matches, use the next free port and say so in the spec.\n3. Create cmd/loopctl/main.go: package main. 'loopctl version' prints \"loopctl dev\". Any other argument prints 'usage: loopctl version' to stderr and exits 1.\n4. Create specs/loopd.md. Copy specs/switchboard.md as the model for the front matter and section headings (read specs/README.md first for the required fields). Set id: loopd, kind: container, status: planned if the README allows it (otherwise active), compose: [loopd], binaries: [cmd/loopd, cmd/loopctl], group: agent. Purpose: 'The event-loop agent runtime daemon: schedules ticks for jobs with driver loop. Skeleton only for now.'\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/doc.go",
+        "cmd/loopd/main.go",
+        "cmd/loopctl/main.go",
+        "specs/loopd.md"
+      ],
+      "dependencies": [
+        "m0-4-decide-thresholds"
+      ],
+      "acceptance_check": "go build ./cmd/loopd ./cmd/loopctl ./runtime/... && go test ./specs/",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-1b-docker",
+      "title": "M1.1b loopd Docker image and compose service (profile loop)",
+      "description": "Goal: loopd builds and runs as a compose service, but does not start with the stack yet.\n\nDo:\n1. Create docker/loopd/Dockerfile. The Go services share docker/jarvis-go/Dockerfile (the switchboard service uses it); read it and copy its build stage. The final image must also contain git, the Go toolchain and the gh CLI, because later the runtime runs builds and tests inside this container. Build both binaries: /usr/local/bin/loopd and /usr/local/bin/loopctl. ENTRYPOINT [\"loopd\"].\n2. Add a service 'loopd' to docker-compose.yml, next to switchboard. container_name: jarvis-loopd. profiles: [\"loop\"]. restart: unless-stopped. environment: LOOPD_ADDR=\":9110\". ports: \"127.0.0.1:9110:9110\". Copy env_file and the job-store volume mount from the switchboard service exactly.\n3. Update specs/loopd.md: ports, health URL http://loopd:9110/healthz, and a Deploy section: docker compose --profile loop build loopd && docker compose --profile loop up -d loopd.\n\nDo NOT touch the engine, engine-igpu or engine-voice services.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "docker/loopd/Dockerfile",
+        "docker-compose.yml",
+        "specs/loopd.md"
+      ],
+      "dependencies": [
+        "m1-1a-skeleton"
+      ],
+      "acceptance_check": "docker compose --profile loop config -q && docker compose --profile loop build loopd && go test ./specs/",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-2a-store-fields",
+      "title": "M1.2a Job store: new optional fields on Spec and State",
+      "description": "Goal: the job store can hold what a runtime task needs. Additive only: old jobs must still load.\n\nRead first: internal/agentjob/store.go (types Spec and State).\n\nDo, in internal/agentjob/store.go:\n- Add to Spec, all with json 'omitempty': ParentID string `json:\"parent_id,omitempty\"`; RootID string `json:\"root_id,omitempty\"`; Capability string `json:\"capability,omitempty\"`; WantModel string `json:\"want_model,omitempty\"` (do NOT name it Model: State already has a Model field and Job embeds both Spec and State, so two fields named Model would clash); Workspace string `json:\"workspace,omitempty\"`; Acceptance []string `json:\"acceptance,omitempty\"`.\n- Add to State, all 'omitempty': WaitReason string `json:\"wait_reason,omitempty\"`; Tokens int `json:\"tokens,omitempty\"`; WarmSlot *int `json:\"warm_slot,omitempty\"`; Snapshot *SnapshotRef `json:\"snapshot,omitempty\"`.\n- Add type SnapshotRef struct { File string `json:\"file\"`; Fingerprint string `json:\"fingerprint\"`; Tokens int `json:\"tokens\"`; Bytes int64 `json:\"bytes\"`; Tier string `json:\"tier\"` }.\n- Add constants: WaitOperation = \"operation\", WaitApproval = \"approval\", WaitModel = \"model\", WaitChild = \"child\", WaitUser = \"user\".\n\nTest (new file internal/agentjob/loopfields_test.go): TestLoopFieldsRoundTrip ingests a job with the new Spec fields, sets the new State fields with SetStatus, reads it back with Get and compares. TestLoopFieldsOldJobLoads writes a job directory by hand with only the old fields (copy the JSON shape from an existing test in store_test.go) and checks Get succeeds and the new fields are zero.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "internal/agentjob/store.go",
+        "internal/agentjob/loopfields_test.go"
+      ],
+      "dependencies": [
+        "m1-1a-skeleton"
+      ],
+      "acceptance_check": "go test ./internal/agentjob/ -run 'TestLoopFields'",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-2b-messages-log",
+      "title": "M1.2b Job store: messages.jsonl (append-only message log)",
+      "description": "Goal: each job can keep its conversation as an append-only file, one JSON object per line.\n\nDo: create internal/agentjob/loopmsg.go with:\ntype LoopMessage struct { Seq int `json:\"seq\"`; Role string `json:\"role\"`; Content json.RawMessage `json:\"content\"`; Tokens int `json:\"tokens,omitempty\"`; At time.Time `json:\"at\"` }\nfunc (s *Store) MessagesPath(id string) string  // filepath.Join(s.JobDir(id), \"messages.jsonl\")\nfunc (s *Store) AppendMessages(id string, msgs ...LoopMessage) ([]LoopMessage, error)\nfunc (s *Store) Messages(id string) ([]LoopMessage, error)\n\nAppendMessages: read the current last Seq (0 if the file is missing), give each new message the next Seq (1, 2, 3 ...) and At = time.Now().UTC() when zero, open the file with os.O_APPEND|os.O_CREATE|os.O_WRONLY mode 0o644, write all lines in ONE Write call (so they land together), call f.Sync(), close, and return the messages with their Seq set. Messages: read the file line by line; a missing file returns nil, nil; a last line that is not valid JSON (a write cut off by a crash) is ignored, any other bad line is an error. Use bufio.Reader, not bufio.Scanner (lines can be longer than 64 KB).\n\nTests (internal/agentjob/loopmsg_test.go): TestAppendMessagesAssignsSeq (two calls, Seq continues 1,2,3); TestMessagesMissingFile; TestMessagesIgnoresTornLastLine (append half a JSON line by hand, Messages returns the good ones); TestMessagesLongLine (a 200 KB content).\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "internal/agentjob/loopmsg.go",
+        "internal/agentjob/loopmsg_test.go"
+      ],
+      "dependencies": [
+        "m1-2a-store-fields"
+      ],
+      "acceptance_check": "go test ./internal/agentjob/ -run 'TestAppendMessages|TestMessages'",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-2c-ops-files",
+      "title": "M1.2c Job store: operation and approval files",
+      "description": "Goal: each job can keep one JSON file per operation (a tool call running outside the model) and per approval request.\n\nDo: create internal/agentjob/loopops.go with:\ntype LoopOp struct { ID string `json:\"id\"`; ToolCallID string `json:\"tool_call_id\"`; Tool string `json:\"tool\"`; Args json.RawMessage `json:\"args\"`; Status string `json:\"status\"`; PID int `json:\"pid,omitempty\"`; StartedAt *time.Time `json:\"started_at,omitempty\"`; Deadline *time.Time `json:\"deadline,omitempty\"`; LastProgress *time.Time `json:\"last_progress,omitempty\"`; Result json.RawMessage `json:\"result,omitempty\"` }\nStatus constants: OpPending = \"pending\", OpAwaitingApproval = \"awaiting_approval\", OpRunning = \"running\", OpDone = \"done\", OpFailed = \"failed\", OpTimeout = \"timeout\", OpCancelled = \"cancelled\", OpLost = \"lost\".\nfunc (o LoopOp) Finished() bool  // true for done, failed, timeout, cancelled, lost\nfunc (s *Store) PutOp(jobID string, op LoopOp) error      // writes <JobDir>/ops/<op.ID>.json with the package's writeJSON (it is already atomic: temp file + rename); create the ops directory with os.MkdirAll\nfunc (s *Store) GetOp(jobID, opID string) (LoopOp, error)\nfunc (s *Store) Ops(jobID string) ([]LoopOp, error)       // all ops sorted by ID; missing directory returns nil, nil; skip files ending in .tmp or .log\nfunc (s *Store) OpLogPath(jobID, opID string) string       // <JobDir>/ops/<opID>.log\ntype LoopApproval struct { ID string `json:\"id\"`; OpID string `json:\"op_id\"`; Request json.RawMessage `json:\"request\"`; Status string `json:\"status\"`; DecidedBy string `json:\"decided_by,omitempty\"`; DecidedAt *time.Time `json:\"decided_at,omitempty\"`; RemindAt *time.Time `json:\"remind_at,omitempty\"` }  // Status: \"pending\", \"approved\", \"denied\"\nfunc (s *Store) PutApproval(jobID string, a LoopApproval) error   // <JobDir>/approvals/<a.ID>.json\nfunc (s *Store) Approvals(jobID string) ([]LoopApproval, error)\nReject an op or approval ID that is empty or contains '/' or '..' with an error.\n\nTests (internal/agentjob/loopops_test.go): TestPutGetOp, TestOpsSortedAndSkipsLogs, TestOpFinished (table over all statuses), TestPutApprovalRoundTrip, TestOpBadID.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "internal/agentjob/loopops.go",
+        "internal/agentjob/loopops_test.go"
+      ],
+      "dependencies": [
+        "m1-2b-messages-log"
+      ],
+      "acceptance_check": "go test ./internal/agentjob/ -run 'TestPutGetOp|TestOps|TestOpFinished|TestPutApproval|TestOpBadID'",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-2d-checkpoint-tests",
+      "title": "M1.2d Checkpoint: API stub and the crash tests (tests first)",
+      "description": "Goal: write the tests for the checkpoint BEFORE the code. A checkpoint saves one tick: the new messages, the operations they start, and the new state. The store has no transactions, so the order of writes is the design.\n\nDo: create internal/agentjob/checkpoint.go with only this:\ntype Checkpoint struct { Messages []LoopMessage; Ops []LoopOp; State State }\n// failAfter is a test hook: Checkpoint returns errInjected right after finishing step n (1 = messages appended, 2 = ops written). 0 = never.\nvar failAfter int\nvar errInjected = errors.New(\"injected failure\")\nfunc (s *Store) Checkpoint(id string, cp Checkpoint) error { return errors.New(\"not implemented\") }\nfunc (s *Store) RecoverLoop(id string) error { return errors.New(\"not implemented\") }\n\nCreate internal/agentjob/checkpoint_test.go. Start EVERY test with: t.Skip(\"enabled by card m1-2e\"). Tests:\n- TestCheckpointHappy: a job in status running; Checkpoint with one assistant message whose Content is {\"tool_calls\":[{\"id\":\"call_1\",\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}]}, one LoopOp{ID:\"op1\", ToolCallID:\"call_1\", Tool:\"shell\", Status:OpPending}, and State.Status \"waiting\" with WaitReason WaitOperation. After it: Messages has 1 entry, Ops has 1, Get shows waiting.\n- TestCheckpointCrashAfterMessages: set failAfter=1; Checkpoint returns errInjected; then RecoverLoop(id); expect: Messages has 1 entry, Ops has 1 op with ID \"call_1\" (rebuilt from the tool call, Status pending, Tool \"shell\"), state is waiting with WaitReason operation.\n- TestCheckpointCrashAfterOps: failAfter=2; then RecoverLoop; expect the same end result as the happy case.\n- TestRecoverLoopNoToolCalls: last message is an assistant message with no tool_calls and state still says running; RecoverLoop sets status to ready (the tick must be decided again by the loop).\n- TestRecoverLoopIdempotent: calling RecoverLoop twice changes nothing the second time.\nReset failAfter to 0 with t.Cleanup in each test.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "internal/agentjob/checkpoint.go",
+        "internal/agentjob/checkpoint_test.go"
+      ],
+      "dependencies": [
+        "m1-2c-ops-files"
+      ],
+      "acceptance_check": "go vet ./internal/agentjob/ && go test ./internal/agentjob/ -run 'TestCheckpoint|TestRecoverLoop' -v | grep -c SKIP | grep -q 5",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-2e-checkpoint-impl",
+      "title": "M1.2e Checkpoint and RecoverLoop: make the tests pass",
+      "description": "Goal: implement Store.Checkpoint and Store.RecoverLoop so the tests from card m1-2d pass.\n\nDo, in internal/agentjob/checkpoint.go:\nCheckpoint(id, cp), in exactly this order:\n1. s.AppendMessages(id, cp.Messages...). If failAfter == 1, return errInjected.\n2. For each op in cp.Ops: s.PutOp(id, op). If failAfter == 2, return errInjected.\n3. Write the state with the store's existing state setter (s.SetStatus(id, cp.State)).\nAn error in any step is returned at once.\n\nRecoverLoop(id): the message log is the truth.\n1. msgs := s.Messages(id). If there are none, return nil.\n2. Take the LAST message with Role \"assistant\". Decode its Content as struct { ToolCalls []struct { ID string `json:\"id\"`; Name string `json:\"name\"`; Arguments json.RawMessage `json:\"arguments\"` } `json:\"tool_calls\"` }.\n3. For each tool call with no op whose ToolCallID equals its ID (look in s.Ops(id)): PutOp with ID = the tool call ID, ToolCallID = the same, Tool = Name, Args = Arguments, Status = OpPending.\n4. Count tool calls that have a later message with Role \"tool\" whose Content has \"tool_call_id\" equal to the call's ID; those are answered.\n5. Read the job. Only change the state when Status is \"running\" or \"waiting\": if there are unanswered tool calls set Status \"waiting\" and WaitReason WaitOperation; if there are none set Status \"ready\" and clear WaitReason. Do not write when nothing changes.\n\nThen remove the t.Skip line from every test in internal/agentjob/checkpoint_test.go. Do not change the tests in any other way.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "internal/agentjob/checkpoint.go",
+        "internal/agentjob/checkpoint_test.go"
+      ],
+      "dependencies": [
+        "m1-2d-checkpoint-tests"
+      ],
+      "acceptance_check": "go test ./internal/agentjob/ -run 'TestCheckpoint|TestRecoverLoop' -v | grep -c '^--- PASS' | grep -q 5 && go test ./internal/agentjob/",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-3a-loop-events-queue",
+      "title": "M1.3a RabbitMQ: the loop.events queue and the LoopEvent type",
+      "description": "Goal: a durable queue that carries runtime events (a tool finished, a user sent a message, an approval was decided).\n\nRead first: internal/queue/flow.go (EnsureFlowQueue, PublishFlow) and internal/queue/dlx.go (EnsureDLX, declareWithDLX).\n\nDo: create internal/queue/loopevents.go:\nconst LoopEventsQueue = \"loop.events\"\ntype LoopEvent struct { ID string `json:\"id\"`; Type string `json:\"type\"`; JobID string `json:\"job_id,omitempty\"`; OpID string `json:\"op_id,omitempty\"`; Payload json.RawMessage `json:\"payload,omitempty\"`; At time.Time `json:\"at\"` }\nEvent type constants: EvTaskSubmitted = \"task.submitted\", EvTaskReady = \"task.ready\", EvTaskDone = \"task.done\", EvOpStarted = \"op.started\", EvOpProgress = \"op.progress\", EvOpDone = \"op.done\", EvApprovalRequested = \"approval.requested\", EvApprovalDecided = \"approval.decided\", EvUserMessage = \"user.message\", EvTimerFired = \"timer.fired\", EvModelSuspended = \"model.suspended\", EvModelResumed = \"model.resumed\", EvCancelRequested = \"cancel.requested\".\nfunc NewLoopEvent(typ, jobID string) LoopEvent   // ID = \"ev-<unix nanos>-<6 random hex>\", At = now UTC\nfunc (c *Conn) EnsureLoopEventsQueue() error       // same as EnsureFlowQueue does for a flow queue: EnsureDLX, declare durable with the dead-letter args via declareWithDLX, bind to the tasks exchange on \"loop.events.#\"\nfunc (c *Conn) PublishLoopEvent(ctx context.Context, ev LoopEvent) error   // EnsureLoopEventsQueue, then publish persistent in confirm mode and wait for the broker ack, exactly as PublishFlow does; routing key \"loop.events.default\"; message id = ev.ID\nfunc EncodeLoopEvent(ev LoopEvent) ([]byte, error); func DecodeLoopEvent(b []byte) (LoopEvent, error)   // decode rejects an empty ID or Type\n\nAlso add \"loop.events\" to rabbitmq/definitions.json: copy the queue entry and binding of an existing durable queue and change the names; give it the argument \"x-dead-letter-exchange\": \"jarvis.dlx\" so it matches what declareWithDLX declares (a mismatch makes the broker answer 406).\n\nTests (internal/queue/loopevents_test.go): TestLoopEventEncodeDecode, TestLoopEventDecodeRejectsEmpty, TestNewLoopEventUniqueIDs (1000 ids, all different).\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "internal/queue/loopevents.go",
+        "internal/queue/loopevents_test.go",
+        "rabbitmq/definitions.json"
+      ],
+      "dependencies": [
+        "m1-1a-skeleton"
+      ],
+      "acceptance_check": "go test ./internal/queue/ -run 'TestLoopEvent|TestNewLoopEvent' && python3 -c \"import json;d=json.load(open('rabbitmq/definitions.json'));assert any(q['name']=='loop.events' for q in d['queues'])\"",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-3b-loop-events-consume",
+      "title": "M1.3b Consume loop.events: ack only after the effect is saved",
+      "description": "Goal: a consumer that never loses an event and never applies one twice.\n\nDo:\n1. In internal/agentjob add file loopevents.go:\nfunc (s *Store) EventApplied(jobID, eventID string) (bool, error)        // true if <JobDir>/events.jsonl has a line with this id\nfunc (s *Store) MarkEventApplied(jobID, eventID, typ string) error        // append one line {\"id\":..., \"type\":..., \"at\":...} with O_APPEND and f.Sync()\nA missing file means not applied.\n2. In internal/queue/loopevents.go add:\nfunc (c *Conn) ConsumeLoopEvents(ctx context.Context, handle func(LoopEvent) error) error\nIt calls EnsureLoopEventsQueue, sets prefetch 1, consumes with manual ack. For each delivery: decode; a message that does not decode is rejected without requeue (it dead-letters). Call handle(ev). If it returns nil, Ack. If it returns an error, use the existing delivery budget in dlx.go (AttemptHeader \"x-attempts\", MaxAttempts): republish with the attempt count increased, or reject without requeue when the budget is used up. Read how the capworker (internal/capworker/capworker.go) does this and do the same. Return when ctx is done.\nThe handler, not this function, is responsible for calling EventApplied first and MarkEventApplied last.\n\nTests: internal/agentjob/loopevents_test.go: TestEventsApplied (not applied, mark, applied, second job is independent). internal/queue/loopevents_consume_test.go: TestConsumeLoopEvents is an integration test: copy the broker setup helpers used by internal/switchboard/integration_test.go (TestMain, getBroker; the test SKIPS when no broker is available). Publish three events, consume them with a handler that fails the second one once, and check the handler saw all three and the second one twice.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "internal/agentjob/loopevents.go",
+        "internal/agentjob/loopevents_test.go",
+        "internal/queue/loopevents.go",
+        "internal/queue/loopevents_consume_test.go"
+      ],
+      "dependencies": [
+        "m1-3a-loop-events-queue",
+        "m1-2c-ops-files"
+      ],
+      "acceptance_check": "go test ./internal/agentjob/ -run TestEventsApplied && go test ./internal/queue/ -run TestConsumeLoopEvents",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-3c-events-docs",
+      "title": "M1.3c Document loop.events in the RabbitMQ spec and the event-driven doc",
+      "description": "Goal: the docs say the new queue exists. The repo rule is: a spec is updated in the same change as the service.\n\nDo:\n1. docs/event-driven.md, table under '## Queues': add one row after the `dead` row. Queue: `loop.events`. Purpose: 'runtime events for jobs with driver loop (tool finished, user message, approval decided, cancel); a consumer acks only after the effect is on disk'. Owner: 'loopd (internal/queue.ConsumeLoopEvents); published by loopd and its operation runner'. Priority: '\u2014'. DLX: `jarvis.dlx`.\n2. docs/event-driven.md, section '## Code': add a bullet for internal/queue/loopevents.go listing LoopEvent, EnsureLoopEventsQueue, PublishLoopEvent, ConsumeLoopEvents.\n3. specs/rabbitmq.md: in the section that lists queues or interfaces, add `loop.events` with the same one-line purpose, and add loopd to the list of services that use the broker if such a list exists.\nChange nothing else in these files.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "docs/event-driven.md",
+        "specs/rabbitmq.md"
+      ],
+      "dependencies": [
+        "m1-3b-loop-events-consume"
+      ],
+      "acceptance_check": "grep -q 'loop.events' docs/event-driven.md && grep -q 'loop.events' specs/rabbitmq.md && go test ./specs/",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m1-4-lifecycle",
+      "title": "M1.4 Lifecycle: the pure state-transition function",
+      "description": "Goal: one pure function that says what a job's status becomes when an event arrives. No I/O, no store, no broker.\n\nDo: create runtime/lifecycle/lifecycle.go, package lifecycle. Import github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob only for the wait-reason constants and github.com/ImMakingAJarvis/ai-agent-build/internal/queue for the event type constants.\ntype In struct { Status, WaitReason string; Event string; OpenOps int; OpenChildren int; ModelSuspended bool }   // OpenOps = operations of the job that are not finished AFTER this event is applied\ntype Out struct { Status, WaitReason string; Changed bool }\nfunc Transition(in In) Out\nUse the status strings the store already uses; read internal/agentjob/store.go for the constants (ready, running, waiting, done, failed and the stopped/parked one). Rules, in this order:\n1. A finished job (done, failed, stopped/parked) never changes: Changed false.\n2. Event cancel.requested: status becomes the store's stopped/parked status, reason \"\".\n3. Event model.suspended and status ready or waiting: waiting, reason model.\n4. Event model.resumed and reason model: if OpenOps > 0 then waiting/operation; else if OpenChildren > 0 then waiting/child; else ready.\n5. Event op.done, approval.decided or task.done (a child finished), and status waiting: if ModelSuspended then waiting/model; else if OpenOps > 0 keep waiting/operation; else if OpenChildren > 0 waiting/child; else ready with reason \"\".\n6. Event user.message and status waiting with reason user: ready.\n7. Anything else: unchanged, Changed false.\n\nTest runtime/lifecycle/lifecycle_test.go: TestTransition is ONE table test with at least one row per rule above plus: op.done for a done job is ignored; op.done while one of two ops is still open stays waiting; model.resumed with an open op goes to waiting/operation.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/lifecycle/lifecycle.go",
+        "runtime/lifecycle/lifecycle_test.go"
+      ],
+      "dependencies": [
+        "m1-2a-store-fields",
+        "m1-3a-loop-events-queue"
+      ],
+      "acceptance_check": "go test ./runtime/lifecycle/ -run TestTransition",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m2-1a-engine-interface",
+      "title": "M2.1a Engine interface and its types (no implementation)",
+      "description": "Goal: the Go interface every model backend implements. Types only; nothing calls it yet.\n\nDo: create runtime/engine/engine.go, package engine:\ntype Message struct { Role string `json:\"role\"`; Content string `json:\"content,omitempty\"`; ToolCalls []ToolCall `json:\"tool_calls,omitempty\"`; ToolCallID string `json:\"tool_call_id,omitempty\"` }\ntype ToolCall struct { ID string `json:\"id\"`; Name string `json:\"name\"`; Arguments json.RawMessage `json:\"arguments\"` }\ntype ToolSpec struct { Name string; Description string; Schema json.RawMessage }   // Schema is a JSON Schema object\ntype ChatRequest struct { Slot int; Messages []Message; Tools []ToolSpec; CachePrompt bool; MaxTokens int; Thinking bool }\ntype Chunk struct { Text string; Done bool; Message *Message; PromptTokens, OutputTokens int; Err error }   // the last chunk has Done true and the complete Message\ntype Stream interface { Recv() (Chunk, error); Close() error }   // Recv returns io.EOF after the Done chunk\ntype SlotState struct { ID int; Busy bool; Tokens int }\ntype ModelInfo struct { ID string; ContextTokens int; KVType string; Build string; ModelFile string; ModelBytes int64 }\nfunc (m ModelInfo) Fingerprint() string   // hex sha256 of ID, ContextTokens, KVType, Build, ModelFile, ModelBytes joined with \"|\" ; first 16 hex chars\ntype SnapshotMeta struct { File string; Tokens int; Bytes int64; Seconds float64 }\ntype Caps struct { SlotSave, SleepWake, Priority, ExpertOffload, VariableTickCost bool }\ntype Engine interface {\n  Info(ctx context.Context) (ModelInfo, error)\n  Caps() Caps\n  Slots(ctx context.Context) ([]SlotState, error)\n  Chat(ctx context.Context, req ChatRequest) (Stream, error)\n  SaveSlot(ctx context.Context, slot int, name string) (SnapshotMeta, error)\n  RestoreSlot(ctx context.Context, slot int, name string) error\n  EraseSlot(ctx context.Context, slot int) error\n  Health(ctx context.Context) error\n}\nTest runtime/engine/engine_test.go: TestFingerprintStable (same info gives the same value) and TestFingerprintChanges (changing any one field changes it; loop over the six fields).\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/engine/engine.go",
+        "runtime/engine/engine_test.go"
+      ],
+      "dependencies": [
+        "m1-1a-skeleton"
+      ],
+      "acceptance_check": "go test ./runtime/engine/ -run TestFingerprint",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m2-1b-llamacpp-slots",
+      "title": "M2.1b llama.cpp client: health, info, slots, save, restore, erase",
+      "description": "Goal: the non-chat half of the llama.cpp implementation of engine.Engine.\n\nRead first: internal/slots/slots.go (GetSlots: how /slots is read) and internal/agentjob/run.go functions saveSlot and restoreSlot (how /slots/<id>?action=save|restore is called). Copy that behaviour; do not import those packages.\n\nDo: create runtime/engine/llamacpp/client.go, package llamacpp:\ntype Client struct { BaseURL string; HTTP *http.Client; SlotDir string }   // SlotDir = the host directory the engine saves snapshots into (default /var/lib/jarvis/slots), used only to stat a saved file\nfunc New(baseURL string) *Client\nfunc (c *Client) Health(ctx) error            // GET /health, nil only on 200\nfunc (c *Client) Slots(ctx) ([]engine.SlotState, error)   // GET /slots\nfunc (c *Client) SaveSlot(ctx, slot, name) (engine.SnapshotMeta, error)   // POST /slots/<slot>?action=save body {\"filename\": name}; time it; Bytes from os.Stat(SlotDir/name) when the file is readable, else 0; Tokens from the reply field n_saved if present\nfunc (c *Client) RestoreSlot(ctx, slot, name) error       // action=restore\nfunc (c *Client) EraseSlot(ctx, slot) error               // action=erase, no body\nfunc (c *Client) Info(ctx) (engine.ModelInfo, error)      // GET /props and GET /v1/models\nfunc (c *Client) Caps() engine.Caps                        // SlotSave true, everything else false\nFor Info: FIRST look at the real replies on the box (read-only, safe): curl -s 127.0.0.1:11434/props | head -c 3000 ; curl -s 127.0.0.1:11434/v1/models. Use the field names you see; do not guess. Save both replies as runtime/engine/llamacpp/testdata/props.json and models.json and use them in the tests. If a value (for example the KV cache type) is not in either reply, leave that ModelInfo field empty and write a one-line comment saying so.\nA name that is empty or contains '/' or '..' is refused before any request. Any HTTP status above 299 is an error that includes the status and the first 200 bytes of the body.\n\nTests runtime/engine/llamacpp/client_test.go with httptest.Server: TestHealth (200 and 503), TestSlots, TestSaveSlotSendsFilename, TestRestoreSlot, TestEraseSlot, TestInfoFromFixtures, TestBadSnapshotName, TestHTTPErrorIncludesBody.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/engine/llamacpp/client.go",
+        "runtime/engine/llamacpp/client_test.go",
+        "runtime/engine/llamacpp/testdata/props.json",
+        "runtime/engine/llamacpp/testdata/models.json"
+      ],
+      "dependencies": [
+        "m2-1a-engine-interface"
+      ],
+      "acceptance_check": "go test ./runtime/engine/llamacpp/ -run 'TestHealth|TestSlots|TestSaveSlot|TestRestoreSlot|TestEraseSlot|TestInfo|TestBadSnapshotName|TestHTTPError'",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m2-1c-llamacpp-chat",
+      "title": "M2.1c llama.cpp client: streaming chat with tool calls",
+      "description": "Goal: Client.Chat, the streaming half of the llama.cpp engine. After this card *Client satisfies engine.Engine.\n\nRead first: internal/models/slot.go (how id_slot is sent) and the fixtures docs/runtime/fixtures/toolcalls.json and toolcalls.sse written by card M0.2 (the real shape of this engine's replies). If the fixtures are missing, stop and comment.\n\nDo: create runtime/engine/llamacpp/chat.go:\nfunc (c *Client) Chat(ctx context.Context, req engine.ChatRequest) (engine.Stream, error)\nRequest: POST BaseURL + /v1/chat/completions with JSON: \"messages\" (role, content, tool_calls, tool_call_id in the OpenAI shape: a tool call is {\"id\",\"type\":\"function\",\"function\":{\"name\",\"arguments\": <a JSON STRING>}}), \"tools\" when req.Tools is not empty ({\"type\":\"function\",\"function\":{\"name\",\"description\",\"parameters\": Schema}}), \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"id_slot\": req.Slot, \"cache_prompt\": req.CachePrompt, \"max_tokens\" when > 0, and \"chat_template_kwargs\": {\"enable_thinking\": req.Thinking}.\nStream: read the body line by line. Lines starting with \"data: \" carry JSON; \"data: [DONE]\" ends the stream. For each JSON chunk: append choices[0].delta.content to the text and return it as a Chunk{Text}; tool call deltas come in pieces: choices[0].delta.tool_calls[i] has an \"index\"; the first piece for an index has id and function.name, later pieces append to function.arguments. Collect by index. A chunk with a \"usage\" object gives prompt_tokens and completion_tokens. On [DONE] return one Chunk{Done: true, Message: the full assistant message, PromptTokens, OutputTokens}; convert each collected arguments string into json.RawMessage (if it is not valid JSON, return an error that includes it). The next Recv returns io.EOF. Close closes the response body. Cancelling ctx must make Recv return an error quickly.\nAdd at the bottom: var _ engine.Engine = (*Client)(nil)\n\nTests runtime/engine/llamacpp/chat_test.go with httptest: TestChatRequestBody (id_slot, cache_prompt, tools shape), TestChatStreamText (three content deltas then [DONE]), TestChatStreamToolCalls (replay docs/runtime/fixtures/toolcalls.sse copied into testdata/; expect the tool calls the fixture contains), TestChatBadArguments, TestChatCancel (server sleeps; cancel ctx; Recv returns an error within 1 second).\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/engine/llamacpp/chat.go",
+        "runtime/engine/llamacpp/chat_test.go",
+        "runtime/engine/llamacpp/testdata/toolcalls.sse"
+      ],
+      "dependencies": [
+        "m2-1b-llamacpp-slots",
+        "m0-2-engine-behaviours"
+      ],
+      "acceptance_check": "go test ./runtime/engine/llamacpp/",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m2-2-fake-engine",
+      "title": "M2.2 Fake engine for tests (scripted replies, slot timeline)",
+      "description": "Goal: an engine.Engine that needs no GPU, so every later card can be tested fast and exactly.\n\nDo: create runtime/engine/fake/fake.go, package fake:\ntype Step struct { Reply engine.Message; PromptTokens, OutputTokens int; Delay time.Duration; Err error }\ntype Use struct { Slot int; Key string; Start, End time.Time }\ntype Engine struct { ... }   // safe for concurrent use (sync.Mutex)\nfunc New(slots int) *Engine\nfunc (e *Engine) Script(key string, steps ...Step)   // queue replies for a conversation. The key of a request is the Content of its FIRST message with role \"user\".\nfunc (e *Engine) Now() time.Time ; func (e *Engine) Advance(d time.Duration)   // a simulated clock, starts at 2026-01-01 00:00 UTC. Chat does NOT sleep: a Step's Delay is added to the simulated clock.\nfunc (e *Engine) Timeline() []Use                    // every Chat call in order\nfunc (e *Engine) Saved() map[string]int              // snapshot name -> tokens, for SaveSlot calls\nfunc (e *Engine) SlotTokens(slot int) int ; func (e *Engine) SlotKey(slot int) string   // what the slot currently holds\nBehaviour: Chat pops the next Step for the request's key (no step left is an error \"fake: no scripted reply for <key>\"), records a Use, sets the slot's key and tokens (PromptTokens+OutputTokens), and returns a Stream that yields one text chunk (the reply content) and then the Done chunk. SaveSlot records name -> the slot's tokens and key; RestoreSlot sets the slot's key and tokens from a saved name (unknown name is an error); EraseSlot clears the slot. Info returns a fixed ModelInfo{ID:\"fake\", ContextTokens: 131072}; a field SetInfo(engine.ModelInfo) lets a test change it. Caps: SlotSave true. Health: nil. A slot number outside 0..slots-1 is an error everywhere.\nAdd: var _ engine.Engine = (*Engine)(nil)\n\nTests runtime/engine/fake/fake_test.go: TestScriptedReplies (two keys interleaved), TestNoScriptIsError, TestSaveRestoreErase, TestTimelineAndClock, TestBadSlot.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/engine/fake/fake.go",
+        "runtime/engine/fake/fake_test.go"
+      ],
+      "dependencies": [
+        "m2-1a-engine-interface"
+      ],
+      "acceptance_check": "go test ./runtime/engine/fake/",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m2-3a-slot-manager-tests",
+      "title": "M2.3a Slot manager: API stub and tests (tests first)",
+      "description": "Goal: write the tests for the slot manager BEFORE the code. The slot manager decides which slot a job runs in, and when a job's KV cache is saved to a snapshot or restored from one.\n\nDo: create runtime/slot/slot.go, package slot, with only:\ntype Config struct { Slots []int; SnapshotMinTokens int }   // Slots = the slot numbers this manager may use, e.g. []int{0}\ntype JobState struct { ID string; Running bool; Tokens int; Snapshot string; SnapshotFingerprint string }   // Snapshot = file name, \"\" if none\ntype Jobs interface { Get(id string) (JobState, error); SetSnapshot(id, file, fingerprint string, tokens int) error; SetWarmSlot(id string, slot *int) error }\ntype Lease struct { JobID string; Slot int; Warm bool; Restored bool }\nvar ErrNoSlot = errors.New(\"slot: none free\")\ntype Manager struct { /* unexported */ }\nfunc New(cfg Config, eng engine.Engine, jobs Jobs) *Manager\nfunc (m *Manager) Acquire(ctx context.Context, jobID string) (Lease, error) { return Lease{}, errors.New(\"not implemented\") }\nfunc (m *Manager) Release(l Lease, tokens int) {}\nfunc (m *Manager) Forget(jobID string) {}\nfunc (m *Manager) Warm() map[int]string { return nil }\nImport github.com/ImMakingAJarvis/ai-agent-build/runtime/engine.\n\nCreate runtime/slot/slot_test.go using runtime/engine/fake and a small in-memory Jobs. Start EVERY test with t.Skip(\"enabled by card m2-3b\"). Tests (SnapshotMinTokens = 1000 unless said):\n- TestAcquireCold: one slot, job A never ran: Lease{Slot 0, Warm false, Restored false}.\n- TestAcquireWarm: A acquires, releases with 5000 tokens, acquires again: Warm true, and the fake engine saw NO save and NO restore.\n- TestAcquireBusy: A holds the only slot (not released); B gets ErrNoSlot.\n- TestEvictSaves: A releases with 5000 tokens; B acquires the same slot: the engine saved one snapshot named \"A.bin\", Jobs has A's snapshot with the engine's fingerprint and 5000 tokens, and A's warm slot is nil.\n- TestEvictSmallDoesNotSave: A releases with 500 tokens; B acquires: no save, A has no snapshot.\n- TestRestore: after TestEvictSaves, B releases; A acquires: Restored true, the engine restored \"A.bin\".\n- TestRestoreFingerprintMismatch: as TestRestore but call fake SetInfo with a different ContextTokens before A acquires again: Restored false, no restore call, and A's snapshot is cleared in Jobs.\n- TestPrefersColdSlot: two slots; A warm in slot 0; B acquires: gets slot 1 and nothing is saved.\n- TestEvictsLeastRecentlyUsed: two slots; A then B released; C acquires: evicts A (released first).\n- TestForget: A releases; Forget(\"A\"); Warm() no longer lists A.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/slot/slot.go",
+        "runtime/slot/slot_test.go"
+      ],
+      "dependencies": [
+        "m2-2-fake-engine"
+      ],
+      "acceptance_check": "go vet ./runtime/slot/ && go test ./runtime/slot/ -v | grep -c SKIP | grep -q 10",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m2-3b-slot-manager-impl",
+      "title": "M2.3b Slot manager: make the tests pass",
+      "description": "Goal: implement runtime/slot so the tests from card m2-3a pass. Do not change the tests except to delete the t.Skip lines.\n\nThe Manager keeps, under one sync.Mutex, for each slot: holder (job id currently RUNNING a tick in it, \"\" if none), warm (job id whose KV is in the slot, \"\" if none), tokens, and lastReleased (a counter that increases on every Release; use a counter, not time).\n\nAcquire(ctx, jobID), in this order:\n1. If some slot has warm == jobID and holder == \"\": take it. Lease{Warm: true}. No engine calls.\n2. Else pick a slot with holder == \"\" and warm == \"\" (lowest number first).\n3. Else pick, among slots with holder == \"\", the one with the smallest lastReleased. If there is none, return ErrNoSlot. Evict its warm job W: if the slot's tokens >= cfg.SnapshotMinTokens then info := eng.Info(ctx); eng.SaveSlot(ctx, slot, W+\".bin\"); jobs.SetSnapshot(W, W+\".bin\", info.Fingerprint(), tokens). In both cases jobs.SetWarmSlot(W, nil) and clear the slot's warm.\n4. For a slot taken in step 2 or 3: js := jobs.Get(jobID). If js.Snapshot != \"\": if js.SnapshotFingerprint == eng.Info(ctx).Fingerprint() then eng.RestoreSlot(ctx, slot, js.Snapshot) and Lease.Restored = true; otherwise jobs.SetSnapshot(jobID, \"\", \"\", 0) (the snapshot is stale; the tick will re-read the prompt). If there was no snapshot and the slot was evicted in step 3, call eng.EraseSlot(ctx, slot).\n5. Set holder = jobID, warm = jobID, jobs.SetWarmSlot(jobID, &slot). Return the lease.\nAn engine or jobs error returns the error and leaves the slot with holder == \"\".\nRelease(l, tokens): holder = \"\", tokens = tokens, lastReleased = next counter value. The job stays warm.\nForget(jobID): clear warm for that job in every slot where holder == \"\".\nWarm(): a copy of slot -> warm job id for slots where warm != \"\".\n\nDo the engine calls while holding the mutex (simple and correct; ticks are long, acquires are rare).\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/slot/slot.go",
+        "runtime/slot/slot_test.go"
+      ],
+      "dependencies": [
+        "m2-3a-slot-manager-tests"
+      ],
+      "acceptance_check": "go test ./runtime/slot/ -v | grep -c '^--- PASS' | grep -q 10",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m2-4-config",
+      "title": "M2.4 Runtime config file with defaults, and loopctl config show",
+      "description": "Goal: one YAML config file for the runtime. Every number in the plan is a key here, never a constant in code.\n\nDo: create runtime/config/config.go, package config, using the YAML package already in go.mod (go.yaml.in/yaml/v3):\ntype Config struct {\n  Engine struct { URL string `yaml:\"url\"`; SlotDir string `yaml:\"slot_dir\"` } `yaml:\"engine\"`\n  Slots []int `yaml:\"slots\"`\n  SnapshotMinTokens int `yaml:\"snapshot_min_tokens\"`\n  InlineWaitMS int `yaml:\"inline_wait_ms\"`\n  SpillBytes int `yaml:\"spill_bytes\"`\n  MaxTicks int `yaml:\"max_ticks\"`\n  MaxTaskTokens int `yaml:\"max_task_tokens\"`\n  Timeouts struct { QuickSeconds int `yaml:\"quick_seconds\"`; NormalSeconds int `yaml:\"normal_seconds\"`; MaxOpHours int `yaml:\"max_op_hours\"`; StallMinutes int `yaml:\"stall_minutes\"` } `yaml:\"timeouts\"`\n  InstructionFiles []string `yaml:\"instruction_files\"`\n}\nfunc Default() Config   // engine.url http://127.0.0.1:11434, slot_dir /var/lib/jarvis/slots, slots [0], snapshot_min_tokens = the value on the 'Decision: snapshot_min_tokens' line of docs/runtime/measurements.md (use 8000 if that file does not exist yet and say so in a comment), inline_wait_ms 300, spill_bytes 8192, max_ticks 200, max_task_tokens 100000, quick 30, normal 600, max_op_hours 24, stall_minutes 10\nfunc Load(path string) (Config, error)   // start from Default(), overlay the file; a missing file returns Default() and no error; unknown keys are an error (use yaml.Decoder with KnownFields(true))\nfunc (c Config) Validate() error          // slots not empty, no negative numbers, engine.url not empty\nfunc (c Config) YAML() string\nPath: env LOOPD_CONFIG, default ~/.config/jarvis/loopd.yaml.\n\nIn cmd/loopctl/main.go add 'loopctl config show': loads the config and prints c.YAML(). Keep 'loopctl version'.\n\nTests runtime/config/config_test.go: TestDefaultValid, TestLoadMissingFileIsDefault, TestLoadOverlay (file sets only slots: [0, 1]; other values stay default), TestLoadUnknownKey, TestValidateRejects (table).\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/config/config.go",
+        "runtime/config/config_test.go",
+        "cmd/loopctl/main.go"
+      ],
+      "dependencies": [
+        "m1-1a-skeleton",
+        "m0-4-decide-thresholds"
+      ],
+      "acceptance_check": "go test ./runtime/config/ && go run ./cmd/loopctl config show | grep -q snapshot_min_tokens",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-1a-ops-runner",
+      "title": "M3.1a Operation runner: start a tool call in the background",
+      "description": "Goal: run a tool call outside the model, return at once, and report the result later through a callback. This is what lets a job give its slot back while a command runs.\n\nDo: create runtime/ops/ops.go, package ops:\ntype Class string ; const (Quick Class = \"quick\"; Normal Class = \"normal\"; Long Class = \"long\")\ntype Spec struct { Name, Description string; Schema json.RawMessage; Class Class; ExpectFast bool; NeedsGPU bool }\ntype Call struct { JobID, OpID, Workspace string; Args json.RawMessage; LogPath string; Timeout time.Duration }\ntype Result struct { Status string; Output string; ExitCode int; Error string }   // Status uses the agentjob op constants: done, failed, timeout, cancelled\ntype Tool interface { Spec() Spec; Run(ctx context.Context, c Call, progress func()) Result }   // Run blocks; the Runner makes it asynchronous. progress() is called whenever the tool produces output.\ntype Registry struct { ... } ; func NewRegistry(tools ...Tool) *Registry ; func (r *Registry) Get(name string) (Tool, bool) ; func (r *Registry) Specs() []Spec   // sorted by name\ntype Runner struct { Registry *Registry; Timeouts map[Class]time.Duration; OnProgress func(jobID, opID string); OnDone func(jobID, opID string, res Result) }\nfunc (r *Runner) Start(c Call) error    // unknown tool is an error. Otherwise start ONE goroutine: ctx with timeout (c.Timeout if > 0, else Timeouts[class]; for class Long use no deadline here, card M8.5 adds the stall rule), call tool.Run, then OnDone. A ctx deadline gives Status \"timeout\". Start returns immediately.\nfunc (r *Runner) Cancel(opID string) bool   // cancels the ctx of a running op; its result has Status \"cancelled\"\nfunc (r *Runner) Running() []string         // op ids\nA panic inside tool.Run is recovered and reported as Status \"failed\" with the panic text.\n\nTests runtime/ops/ops_test.go with small fake tools: TestStartReturnsAtOnce (tool sleeps 200 ms; Start returns in under 50 ms; OnDone arrives), TestTimeout, TestCancel, TestUnknownTool, TestPanicIsFailed, TestProgressCallback, TestSpecsSorted.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/ops/ops.go",
+        "runtime/ops/ops_test.go"
+      ],
+      "dependencies": [
+        "m1-2c-ops-files"
+      ],
+      "acceptance_check": "go test ./runtime/ops/ -race",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-2a-perm-guard",
+      "title": "M3.2a Permission guard: port the superagent Guard",
+      "description": "Goal: the path and command guard, moved to a package the runtime can use. Same behaviour as today.\n\nRead first: internal/superagent/guard.go and guard_test.go.\n\nDo: create runtime/perm/guard.go, package perm. Copy type Guard with its fields, CheckCommand, CheckPath and the helper functions they use (recursiveRmOutside, pushToDefaultBranch and any others), unchanged. Copy guard_test.go to runtime/perm/guard_test.go and change only the package name. Then add ONE new thing: CheckPath must also resolve symlinks before it decides (filepath.EvalSymlinks on the deepest existing parent directory), so a symlink inside the work dir that points outside is refused. Add test TestCheckPathSymlinkEscape: create a temp work dir, a symlink in it pointing to another temp dir, and check that a path through the symlink is refused.\nDo NOT edit internal/superagent in this card.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/perm/guard.go",
+        "runtime/perm/guard_test.go"
+      ],
+      "dependencies": [
+        "m1-1a-skeleton"
+      ],
+      "acceptance_check": "go test ./runtime/perm/",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-2b-file-tools",
+      "title": "M3.2b Core tools: read_file, write_file, edit_file, list, search",
+      "description": "Goal: the file tools, as ops.Tool implementations.\n\nRead first: internal/superagent/tools.go functions runRead, runWrite, runList (copy their behaviour and limits) and runtime/ops/ops.go (the Tool interface).\n\nDo: create runtime/tools/files.go, package tools. One struct per tool, each with a field Guard *perm.Guard, each implementing ops.Tool. Args are JSON; decode into a small struct. All are Class Quick and ExpectFast true. Every path goes through Guard.CheckPath; a refused path gives Result{Status: \"failed\", Error: \"BLOCKED: <reason>\"}.\n- read_file {\"path\", \"offset\" (line, optional), \"limit\" (lines, optional, default 2000)}: returns the lines with line numbers.\n- write_file {\"path\", \"content\"}: creates parent directories; returns \"wrote N bytes\".\n- edit_file {\"path\", \"old\", \"new\"}: replaces exactly ONE occurrence of old. If old occurs 0 times: failed, Error \"old text not found\". If more than once: failed, Error \"old text occurs N times; add more context\". Returns \"edited <path>\".\n- list {\"path\"}: names in the directory, directories with a trailing \"/\", sorted.\n- search {\"pattern\" (Go regexp), \"path\" (optional, default the work dir), \"max\" (optional, default 100)}: walks files, skips .git and files over 1 MB or with a NUL byte in the first 512 bytes, returns \"path:line: text\" lines, at most max.\nGive each a JSON Schema in Spec().Schema that lists its arguments and which are required.\nfunc FileTools(g *perm.Guard) []ops.Tool   // returns all five\n\nTests runtime/tools/files_test.go in a temp dir: one test per tool for the normal case, plus TestEditNotFound, TestEditAmbiguous, TestReadOffsetLimit, TestBlockedPath (outside the work dir), TestSearchSkipsBinaryAndGit.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/tools/files.go",
+        "runtime/tools/files_test.go"
+      ],
+      "dependencies": [
+        "m3-1a-ops-runner",
+        "m3-2a-perm-guard"
+      ],
+      "acceptance_check": "go test ./runtime/tools/ -run 'TestRead|TestWrite|TestEdit|TestList|TestSearch|TestBlocked'",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-2c-shell-fetch-tools",
+      "title": "M3.2c Core tools: shell and web_fetch",
+      "description": "Goal: the two tools that can take a long time, as ops.Tool implementations.\n\nRead first: internal/superagent/tools.go functions runShell and runFetch.\n\nDo: create runtime/tools/shell.go and runtime/tools/fetch.go, package tools.\nshell {\"cmd\", \"timeout_seconds\" (optional)}: Class Normal, ExpectFast false. Guard.CheckCommand first; a blocked command gives Status \"failed\", Error \"BLOCKED: <reason>\". Run 'bash -lc <cmd>' with cmd.Dir = c.Workspace. Set cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} so the command has its own process group, and when ctx is cancelled kill the whole group: syscall.Kill(-pid, syscall.SIGKILL). Send stdout and stderr together to the file c.LogPath (create it) AND keep the last 64 KB in memory. Call progress() each time output arrives. Result: Status \"done\" when exit code is 0, \"failed\" otherwise (ExitCode set), Output = the kept output. Do NOT cap the timeout at 600 seconds the way the superagent tool does; the Runner owns timeouts.\nweb_fetch {\"url\"}: Class Normal. Only http and https. GET with a 60 second client timeout, read at most 1 MB, Output = status line + body text. Non-2xx is Status \"failed\" with the status in Error.\nfunc ShellTool(g *perm.Guard) ops.Tool ; func FetchTool() ops.Tool\n\nTests: runtime/tools/shell_test.go: TestShellEcho, TestShellExitCode, TestShellBlocked (a command the guard refuses, e.g. 'rm -rf /'), TestShellWritesLog, TestShellCancelKillsGroup (run 'sleep 30 & sleep 30', cancel after 200 ms, the tool returns within 2 s and 'pgrep -f \"sleep 30\"' started by this test finds nothing; use a unique sleep value like 31.337 to find them). runtime/tools/fetch_test.go with httptest: TestFetchOK, TestFetch404, TestFetchRejectsFileScheme.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/tools/shell.go",
+        "runtime/tools/shell_test.go",
+        "runtime/tools/fetch.go",
+        "runtime/tools/fetch_test.go"
+      ],
+      "dependencies": [
+        "m3-2b-file-tools"
+      ],
+      "acceptance_check": "go test ./runtime/tools/ -run 'TestShell|TestFetch' -race",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-3-output-spill",
+      "title": "M3.3 Output spill: big tool output goes to a file, the model gets a summary",
+      "description": "Goal: a tool result bigger than a limit never enters the model's context whole. The model gets the head, the tail, the error lines and a handle it can search.\n\nDo: create runtime/tools/spill.go, package tools:\ntype Spilled struct { Text string; Handle string; Spilled bool }\nfunc Spill(output string, limitBytes int, save func(content string) (handle string, err error)) (Spilled, error)\nIf len(output) <= limitBytes: Text = output, Spilled false, save is not called. Otherwise: handle := save(output); Text is built as: a first line \"[output was <N> bytes, <L> lines; full text saved as <handle>; use search_output to read more]\", then the first 40 lines, then \"...\", then up to 30 lines that match the case-insensitive regexp (error|fail|panic|fatal|exception|traceback) and are not already in the head or tail, each prefixed with its line number, then \"...\", then the last 40 lines. A single line longer than 500 characters is cut to 500 with \"\u2026\".\nAlso a tool search_output {\"handle\", \"pattern\" (optional regexp), \"from\" (optional line), \"to\" (optional line)}: struct with a field Open func(handle string) (string, error). With pattern: matching lines with numbers, at most 100. With from/to: that line range, at most 200 lines. With neither: failed, Error \"give a pattern or a line range\". Class Quick, ExpectFast true. A handle containing '/' or '..' is refused.\n\nTests runtime/tools/spill_test.go: TestSpillSmallUntouched, TestSpillBig (10 000 lines with 'ERROR boom' at line 5000: the text has the head, the tail, line 5000, the handle, and is under 12 KB), TestSpillLongLine, TestSearchOutputPattern, TestSearchOutputRange, TestSearchOutputBadHandle.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/tools/spill.go",
+        "runtime/tools/spill_test.go"
+      ],
+      "dependencies": [
+        "m3-2b-file-tools"
+      ],
+      "acceptance_check": "go test ./runtime/tools/ -run 'TestSpill|TestSearchOutput'",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-4a-gate-test",
+      "title": "M3.4a The loop: API stub and the Gate A test (tests first)",
+      "description": "Goal: write the test that proves the whole point of the project BEFORE the loop exists: while job A waits for a slow command, job B uses the slot.\n\nDo: create runtime/loop/loop.go, package loop, with only:\ntype Store interface { /* the methods of *agentjob.Store the loop uses; card m3-4b fills this in */ }\ntype Deps struct { Engine engine.Engine; Slots *slot.Manager; Runner *ops.Runner; Registry *ops.Registry; Store *agentjob.Store; Config config.Config; Now func() time.Time }\ntype Loop struct { deps Deps }\nfunc New(d Deps) *Loop { return &Loop{deps: d} }\nfunc (l *Loop) Submit(jobID string) error { return errors.New(\"not implemented\") }        // a job with driver loop is ready to run\nfunc (l *Loop) HandleOpDone(jobID, opID string, res ops.Result) error { return errors.New(\"not implemented\") }\nfunc (l *Loop) Step(ctx context.Context) (ran bool, err error) { return false, errors.New(\"not implemented\") }   // runs at most ONE tick for the first ready job that can get a slot; ran is false when nothing could run\nfunc (l *Loop) IdleWhileReady() time.Duration { return 0 }\n\nCreate runtime/loop/gate_test.go. Start the test with t.Skip(\"enabled by card m3-4c\"). TestGateA:\n- Temp dir job store (agentjob.Open or the constructor store_test.go uses). Ingest two jobs: A (instructions \"task A\") and B (instructions \"task B\"), both Driver \"loop\".\n- Fake engine with 1 slot. Script \"task A\": step 1 replies with a tool call {id \"call_1\", name \"slow\", arguments {}}; step 2 replies with content \"A done\". Script \"task B\": one step, content \"B done\".\n- A fake tool named \"slow\" whose Run blocks until the test closes a channel, then returns Status done, Output \"ok\".\n- Slot manager over slot 0, Runner whose OnDone calls l.HandleOpDone.\n- Submit A, Submit B. Call Step: A's first tick runs; A is now waiting. Call Step: B's tick runs and B is done (this is the proof: the slot was free while A's tool was running). Close the channel, wait for the op to finish, call Step: A's second tick runs; A is done.\n- Assert: fake Timeline keys in order are \"task A\", \"task B\", \"task A\"; job A's Messages are user, assistant (tool call), tool, assistant; both jobs have status done; B's summary contains \"B done\".\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/loop/loop.go",
+        "runtime/loop/gate_test.go"
+      ],
+      "dependencies": [
+        "m2-3b-slot-manager-impl",
+        "m2-4-config",
+        "m3-1a-ops-runner",
+        "m1-2e-checkpoint-impl"
+      ],
+      "acceptance_check": "go vet ./runtime/loop/ && go test ./runtime/loop/ -run TestGateA -v | grep -q SKIP",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-4b-tick",
+      "title": "M3.4b The loop: one tick",
+      "description": "Goal: the function that runs ONE tick for ONE job: get a slot, ask the model, save the result, start the tools, give the slot back.\n\nDo: create runtime/loop/tick.go, package loop:\nfunc (l *Loop) tick(ctx context.Context, jobID string) error\nSteps, in this order:\n1. lease, err := l.deps.Slots.Acquire(ctx, jobID). On slot.ErrNoSlot return it unchanged.\n2. Set the job's status to running (store SetStatus, keep the other State fields).\n3. Build the messages: l.prompt(jobID) (below).\n4. stream := Engine.Chat(ctx, engine.ChatRequest{Slot: lease.Slot, Messages: msgs, Tools: specs from l.deps.Registry.Specs() converted to engine.ToolSpec, CachePrompt: true}). Read the stream to the Done chunk.\n5. Build the checkpoint: one LoopMessage with Role \"assistant\" and Content = JSON of {\"content\": text, \"tool_calls\": [...]} (each tool call: id, name, arguments). For each tool call one LoopOp{ID: call id, ToolCallID: call id, Tool: name, Args: arguments, Status: agentjob.OpPending}. State: if there are tool calls then Status \"waiting\", WaitReason agentjob.WaitOperation; else Status \"done\" and Summary = the reply text. Tokens = PromptTokens + OutputTokens. Call Store.Checkpoint.\n6. l.deps.Slots.Release(lease, tokens).\n7. For each op: mark it running with StartedAt (PutOp) and call Runner.Start(ops.Call{JobID, OpID, Workspace: the job's Spec.Workspace, Args, LogPath: Store.OpLogPath(jobID, opID)}). A tool name that is not in the registry is not started: call l.HandleOpDone at once with Status failed, Error \"unknown tool <name>\".\nIf step 4 fails: Release the lease with the old token count, set the job back to ready, and return the error.\n\nfunc (l *Loop) prompt(jobID string) ([]engine.Message, error): message 1 is role \"system\" with the text \"You are an autonomous agent. Use the tools to do the task. When the task is finished, reply with a short summary and no tool call.\" (later cards add the instruction files). Message 2 is role \"user\" with the job's Spec.Instructions. Then one engine.Message per LoopMessage in Store.Messages(jobID): assistant ones carry content and tool calls; tool ones carry ToolCallID and content. The first two messages must be byte-identical on every tick of the same job (the engine's cache depends on it): put nothing that changes (time, status) in them.\n\nFill in the Store interface in loop.go with the methods you use, or delete that type if you use *agentjob.Store directly.\nTest runtime/loop/tick_test.go with the fake engine: TestTickFinalAnswer (job becomes done with the summary), TestTickToolCall (job waiting, one op running, runner received the call), TestTickUnknownTool, TestTickEngineErrorPutsJobBack, TestPromptStablePrefix (two ticks: the first two messages of both requests are identical).\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/loop/tick.go",
+        "runtime/loop/tick_test.go",
+        "runtime/loop/loop.go"
+      ],
+      "dependencies": [
+        "m3-4a-gate-test"
+      ],
+      "acceptance_check": "go test ./runtime/loop/ -run 'TestTick|TestPrompt'",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-4c-loop-events",
+      "title": "M3.4c The loop: ready queue, tool results, budgets; Gate A passes",
+      "description": "Goal: implement Submit, HandleOpDone, Step and IdleWhileReady in runtime/loop/loop.go so TestGateA passes.\n\nDo:\n- The Loop keeps, under a sync.Mutex, a FIFO list of ready job ids, and for the idle metric: readySince (time the list last became non-empty while no tick was running) and idle (a total duration).\n- Submit(jobID): add to the end of the list if it is not in it.\n- HandleOpDone(jobID, opID, res): load the op (Store.GetOp); if it is already finished, return nil (a repeated event must change nothing). Set its Status from res.Status and its Result to JSON of res; PutOp. Build the text for the model: res.Output, or \"ERROR: \"+res.Error when Status is not done; pass it through tools.Spill with Config.SpillBytes, saving the full text to <JobDir>/ops/<opID>.full with Store.WriteFile. Append one LoopMessage Role \"tool\", Content JSON {\"tool_call_id\": op.ToolCallID, \"content\": text}. Then: if every op of the job is Finished(), set the job's status to ready with WaitReason \"\" and Submit it.\n- Step(ctx): take the first job in the list. If its Messages count is >= Config.MaxTicks*2 or its State.Tokens >= Config.MaxTaskTokens, set it to failed with Error \"budget: tick or token limit reached\" and remove it. Otherwise call l.tick. On slot.ErrNoSlot leave the list as it is and return ran=false. On success remove the job from the list (it is now waiting or done) and return ran=true. Update the idle counter: time during which the list was non-empty and Step was not inside a tick.\n- IdleWhileReady() returns the idle total. Use l.deps.Now for time (default time.Now).\nThen delete the t.Skip line in runtime/loop/gate_test.go. Do not change the test otherwise.\n\nExtra tests in runtime/loop/loop_test.go: TestHandleOpDoneTwiceIsNoop, TestTwoToolCallsWaitForBoth (the job becomes ready only after the second result), TestBudgetFailsJob, TestStepNoSlot (ran false, job stays first in the list), TestBigOutputIsSpilled (a 100 KB result: the tool message is under 12 KB and the .full file has all of it).\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/loop/loop.go",
+        "runtime/loop/loop_test.go",
+        "runtime/loop/gate_test.go"
+      ],
+      "dependencies": [
+        "m3-4b-tick",
+        "m3-3-output-spill"
+      ],
+      "acceptance_check": "go test ./runtime/loop/ -race && go test ./runtime/loop/ -run TestGateA -v | grep -q '^--- PASS'",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-1b-readopt",
+      "title": "M3.1b Recover operations after a loopd restart",
+      "description": "Goal: when loopd restarts, operations that were running are not forgotten.\n\nDo: in runtime/loop add file recover.go:\nfunc (l *Loop) Recover(jobIDs []string) error\nFor each job: call Store.RecoverLoop(jobID). Then for each op of the job with Status running: if op.PID > 0 and that process is alive (syscall.Kill(pid, 0) returns nil) leave it and start a goroutine that polls every 2 seconds until the process is gone, then calls HandleOpDone with Status done and Output = the last 64 KB of the op's log file (we cannot know the exit code of a process we did not start; say so in the output's first line: \"[finished while loopd was restarting; exit code unknown]\"). If the PID is 0 or the process is gone: call HandleOpDone with Status \"lost\" and Error \"operation was lost when loopd restarted\". Ops with Status pending are started again through the same code tick uses to start an op (move that code into a helper func (l *Loop) startOp(jobID string, op agentjob.LoopOp) and call it from both places). Finally Submit every job whose status is ready.\nFor this to work the shell tool must record its PID: add to ops.Call a field OnPID func(pid int), have the shell tool call it right after cmd.Start(), and have startOp set it to a function that stores the PID on the op with PutOp.\n\nTests runtime/loop/recover_test.go: TestRecoverLostOp (op running with PID 0: job gets a tool message containing \"lost\" and becomes ready), TestRecoverLiveOp (start a real 'sleep 1' yourself, store its PID on a running op; Recover; within 5 s the job becomes ready), TestRecoverPendingOpStarts, TestRecoverSubmitsReady.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/loop/recover.go",
+        "runtime/loop/recover_test.go",
+        "runtime/loop/tick.go",
+        "runtime/ops/ops.go",
+        "runtime/tools/shell.go"
+      ],
+      "dependencies": [
+        "m3-4c-loop-events",
+        "m3-2c-shell-fetch-tools"
+      ],
+      "acceptance_check": "go test ./runtime/loop/ ./runtime/ops/ ./runtime/tools/ -race",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-5-metrics",
+      "title": "M3.5 Prometheus metrics for the loop",
+      "description": "Goal: numbers that show whether the runtime does its job, above all how long a slot sat idle while a job was ready.\n\nRead first: internal/switchboard/metrics.go (how this repo builds a prometheus registry and metrics struct). Follow the same style.\n\nDo: create runtime/loop/metrics.go:\ntype Metrics struct { ... } ; func NewMetrics() (*Metrics, *prometheus.Registry)\nMetrics (prefix loopd_): idle_while_ready_seconds_total (counter), ticks_total (counter, label outcome: final|tool_calls|error), tick_seconds (histogram), prompt_tokens_total and output_tokens_total (counters), snapshot_saves_total, snapshot_restores_total, warm_hits_total (counters), ops_running (gauge), ready_jobs (gauge).\nAdd a field Metrics *Metrics to loop.Deps; when it is nil nothing is recorded. Record: in tick (outcome, duration, tokens; warm hit when lease.Warm; restore when lease.Restored), in Step (ready_jobs, idle counter), around Runner.Start and HandleOpDone (ops_running). Snapshot saves: count them from the difference in len(fake/real engine saves) is NOT possible generally, so add an optional callback field OnSave func() to slot.Config and call it in the slot manager after a successful SaveSlot; wire it to the counter.\nIn cmd/loopd/main.go serve the registry at GET /metrics with promhttp.HandlerFor.\n\nTests runtime/loop/metrics_test.go: run the Gate A scenario (copy the setup into a helper in a _test.go file) and assert with prometheus testutil: ticks_total sums to 3, warm_hits_total is 0 or more, ops_running is 0 at the end.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/loop/metrics.go",
+        "runtime/loop/metrics_test.go",
+        "runtime/loop/loop.go",
+        "runtime/loop/tick.go",
+        "runtime/slot/slot.go",
+        "cmd/loopd/main.go"
+      ],
+      "dependencies": [
+        "m3-4c-loop-events"
+      ],
+      "acceptance_check": "go test ./runtime/... -race && go build ./cmd/loopd",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-6a-loopctl-run",
+      "title": "M3.6a loopctl run: run jobs through the loop from the command line",
+      "description": "Goal: a way to run the loop by hand against a real engine, without the daemon. Used for the live Gate A check.\n\nDo: in cmd/loopctl/main.go add 'loopctl run [--slot N] [--workspace DIR] \"<instructions>\" [\"<instructions>\" ...]'.\nIt loads the config (runtime/config), opens the job store the way cmd/jarvis-jobs does (read cmd/jarvis-jobs/main.go to see how the store directory is found), and for each instructions argument ingests a job with Driver \"loop\", Class \"background\", Tags [\"loopctl\"], Spec.Workspace = the --workspace value (default: a new directory under os.TempDir()), ID \"loopctl-<unix>-<n>\". It builds: llamacpp.New(config engine url), slot.New over the --slot value (default: config slots), a perm.Guard for the workspace, a Registry with tools.FileTools, ShellTool and FetchTool and the search_output tool, an ops.Runner with timeouts from the config whose OnDone calls loop.HandleOpDone, and loop.New. It submits the jobs, then loops: call Step; when Step returns ran=false sleep 200 ms; stop when every job is done or failed. At the end print, per job: id, status, ticks (number of assistant messages), summary; then one line \"idle_while_ready_seconds: <n>\" and \"wall_seconds: <n>\". Exit 1 if any job failed.\nRefuse to start (exit 2 with a clear message) if any job in the store has status running and driver local: the work slot is in use by a Claude Code round.\n\nTest cmd/loopctl/run_test.go: put the body of the command in a function run(args []string, eng engine.Engine, out io.Writer) int so a test can pass the fake engine: TestRunTwoJobs (scripted like Gate A but with the real shell tool running 'sleep 1'; exit code 0; the output has both ids and the idle line).\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "cmd/loopctl/main.go",
+        "cmd/loopctl/run.go",
+        "cmd/loopctl/run_test.go"
+      ],
+      "dependencies": [
+        "m3-4c-loop-events",
+        "m3-2c-shell-fetch-tools",
+        "m2-1c-llamacpp-chat"
+      ],
+      "acceptance_check": "go test ./cmd/loopctl/ && go build ./cmd/loopctl",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-6b-gate-a-live",
+      "title": "M3.6b Gate A on the real brain (sonnet)",
+      "description": "Goal: prove on the box that two jobs share one slot around a slow command. This is the gate for everything after M3.\n\nDo, when no agent job is running on the local driver: build loopctl (go build -o /tmp/loopctl ./cmd/loopctl). Run:\n/tmp/loopctl run --slot 0 \"Run the shell command 'sleep 30 && echo first-done' and then tell me what it printed.\" \"Create a file named hello.txt containing the word hi, then read it back and tell me its content.\"\nExpected: both jobs end done; the second job finishes while the first one's sleep is still running; idle_while_ready_seconds is under 1.\nWrite docs/runtime/gate-a.md: the command, the full output, the tick count per job, idle_while_ready_seconds, wall_seconds, and from 'curl -s 127.0.0.1:11434/metrics' the prompt tokens evaluated before and after (to show whether the first job's second tick reused its cache). End with one line: 'Gate A: PASS' or 'Gate A: FAIL, because ...'.\nIf it fails because the model does not produce tool calls correctly, save the raw reply and say so; do not change runtime code in this card. Post the result line with jarvis-board comment --model sonnet ELR-1 and jarvis-discord notify --item ELR-1.\n\nRules: this card runs on the sonnet driver. Never run it from a local round. Open a maintenance window first (jarvis-watchdog maintain 2h) if the card stops or loads the brain, and leave the brain running and healthy when you finish.",
+      "files": [
+        "docs/runtime/gate-a.md"
+      ],
+      "dependencies": [
+        "m3-6a-loopctl-run",
+        "m3-5-metrics",
+        "m3-1b-readopt"
+      ],
+      "acceptance_check": "grep -qE '^Gate A: (PASS|FAIL)' docs/runtime/gate-a.md",
+      "size": "S",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m3-7a-block-edit",
+      "title": "M3.7a Search-and-replace block edits for models that are weak at tool calls",
+      "description": "Goal: a second way to express an edit, as plain text, for when the model fumbles the JSON of edit_file.\n\nDo: create runtime/tools/blockedit.go, package tools:\ntype BlockEdit struct { Path, Old, New string }\nfunc ParseBlockEdits(text string) ([]BlockEdit, error)\nFormat, one or more blocks:\n<path on its own line>\n<<<<<<< SEARCH\n<old lines>\n=======\n<new lines>\n>>>>>>> REPLACE\nThe path is the last non-empty line before the SEARCH marker; strip backticks and spaces around it. An empty SEARCH part means \"create the file with the REPLACE part\". A SEARCH marker with no ======= or no REPLACE marker is an error naming the block number.\nfunc ApplyBlockEdit(g *perm.Guard, e BlockEdit) (string, error)\nSame exact-match rule as edit_file: Old must occur exactly once. When it occurs 0 times, the error text lists up to 3 candidate places: for each line of the file compute how many of Old's lines (trimmed of spaces) appear in the window of len(Old lines) lines starting there; show the best windows with their line numbers and text, so the model can correct itself.\nAlso a tool apply_edits {\"text\"}: parses and applies every block in order; stops at the first failure and reports which blocks were applied. Class Quick.\n\nTests runtime/tools/blockedit_test.go: TestParseOneBlock, TestParseTwoBlocks, TestParseCreateFile, TestParseMissingMarker, TestApplyExact, TestApplyNotFoundShowsCandidates (Old differs from the file by one changed word; the error contains the right line number), TestApplyAmbiguous, TestApplyBlockedPath.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/tools/blockedit.go",
+        "runtime/tools/blockedit_test.go"
+      ],
+      "dependencies": [
+        "m3-2b-file-tools"
+      ],
+      "acceptance_check": "go test ./runtime/tools/ -run 'TestParse|TestApply'",
+      "size": "S",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m3-7b-after-edit",
+      "title": "M3.7b Run checks automatically after edits (after_edit)",
+      "description": "Goal: after the model edits files, run the project's quick checks at once and show the model only the errors.\n\nDo:\n1. runtime/config/config.go: add AfterEdit []string `yaml:\"after_edit\"` (shell commands; default empty) and AfterEditTimeoutSeconds int `yaml:\"after_edit_timeout_seconds\"` (default 300). Update TestDefaultValid if needed.\n2. runtime/loop: in HandleOpDone, after the tool message is appended and BEFORE the \"every op finished\" check: if the finished op's Tool is one of write_file, edit_file, apply_edits and its Status is done, remember on the Loop (a map jobID -> bool) that this job has edits to check. When every op of the job is finished and that flag is set and len(Config.AfterEdit) > 0: clear the flag and, instead of making the job ready, create ONE extra op: LoopOp{ID: \"after-edit-<n>\", ToolCallID: \"\", Tool: \"shell\", Args: {\"cmd\": the AfterEdit commands joined with \" && \"}, Status pending} and start it with startOp. An op with an empty ToolCallID is internal: when it finishes, append a LoopMessage with Role \"user\" and content \"[automatic check after your edits] exit code <n>\\n<output through tools.Spill>\" (role user, not tool, because no tool call asked for it), then make the job ready. If the check passed (exit 0) the content is just \"[automatic check after your edits] passed\".\nMake sure RecoverLoop and the \"every op finished\" logic still work with an op that has no ToolCallID (it is never matched to a tool call).\n\nTests runtime/loop/afteredit_test.go with the fake engine: TestAfterEditRunsOncePerTick (two edit_file calls in one tick: one check op), TestAfterEditFailureReachesModel (check command 'echo boom; exit 3': the next prompt contains \"exit code 3\" and \"boom\"), TestAfterEditPassIsShort, TestNoAfterEditWithoutEdits, TestNoAfterEditWhenNotConfigured.\n\nRules: change only the files listed on this card. Run the acceptance check before you finish. If the repo does not match what this card says, stop and comment on the card; do not improvise. Do not stop, start or restart the brain engine.",
+      "files": [
+        "runtime/config/config.go",
+        "runtime/loop/loop.go",
+        "runtime/loop/afteredit_test.go"
+      ],
+      "dependencies": [
+        "m3-7a-block-edit",
+        "m3-1b-readopt"
+      ],
+      "acceptance_check": "go test ./runtime/loop/ ./runtime/config/ -race",
+      "size": "M",
+      "executor_model": "qwen3.8-27b"
+    },
+    {
+      "id": "m4-1-loopd-api",
+      "title": "M4.1 loopd daemon and its HTTP API",
+      "description": "loopd serves POST /v1/tasks, GET /v1/tasks/{id}, cancel, messages, approvals, GET /v1/state, GET /v1/events (server-sent events), /metrics, /healthz. Bearer token from a mounted 0600 file. Joins the compose network, publishes on 127.0.0.1 only. Remove the 'loop' profile gate. Check the image can do everything a round does today (git push with the GitHub app token, gh, go build and test, the jarvis-* CLIs) and report anything that cannot run in the container.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m4-2-permissions",
+      "title": "M4.2 Permission rules: allow, deny, ask",
+      "description": "runtime/perm: a pure Decide(rules, call) returning Allow, Deny or Ask. Inside the task's workspace file tools and shell are allowed; allowlist rules are {tool, pattern} pairs from config; the deny list refuses; everything else asks. Workspace is a git worktree per task on a mounted volume (reuse internal/taskrunner worktree code). The container's only writable mounts are the workspace volume, the job store and the snapshot directory.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m4-3-async-approvals",
+      "title": "M4.3 Approvals as events: a waiting task holds no slot",
+      "description": "An operation that needs approval is stored as awaiting_approval; the job waits with reason approval and holds no slot. The answer arrives through the API as approval.decided and either starts the operation or returns 'denied: <note>' as that tool call's result. Reminder after 1 h, optional expiry. Test: 20 jobs parked on approvals hold zero slots, survive a restart, one is approved and resumes.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m4-4-claim-and-discord",
+      "title": "M4.4 loopd claims driver:loop jobs; Discord approver",
+      "description": "loopd claims ready jobs whose driver is loop straight from the store with the existing Claim; jarvis-jobs next skips them so agent-run never sees them. Finished tasks record summary and PR link through the store's existing finish path. Stop, pause and restart signals for a loop job go to the cancel endpoint. A Discord approver posts the request with buttons through the jarvis-discord path and calls the approval endpoint.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m4-5-coexistence",
+      "title": "M4.5 Do not overlap with Claude Code rounds on slot 0",
+      "description": "Until M5 the runtime and Claude Code rounds share slot 0. The runtime does not schedule while the job store shows a running job on the local driver. jarvis-jobs next skips local jobs while the runtime has unfinished tasks, using the same marker-file mechanism as the game hold.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m4-6-caller-audit",
+      "title": "M4.6 Audit every caller of the brain; pin the unpinned",
+      "description": "List every caller of the brain (cmd/worker, internal/planworker, cmd/jarvis-ha, scripts/voice_service.py, cmd/jarvis-chat, cmd/jarvis-reply, cmd/superagent) and whether it pins a slot. Change unpinned callers to pin the chat slot. Output: docs/runtime/engine-callers.md.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m4-7-gate-b",
+      "title": "M4.7 Gate B: a real build job on the brain through driver loop",
+      "description": "One real build job with driver: loop runs on the brain to an open PR, with a shell call over 10 s and one approval answered from Discord. Record tick count, idle-while-ready and wall time in docs/runtime/gate-b.md. Sonnet runs and judges this.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m4-8-first-ui-pages",
+      "title": "M4.8 First two UI pages, read-only: Overview and Waiting",
+      "description": "Mock-ups for Nathan to approve first. Then the Overview page (a card per slot, waiting counts by reason, next five tasks, loaded models, alerts) and the Waiting page (every task that is not running, grouped by what it waits on, how long, snapshot location). Pages read only the loopd API and its event stream. Server-rendered Go templates, no Node build step.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m4-9-instructions-hooks-notes",
+      "title": "M4.9 Obey CLAUDE.md, the hooks and the notes rules",
+      "description": "Config instruction_files loaded into every root task's fixed system prompt: the driver brief (stage3-loop.txt), the agent instructions, the repo CLAUDE.md, any CLAUDE.md or AGENTS.md in the working directory. A hook runner that reads .claude/settings.json and runs the three existing hooks unchanged (same JSON on stdin, exit code 2 blocks). A task cannot finish while a stop hook blocks. notes/ and the jarvis-notes, jarvis-board, jarvis-discord, jarvis-kanban CLIs work inside the container; memory_search is ported.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m4-10-agent-loop-md",
+      "title": "M4.10 docs/agent-loop.md: the loop edition of the agent instructions",
+      "description": "docs/agent-claude.md teaches workarounds for a blocking harness (yield and wake by hand, the photo-window swap protocol, the machine snapshot). Write docs/agent-loop.md with the same standing rules and those sections replaced by the tool that now does the job. Nathan reviews it before Gate B. Sonnet writes this.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m5-1-priority-aging",
+      "title": "M5.1 Numeric priority and aging",
+      "description": "Effective priority = base + aging_rate x minutes waited, capped one below the lowest reservation threshold. Default map (config): voice 100, chat 90, fix 70, build 50, background 20. Pure function sched.Decide, simulated-clock tests.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m5-2-reservations-lending",
+      "title": "M5.2 Reserved capacity and lending",
+      "description": "Config reservations: [{slots: 1, min_priority: 90}]. An idle reserved slot may run lower-priority work, marked preemptible, and is taken back when qualifying work is ready.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m5-3-preemption",
+      "title": "M5.3 Preemption and anti-thrash rules",
+      "description": "Preempt when the candidate's effective priority exceeds the running task's by priority_gap and the running task has had min_run_ms. Preempting cancels the stream and discards the partial reply. A per-slot swap_budget suspends non-reserved preemption. Ties: warm KV first, then resuming over new, then age.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m5-4-context-budget",
+      "title": "M5.4 Context budget across slots",
+      "description": "If slots share one context (M0 decision), Decide refuses an assignment that would overflow it and first erases the least recently used idle warm slot.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m5-5-own-all-slots",
+      "title": "M5.5 The runtime owns every slot; chat and voice go through it",
+      "description": "POST /v1/chat: a one-tick task with no tools, streamed, at chat priority. jarvis-reply, the Hermes chat client and the voice service call it instead of the engine and keep their iGPU fallback. On the box, a Discord message during a loop build gets its reply and the build resumes from its warm slot or snapshot.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m5-6-scheduler-explains",
+      "title": "M5.6 The scheduler explains itself; Queue page",
+      "description": "Decide returns, for every ready task, its position and the reason in words. GET /v1/queue serves it. The Queue page shows the full order with reasons, drag to reorder, change priority, hold or release, and the backlog as a separate list.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m6-1-registry-fields",
+      "title": "M6.1 Registry and catalog fields",
+      "description": "Add registry fields load_seconds, capabilities, arch (dense | moe | looped), kv_type, tool_protocol, start, stop. Correct the brain's entry, which still says engine: ollama.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m6-2-brain-suspension",
+      "title": "M6.2 Brain suspension: park tasks with snapshots across a swap",
+      "description": "Suspend(model): stop assigning ticks, let running ticks finish for up to suspend_grace then preempt, snapshot every warm slot, move tasks to waiting reason model, publish model.suspended. Resume makes them ready; restore is lazy. POST /v1/models/{id}/suspend and /resume.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m6-3-resourced-uses-it",
+      "title": "M6.3 resourced and jarvis-swap call suspend and resume",
+      "description": "jarvis-swap out calls suspend before docker stop jarvis-engine; in calls resume after /health is 200. For loop tasks this replaces 'refuse while a round runs' and 'cut the round for a game'. Add min_residency. Update specs/resourced.md and docs/brain-swap.md. Sonnet only: it stops the brain.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m6-4-capability-ops",
+      "title": "M6.4 Capabilities as operations",
+      "description": "A capability tool whose operation publishes the existing v2 envelope to cap.<name> with the operation id as correlation id and a per-task reply queue; the Result becomes op.done with artifact paths. Capabilities marked needs_brain_out now work from inside a task.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m6-5-devices-poststeps",
+      "title": "M6.5 Devices, continuations, post-steps",
+      "description": "Each registered device has its own Engine and slot set; a task's model selects the engine, so the iGPU helper runs alongside the 4090. Optional post_step on the envelope. On the box: a brain task requests an image, the brain is suspended, the image model runs, the task resumes with the file path and its context.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m7-1-snapshot-tiers",
+      "title": "M7.1 Snapshots in RAM first, copied to disk behind",
+      "description": "ram_dir (tmpfs) and disk_dir. The engine's --slot-save-path points at ram_dir (compose change for jarvis-engine, sonnet only). A write-behind goroutine copies each snapshot to disk and fsyncs. Restore from RAM, else disk to RAM first, else re-prefill.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m7-2-ram-budget",
+      "title": "M7.2 Snapshot RAM budget with least-recently-used eviction",
+      "description": "snapshot_ram_cap_mb. Over the cap, the least recently used snapshots leave RAM once their disk copy exists; snapshots of tasks waiting on an approval go first.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m7-3-unified-budget",
+      "title": "M7.3 One memory budget for weights and snapshots",
+      "description": "Extend the ledger with holders for snapshots and for swapped-out weights. Snapshots go to disk first, weights are evicted last. Lock resident weights in memory if the engine supports it (M0.3).\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m8-1-task-trees",
+      "title": "M8.1 Subtasks with packed briefs",
+      "description": "Tool spawn_task(brief, inputs, model?, priority?). The child's first message is a packed brief, never the parent's history. The parent waits with reason child. The child's result comes back as one capped tool result; its transcript is archived; read_archive(task_id, query) reads it.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m8-2-error-side-tasks",
+      "title": "M8.2 Errors become side-tasks",
+      "description": "Config on_error: when a tool result is an error larger than error_inline_bytes, or the same call failed error_repeat times, spawn a fix child that gets the error by handle and the approaches already tried. The parent sees one status line.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m8-3-compaction",
+      "title": "M8.3 Compaction as a fallback for long conversations",
+      "description": "Only for tasks marked long-lived. Past compact_at, the oldest messages are replaced by a summary and the snapshot is invalidated.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m8-4-heartbeat-cancel",
+      "title": "M8.4 Heartbeat, timeout and cancelling a task tree",
+      "description": "No output for heartbeat_silence means hung. On timeout kill the process group and return a short result. cancel.requested cascades to every descendant. Tools marked NeedsGPU take a ledger lease first.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m8-5-long-operations",
+      "title": "M8.5 Long operations: kill on stall, not on duration; download tool",
+      "description": "A long operation is hung only when it makes no progress for stall_timeout (default 10 min). download(url, path, sha256?) resumes with range requests, reports progress, checks free disk space, verifies size or checksum, retries a stall by resuming. Long operations survive a daemon restart.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m8-6-repo-map",
+      "title": "M8.6 Repo map",
+      "description": "repo_map(paths?, budget_tokens): a compact ranked summary of a workspace (files, top-level symbols, signatures), cached per commit. Go first with the standard library parser; other languages fall back to file names and a regex. Each child brief gets about 2000 tokens of it.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m9-1-plugin-contract",
+      "title": "M9.1 Plugin contract",
+      "description": "A plugin is a separate process using the HTTP API and event stream. Document it with the Discord approver as the worked example.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m9-2-plane-sync",
+      "title": "M9.2 Plane as an event-synced UI",
+      "description": "Outward: a listener with its own durable queue on the events exchange creates the Plane item when a task is created and updates it on status, comment and result. Inward: plane-bridge turns each webhook into an event that creates, schedules, updates or cancels the internal task. Echo guard so the listener's own writes do not come back as new tasks. The plan pipeline's direct write to Plane is removed.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m9-3-cards-as-tasks",
+      "title": "M9.3 Task-runner cards run as runtime tasks; remove Aider",
+      "description": "Worktree, acceptance check, merge and epic PR logic stay; the Aider round is replaced by a runtime task; Aider and its Python environment are removed.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m9-4-router",
+      "title": "M9.4 Router: work item to capability, model and priority",
+      "description": "A routes table in config first, a brain classification as fallback. Start from internal/router.PickModel and the Hermes fast classifier.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m9-5-mcp",
+      "title": "M9.5 MCP client and server",
+      "description": "Client: MCP servers in config appear as tools; each call is an operation. Server: loopd exposes submit, status and approve as MCP tools.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m9-6-web-ui",
+      "title": "M9.6 Web UI, complete",
+      "description": "Connections graph, task detail, models and memory, config editor, plugins, secrets (encrypted at rest), history. Login and HTTPS beyond localhost. Mock-ups for Nathan first. The old dashboard is retired page by page.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "m9-7-built-in-chat",
+      "title": "M9.7 Built-in chat that turns a plan into tasks",
+      "description": "Scope with Nathan after M9.6.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "l1-review-loop",
+      "title": "L1 Review loop",
+      "description": "On task.done a review child is queued automatically with a fresh context, on a different model when one is available. Outcomes: approve, request changes, escalate. review_max_rounds bounds the loop.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "l2-fix-memory",
+      "title": "L2 Fix memory",
+      "description": "Records of symptom, fix that worked, attempts that did not, with confidence. Matches are hints for the fix child, never truth.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "l3-architectures",
+      "title": "L3 MoE and vLLM engines",
+      "description": "A MoE engine adapter with hot-in-VRAM and pinned-in-RAM sizes as separate ledger entries. A vLLM adapter with no slot save. Scheduler uses measured tokens per second per model.\n\nNOT READY TO BUILD. This item is one design task from the plan. Before it moves to Ready, a planner (sonnet) splits it into small cards the way M0-M3 are split: one small change per card, exact files, signatures in the card, one runnable check. Full text: the 'Implementation plan' tab of the spec doc.",
+      "files": [],
+      "dependencies": [],
+      "acceptance_check": "split into cards; this item itself is not executed",
+      "size": "M",
+      "executor_model": "claude-sonnet-5-5"
+    }
+  ]
+}
