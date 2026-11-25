@@ -45,3 +45,16 @@ mean: 3.83 s
 mlock flag: yes
 
 `llama-server --help` lists `--mlock` (force the model to stay in RAM) and `--mmap`/`--no-mmap`; the brain does not pass `--mlock`. Measured 2026-11-25 inside a maintenance window; no `plane-run_task-*` job was running before or after the three runs, so none was repeated.
+
+## Decisions
+
+Decision: snapshot_min_tokens = 900
+Decision: slots share context = yes
+Decision: unpinned requests are unsafe = yes
+Decision: snapshots survive restart = yes
+Decision: cancel keeps prompt cache = yes
+Decision: keep reasoning in history = yes
+Decision: min_residency_seconds = 80
+Plan status: continue
+
+Basis: 900 tokens is the measured break-even (save+restore about 0.3 s against 2100-3000 tokens/s prefill). Slots share one KV pool (a) and an unpinned request lands on the least recently used slot and can evict its cache (b), so every caller pins a slot. Restore works after a restart and into either slot (c); a cancelled request keeps its prompt cache (d); sending `reasoning_content` back keeps the cache hit (e). Mean reload is 3.83 s, 20 times that is 76.6 s, rounded up to 80.
