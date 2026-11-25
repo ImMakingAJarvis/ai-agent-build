@@ -1,0 +1,55 @@
+{
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "The user is asking for the weather in Paris and the current time in Tokyo. Since these are independent calls, they should be made in the same block.\n",
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Paris\"}"
+            },
+            "id": "PaB2uPq0klXKGHvlHlYO3vQPanrFBMwL"
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "get_time",
+              "arguments": "{\"city\":\"Tokyo\"}"
+            },
+            "id": "s9oIX43wp29jHmm5VDuA5bbSqH7WK26v"
+          }
+        ]
+      }
+    }
+  ],
+  "created": 1795599223,
+  "model": "/opt/jarvis-engine/models/jarvis-brain.gguf",
+  "system_fingerprint": "b1-7170cad4d",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 87,
+    "prompt_tokens": 389,
+    "total_tokens": 476,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "id": "chatcmpl-KM4xUNzm1KFwbNHsx16di7w69AxTk2qp",
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 389,
+    "prompt_ms": 266.676,
+    "prompt_per_token_ms": 0.6855424164524422,
+    "prompt_per_second": 1458.6989455369064,
+    "predicted_n": 87,
+    "predicted_ms": 1936.984,
+    "predicted_per_token_ms": 22.52306976744186,
+    "predicted_per_second": 44.39892120946792
+  }
+}
