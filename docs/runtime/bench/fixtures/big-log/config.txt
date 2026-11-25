@@ -1,0 +1,2 @@
+mode=release
+workers=0

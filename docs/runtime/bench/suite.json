@@ -1,0 +1,98 @@
+{
+ "version": 1,
+ "note": "Same instruction text for every driver. {dir} is replaced by the job's workspace directory (a fresh copy of the fixture) by scripts/bench_runtime.sh.",
+ "jobs": [
+  {
+   "id": "edit-small",
+   "fixture": "edit-small",
+   "instructions": "In {dir} the Go test fails. Fix the function that is wrong (not the test) so that `go test ./...` passes. Do not change the test.",
+   "check": "go test ./..."
+  },
+  {
+   "id": "slow-test",
+   "fixture": "slow-test",
+   "instructions": "In {dir} the Go test fails. Fix the function that is wrong (not the test) so that `go test ./...` passes. The suite takes about a minute to run; that is expected, do not remove the delay.",
+   "check": "go test ./..."
+  },
+  {
+   "id": "slow-command",
+   "fixture": "slow-command",
+   "instructions": "In {dir}, run './fetch.sh' (it takes about two minutes and then writes data.txt). Then count the lines of data.txt and write only that number into answer.txt.",
+   "check": "test -s data.txt && test \"$(cat answer.txt)\" = \"$(wc -l < data.txt | tr -d ' ')\""
+  },
+  {
+   "id": "multi-file",
+   "fixture": "multi-file",
+   "instructions": "In {dir}, rename the function OldName to NewName everywhere it is used or defined (five files). `go build ./...` must still work and no 'OldName' may remain.",
+   "check": "go build ./... && ! grep -rn OldName ."
+  },
+  {
+   "id": "big-log",
+   "fixture": "big-log",
+   "instructions": "In {dir}, './build.sh' fails with one real error in a very long log. Find the cause and fix it so './build.sh' exits 0. Do not edit build.sh. Do not print the whole log; filter it.",
+   "check": "./build.sh >/dev/null"
+  },
+  {
+   "id": "docs",
+   "fixture": "docs",
+   "instructions": "In {dir}, add a section '## API' to README.md that describes the three exported functions of the package textkit (textkit/textkit.go): one or two lines each, with the function name in backticks.",
+   "check": "test \"$(grep -c -E 'Reverse|WordCount|Truncate' README.md)\" = 3"
+  }
+ ],
+ "scenarios": [
+  {
+   "id": "S1",
+   "description": "each job alone, one after another",
+   "mode": "sequential",
+   "jobs": [
+    "edit-small",
+    "slow-test",
+    "slow-command",
+    "multi-file",
+    "big-log",
+    "docs"
+   ],
+   "chat_messages": 0
+  },
+  {
+   "id": "S2",
+   "description": "all six queued at the same moment",
+   "mode": "parallel",
+   "jobs": [
+    "edit-small",
+    "slow-test",
+    "slow-command",
+    "multi-file",
+    "big-log",
+    "docs"
+   ],
+   "chat_messages": 0
+  },
+  {
+   "id": "S3",
+   "description": "S2 plus five chat messages sent 60 s apart while it runs",
+   "mode": "parallel",
+   "jobs": [
+    "edit-small",
+    "slow-test",
+    "slow-command",
+    "multi-file",
+    "big-log",
+    "docs"
+   ],
+   "chat_messages": 5,
+   "chat_interval_s": 60,
+   "chat_text": [
+    "What is the status of the jobs right now?",
+    "Which job is slowest so far?",
+    "Reply with the single word: pong",
+    "What is 17 times 23?",
+    "Summarise what you have done in one sentence."
+   ]
+  }
+ ],
+ "sampling": {
+  "temperature": "driver default (recorded per result file)",
+  "seed": "fixed where the driver allows it; 'n/a' otherwise (recorded per result file)"
+ }
+}
