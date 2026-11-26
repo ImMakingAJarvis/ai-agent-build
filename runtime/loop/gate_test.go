@@ -23,8 +23,6 @@ import (
 // until card m3-4c implements Submit, HandleOpDone and Step, then
 // deletes the Skip and changes nothing else.
 func TestGateA(t *testing.T) {
-	t.Skip("enabled by card m3-4c")
-
 	store, err := agentjob.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
