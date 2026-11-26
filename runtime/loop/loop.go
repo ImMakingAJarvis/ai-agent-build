@@ -3,10 +3,10 @@
 // so that a job waiting on a slow tool call does not hold its engine slot
 // while it waits — the whole point of the project (gate_test.go proves it).
 //
-// This card (m3-4a) is the API stub plus the Gate A test, written before
-// the loop exists: every method below returns "not implemented" and the
-// test is skipped. Card m3-4b fills in the tick, card m3-4c the queue and
-// the events, and deletes the test's Skip.
+// Card m3-4a wrote the API stub and the skipped Gate A test; card m3-4b
+// added the tick (tick.go). Submit, HandleOpDone and Step still return
+// "not implemented" — card m3-4c fills them in and deletes the test's
+// Skip.
 package loop
 
 import (
@@ -20,12 +20,6 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/ops"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/slot"
 )
-
-// Store is the subset of *agentjob.Store the loop uses; card m3-4b fills
-// this in.
-type Store interface {
-	// card m3-4b fills this in
-}
 
 // Deps are the loop's collaborators: the model backend, the slot manager
 // that assigns engine slots to ticks, the runner that executes tool calls
