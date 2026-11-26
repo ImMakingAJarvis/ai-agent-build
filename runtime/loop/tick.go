@@ -11,10 +11,39 @@ import (
 	"errors"
 	"io"
 
+	"strings"
+
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/engine"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/ops"
 )
+
+// emptyReplyNote is the user message appended after a tick whose reply
+// has neither text nor tool calls (card ELR-88): the job is not done,
+// the model gets one more try, and the guard in Step fails it if the
+// empty replies keep coming.
+const emptyReplyNote = "[runtime] your reply was empty. Continue the task, or reply with a short summary if it is finished."
+
+// clip500 shortens s to at most 500 runes, so a runtime note stays a
+// small user message no matter how long the error text is.
+func clip500(s string) string {
+	r := []rune(s)
+	if len(r) > 500 {
+		return string(r[:500])
+	}
+	return s
+}
+
+// appendUserNote appends one user message holding a plain text note, in
+// the JSON string shape every user message in the log has.
+func (l *Loop) appendUserNote(jobID, note string) error {
+	b, err := json.Marshal(note)
+	if err != nil {
+		return err
+	}
+	_, err = l.deps.Store.AppendMessages(jobID, agentjob.LoopMessage{Role: "user", Content: b})
+	return err
+}
 
 // systemPrompt is the first message of every tick of every job. It must
 // not change while a job runs: the engine's prompt cache depends on the
@@ -91,6 +120,13 @@ func (l *Loop) tick(ctx context.Context, jobID string) error {
 	// Ask the model and read the stream to the Done chunk.
 	reply, promptTok, outputTok, err := l.ask(ctx, jobID, lease.Slot)
 	if err != nil {
+		// The model round could not be used (card ELR-88): before the job
+		// goes back to ready, leave the model one note about it, so the
+		// next tick can answer the failure instead of just retrying blind.
+		if nerr := l.appendUserNote(jobID, "[runtime] your last reply could not be used: "+clip500(err.Error())+". Reply again."); nerr != nil {
+			giveBack()
+			return nerr
+		}
 		giveBack()
 		return err
 	}
@@ -112,15 +148,24 @@ func (l *Loop) tick(ctx context.Context, jobID string) error {
 	}
 	cs := job.State
 	cs.Tokens = tokens
-	if len(tickOps) > 0 {
+	switch {
+	case len(tickOps) > 0:
 		cs.Status = agentjob.Waiting
 		cs.WaitReason = agentjob.WaitOperation
 		outcome = tickOutcomeToolCalls
-	} else {
+	case strings.TrimSpace(reply.Content) != "":
 		cs.Status = agentjob.Done
 		cs.WaitReason = ""
 		cs.Summary = reply.Content
 		outcome = tickOutcomeFinal
+	default:
+		// An empty reply is not a finished job (card ELR-88): the tick is
+		// checkpointed like any other, the job goes back to ready, and a
+		// note (below) tells the model what to do next. The guard in Step
+		// fails the job if the empty replies keep coming.
+		cs.Status = agentjob.Ready
+		cs.WaitReason = ""
+		outcome = tickOutcomeError
 	}
 	if err := l.deps.Store.Checkpoint(jobID, agentjob.Checkpoint{
 		Messages: []agentjob.LoopMessage{{Role: "assistant", Content: content, Tokens: tokens}},
@@ -129,6 +174,12 @@ func (l *Loop) tick(ctx context.Context, jobID string) error {
 	}); err != nil {
 		giveBack()
 		return err
+	}
+	if cs.Status == agentjob.Ready {
+		if err := l.appendUserNote(jobID, emptyReplyNote); err != nil {
+			l.deps.Slots.Release(lease, tokens)
+			return err
+		}
 	}
 
 	// The slot is free for the next ready job; it keeps the job's KV
@@ -151,6 +202,17 @@ func (l *Loop) tick(ctx context.Context, jobID string) error {
 // HandleOpDone. The tool's OnPID callback records the command's PID on
 // the op, so a restart can adopt the process (card m3-1b).
 func (l *Loop) startOp(jobID string, op agentjob.LoopOp) error {
+	var argsObj map[string]any
+	if err := json.Unmarshal(op.Args, &argsObj); err != nil {
+		// A call whose arguments are not a JSON object is not started
+		// (card ELR-88): the failure reaches the model on the next tick,
+		// the same way an unknown tool does, so the model can resend the
+		// call with valid JSON.
+		return l.HandleOpDone(jobID, op.ID, ops.Result{
+			Status: agentjob.OpFailed,
+			Error:  "arguments are not a JSON object: " + err.Error() + ". Send the call again with valid JSON.",
+		})
+	}
 	if _, known := l.deps.Registry.Get(op.Tool); !known {
 		return l.HandleOpDone(jobID, op.ID, ops.Result{
 			Status: agentjob.OpFailed,

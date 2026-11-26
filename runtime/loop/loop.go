@@ -428,6 +428,26 @@ func (l *Loop) spillSave(jobID, opID string) func(string) (string, error) {
 	}
 }
 
+// failGuard fails a job for an unusable-reply or repeat run (card
+// ELR-88) and removes it from the ready list, with the same bookkeeping
+// as the budget path in Step: the running idle interval settles, the job
+// drops off the head, the metrics settle.
+func (l *Loop) failGuard(jobID string, j agentjob.Job, reason string) (bool, error) {
+	st := j.State
+	st.Status = agentjob.Failed
+	st.Error = reason
+	if err := l.deps.Store.SetStatus(jobID, st); err != nil {
+		return false, err
+	}
+	l.mu.Lock()
+	l.settleIdleLocked()
+	l.dropFirstLocked()
+	l.afterTickLocked()
+	l.deps.Metrics.setReadyJobs(len(l.ready))
+	l.mu.Unlock()
+	return true, nil
+}
+
 // Step runs at most ONE tick for the first ready job; ran is false when
 // nothing ran. A job over its tick or token budget is failed and removed
 // instead of ticking. On slot.ErrNoSlot the list is left as it is and
@@ -469,6 +489,27 @@ func (l *Loop) Step(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
+	// Unusable replies (card ELR-88): the runtime notes appended in a row
+	// at the end of the log. The model has been answered that many times
+	// and still cannot produce a usable reply — fail the job instead of
+	// burning more ticks.
+	if bad := trailingBad(msgs); bad >= l.deps.Config.MaxBadReplies {
+		return l.failGuard(jobID, j, fmt.Sprintf("model gave %d unusable replies in a row", bad))
+	}
+
+	// Repeated tool calls (card ELR-88): the identical calls at the end
+	// of the log. At repeat_warn the model gets one warning note; at
+	// repeat_fail the job is failed.
+	same := trailingSame(msgs)
+	if same >= l.deps.Config.RepeatFail {
+		return l.failGuard(jobID, j, fmt.Sprintf("model repeated the same tool call %d times", same))
+	}
+	if same == l.deps.Config.RepeatWarn && !isRepeatWarn(msgs, same) {
+		if err := l.appendUserNote(jobID, repeatWarnNote(same)); err != nil {
+			return false, err
+		}
+	}
+
 	// A tick starts: the running idle interval ends here, and time inside
 	// the tick never counts as idle.
 	l.mu.Lock()
@@ -497,6 +538,15 @@ func (l *Loop) Step(ctx context.Context) (bool, error) {
 		l.afterTickLocked()
 		l.deps.Metrics.setReadyJobs(len(l.ready))
 		l.mu.Unlock()
+		// A tick can end with the job ready again INSIDE the tick: an
+		// empty reply (card ELR-88) or a tool call that failed before it
+		// started (unknown tool, invalid arguments). Their resubmit was a
+		// no-op while the job was still first in the list, and the drop
+		// above removed that entry — put it back, or the loop would never
+		// tick the job again.
+		if j, err := l.deps.Store.Get(jobID); err == nil && j.State.Status == agentjob.Ready {
+			_ = l.Submit(jobID)
+		}
 		return true, nil
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -225,8 +226,9 @@ func TestTickUnknownTool(t *testing.T) {
 }
 
 // TestTickEngineErrorPutsJobBack: a failed model round gives the slot
-// back with the pre-tick token count, writes no checkpoint, and puts
-// the job back to ready.
+// back with the pre-tick token count, writes no checkpoint, leaves the
+// model one note to answer the failure (card ELR-88), and puts the job
+// back to ready.
 func TestTickEngineErrorPutsJobBack(t *testing.T) {
 	eng := fake.New(1)
 	l, store, _ := newTickEnv(t, eng)
@@ -246,8 +248,18 @@ func TestTickEngineErrorPutsJobBack(t *testing.T) {
 	if j.Tokens != 0 {
 		t.Errorf("tokens = %d, want 0 (the pre-tick count)", j.Tokens)
 	}
-	if msgs, err := store.Messages(tickJobID); err != nil || len(msgs) != 0 {
-		t.Errorf("messages = %d (err %v), want none (no checkpoint)", len(msgs), err)
+	// Card ELR-88: the failed round leaves one user note for the model
+	// to answer — no assistant message, so no checkpoint.
+	msgs, err := store.Messages(tickJobID)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("messages = %d (err %v), want the one runtime note", len(msgs), err)
+	}
+	var note string
+	if err := json.Unmarshal(msgs[0].Content, &note); err != nil {
+		t.Fatalf("note content = %q, want a JSON string: %v", msgs[0].Content, err)
+	}
+	if msgs[0].Role != "user" || !strings.HasPrefix(note, "[runtime] your last reply could not be used: engine down") {
+		t.Errorf("note = %q (role %q), want the engine-error note", note, msgs[0].Role)
 	}
 	// The slot went back: another job can take it.
 	if _, err := l.deps.Slots.Acquire(context.Background(), "other"); err != nil {

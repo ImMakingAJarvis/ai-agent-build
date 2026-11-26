@@ -27,6 +27,9 @@ type Config struct {
 	SpillBytes              int      `yaml:"spill_bytes"`
 	MaxTicks                int      `yaml:"max_ticks"`
 	MaxTaskTokens           int      `yaml:"max_task_tokens"`
+	MaxBadReplies           int      `yaml:"max_bad_replies"`
+	RepeatWarn              int      `yaml:"repeat_warn"`
+	RepeatFail              int      `yaml:"repeat_fail"`
 	AfterEdit               []string `yaml:"after_edit"`
 	AfterEditTimeoutSeconds int      `yaml:"after_edit_timeout_seconds"`
 	Timeouts                struct {
@@ -51,6 +54,9 @@ func Default() Config {
 	c.SpillBytes = 8192
 	c.MaxTicks = 200
 	c.MaxTaskTokens = 100000
+	c.MaxBadReplies = 3
+	c.RepeatWarn = 3
+	c.RepeatFail = 5
 	c.AfterEditTimeoutSeconds = 300
 	c.Timeouts.QuickSeconds = 30
 	c.Timeouts.NormalSeconds = 600
@@ -111,6 +117,15 @@ func (c Config) Validate() error {
 	}
 	if c.MaxTaskTokens < 0 {
 		return fmt.Errorf("max_task_tokens: %d is negative", c.MaxTaskTokens)
+	}
+	if c.MaxBadReplies < 0 {
+		return fmt.Errorf("max_bad_replies: %d is negative", c.MaxBadReplies)
+	}
+	if c.RepeatWarn < 0 {
+		return fmt.Errorf("repeat_warn: %d is negative", c.RepeatWarn)
+	}
+	if c.RepeatFail < 0 {
+		return fmt.Errorf("repeat_fail: %d is negative", c.RepeatFail)
 	}
 	if c.AfterEditTimeoutSeconds < 0 {
 		return fmt.Errorf("after_edit_timeout_seconds: %d is negative", c.AfterEditTimeoutSeconds)
