@@ -74,6 +74,7 @@ Call mode (docs/voice-call.md):
 
 import asyncio
 import base64
+import contextlib
 import hmac
 import io
 import json
@@ -701,8 +702,80 @@ async def resolve_llm(model: str | None) -> tuple[str, str]:
     return OLLAMA_URL, LOCAL_MODEL
 
 
+# A sentence ends at .!? followed by whitespace — the cut point for the
+# streaming TTS: each completed sentence can start synthesizing while the
+# model is still generating the rest of the reply.
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+async def _stream_chat_round(client, base_url, payload, on_sentence):
+    """One streamed LLM round (OpenAI SSE). Accumulates the deltas into a
+    message dict and emits completed sentences to on_sentence as they form,
+    so the caller can start TTS while the model is still generating.
+
+    Returns the assembled message: {"content": str|None, "tool_calls": [...]}.
+    """
+    content_parts = []
+    tool_calls = {}  # index -> accumulated tool call
+    buf = ""
+    async with client.stream(
+        "POST", f"{base_url}/v1/chat/completions", json=payload
+    ) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+            for tc in delta.get("tool_calls") or []:
+                idx = int(tc.get("index") or 0)
+                slot = tool_calls.setdefault(idx, {"arguments": ""})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["arguments"] += fn["arguments"]
+            c = delta.get("content")
+            if not c:
+                continue
+            content_parts.append(c)
+            buf += c
+            while True:
+                m = _SENTENCE_BOUNDARY_RE.search(buf)
+                if not m:
+                    break
+                sent = buf[: m.end()].strip()
+                buf = buf[m.end():]
+                if sent:
+                    await on_sentence(sent)
+    if buf.strip() and not tool_calls:
+        await on_sentence(buf.strip())
+    tcs = [
+        {
+            "id": slot.get("id") or f"call_stream_{i}",
+            "type": "function",
+            "function": {
+                "name": slot.get("name", ""),
+                "arguments": slot.get("arguments", "") or "{}",
+            },
+        }
+        for i, slot in sorted(tool_calls.items())
+    ]
+    return {"content": "".join(content_parts) or None, "tool_calls": tcs}
+
+
 async def run_tool_loop(client, messages, on_action=None, model=None,
-                        max_tokens=300, actions=None, base_url=None):
+                        max_tokens=300, actions=None, base_url=None,
+                        on_sentence=None):
     """One brain turn: LLM call, tool execution, repeat until a plain
     answer. Appends the exchange to messages. Returns (reply, scheduled).
 
@@ -711,7 +784,10 @@ async def run_tool_loop(client, messages, on_action=None, model=None,
     a list, is appended with {tool,label,result,scheduled} per tool run so a
     non-streaming caller (the /chat endpoint) can report what happened.
     base_url pins the engine (the call engine on a voice call) instead of
-    letting resolve_llm() route the turn.
+    letting resolve_llm() route the turn. on_sentence, when given, makes the
+    final answer stream (stream: true) and is awaited with each completed
+    sentence as it forms — the voice WebSocket uses it to start TTS before
+    the reply is finished.
     """
     reply = "(no reply)"
     scheduled = False
@@ -724,7 +800,9 @@ async def run_tool_loop(client, messages, on_action=None, model=None,
         payload = {
             "model": model_id,
             "messages": messages,
-            "stream": False,
+            # Stream only when a caller wants the sentences early (voice);
+            # a plain reply is cheaper to fetch in one shot.
+            "stream": on_sentence is not None,
             "temperature": 0.7,
             # Cap the output; voice passes a short cap, text chat a longer one.
             "max_tokens": max_tokens,
@@ -736,10 +814,17 @@ async def run_tool_loop(client, messages, on_action=None, model=None,
         if tools_supported and rnd < MAX_TOOL_ROUNDS:
             payload["tools"] = VOICE_TOOLS
         try:
-            resp = await client.post(
-                f"{base_url}/v1/chat/completions", json=payload
-            )
-            resp.raise_for_status()
+            if on_sentence is not None:
+                msg = await _stream_chat_round(
+                    client, base_url, payload, on_sentence
+                )
+            else:
+                resp = await client.post(
+                    f"{base_url}/v1/chat/completions", json=payload
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                msg = result.get("choices", [{}])[0].get("message", {})
         except httpx.HTTPStatusError as e:
             # An engine without tool support rejects the request; retry
             # the conversation plain rather than fail the utterance.
@@ -751,8 +836,6 @@ async def run_tool_loop(client, messages, on_action=None, model=None,
                 tools_supported = False
                 continue
             raise
-        result = resp.json()
-        msg = result.get("choices", [{}])[0].get("message", {})
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
             reply = msg.get("content") or "(no reply)"
@@ -803,14 +886,17 @@ async def run_tool_loop(client, messages, on_action=None, model=None,
 
 
 async def ask_brain(user_text: str, on_action=None, model=None, max_tokens=300,
-                    history=None, system_prompt=None, base_url=None) -> str:
+                    history=None, system_prompt=None, base_url=None,
+                    on_sentence=None) -> str:
     """Send text to the brain and get a spoken reply.
 
     The brain may call the tools in VOICE_TOOLS (schedule_job, search_jobs);
     this runs the tool loop: on tool_calls, execute each one, feed the
     results back, and let the model answer. on_action, if given, is awaited
     with a short status string when a tool starts, so the UI can show what
-    voice is doing.
+    voice is doing. on_sentence, if given, makes the final answer stream and
+    is awaited with each completed sentence as it forms (the voice WebSocket
+    starts TTS per sentence).
 
     Call-mode overrides (docs/voice-call.md): history (a separate list — a
     call keeps its own conversation, defaulting to the global chat_history),
@@ -830,7 +916,7 @@ async def ask_brain(user_text: str, on_action=None, model=None, max_tokens=300,
     async with httpx.AsyncClient(timeout=180.0) as client:
         reply, scheduled = await run_tool_loop(
             client, messages, on_action, model=model, max_tokens=max_tokens,
-            base_url=base_url,
+            base_url=base_url, on_sentence=on_sentence,
         )
 
         # Guardrail: the model sometimes says "I queued it" without calling
@@ -912,6 +998,25 @@ async def synthesize(text: str) -> bytes:
             audio_bytes.write(chunk["data"])
     audio_bytes.seek(0)
     return audio_bytes.read()
+
+
+async def synthesize_pcm(text: str) -> bytes:
+    """Synthesize one sentence with edge-tts, return raw 24 kHz 16-bit mono
+    PCM (no header). The voice WebSocket wraps each sentence's PCM in its
+    own tiny WAV and sends it as soon as it is done, while the model is
+    still generating the next sentence; synthesize() (full MP3) stays for
+    the REST endpoints.
+    """
+    voice, rate, pitch = tts_settings()
+    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+    audio = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio.write(chunk["data"])
+    audio.seek(0)
+    # edge-tts emits 24 kHz 16-bit mono MP3; soundfile decodes it.
+    pcm, _ = sf.read(audio, dtype="int16")
+    return pcm.tobytes()
 
 _HEADER_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -1589,18 +1694,38 @@ async def voice_endpoint(file: UploadFile = File(...), model: str | None = Form(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/voice/json")
-async def voice_json_endpoint(req: TextRequest):
-    """Full pipeline via JSON body: {"text": "..."} -> WAV audio out.
+async def voice_json_endpoint(req: TextRequest, request: Request):
+    """Full pipeline via JSON body: {"text": "..."} -> audio out.
 
     The Home Assistant satellite path — already wake-gated upstream, so
     every text here counts as addressed to the call state machine
     (trigger/goodbye handling applies; the level gate does not).
+
+    Header X-Audio: 0 returns JSON instead of synthesizing audio: the
+    satellite reads only X-Reply and speaks the text with HA's own TTS
+    (google_translate), so edge-tts here is dead weight (~1-6 s of network
+    TTS per turn). A missing/other header keeps the old audio body.
     """
     start = time.time()
     try:
         kind, reply = await session.on_utterance(req.text, level_db=None)
         if kind == "normal":
             reply = await ask_ollama(req.text, model=req.model)
+        if request.headers.get("x-audio") == "0":
+            elapsed = time.time() - start
+            return JSONResponse(
+                content={
+                    "transcript": req.text,
+                    "reply": reply,
+                    "session": session.state,
+                    "elapsed": round(elapsed, 1),
+                },
+                headers={
+                    "X-Reply": ascii_header(reply),
+                    "X-Elapsed": f"{elapsed:.1f}",
+                    "X-Session": session.state,
+                },
+            )
         reply_audio = await synthesize(reply)
         elapsed = time.time() - start
         return Response(
@@ -1676,6 +1801,10 @@ if os.path.isdir(APP_DIR):
 #       (scheduling a job / searching job history)
 #     - Binary frames: TTS audio chunks (raw 16-bit PCM at 24kHz, mono)
 #     - JSON: {"type": "error", "message": "..."}
+
+# Queue sentinel: end of the sentences for one turn (the TTS worker stops).
+_TTS_SENTINEL = object()
+
 
 async def voice_websocket(ws: WebSocket):
     await ws.accept()
@@ -1767,34 +1896,56 @@ async def voice_websocket(ws: WebSocket):
                                 "session": session.state,
                             })
                             continue
-                        if kind == "normal":
-                            reply = await ask_brain(text, on_action=_action)
 
-                        # TTS - stream audio chunks as they arrive
-                        await ws.send_json({"type": "status", "state": "speaking", "text": reply})
-                        voice, rate, pitch = tts_settings()
-                        communicate = edge_tts.Communicate(reply, voice, rate=rate, pitch=pitch)
+                        # TTS as the reply arrives: completed sentences are
+                        # queued (on_sentence) while a worker task
+                        # synthesizes each one (edge-tts) and sends its
+                        # audio as soon as it is done — the first frame
+                        # lands after the first sentence, not after the
+                        # whole pipeline (STT + full reply + full TTS).
+                        tts_queue: asyncio.Queue = asyncio.Queue()
+                        speaking_sent = False
 
-                        # Collect all audio first, then convert to raw PCM and stream
-                        audio_bytes = io.BytesIO()
-                        async for chunk in communicate.stream():
-                            if chunk["type"] == "audio":
-                                audio_bytes.write(chunk["data"])
+                        async def _sentence(sentence: str):
+                            tts_queue.put_nowait(sentence)
 
-                        audio_bytes.seek(0)
-                        tts_wav = audio_bytes.read()
+                        async def _tts_worker():
+                            nonlocal speaking_sent
+                            while True:
+                                sentence = await tts_queue.get()
+                                if sentence is _TTS_SENTINEL:
+                                    return
+                                pcm = await synthesize_pcm(sentence)
+                                if not pcm:
+                                    continue
+                                if not speaking_sent:
+                                    await ws.send_json({
+                                        "type": "status",
+                                        "state": "speaking",
+                                    })
+                                    speaking_sent = True
+                                # One tiny WAV per sentence: the browser
+                                # decodes each frame as an independent clip.
+                                await ws.send_bytes(pcm16_to_wav(pcm, 24000))
 
-                        # Convert WAV to raw PCM (edge-tts produces 24kHz 16-bit mono)
-                        # sf.read returns (data, samplerate) — data first
-                        tts_pcm, _ = sf.read(io.BytesIO(tts_wav), dtype="int16")
-                        raw_pcm = tts_pcm.tobytes()
-
-                        # Stream in chunks of ~200ms (4800 bytes at 24kHz 16-bit)
-                        chunk_size = 4800
-                        for i in range(0, len(raw_pcm), chunk_size):
-                            chunk = raw_pcm[i:i + chunk_size]
-                            await ws.send_bytes(chunk)
-
+                        worker = asyncio.create_task(_tts_worker())
+                        try:
+                            if kind == "normal":
+                                reply = await ask_brain(
+                                    text, on_action=_action,
+                                    on_sentence=_sentence,
+                                )
+                            else:
+                                # Session/call-mode replies are complete
+                                # when on_utterance returns: one chunk.
+                                _sentence(reply)
+                        finally:
+                            tts_queue.put_nowait(_TTS_SENTINEL)
+                            if worker.cancel():
+                                pass  # the pipeline failed mid-way: stop TTS
+                            else:
+                                with contextlib.suppress(Exception):
+                                    await worker
                         await ws.send_json({
                             "type": "status", "state": "idle",
                             "text": reply, "session": session.state,

@@ -58,6 +58,11 @@ class JarvisVoiceAgent(AbstractConversationAgent):
             async with self._session.post(
                 f"{self._voice_url}/voice/json",
                 json={"text": user_input.text},
+                # We only read X-Reply and speak it with HA's own TTS
+                # (google_translate) — X-Audio: 0 makes the service skip
+                # its edge-tts synthesis (~1-6 s per turn). Pre-streaming
+                # services ignore the header and still return audio.
+                headers={"X-Audio": "0"},
                 auth=self._auth,
                 timeout=timeout,
             ) as resp:
