@@ -39,6 +39,14 @@ the voice-call session state machine (docs/voice-call.md).
   `POST /voice/json`, `POST /chat`, `WS /voice/ws`, `/voice/chat`, `/app/`.
 - The reply text also rides in the `X-Reply` header (control characters
   collapsed — a newline there once aborted every response, 2026-10-27).
+- `WS /voice/ws` streams: the reply's LLM round runs with `stream: true`
+  and each completed sentence is synthesized (edge-tts) and sent as one
+  small WAV binary frame as soon as it is done — first audio lands after
+  the first sentence, not after the whole pipeline (2026-11-26).
+- `POST /voice/json` with request header `X-Audio: 0` returns a JSON body
+  (`transcript`, `reply`, `session`, `elapsed`) and skips the edge-tts
+  synthesis — the HA satellite sends it (it reads only `X-Reply` and speaks
+  with HA's own TTS). No/other header keeps the old audio body.
 
 ## Configuration
 
@@ -71,6 +79,14 @@ The image needs ffmpeg (webm/opus decode and resampling).
 Then a real turn: POST a short WAV and a webm/opus clip to `/voice/json`
 and check transcript + reply + audio.
 
+Streaming verification (inside the container):
+
+    docker exec jarvis-voice python3 /opt/jarvis-voice/scripts/voice_stream_test.py
+
+It checks the REST X-Audio behavior, the WS time-to-first-audio (first
+frame must land well before the final idle status), and the sentence
+streaming of run_tool_loop against a local fake SSE server.
+
 ## Failure modes
 
 - Mic never worked: buffer size, sample rate, binary frames, raw PCM (5
@@ -81,4 +97,9 @@ and check transcript + reply + audio.
   PR #263) although the webm fix (PR #78) relied on it since 10-27.
 - The HA satellite speaks through HA's own TTS (google_translate), not
   this service's edge-tts — tuning TTS here does not change the satellite
-  voice (2026-11-16).
+  voice (2026-11-16). It used to pay for that dead edge-tts pass on every
+  turn; it now sends `X-Audio: 0` (2026-11-26).
+- `/voice/chat` never played the audio: the WS client checked
+  `instanceof Blob` while binary frames arrive as ArrayBuffer
+  (binaryType default). Fixed with `ws.binaryType = 'arraybuffer'` +
+  ArrayBuffer handling (2026-11-26, unverified in a real browser).

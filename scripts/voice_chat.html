@@ -345,6 +345,7 @@ const vizBars = visualizer.querySelectorAll('.viz-bar');
 // ---------------------------------------------------------------------------
 function connect() {
   ws = new WebSocket(wsConnectUrl());
+  ws.binaryType = 'arraybuffer';  // audio frames arrive as ArrayBuffer
 
   ws.onopen = () => {
     state = 'connected';
@@ -377,7 +378,7 @@ function connect() {
   };
 
   ws.onmessage = (e) => {
-    if (e.data instanceof Blob) {
+    if (e.data instanceof Blob || e.data instanceof ArrayBuffer) {
       // Binary audio data from Jarvis - play it
       handleAudioChunk(e.data);
     } else {
@@ -418,8 +419,13 @@ function handleJsonMessage(msg) {
 // ---------------------------------------------------------------------------
 // Audio playback
 // ---------------------------------------------------------------------------
-async function handleAudioChunk(blob) {
-  const arrayBuffer = await blob.arrayBuffer();
+async function handleAudioChunk(data) {
+  // Each frame is one sentence's audio, WAV-wrapped (the server streams a
+  // frame as soon as that sentence is synthesized — playback starts while
+  // the reply is still generating).
+  const arrayBuffer = data instanceof ArrayBuffer
+    ? data
+    : await data.arrayBuffer();
   playbackQueue.push(arrayBuffer);
   if (!playbackActive) {
     playNext();
@@ -439,7 +445,6 @@ async function playNext() {
   }
 
   try {
-    // edge-tts produces 24kHz 16-bit mono PCM
     const audioBuffer = await audioCtx.decodeAudioData(chunk);
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
@@ -449,13 +454,13 @@ async function playNext() {
   } catch (e) {
     console.warn('Playback decode failed, trying raw PCM:', e);
     // Fallback: treat as raw PCM at 24kHz
-    playRawPCM(chunk);
+    await playRawPCM(chunk);
   }
 
   setTimeout(playNext, 50);
 }
 
-function playRawPCM(arrayBuffer) {
+async function playRawPCM(arrayBuffer) {
   if (!audioCtx) return;
   const samples = new Int16Array(arrayBuffer);
   const audioBuffer = audioCtx.createBuffer(1, samples.length, 24000);
@@ -467,6 +472,7 @@ function playRawPCM(arrayBuffer) {
   source.buffer = audioBuffer;
   source.connect(audioCtx.destination);
   source.start();
+  await new Promise(r => source.onended = r);
 }
 
 // ---------------------------------------------------------------------------
