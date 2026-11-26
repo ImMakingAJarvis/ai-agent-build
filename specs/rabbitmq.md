@@ -17,10 +17,12 @@ depends_on: []
 The message broker. Worker queues `voice`/`fix`/`image`/`coding`/
 `background` (priority via `x-max-priority`), location queues
 `jobs.gpu|cpu|igpu`, capability queues `cap.<cap>`, reply queues
-`flow.<id>`, mailboxes `agent.<name>.inbox`, cadence queues
-`sched.<cadence>`, the `tasks` and `events` topic exchanges, and the
-`jarvis.dlx` → `dead` dead-letter path. The MQTT plugin on 1883 carries
-the Home Assistant sensors.
+`flow.<id>`, mailboxes `agent.<name>.inbox`, loop events `loop.events`
+(runtime events for jobs with driver loop — tool finished, user message,
+approval decided, cancel; a consumer acks only after the effect is on
+disk), cadence queues `sched.<cadence>`, the `tasks` and `events` topic
+exchanges, and the `jarvis.dlx` → `dead` dead-letter path. The MQTT
+plugin on 1883 carries the Home Assistant sensors.
 
 ## Interfaces
 

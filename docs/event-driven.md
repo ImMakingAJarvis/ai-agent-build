@@ -33,6 +33,7 @@ temporary auto-delete ones the CLI creates to `tail` an exchange.
 | `cap.<capability>` | request channel for a capability — v2 messages, e.g. `cap.image.generate`; created on demand; the result goes to the request's `reply_to`, not here | the capability's worker (capworker SDK; `cap-echo` consumes `cap.echo`, the Phase 2 gate's test worker) | 10 | `jarvis.dlx` |
 | `agent.<name>.inbox` | agent mailbox (EVB-35): direct mail between identities — `question`/`answer`/`fyi`/`handoff`/`review_request` envelopes; a question's `wake_job` wakes when the answer lands. Identities: `brain`, `igpu-helper`, `sonnet`, `planner` (+ `remote-<n>` when it lands) | the round that sends — read with `jarvis-mq inbox` / `take`; sent with `ask` / `tell` / `answer` | — | `jarvis.dlx` |
 | `dead` | dead letters from `flow.*`/`cap.*`: rejected (nack without requeue after the `MaxAttempts` budget) or expired (TTL), each carrying an `x-death` header (reason, queue, count, time) | nobody consumes it — the dashboard's Dead Letters section reads it and offers requeue / drop | — | — |
+| `loop.events` | runtime events for jobs with driver loop (tool finished, user message, approval decided, cancel); a consumer acks only after the effect is on disk | loopd (`internal/queue.ConsumeLoopEvents`); published by loopd and its operation runner | — | `jarvis.dlx` |
 | `events` (topic) | lifecycle events: `job.<capability>.<started\|progress\|done\|failed>`, `agent.<job-id>.<yielded\|woken\|resumed>`, `window.<opened\|closed>`, `lease.<granted\|released\|denied>`, `stream.<started\|stopped>` | publishers: worker (the jobs it runs), task-runner (`job.run_task.*`), agent-run (`agent.*`), resourced (`window.*`, `lease.*`, `stream.*`); declared by `definitions.json` + `EventPublisher` | — | — |
 | `jarvis.dlx` (fanout) | the dead-letter exchange — fanout, so every dead letter lands on its single bound queue, `dead` | `EnsureDLX` (called from every `flow.*`/`cap.*` declare and dead-letter operation) | — | — |
 
@@ -641,6 +642,13 @@ because a notify listener can only send its static text — the result body
 - `internal/queue/events.go` — the `events` exchange: `Event`, the
   `JobEvent`/`AgentEvent`/`WindowEvent`/`LeaseEvent` builders, and the
   fire-and-forget `EventPublisher`.
+- `internal/queue/loopevents.go` — the `loop.events` queue (ELR-1,
+  M1.3a): the `LoopEvent` envelope and the `Ev*` type constants,
+  `NewLoopEvent`, `EnsureLoopEventsQueue` (durable, DLX args — like
+  `flow.*`), `PublishLoopEvent` (confirm mode), `EncodeLoopEvent`/
+  `DecodeLoopEvent`, and `ConsumeLoopEvents` (prefetch 1, manual ack —
+  the handler's effect is on disk before the ack; a handler error
+  burns the shared delivery budget, then dead-letters with a reason).
 - `internal/queue/dlx.go` — `EnsureDLX`, the `dead` queue, the
   `x-attempts` delivery budget, and `ListDead`/`RequeueDead`/`DropDead`.
 - `cmd/jarvis-mq/main.go` — the CLI above (including `ask`/`tell`/`answer`/
