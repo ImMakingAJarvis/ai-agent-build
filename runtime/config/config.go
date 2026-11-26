@@ -21,13 +21,15 @@ type Config struct {
 		URL     string `yaml:"url"`
 		SlotDir string `yaml:"slot_dir"`
 	} `yaml:"engine"`
-	Slots             []int    `yaml:"slots"`
-	SnapshotMinTokens int      `yaml:"snapshot_min_tokens"`
-	InlineWaitMS      int      `yaml:"inline_wait_ms"`
-	SpillBytes        int      `yaml:"spill_bytes"`
-	MaxTicks          int      `yaml:"max_ticks"`
-	MaxTaskTokens     int      `yaml:"max_task_tokens"`
-	Timeouts struct {
+	Slots                   []int    `yaml:"slots"`
+	SnapshotMinTokens       int      `yaml:"snapshot_min_tokens"`
+	InlineWaitMS            int      `yaml:"inline_wait_ms"`
+	SpillBytes              int      `yaml:"spill_bytes"`
+	MaxTicks                int      `yaml:"max_ticks"`
+	MaxTaskTokens           int      `yaml:"max_task_tokens"`
+	AfterEdit               []string `yaml:"after_edit"`
+	AfterEditTimeoutSeconds int      `yaml:"after_edit_timeout_seconds"`
+	Timeouts                struct {
 		QuickSeconds  int `yaml:"quick_seconds"`
 		NormalSeconds int `yaml:"normal_seconds"`
 		MaxOpHours    int `yaml:"max_op_hours"`
@@ -49,6 +51,7 @@ func Default() Config {
 	c.SpillBytes = 8192
 	c.MaxTicks = 200
 	c.MaxTaskTokens = 100000
+	c.AfterEditTimeoutSeconds = 300
 	c.Timeouts.QuickSeconds = 30
 	c.Timeouts.NormalSeconds = 600
 	c.Timeouts.MaxOpHours = 24
@@ -108,6 +111,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxTaskTokens < 0 {
 		return fmt.Errorf("max_task_tokens: %d is negative", c.MaxTaskTokens)
+	}
+	if c.AfterEditTimeoutSeconds < 0 {
+		return fmt.Errorf("after_edit_timeout_seconds: %d is negative", c.AfterEditTimeoutSeconds)
 	}
 	if c.Timeouts.QuickSeconds < 0 {
 		return fmt.Errorf("timeouts.quick_seconds: %d is negative", c.Timeouts.QuickSeconds)

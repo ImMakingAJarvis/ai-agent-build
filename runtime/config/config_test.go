@@ -36,6 +36,9 @@ func TestDefaultValid(t *testing.T) {
 	if got, want := c.MaxTaskTokens, 100000; got != want {
 		t.Errorf("MaxTaskTokens = %d, want %d", got, want)
 	}
+	if got, want := c.AfterEditTimeoutSeconds, 300; got != want {
+		t.Errorf("AfterEditTimeoutSeconds = %d, want %d", got, want)
+	}
 	got := [4]int{c.Timeouts.QuickSeconds, c.Timeouts.NormalSeconds, c.Timeouts.MaxOpHours, c.Timeouts.StallMinutes}
 	if want := [4]int{30, 600, 24, 10}; got != want {
 		t.Errorf("Timeouts = %v, want %v", got, want)
@@ -92,6 +95,7 @@ func TestValidateRejects(t *testing.T) {
 		{"negative spill_bytes", func(c *Config) { c.SpillBytes = -1 }},
 		{"negative max_ticks", func(c *Config) { c.MaxTicks = -1 }},
 		{"negative max_task_tokens", func(c *Config) { c.MaxTaskTokens = -1 }},
+		{"negative after_edit_timeout_seconds", func(c *Config) { c.AfterEditTimeoutSeconds = -1 }},
 		{"negative quick_seconds", func(c *Config) { c.Timeouts.QuickSeconds = -1 }},
 		{"negative normal_seconds", func(c *Config) { c.Timeouts.NormalSeconds = -1 }},
 		{"negative max_op_hours", func(c *Config) { c.Timeouts.MaxOpHours = -1 }},

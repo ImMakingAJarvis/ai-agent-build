@@ -18,8 +18,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +73,12 @@ type Loop struct {
 	// process never counted.
 	opsMu   sync.Mutex
 	opsLive map[string]struct{}
+
+	// afterEdits holds the job ids whose last finished op was a
+	// successful file edit (editTools) and whose next all-done pass
+	// must therefore run the after_edit check (card ELR-37). Guarded by
+	// mu; consumed by afterEditCheck.
+	afterEdits map[string]bool
 }
 
 // New returns a Loop with its collaborators. Now defaults to time.Now.
@@ -148,9 +156,27 @@ func (l *Loop) Submit(jobID string) error {
 	return nil
 }
 
+// afterEditIDPrefix prefixes the internal check ops (card ELR-37); the
+// ids are after-edit-1, after-edit-2, ... per job.
+const afterEditIDPrefix = "after-edit-"
+
+// afterEditPassed and afterEditFailed are the user messages a finished
+// check op produces (card ELR-37).
+const (
+	afterEditPassed = "[automatic check after your edits] passed"
+	afterEditFailed = "[automatic check after your edits] exit code %d\n%s"
+)
+
+// editTools are the tools whose success means the job changed files, so
+// the after_edit check (card ELR-37) must run before the job ticks
+// again.
+var editTools = map[string]bool{"write_file": true, "edit_file": true, "apply_edits": true}
+
 // HandleOpDone records a finished op and wakes its job when every op of
 // it is done. It is called by the Runner's OnDone, from the op's
 // goroutine. A repeated event — an op already finished — changes nothing.
+// An op with no tool call is internal (the after_edit check): its result
+// is a plain user message, not a tool message.
 func (l *Loop) HandleOpDone(jobID, opID string, res ops.Result) error {
 	op, err := l.deps.Store.GetOp(jobID, opID)
 	if err != nil {
@@ -170,23 +196,18 @@ func (l *Loop) HandleOpDone(jobID, opID string, res ops.Result) error {
 	}
 	l.markOpFinished(op.ID)
 
+	// An internal op (no tool call) answers no model call: its result is
+	// a plain user message and it wakes the job on its own (card ELR-37).
+	if op.ToolCallID == "" {
+		return l.finishAfterEditOp(jobID, op.ID, res)
+	}
+
 	// The text the model reads: the output, or the error.
 	text := res.Output
 	if res.Status != agentjob.OpDone {
 		text = "ERROR: " + res.Error
 	}
-	spilled, err := tools.Spill(text, l.deps.Config.SpillBytes, func(content string) (string, error) {
-		// The full text goes to <JobDir>/ops/<opID>.full; the handle is
-		// its path, so the model can read it back.
-		name := "ops/" + opID + ".full"
-		if err := os.MkdirAll(filepath.Join(l.deps.Store.JobDir(jobID), "ops"), 0o755); err != nil {
-			return "", err
-		}
-		if err := l.deps.Store.WriteFile(jobID, name, []byte(content)); err != nil {
-			return "", err
-		}
-		return filepath.Join(l.deps.Store.JobDir(jobID), name), nil
-	})
+	spilled, err := tools.Spill(text, l.deps.Config.SpillBytes, l.spillSave(jobID, op.ID))
 	if err != nil {
 		return err
 	}
@@ -201,13 +222,36 @@ func (l *Loop) HandleOpDone(jobID, opID string, res ops.Result) error {
 		return err
 	}
 
-	// Every op finished: the job is ready for its next tick.
+	// A successful edit means this job changed files: when every op is
+	// finished, the after_edit check runs before the job may tick again
+	// (card ELR-37).
+	if editTools[op.Tool] && res.Status == agentjob.OpDone {
+		l.mu.Lock()
+		if l.afterEdits == nil {
+			l.afterEdits = make(map[string]bool)
+		}
+		l.afterEdits[jobID] = true
+		l.mu.Unlock()
+	}
+
+	// Every op finished: the job is ready for its next tick — unless the
+	// after_edit check runs first (card ELR-37).
 	allDone, err := l.allOpsFinished(jobID)
 	if err != nil {
 		return err
 	}
 	if !allDone {
 		return nil // still waiting on the other ops
+	}
+	chk, live, err := l.afterEditCheck(jobID)
+	if err != nil {
+		return err
+	}
+	if live {
+		return nil // the other finishing op's check op is running; it wakes the job
+	}
+	if chk.ID != "" {
+		return l.startOp(jobID, chk)
 	}
 	j, err := l.deps.Store.Get(jobID)
 	if err != nil {
@@ -220,6 +264,168 @@ func (l *Loop) HandleOpDone(jobID, opID string, res ops.Result) error {
 		return err
 	}
 	return l.Submit(jobID)
+}
+
+// afterEditCheck decides, for a job whose every op is finished, whether
+// the after_edit check (card ELR-37) runs: it returns the op this caller
+// must start when it created one, live when a check op already runs
+// (created by an op that finished in the same instant), and (zero,
+// false) when no check is due and the job may go ready. The decision and
+// the op's creation run under l.mu, so two ops finishing concurrently
+// create exactly one check op and no caller makes the job ready while
+// one is live.
+func (l *Loop) afterEditCheck(jobID string) (op agentjob.LoopOp, live bool, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	pending := l.afterEdits[jobID]
+	if pending {
+		delete(l.afterEdits, jobID)
+	}
+	if live, err = l.liveAfterEditOp(jobID); err != nil {
+		return agentjob.LoopOp{}, false, err
+	}
+	if live || !(pending && len(l.deps.Config.AfterEdit) > 0) {
+		return op, live, nil
+	}
+	id, err := l.nextAfterEditID(jobID)
+	if err != nil {
+		return agentjob.LoopOp{}, false, err
+	}
+	args, err := json.Marshal(map[string]any{
+		"cmd":             strings.Join(l.deps.Config.AfterEdit, " && "),
+		"timeout_seconds": l.deps.Config.AfterEditTimeoutSeconds,
+	})
+	if err != nil {
+		return agentjob.LoopOp{}, false, err
+	}
+	op = agentjob.LoopOp{ID: id, Tool: "shell", Args: args, Status: agentjob.OpPending}
+	if err = l.deps.Store.PutOp(jobID, op); err != nil {
+		return agentjob.LoopOp{}, false, err
+	}
+	return op, false, nil
+}
+
+// finishAfterEditOp records the result of a finished after_edit check op
+// (card ELR-37) as a plain user message — the op answered no tool call,
+// so a tool message would be wrong — and wakes the job: the check op was
+// its last op.
+func (l *Loop) finishAfterEditOp(jobID, opID string, res ops.Result) error {
+	content := afterEditPassed
+	if res.Status != agentjob.OpDone {
+		body := res.Output
+		if body == "" {
+			body = res.Error
+		}
+		spilled, err := tools.Spill(body, l.deps.Config.SpillBytes, l.spillSave(jobID, opID))
+		if err != nil {
+			return err
+		}
+		content = fmt.Sprintf(afterEditFailed, res.ExitCode, spilled.Text)
+	}
+	b, err := json.Marshal(content)
+	if err != nil {
+		return err
+	}
+	if _, err := l.deps.Store.AppendMessages(jobID, agentjob.LoopMessage{
+		Role:    "user",
+		Content: b,
+	}); err != nil {
+		return err
+	}
+	j, err := l.deps.Store.Get(jobID)
+	if err != nil {
+		return err
+	}
+	st := j.State
+	st.Status = agentjob.Ready
+	st.WaitReason = ""
+	if err := l.deps.Store.SetStatus(jobID, st); err != nil {
+		return err
+	}
+	return l.Submit(jobID)
+}
+
+// afterEditOps lists the job's ops by walking the ops directory like
+// allOpsFinished: the spilled .full texts live in the same directory and
+// only the .json files are ops.
+func (l *Loop) afterEditOps(jobID string) ([]agentjob.LoopOp, error) {
+	dir := filepath.Join(l.deps.Store.JobDir(jobID), "ops")
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []agentjob.LoopOp
+	for _, e := range ents {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		op, err := l.deps.Store.GetOp(jobID, strings.TrimSuffix(name, ".json"))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, op)
+	}
+	return out, nil
+}
+
+// liveAfterEditOp reports whether the job has an after_edit check op
+// that has not finished (card ELR-37): an op with no tool call. The
+// callers hold l.mu.
+func (l *Loop) liveAfterEditOp(jobID string) (bool, error) {
+	ops, err := l.afterEditOps(jobID)
+	if err != nil {
+		return false, err
+	}
+	for _, op := range ops {
+		if op.ToolCallID == "" && !op.Finished() {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// nextAfterEditID returns the id of the next after_edit check op:
+// after-edit-<n> with n one past the highest existing one (card
+// ELR-37). The callers hold l.mu.
+func (l *Loop) nextAfterEditID(jobID string) (string, error) {
+	ops, err := l.afterEditOps(jobID)
+	if err != nil {
+		return "", err
+	}
+	max := 0
+	for _, op := range ops {
+		if !strings.HasPrefix(op.ID, afterEditIDPrefix) {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimPrefix(op.ID, afterEditIDPrefix))
+		if err != nil {
+			continue
+		}
+		if n > max {
+			max = n
+		}
+	}
+	return afterEditIDPrefix + strconv.Itoa(max+1), nil
+}
+
+// spillSave returns the save function that keeps the full text of a
+// spilled op result at <JobDir>/ops/<opID>.full; the spilled handle is
+// the path, so the model can read it back.
+func (l *Loop) spillSave(jobID, opID string) func(string) (string, error) {
+	return func(content string) (string, error) {
+		name := "ops/" + opID + ".full"
+		if err := os.MkdirAll(filepath.Join(l.deps.Store.JobDir(jobID), "ops"), 0o755); err != nil {
+			return "", err
+		}
+		if err := l.deps.Store.WriteFile(jobID, name, []byte(content)); err != nil {
+			return "", err
+		}
+		return filepath.Join(l.deps.Store.JobDir(jobID), name), nil
+	}
 }
 
 // Step runs at most ONE tick for the first ready job; ran is false when

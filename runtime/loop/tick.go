@@ -284,8 +284,19 @@ func (l *Loop) prompt(jobID string) ([]engine.Message, error) {
 				return nil, err
 			}
 			out = engine.Message{Role: "tool", ToolCallID: tc.ToolCallID, Content: tc.Content}
+		case "user":
+			var s string
+			if err := json.Unmarshal(m.Content, &s); err != nil {
+				return nil, err
+			}
+			if s == j.Spec.Instructions {
+				continue // the instructions are already the second message
+			}
+			// A user message the model did not ask for — the after_edit
+			// check result (card ELR-37) reaches the model here.
+			out = engine.Message{Role: "user", Content: s}
 		default:
-			continue // system and user come from the spec, not the log
+			continue // the system message comes from the constant, not the log
 		}
 		msgs = append(msgs, out)
 	}
