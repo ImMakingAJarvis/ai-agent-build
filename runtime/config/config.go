@@ -30,6 +30,7 @@ type Config struct {
 	MaxBadReplies           int      `yaml:"max_bad_replies"`
 	RepeatWarn              int      `yaml:"repeat_warn"`
 	RepeatFail              int      `yaml:"repeat_fail"`
+	MaxAcceptanceFails      int      `yaml:"max_acceptance_fails"`
 	AfterEdit               []string `yaml:"after_edit"`
 	AfterEditTimeoutSeconds int      `yaml:"after_edit_timeout_seconds"`
 	Timeouts                struct {
@@ -57,6 +58,7 @@ func Default() Config {
 	c.MaxBadReplies = 3
 	c.RepeatWarn = 3
 	c.RepeatFail = 5
+	c.MaxAcceptanceFails = 5
 	c.AfterEditTimeoutSeconds = 300
 	c.Timeouts.QuickSeconds = 30
 	c.Timeouts.NormalSeconds = 600
@@ -126,6 +128,9 @@ func (c Config) Validate() error {
 	}
 	if c.RepeatFail < 0 {
 		return fmt.Errorf("repeat_fail: %d is negative", c.RepeatFail)
+	}
+	if c.MaxAcceptanceFails < 0 {
+		return fmt.Errorf("max_acceptance_fails: %d is negative", c.MaxAcceptanceFails)
 	}
 	if c.AfterEditTimeoutSeconds < 0 {
 		return fmt.Errorf("after_edit_timeout_seconds: %d is negative", c.AfterEditTimeoutSeconds)

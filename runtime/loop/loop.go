@@ -196,6 +196,13 @@ func (l *Loop) HandleOpDone(jobID, opID string, res ops.Result) error {
 	}
 	l.markOpFinished(op.ID)
 
+	// An acceptance op (card ELR-89) settles the job itself — a pass
+	// makes it done, a fail sends it back to the model or fails it —
+	// before the generic internal-op path below.
+	if strings.HasPrefix(op.ID, acceptIDPrefix) {
+		return l.finishAcceptanceOp(jobID, op.ID, res)
+	}
+
 	// An internal op (no tool call) answers no model call: its result is
 	// a plain user message and it wakes the job on its own (card ELR-37).
 	if op.ToolCallID == "" {
@@ -343,6 +350,103 @@ func (l *Loop) finishAfterEditOp(jobID, opID string, res ops.Result) error {
 		return err
 	}
 	return l.Submit(jobID)
+}
+
+// finishAcceptanceOp settles a finished acceptance-check op (card
+// ELR-89): exit 0 makes the job done; anything else counts the job's
+// failed accept- ops — at the configured limit the job fails, below it
+// the model gets the output as a user message and the job goes back to
+// ready. The count includes the op that just finished: its result is
+// stored before this runs.
+func (l *Loop) finishAcceptanceOp(jobID, opID string, res ops.Result) error {
+	if res.Status == agentjob.OpDone {
+		return l.acceptancePass(jobID)
+	}
+	j, err := l.deps.Store.Get(jobID)
+	if err != nil {
+		return err
+	}
+	jobOps, err := l.afterEditOps(jobID)
+	if err != nil {
+		return err
+	}
+	failed := 0
+	for _, op := range jobOps {
+		if strings.HasPrefix(op.ID, acceptIDPrefix) && op.Status == agentjob.OpFailed {
+			failed++
+		}
+	}
+	st := j.State
+	if failed >= l.deps.Config.MaxAcceptanceFails {
+		st.Status = agentjob.Failed
+		st.WaitReason = ""
+		st.Error = fmt.Sprintf("acceptance check failed %d times", failed)
+		return l.deps.Store.SetStatus(jobID, st)
+	}
+	body := res.Output
+	if body == "" {
+		body = res.Error
+	}
+	spilled, err := tools.Spill(body, l.deps.Config.SpillBytes, l.spillSave(jobID, opID))
+	if err != nil {
+		return err
+	}
+	note := fmt.Sprintf(
+		"[acceptance check failed] exit code %d\n%s\nThe task is not finished. Fix the cause and reply again when done.",
+		res.ExitCode, spilled.Text)
+	b, err := json.Marshal(note)
+	if err != nil {
+		return err
+	}
+	if _, err := l.deps.Store.AppendMessages(jobID, agentjob.LoopMessage{
+		Role:    "user",
+		Content: b,
+	}); err != nil {
+		return err
+	}
+	st.Status = agentjob.Ready
+	st.WaitReason = ""
+	if err := l.deps.Store.SetStatus(jobID, st); err != nil {
+		return err
+	}
+	return l.Submit(jobID)
+}
+
+// acceptancePass makes the job done with the text of its last assistant
+// message as its summary (card ELR-89): the model said the task is
+// finished and the acceptance commands agreed.
+func (l *Loop) acceptancePass(jobID string) error {
+	j, err := l.deps.Store.Get(jobID)
+	if err != nil {
+		return err
+	}
+	msgs, err := l.deps.Store.Messages(jobID)
+	if err != nil {
+		return err
+	}
+	var summary string
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "assistant" {
+			continue
+		}
+		var a assistantContent
+		if err := json.Unmarshal(msgs[i].Content, &a); err != nil {
+			// A content that is a bare JSON string is a plain answer.
+			var s string
+			if serr := json.Unmarshal(msgs[i].Content, &s); serr != nil {
+				return err
+			}
+			summary = s
+		} else {
+			summary = a.Content
+		}
+		break
+	}
+	st := j.State
+	st.Status = agentjob.Done
+	st.WaitReason = ""
+	st.Summary = summary
+	return l.deps.Store.SetStatus(jobID, st)
 }
 
 // afterEditOps lists the job's ops by walking the ops directory like

@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-
+	"strconv"
 	"strings"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
@@ -64,6 +64,28 @@ type assistantContent struct {
 type toolContent struct {
 	ToolCallID string `json:"tool_call_id"`
 	Content    string `json:"content"`
+}
+
+// acceptIDPrefix is the id of an acceptance-check op (card ELR-89):
+// accept-<n>, with the commands taken from the job's spec (M1.2a),
+// never from the model.
+const acceptIDPrefix = "accept-"
+
+// nextAcceptID returns the id of the job's next acceptance op:
+// accept-<n> with n one past the count of its existing accept- ops
+// (card ELR-89).
+func (l *Loop) nextAcceptID(jobID string) (string, error) {
+	ops, err := l.afterEditOps(jobID)
+	if err != nil {
+		return "", err
+	}
+	n := 0
+	for _, op := range ops {
+		if strings.HasPrefix(op.ID, acceptIDPrefix) {
+			n++
+		}
+	}
+	return acceptIDPrefix + strconv.Itoa(n+1), nil
 }
 
 // tick runs one tick for jobID in the given order: acquire a slot, mark
@@ -150,6 +172,29 @@ func (l *Loop) tick(ctx context.Context, jobID string) error {
 	cs.Tokens = tokens
 	switch {
 	case len(tickOps) > 0:
+		cs.Status = agentjob.Waiting
+		cs.WaitReason = agentjob.WaitOperation
+		outcome = tickOutcomeToolCalls
+	case len(job.Spec.Acceptance) > 0 && strings.TrimSpace(reply.Content) != "":
+		// The model claims the task is done, but the job carries
+		// acceptance commands (M1.2a): a job is done only when they
+		// pass, so the runtime runs them itself as one internal shell
+		// op and the op's result settles the job (card ELR-89).
+		id, aerr := l.nextAcceptID(jobID)
+		if aerr != nil {
+			giveBack()
+			return aerr
+		}
+		args, aerr := json.Marshal(map[string]any{
+			"cmd": strings.Join(job.Spec.Acceptance, " && "),
+		})
+		if aerr != nil {
+			giveBack()
+			return aerr
+		}
+		tickOps = append(tickOps, agentjob.LoopOp{
+			ID: id, Tool: "shell", Args: args, Status: agentjob.OpPending,
+		})
 		cs.Status = agentjob.Waiting
 		cs.WaitReason = agentjob.WaitOperation
 		outcome = tickOutcomeToolCalls
