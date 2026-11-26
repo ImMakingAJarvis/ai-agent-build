@@ -120,6 +120,17 @@ type Spec struct {
 	// (kept for history) once the job has been woken or finished.
 	WaitOn    []string   `json:"wait_on,omitempty"`
 	WaitUntil *time.Time `json:"wait_until,omitempty"`
+
+	// ELR M1.2a — the fields a runtime task carries. All optional: a job
+	// written before they existed loads with them empty. WantModel (not
+	// Model) because State already has a Model field and Job embeds both
+	// structs, so two fields named Model would clash.
+	ParentID   string   `json:"parent_id,omitempty"`
+	RootID     string   `json:"root_id,omitempty"`
+	Capability string   `json:"capability,omitempty"`
+	WantModel  string   `json:"want_model,omitempty"`
+	Workspace  string   `json:"workspace,omitempty"`
+	Acceptance []string `json:"acceptance,omitempty"`
 }
 
 // WaitDeadline returns the job's wait deadline, or the zero time when the
@@ -165,6 +176,27 @@ func (sp Spec) HasTag(tag string) bool {
 	return false
 }
 
+// WaitReason values for State.WaitReason (ELR M1.2a): what a waiting job
+// is waiting on.
+const (
+	WaitOperation = "operation"
+	WaitApproval  = "approval"
+	WaitModel     = "model"
+	WaitChild     = "child"
+	WaitUser      = "user"
+)
+
+// SnapshotRef describes a saved context snapshot (ELR M1.2a): the file it
+// was written to, a fingerprint of its content, how much context it held,
+// its size, and the tier it was kept at.
+type SnapshotRef struct {
+	File        string `json:"file"`
+	Fingerprint string `json:"fingerprint"`
+	Tokens      int    `json:"tokens"`
+	Bytes       int64  `json:"bytes"`
+	Tier        string `json:"tier"`
+}
+
 // State is the mutable record (state.json).
 type State struct {
 	Status     string `json:"status"`
@@ -198,6 +230,12 @@ type State struct {
 	// active queue; the sweep clears it and returns the job to ready as
 	// soon as no dependency is broken (the blocker was requeued or done).
 	DepBlock string `json:"dep_block,omitempty"`
+	// ELR M1.2a — runtime fields. All optional: a state file written before
+	// they existed loads with them zero.
+	WaitReason string       `json:"wait_reason,omitempty"` // one of the Wait* constants
+	Tokens     int          `json:"tokens,omitempty"`
+	WarmSlot   *int         `json:"warm_slot,omitempty"`
+	Snapshot   *SnapshotRef `json:"snapshot,omitempty"`
 }
 
 // Job is a spec plus its state.
