@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -174,4 +175,125 @@ func DecodeLoopEvent(b []byte) (LoopEvent, error) {
 		return LoopEvent{}, fmt.Errorf("loop.events: event %s has no type", ev.ID)
 	}
 	return ev, nil
+}
+
+// ConsumeLoopEvents consumes loop.events with manual ack and prefetch 1
+// (ELR-1, M1.3b): the delivery is acked only after the handler has saved
+// the event's effect. For each delivery it decodes the event — a body
+// that does not decode is rejected without requeue (it dead-letters with
+// the reason; requeuing it would loop forever on the same bad body) —
+// and calls handle. When handle returns nil the delivery is acked; when
+// it returns an error the shared delivery budget (dlx.go) decides, the
+// same way the cap worker does (capworker.go): under MaxAttempts the
+// event is republished with the x-attempts header bumped — the copy is
+// confirmed by the broker before the failed delivery is acked, so the
+// event cannot be lost — and at the budget the delivery is rejected
+// without requeue, which dead-letters it (reason "rejected").
+//
+// The handler, not this function, is responsible for calling
+// Store.EventApplied first and Store.MarkEventApplied last: the mark is
+// durable before the ack, so a redelivery of an already-applied event is
+// a no-op — the consumer never loses an event and never applies one
+// twice. It returns when ctx is done (nil), or when the delivery channel
+// closes (an error: the queue is durable, the caller reconnects).
+func (c *Conn) ConsumeLoopEvents(ctx context.Context, handle func(LoopEvent) error) error {
+	if err := c.EnsureLoopEventsQueue(); err != nil {
+		return err
+	}
+	ch, err := c.NewChannel()
+	if err != nil {
+		return fmt.Errorf("loop.events: consume: %w", err)
+	}
+	defer ch.Close()
+	if err := ch.Qos(1, 0, true); err != nil {
+		return fmt.Errorf("loop.events: qos: %w", err)
+	}
+	tag := fmt.Sprintf("loop-events-%d", time.Now().UnixNano())
+	dels, err := ch.Consume(LoopEventsQueue, tag, false, false, false, false, nil)
+	if err != nil {
+		return fmt.Errorf("loop.events: consume: %w", err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case del, ok := <-dels:
+			if !ok {
+				return errors.New("loop.events: delivery channel closed")
+			}
+			c.handleLoopEvent(ctx, del, handle)
+		}
+	}
+}
+
+// handleLoopEvent applies the delivery contract to one loop.events
+// message: decode (an undecodable body is rejected without requeue), then
+// the handler — nil acks the delivery, an error burns an attempt.
+func (c *Conn) handleLoopEvent(ctx context.Context, del amqp.Delivery, handle func(LoopEvent) error) {
+	ev, err := DecodeLoopEvent(del.Body)
+	if err != nil {
+		del.Nack(false, false) // undecodable: reject without requeue -> DLX
+		return
+	}
+	if err := handle(ev); err != nil {
+		c.retryOrDeadLetter(ctx, del, err)
+		return
+	}
+	del.Ack(false)
+}
+
+// retryOrDeadLetter burns an attempt on a handler error (the shared
+// delivery budget, dlx.go). Under the budget: republish the event with
+// the bumped x-attempts header — the copy is confirmed by the broker
+// before the failed delivery is acked, so the event cannot be lost. At
+// the budget: nack without requeue, which dead-letters the message
+// (reason "rejected"). A republish that cannot be confirmed is requeued,
+// exactly as the cap worker's retry does.
+func (c *Conn) retryOrDeadLetter(ctx context.Context, del amqp.Delivery, herr error) {
+	n := AttemptCount(del) + 1
+	if n >= MaxAttempts {
+		del.Nack(false, false)
+		return
+	}
+	ch, err := c.NewChannel()
+	if err != nil {
+		// Leave the delivery unacked: the channel close requeues it on
+		// the broker and the event is retried.
+		return
+	}
+	defer ch.Close()
+	if err := ch.Confirm(false); err != nil {
+		return
+	}
+	confirms := make(chan amqp.Confirmation, 1)
+	ch.NotifyPublish(confirms)
+	pub := amqp.Publishing{
+		Body:          del.Body,
+		ContentType:   del.ContentType,
+		CorrelationId: del.CorrelationId,
+		ReplyTo:       del.ReplyTo,
+		DeliveryMode:  amqp.Persistent,
+		Timestamp:     time.Now(),
+		Headers:       BumpAttempt(del),
+	}
+	// The queue is bound to the tasks exchange on loop.events.# (see
+	// EnsureLoopEventsQueue); .default is the key PublishLoopEvent uses.
+	routingKey := LoopEventsQueue + ".default"
+	if err := ch.PublishWithContext(ctx, c.Exchange(), routingKey, false, false, pub); err != nil {
+		del.Nack(false, true)
+		return
+	}
+	select {
+	case cf := <-confirms:
+		if !cf.Ack {
+			del.Nack(false, true)
+			return
+		}
+	case <-time.After(10 * time.Second):
+		del.Nack(false, true)
+		return
+	case <-ctx.Done():
+		return // leaving it unacked; the channel close requeues it
+	}
+	del.Ack(false)
 }
