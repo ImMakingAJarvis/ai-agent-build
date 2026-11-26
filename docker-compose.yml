@@ -797,6 +797,29 @@ services:
       - /home/agent/.local/state/jarvis:/home/agent/.local/state/jarvis
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
 
+  # ---------------- loopd (event-loop runtime, port 9110) -----------------
+  # The event-loop agent runtime daemon (epic ELR-1): schedules ticks for
+  # jobs with driver loop. Skeleton for now (card ELR-6). Behind the 'loop'
+  # profile on purpose — it builds and can be started, but does not start
+  # with the stack yet (card ELR-7). The image keeps the Go toolchain, git
+  # and gh because later cards run builds and tests inside it.
+  loopd:
+    build:
+      context: .
+      dockerfile: docker/loopd/Dockerfile
+    image: jarvis/loopd:local
+    container_name: jarvis-loopd
+    profiles: ["loop"]
+    restart: unless-stopped
+    env_file:
+      - /home/agent/.config/jarvis/agent.env
+    environment:
+      LOOPD_ADDR: ":9110"
+    ports:
+      - "127.0.0.1:9110:9110"
+    volumes:
+      - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+
   # ---------------- cap-echo (event-driven brain test worker) -------------
   # The fake capability behind the Phase 2 wait/wake gate (plan task 17):
   # consumes cap.echo, sleeps ECHO_DELAY, writes an artifact file to the
