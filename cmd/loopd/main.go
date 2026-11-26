@@ -5,12 +5,17 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/runtime/lock"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/loop"
 )
 
@@ -19,6 +24,20 @@ func main() {
 	if addr == "" {
 		addr = ":9110"
 	}
+	// One runtime at a time (card ELR-87): the lock lives in the job
+	// store directory, the one directory loopd in its container and
+	// loopctl on the host both see. The kernel releases the flock when
+	// this process dies, so a crash never leaves a stale lock.
+	lockPath := filepath.Join(agentjob.DataDir(), "loop.lock")
+	lk, err := lock.Acquire(lockPath)
+	if err != nil {
+		if errors.Is(err, lock.ErrHeld) {
+			fmt.Fprintf(os.Stderr, "loopd: another runtime holds %s: %s\n", lockPath, lock.Holder(lockPath))
+			os.Exit(3)
+		}
+		log.Fatalf("loopd: lock %s: %v", lockPath, err)
+	}
+	defer lk.Release()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
