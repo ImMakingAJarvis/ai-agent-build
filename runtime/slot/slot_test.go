@@ -121,7 +121,6 @@ func fingerprintOf(t *testing.T, eng *fake.Engine) string {
 
 // TestAcquireCold: one slot, job A never ran: a cold lease in slot 0.
 func TestAcquireCold(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(1)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0}, SnapshotMinTokens: 1000}, eng, jobs)
@@ -139,7 +138,6 @@ func TestAcquireCold(t *testing.T) {
 // TestAcquireWarm: A acquires, releases with 5000 tokens, acquires
 // again: warm again, and the engine saved and restored nothing.
 func TestAcquireWarm(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(1)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0}, SnapshotMinTokens: 1000}, eng, jobs)
@@ -171,7 +169,6 @@ func TestAcquireWarm(t *testing.T) {
 // TestAcquireBusy: A holds the only slot and never releases it; B gets
 // ErrNoSlot.
 func TestAcquireBusy(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(1)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0}, SnapshotMinTokens: 1000}, eng, jobs)
@@ -195,7 +192,6 @@ func TestAcquireBusy(t *testing.T) {
 // evicted, its snapshot "A.bin" is saved with the engine's fingerprint
 // and 5000 tokens, and A's warm slot is cleared.
 func TestEvictSaves(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(1)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0}, SnapshotMinTokens: 1000}, eng, jobs)
@@ -232,7 +228,6 @@ func TestEvictSaves(t *testing.T) {
 // TestEvictSmallDoesNotSave: A releases with 500 tokens (< 1000); B
 // takes the slot: nothing is saved and A has no snapshot.
 func TestEvictSmallDoesNotSave(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(1)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0}, SnapshotMinTokens: 1000}, eng, jobs)
@@ -261,7 +256,6 @@ func TestEvictSmallDoesNotSave(t *testing.T) {
 // releases; A acquires again: its snapshot "A.bin" is restored into the
 // slot.
 func TestRestore(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(1)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0}, SnapshotMinTokens: 1000}, eng, jobs)
@@ -299,7 +293,6 @@ func TestRestore(t *testing.T) {
 // model changes (different ContextTokens) before A acquires again: the
 // snapshot is stale, so it is not restored and is cleared from Jobs.
 func TestRestoreFingerprintMismatch(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(1)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0}, SnapshotMinTokens: 1000}, eng, jobs)
@@ -342,7 +335,6 @@ func TestRestoreFingerprintMismatch(t *testing.T) {
 // TestPrefersColdSlot: two slots, A warm in slot 0; B acquires: it gets
 // the cold slot 1 and A's snapshot is not saved.
 func TestPrefersColdSlot(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(2)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0, 1}, SnapshotMinTokens: 1000}, eng, jobs)
@@ -372,7 +364,6 @@ func TestPrefersColdSlot(t *testing.T) {
 // TestEvictsLeastRecentlyUsed: two slots, A then B released; C acquires:
 // it evicts A, which was released first.
 func TestEvictsLeastRecentlyUsed(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(2)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0, 1}, SnapshotMinTokens: 1000}, eng, jobs)
@@ -407,7 +398,6 @@ func TestEvictsLeastRecentlyUsed(t *testing.T) {
 
 // TestForget: A releases, then Forget("A"): Warm() no longer lists A.
 func TestForget(t *testing.T) {
-	t.Skip("enabled by card m2-3b")
 	eng := fake.New(1)
 	jobs := newMemJobs()
 	m := New(Config{Slots: []int{0}, SnapshotMinTokens: 1000}, eng, jobs)
