@@ -236,6 +236,10 @@ type State struct {
 	Tokens     int          `json:"tokens,omitempty"`
 	WarmSlot   *int         `json:"warm_slot,omitempty"`
 	Snapshot   *SnapshotRef `json:"snapshot,omitempty"`
+	// ELR M1.2f — version of the loop-file layout (messages, ops, state)
+	// this state was last written with. 0 = written before the field
+	// existed (no loop files yet); always accepted.
+	LoopSchema int `json:"loop_schema,omitempty"`
 }
 
 // Job is a spec plus its state.

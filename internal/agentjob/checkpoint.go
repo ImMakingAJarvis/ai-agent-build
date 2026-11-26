@@ -16,6 +16,17 @@ type Checkpoint struct {
 	State    State
 }
 
+// LoopSchemaVersion is the layout version of the loop files (ELR M1.2f)
+// that this runtime writes and understands: the messages log, the ops,
+// and the state that ties them together.
+const LoopSchemaVersion = 1
+
+// ErrNewerSchema is returned when a job's loop files carry a schema
+// version newer than this runtime understands (LoopSchema >
+// LoopSchemaVersion): the runtime refuses to touch the job rather than
+// corrupt it.
+var ErrNewerSchema = errors.New("job was written by a newer runtime")
+
 // failAfter is a test hook: Checkpoint returns errInjected right after
 // finishing step n (1 = messages appended, 2 = ops written). 0 = never.
 var failAfter int
@@ -27,7 +38,16 @@ var errInjected = errors.New("injected failure")
 // three parts in the crash-safe order — messages, then ops, then the
 // state — and returns an error from any step at once; the steps already
 // written stay, and RecoverLoop rebuilds the rest from the message log.
+// Before writing anything it refuses a job whose loop files carry a
+// schema version newer than LoopSchemaVersion (ErrNewerSchema).
 func (s *Store) Checkpoint(id string, cp Checkpoint) error {
+	job, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if job.State.LoopSchema > LoopSchemaVersion {
+		return ErrNewerSchema
+	}
 	if _, err := s.AppendMessages(id, cp.Messages...); err != nil {
 		return err
 	}
@@ -42,14 +62,24 @@ func (s *Store) Checkpoint(id string, cp Checkpoint) error {
 	if failAfter == 2 {
 		return errInjected
 	}
+	cp.State.LoopSchema = LoopSchemaVersion
 	return s.SetStatus(id, cp.State)
 }
 
 // RecoverLoop puts a job back on the rails after a crash mid-checkpoint
 // (ELR M1.2d). The message log is the truth: it rebuilds the ops the
 // last assistant message's tool calls never got, and leaves the job
-// waiting on its unanswered tool calls (or ready when it has none).
+// waiting on its unanswered tool calls (or ready when it has none). It
+// refuses a job whose loop files carry a schema version newer than
+// LoopSchemaVersion (ErrNewerSchema).
 func (s *Store) RecoverLoop(id string) error {
+	job, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if job.State.LoopSchema > LoopSchemaVersion {
+		return ErrNewerSchema
+	}
 	msgs, err := s.Messages(id)
 	if err != nil {
 		return err
