@@ -43,10 +43,24 @@ type toolContent struct {
 // unchanged: the job stays where it is and the next ready job may take
 // the slot.
 func (l *Loop) tick(ctx context.Context, jobID string) error {
+	start := l.deps.Now()
 	lease, err := l.deps.Slots.Acquire(ctx, jobID)
 	if err != nil {
-		return err
+		return err // no slot, no tick: nothing to record
 	}
+
+	// The tick is recorded when it ends, by which time the outcome is
+	// known (final, tool_calls, error). A closure: defer evaluates its
+	// arguments when the defer statement runs, so a plain call would
+	// record the defaults, not the values the tick settled on.
+	var (
+		outcome   = tickOutcomeError
+		promptTok int
+		outputTok int
+	)
+	defer func() {
+		l.deps.Metrics.recordTick(outcome, l.deps.Now().Sub(start), promptTok, outputTok, lease.Warm, lease.Restored)
+	}()
 
 	job, err := l.deps.Store.Get(jobID)
 	if err != nil {
@@ -75,11 +89,12 @@ func (l *Loop) tick(ctx context.Context, jobID string) error {
 	}
 
 	// Ask the model and read the stream to the Done chunk.
-	reply, tokens, err := l.ask(ctx, jobID, lease.Slot)
+	reply, promptTok, outputTok, err := l.ask(ctx, jobID, lease.Slot)
 	if err != nil {
 		giveBack()
 		return err
 	}
+	tokens := promptTok + outputTok
 
 	// The checkpoint: one assistant message, one pending op per tool
 	// call, and the new state — waiting on the calls, or done with the
@@ -100,10 +115,12 @@ func (l *Loop) tick(ctx context.Context, jobID string) error {
 	if len(tickOps) > 0 {
 		cs.Status = agentjob.Waiting
 		cs.WaitReason = agentjob.WaitOperation
+		outcome = tickOutcomeToolCalls
 	} else {
 		cs.Status = agentjob.Done
 		cs.WaitReason = ""
 		cs.Summary = reply.Content
+		outcome = tickOutcomeFinal
 	}
 	if err := l.deps.Store.Checkpoint(jobID, agentjob.Checkpoint{
 		Messages: []agentjob.LoopMessage{{Role: "assistant", Content: content, Tokens: tokens}},
@@ -150,7 +167,7 @@ func (l *Loop) startOp(jobID string, op agentjob.LoopOp) error {
 	if err := l.deps.Store.PutOp(jobID, op); err != nil {
 		return err
 	}
-	return l.deps.Runner.Start(ops.Call{
+	err = l.deps.Runner.Start(ops.Call{
 		Name:      op.Tool,
 		JobID:     jobID,
 		OpID:      op.ID,
@@ -166,15 +183,20 @@ func (l *Loop) startOp(jobID string, op agentjob.LoopOp) error {
 			_ = l.deps.Store.PutOp(jobID, cur)
 		},
 	})
+	if err != nil {
+		return err
+	}
+	l.markOpStarted(op.ID)
+	return nil
 }
 
 // ask builds the prompt, sends it to the model in the leased slot and
 // reads the stream to the Done chunk, which carries the complete reply
-// and the token counts.
-func (l *Loop) ask(ctx context.Context, jobID string, slotNum int) (engine.Message, int, error) {
+// and the prompt and output token counts.
+func (l *Loop) ask(ctx context.Context, jobID string, slotNum int) (engine.Message, int, int, error) {
 	msgs, err := l.prompt(jobID)
 	if err != nil {
-		return engine.Message{}, 0, err
+		return engine.Message{}, 0, 0, err
 	}
 	speclist := l.deps.Registry.Specs()
 	tools := make([]engine.ToolSpec, 0, len(speclist))
@@ -189,14 +211,15 @@ func (l *Loop) ask(ctx context.Context, jobID string, slotNum int) (engine.Messa
 		CachePrompt: true,
 	})
 	if err != nil {
-		return engine.Message{}, 0, err
+		return engine.Message{}, 0, 0, err
 	}
 	defer stream.Close()
 
 	var (
-		reply  engine.Message
-		tokens int
-		done   bool
+		reply     engine.Message
+		promptTok int
+		outputTok int
+		done      bool
 	)
 	for {
 		ch, rerr := stream.Recv()
@@ -209,7 +232,8 @@ func (l *Loop) ask(ctx context.Context, jobID string, slotNum int) (engine.Messa
 			if ch.Message != nil {
 				reply = *ch.Message
 			}
-			tokens = ch.PromptTokens + ch.OutputTokens
+			promptTok = ch.PromptTokens
+			outputTok = ch.OutputTokens
 			done = true
 		case errors.Is(rerr, io.EOF):
 			err = errors.New("engine: stream ended before the done chunk")
@@ -218,7 +242,7 @@ func (l *Loop) ask(ctx context.Context, jobID string, slotNum int) (engine.Messa
 			break
 		}
 	}
-	return reply, tokens, err
+	return reply, promptTok, outputTok, err
 }
 
 // prompt builds the messages of one tick: the fixed system message, the

@@ -34,13 +34,16 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/engine"
 )
 
-// Config names the slots this manager may use and the smallest KV cache
-// worth saving: a job released with fewer tokens than SnapshotMinTokens
-// is evicted without a snapshot, because re-prefilling it is cheaper
-// than saving and restoring it.
+// Config names the slots this manager may use, the smallest KV cache
+// worth saving, and the hook for a saved snapshot: a job released with
+// fewer tokens than SnapshotMinTokens is evicted without a snapshot,
+// because re-prefilling it is cheaper than saving and restoring it.
 type Config struct {
 	Slots             []int
 	SnapshotMinTokens int
+	// OnSave, when set, is called after each successful SaveSlot (the
+	// loop wires it to loopd_snapshot_saves_total).
+	OnSave func()
 }
 
 // JobState is what the job store records about a job's slot history:
@@ -162,6 +165,9 @@ func (m *Manager) Acquire(ctx context.Context, jobID string) (Lease, error) {
 			}
 			if _, err := m.eng.SaveSlot(ctx, s.num, w+".bin"); err != nil {
 				return Lease{}, err
+			}
+			if m.cfg.OnSave != nil {
+				m.cfg.OnSave()
 			}
 			if err := m.jobs.SetSnapshot(w, w+".bin", info.Fingerprint(), s.tokens); err != nil {
 				return Lease{}, err

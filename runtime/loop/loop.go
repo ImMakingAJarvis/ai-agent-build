@@ -35,7 +35,8 @@ import (
 // Deps are the loop's collaborators: the model backend, the slot manager
 // that assigns engine slots to ticks, the runner that executes tool calls
 // outside the model, the registry of the tools the model may call, the
-// job store, the runtime config, and the clock.
+// job store, the runtime config, the clock, and the metrics (a nil
+// *Metrics records nothing).
 type Deps struct {
 	Engine   engine.Engine
 	Slots    *slot.Manager
@@ -44,6 +45,7 @@ type Deps struct {
 	Store    *agentjob.Store
 	Config   config.Config
 	Now      func() time.Time
+	Metrics  *Metrics
 }
 
 // Loop interleaves the ticks of the ready jobs.
@@ -62,6 +64,13 @@ type Loop struct {
 	readySince time.Time
 	idle       time.Duration
 	inTick     bool
+
+	// opsMu guards opsLive: the set of op ids THIS process started in
+	// the Runner. markOpFinished moves the ops gauge only for them — an
+	// adopted op (M3.1b) or an unknown-tool failure finishes an op this
+	// process never counted.
+	opsMu   sync.Mutex
+	opsLive map[string]struct{}
 }
 
 // New returns a Loop with its collaborators. Now defaults to time.Now.
@@ -70,6 +79,33 @@ func New(d Deps) *Loop {
 		d.Now = time.Now
 	}
 	return &Loop{deps: d}
+}
+
+// markOpStarted records that this process started the op in the Runner
+// and raises the ops-running gauge. markOpFinished lowers it when one of
+// THOSE ops finishes; an op this process never started (an adopted op
+// after a restart, an unknown-tool failure) leaves the gauge alone.
+func (l *Loop) markOpStarted(opID string) {
+	l.opsMu.Lock()
+	if l.opsLive == nil {
+		l.opsLive = make(map[string]struct{})
+	}
+	l.opsLive[opID] = struct{}{}
+	l.opsMu.Unlock()
+	if m := l.deps.Metrics; m != nil {
+		m.OpsRunning.Inc()
+	}
+}
+
+// markOpFinished lowers the ops-running gauge when a started op finishes.
+func (l *Loop) markOpFinished(opID string) {
+	l.opsMu.Lock()
+	_, live := l.opsLive[opID]
+	delete(l.opsLive, opID)
+	l.opsMu.Unlock()
+	if live && l.deps.Metrics != nil {
+		l.deps.Metrics.OpsRunning.Dec()
+	}
 }
 
 // Submit marks a job with driver loop as ready to run. A job whose
@@ -132,6 +168,7 @@ func (l *Loop) HandleOpDone(jobID, opID string, res ops.Result) error {
 	if err := l.deps.Store.PutOp(jobID, op); err != nil {
 		return err
 	}
+	l.markOpFinished(op.ID)
 
 	// The text the model reads: the output, or the error.
 	text := res.Output
@@ -194,6 +231,7 @@ func (l *Loop) Step(ctx context.Context) (bool, error) {
 	l.mu.Lock()
 	if len(l.ready) == 0 {
 		l.mu.Unlock()
+		l.deps.Metrics.setReadyJobs(0)
 		return false, nil
 	}
 	jobID := l.ready[0]
@@ -220,6 +258,7 @@ func (l *Loop) Step(ctx context.Context) (bool, error) {
 		l.settleIdleLocked()
 		l.dropFirstLocked()
 		l.afterTickLocked()
+		l.deps.Metrics.setReadyJobs(len(l.ready))
 		l.mu.Unlock()
 		return true, nil
 	}
@@ -239,15 +278,18 @@ func (l *Loop) Step(ctx context.Context) (bool, error) {
 	case errors.Is(err, slot.ErrNoSlot):
 		// Nothing ran; the job stays first in the list.
 		l.afterTickLocked()
+		l.deps.Metrics.setReadyJobs(len(l.ready))
 		l.mu.Unlock()
 		return false, nil
 	case err != nil:
 		l.afterTickLocked()
+		l.deps.Metrics.setReadyJobs(len(l.ready))
 		l.mu.Unlock()
 		return false, err
 	default:
 		l.dropFirstLocked()
 		l.afterTickLocked()
+		l.deps.Metrics.setReadyJobs(len(l.ready))
 		l.mu.Unlock()
 		return true, nil
 	}
@@ -301,12 +343,14 @@ func (l *Loop) afterTickLocked() {
 	}
 }
 
-// settleIdleLocked folds the running idle interval into idle. The
-// callers hold l.mu.
+// settleIdleLocked folds the running idle interval into idle and, with
+// it, into the idle counter. The callers hold l.mu.
 func (l *Loop) settleIdleLocked() {
 	if !l.readySince.IsZero() {
-		l.idle += l.deps.Now().Sub(l.readySince)
+		d := l.deps.Now().Sub(l.readySince)
+		l.idle += d
 		l.readySince = time.Time{}
+		l.deps.Metrics.addIdle(d)
 	}
 }
 
