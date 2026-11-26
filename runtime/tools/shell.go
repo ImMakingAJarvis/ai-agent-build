@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -73,7 +75,11 @@ func (t Shell) Run(ctx context.Context, c ops.Call, progress func()) ops.Result 
 	}
 
 	out := &shellOut{f: logFile, tail: newTail(shellKeep), onWrite: progress}
-	cmd := exec.Command("bash", "-lc", a.Cmd)
+	// The command runs in a wrapper (card ELR-90) that records its exit
+	// code on disk (<log>.exit) as soon as it finishes, so a loopd
+	// restart cannot lose it. The wrapper's own exit code is echo's, so
+	// the real one is read back from the file below.
+	cmd := exec.Command("bash", "-c", "bash -lc \"$1\"; echo $? > \"$2\"", "_", a.Cmd, c.LogPath+".exit")
 	cmd.Dir = c.Workspace
 	cmd.Stdout = out
 	cmd.Stderr = out
@@ -115,16 +121,41 @@ func (t Shell) Run(ctx context.Context, c ops.Call, progress func()) ops.Result 
 	<-waitDone
 
 	obs := out.String()
+	// The real exit code is the one the wrapper wrote to the .exit file;
+	// only when the file is missing (the wrapper itself died, e.g. killed
+	// on timeout) the wrapper's own exit code stands (card ELR-90).
+	code, haveCode := readExitFile(c.LogPath + ".exit")
 	if waitErr == nil {
-		return done(obs)
+		if !haveCode || code == 0 {
+			return done(obs)
+		}
+		return ops.Result{Status: agentjob.OpFailed, ExitCode: code, Output: obs}
 	}
 	var ee *exec.ExitError
 	if errors.As(waitErr, &ee) {
-		return ops.Result{Status: agentjob.OpFailed, ExitCode: ee.ExitCode(), Output: obs}
+		if !haveCode {
+			code = ee.ExitCode()
+		}
+		return ops.Result{Status: agentjob.OpFailed, ExitCode: code, Output: obs}
 	}
 	res := fail(waitErr)
 	res.Output = obs
 	return res
+}
+
+// readExitFile reads the exit code the shell wrapper wrote to
+// <log path>.exit (card ELR-90); ok is false when the file is missing
+// or does not hold a number.
+func readExitFile(path string) (int, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, false
+	}
+	return code, true
 }
 
 // ShellTool returns the shell tool confined by g.

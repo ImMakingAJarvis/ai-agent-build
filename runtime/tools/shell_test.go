@@ -57,6 +57,24 @@ func TestShellExitCode(t *testing.T) {
 	}
 }
 
+// TestShellWritesExitFile: the wrapper records the command's exit code
+// in <log>.exit on disk (card ELR-90), and the result carries the same
+// real code.
+func TestShellWritesExitFile(t *testing.T) {
+	dir := t.TempDir()
+	res := runShell(t, dir, map[string]any{"cmd": "exit 7"})
+	b, err := os.ReadFile(filepath.Join(dir, "shell.log.exit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(b)); got != "7" {
+		t.Errorf(".exit holds %q, want 7", got)
+	}
+	if res.ExitCode != 7 {
+		t.Errorf("Result.ExitCode %d, want 7", res.ExitCode)
+	}
+}
+
 func TestShellBlocked(t *testing.T) {
 	dir := t.TempDir()
 	res := runShell(t, dir, map[string]any{"cmd": "rm -rf /"})

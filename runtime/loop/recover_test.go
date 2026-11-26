@@ -1,14 +1,17 @@
-// recover_test.go covers card m3-1b (ELR-32): after loopd restarts, a
-// running op whose process is gone is lost (the model reads "lost"), a
-// running op whose process survived is adopted and the job comes back
-// ready when the process exits, a pending op is started again through
-// the same path the tick uses, and every job that ends up ready is
-// submitted.
+// recover_test.go covers card m3-1b (ELR-32) and card ELR-90: after
+// loopd restarts, a running op whose process is gone is finished from
+// its .exit file (done or failed with the real exit code) or lost with
+// the check-first advice, a running op whose process survived is adopted
+// and the job comes back ready when the process exits, a pending op is
+// started again through the same path the tick uses, and every job that
+// ends up ready is submitted.
 package loop
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +87,92 @@ func TestRecoverLostOp(t *testing.T) {
 	if !found {
 		t.Errorf("no tool message containing %q in the log", "lost")
 	}
+}
+
+// TestRecoverReadsExitFile: a running op whose process is gone but whose
+// .exit file (the shell wrapper's, card ELR-90) holds 3 is reported
+// failed with exit code 3 — not lost.
+func TestRecoverReadsExitFile(t *testing.T) {
+	eng := fake.New(1)
+	l, store := recoverSetup(t, eng, "call_1", "shell", agentjob.OpRunning, deadPID(t))
+	logPath := store.OpLogPath(tickJobID, "call_1")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("some output\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath+".exit", []byte("3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Recover([]string{tickJobID}); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	j, err := store.Get(tickJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != agentjob.Ready {
+		t.Errorf("job is %q, want ready", j.Status)
+	}
+	msgs, err := store.Messages(tickJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range msgs {
+		if m.Role != "tool" {
+			continue
+		}
+		if strings.Contains(string(m.Content), "lost") {
+			t.Errorf("tool message says the op was lost: %s", m.Content)
+		}
+		if strings.Contains(string(m.Content), "failed") && strings.Contains(string(m.Content), "exit code 3") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no tool message with the failure and exit code 3: %v", msgs)
+	}
+}
+
+// TestRecoverLostTellsModelToCheck: a running op whose process is gone
+// and that left no .exit file is lost, and the tool message tells the
+// model to check the result before repeating the operation (card
+// ELR-90).
+func TestRecoverLostTellsModelToCheck(t *testing.T) {
+	eng := fake.New(1)
+	l, store := recoverSetup(t, eng, "call_1", "shell", agentjob.OpRunning, 0)
+	if err := l.Recover([]string{tickJobID}); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	msgs, err := store.Messages(tickJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range msgs {
+		if m.Role == "tool" && strings.Contains(string(m.Content), "may or may not have taken effect") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no tool message with the check-first advice in the log")
+	}
+}
+
+// deadPID starts and reaps a short-lived process and returns its (now
+// dead) PID.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd.Process.Pid
 }
 
 // TestRecoverLiveOp: an op running with the PID of a live `sleep 1` is

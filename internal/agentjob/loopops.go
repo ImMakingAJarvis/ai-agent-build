@@ -108,7 +108,8 @@ func (s *Store) GetOp(jobID, opID string) (LoopOp, error) {
 
 // Ops returns every op of the job sorted by ID. A job whose ops directory
 // does not exist yet returns nil, nil; files ending in .tmp (an in-flight
-// writeJSON) or .log (an operation's stream) are not ops and are skipped.
+// writeJSON), .log (an operation's stream) or .exit (the shell wrapper's
+// exit code, card ELR-90) are not ops and are skipped.
 func (s *Store) Ops(jobID string) ([]LoopOp, error) {
 	if !ValidID(jobID) {
 		return nil, fmt.Errorf("agentjob: bad job id %q", jobID)
@@ -126,7 +127,7 @@ func (s *Store) Ops(jobID string) ([]LoopOp, error) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".log") {
+		if strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".exit") {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(s.JobDir(jobID), "ops", name))
