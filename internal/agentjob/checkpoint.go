@@ -1,6 +1,9 @@
 package agentjob
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // Checkpoint saves one tick of the loop (ELR M1.2d): the new messages,
 // the operations they start, and the new state. The store has no
@@ -20,14 +23,129 @@ var failAfter int
 // errInjected is the error the failAfter hook makes Checkpoint return.
 var errInjected = errors.New("injected failure")
 
-// Checkpoint saves one tick of the loop (see Checkpoint).
+// Checkpoint saves one tick of the loop (see Checkpoint). It writes the
+// three parts in the crash-safe order — messages, then ops, then the
+// state — and returns an error from any step at once; the steps already
+// written stay, and RecoverLoop rebuilds the rest from the message log.
 func (s *Store) Checkpoint(id string, cp Checkpoint) error {
-	return errors.New("not implemented")
+	if _, err := s.AppendMessages(id, cp.Messages...); err != nil {
+		return err
+	}
+	if failAfter == 1 {
+		return errInjected
+	}
+	for _, op := range cp.Ops {
+		if err := s.PutOp(id, op); err != nil {
+			return err
+		}
+	}
+	if failAfter == 2 {
+		return errInjected
+	}
+	return s.SetStatus(id, cp.State)
 }
 
 // RecoverLoop puts a job back on the rails after a crash mid-checkpoint
-// (ELR M1.2d): it rebuilds anything the checkpoint never wrote and
-// leaves the job in the state the loop can continue from.
+// (ELR M1.2d). The message log is the truth: it rebuilds the ops the
+// last assistant message's tool calls never got, and leaves the job
+// waiting on its unanswered tool calls (or ready when it has none).
 func (s *Store) RecoverLoop(id string) error {
-	return errors.New("not implemented")
+	msgs, err := s.Messages(id)
+	if err != nil {
+		return err
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+
+	// The last assistant message is the newest tick: its tool calls are
+	// the ones that may still lack ops.
+	lastAssistant := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" {
+			lastAssistant = i
+			break
+		}
+	}
+
+	// Decode that message's content as a tool-call message. A plain-text
+	// answer is not a tool-call object and decodes as no tool calls.
+	type toolCall struct {
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	var calls []toolCall
+	if lastAssistant >= 0 {
+		var last struct {
+			ToolCalls []toolCall `json:"tool_calls"`
+		}
+		if err := json.Unmarshal(msgs[lastAssistant].Content, &last); err == nil {
+			calls = last.ToolCalls
+		}
+	}
+
+	// Rebuild the ops the checkpoint never wrote: every tool call with
+	// no op yet gets a pending op named after the call.
+	ops, err := s.Ops(id)
+	if err != nil {
+		return err
+	}
+	for _, tc := range calls {
+		known := false
+		for _, op := range ops {
+			if op.ToolCallID == tc.ID {
+				known = true
+				break
+			}
+		}
+		if known {
+			continue
+		}
+		op := LoopOp{ID: tc.ID, ToolCallID: tc.ID, Tool: tc.Name, Args: tc.Arguments, Status: OpPending}
+		if err := s.PutOp(id, op); err != nil {
+			return err
+		}
+		ops = append(ops, op)
+	}
+
+	// A call is answered when a later tool message carries its
+	// tool_call_id.
+	answered := 0
+	for _, tc := range calls {
+		for j := lastAssistant + 1; j < len(msgs); j++ {
+			if msgs[j].Role != "tool" {
+				continue
+			}
+			var tool struct {
+				ToolCallID string `json:"tool_call_id"`
+			}
+			if json.Unmarshal(msgs[j].Content, &tool) == nil && tool.ToolCallID == tc.ID {
+				answered++
+				break
+			}
+		}
+	}
+
+	// Only a running or waiting job needs putting back; in any other
+	// state the loop already left it where it belongs.
+	j, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if j.Status != Running && j.Status != Waiting {
+		return nil
+	}
+	target := j.State
+	if len(calls) > answered {
+		target.Status = Waiting
+		target.WaitReason = WaitOperation
+	} else {
+		target.Status = Ready
+		target.WaitReason = ""
+	}
+	if target.Status == j.Status && target.WaitReason == j.WaitReason {
+		return nil // nothing changes
+	}
+	return s.SetStatus(id, target)
 }

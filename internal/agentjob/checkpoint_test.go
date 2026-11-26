@@ -44,7 +44,6 @@ func toolCallCheckpoint() Checkpoint {
 // TestCheckpointHappy: one tick lands all three parts — the message, the
 // op it starts, and the new state — and leaves the job waiting on the op.
 func TestCheckpointHappy(t *testing.T) {
-	t.Skip("enabled by card m1-2e")
 	t.Cleanup(func() { failAfter = 0 })
 	s := newRunningJob(t)
 	if err := s.Checkpoint("j1", toolCallCheckpoint()); err != nil {
@@ -78,7 +77,6 @@ func TestCheckpointHappy(t *testing.T) {
 // before the ops — RecoverLoop rebuilds the op from the tool call and
 // puts the job back to waiting on it.
 func TestCheckpointCrashAfterMessages(t *testing.T) {
-	t.Skip("enabled by card m1-2e")
 	t.Cleanup(func() { failAfter = 0 })
 	s := newRunningJob(t)
 	failAfter = 1
@@ -119,7 +117,6 @@ func TestCheckpointCrashAfterMessages(t *testing.T) {
 // TestCheckpointCrashAfterOps: a crash after the ops land but before the
 // state — RecoverLoop reaches the same end result as the happy case.
 func TestCheckpointCrashAfterOps(t *testing.T) {
-	t.Skip("enabled by card m1-2e")
 	t.Cleanup(func() { failAfter = 0 })
 	s := newRunningJob(t)
 	failAfter = 2
@@ -157,7 +154,6 @@ func TestCheckpointCrashAfterOps(t *testing.T) {
 // nothing to rebuild — RecoverLoop puts the job back to ready and the
 // tick must be decided again by the loop.
 func TestRecoverLoopNoToolCalls(t *testing.T) {
-	t.Skip("enabled by card m1-2e")
 	t.Cleanup(func() { failAfter = 0 })
 	s := newRunningJob(t)
 	if _, err := s.AppendMessages("j1", LoopMessage{
@@ -181,7 +177,6 @@ func TestRecoverLoopNoToolCalls(t *testing.T) {
 // TestRecoverLoopIdempotent: a second RecoverLoop changes nothing — it
 // must not rebuild the op the first call already wrote.
 func TestRecoverLoopIdempotent(t *testing.T) {
-	t.Skip("enabled by card m1-2e")
 	t.Cleanup(func() { failAfter = 0 })
 	s := newRunningJob(t)
 	failAfter = 1
