@@ -170,6 +170,15 @@
       }
     },
     {
+      "name": "loop.events",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "jarvis.dlx"
+      }
+    },
+    {
       "name": "dead",
       "vhost": "/",
       "durable": true,
@@ -281,6 +290,14 @@
       "destination": "jobs.igpu",
       "destination_type": "queue",
       "routing_key": "jobs.igpu.#",
+      "arguments": {}
+    },
+    {
+      "source": "tasks",
+      "vhost": "/",
+      "destination": "loop.events",
+      "destination_type": "queue",
+      "routing_key": "loop.events.#",
       "arguments": {}
     },
     {
