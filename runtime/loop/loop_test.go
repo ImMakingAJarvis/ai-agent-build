@@ -17,6 +17,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/engine"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/engine/fake"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/ops"
+	"github.com/ImMakingAJarvis/ai-agent-build/runtime/redact"
 )
 
 // oneCallScript is a first tick with one tool call to the named tool.
@@ -283,5 +284,63 @@ func TestBigOutputIsSpilled(t *testing.T) {
 	}
 	if string(full) != big {
 		t.Errorf("the .full file is %d bytes, want the full %d-byte output", len(full), len(big))
+	}
+}
+
+// TestToolOutputIsRedacted: a token in the tool output is replaced by
+// "[redacted]" in the tool message and the .full file — neither keeps
+// the token (card ELR-91).
+func TestToolOutputIsRedacted(t *testing.T) {
+	token := "ghp_" + strings.Repeat("a", 36) // a made-up token
+	eng := fake.New(1)
+	l, store, _ := newTickEnv(t, eng, captureTool{name: "shell"})
+	l.deps.Redact = redact.New(nil).Apply
+	l.deps.Config.SpillBytes = 10 // tiny, so the output always spills
+	eng.Script(tickInstructions, oneCallScript("call_1", "shell"))
+	if err := l.Submit(tickJobID); err != nil {
+		t.Fatal(err)
+	}
+	if ran, err := l.Step(context.Background()); err != nil || !ran {
+		t.Fatalf("step = %v, %v", ran, err)
+	}
+	if err := l.HandleOpDone(tickJobID, "call_1", ops.Result{Status: agentjob.OpDone, Output: "token " + token}); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := store.Messages(tickJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tc toolContent
+	found := false
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "tool" {
+			continue
+		}
+		if err := json.Unmarshal(msgs[i].Content, &tc); err != nil {
+			t.Fatalf("tool message content %s: %v", msgs[i].Content, err)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatal("no tool message in the log")
+	}
+	if strings.Contains(tc.Content, token) {
+		t.Errorf("the tool message keeps the token")
+	}
+	if !strings.Contains(tc.Content, "[redacted]") {
+		t.Errorf("the tool message has no [redacted]: %q", tc.Content)
+	}
+
+	full, err := os.ReadFile(filepath.Join(store.JobDir(tickJobID), "ops", "call_1.full"))
+	if err != nil {
+		t.Fatalf("the .full file is missing: %v", err)
+	}
+	if strings.Contains(string(full), token) {
+		t.Errorf("the .full file keeps the token")
+	}
+	if !strings.Contains(string(full), "[redacted]") {
+		t.Errorf("the .full file has no [redacted]")
 	}
 }

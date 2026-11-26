@@ -48,6 +48,10 @@ type Deps struct {
 	Config   config.Config
 	Now      func() time.Time
 	Metrics  *Metrics
+	// Redact scrubs secrets from a finished op's output and error
+	// before they are stored or shown (card ELR-91); nil means no
+	// redaction.
+	Redact func(string) string
 }
 
 // Loop interleaves the ticks of the ready jobs.
@@ -184,6 +188,13 @@ func (l *Loop) HandleOpDone(jobID, opID string, res ops.Result) error {
 	}
 	if op.Finished() {
 		return nil
+	}
+	// Scrub the output and the error before anything of res reaches the
+	// store, the message log, the .full file, or the model (card
+	// ELR-91).
+	if l.deps.Redact != nil {
+		res.Output = l.deps.Redact(res.Output)
+		res.Error = l.deps.Redact(res.Error)
 	}
 	op.Status = res.Status
 	result, err := json.Marshal(res)

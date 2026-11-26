@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/loop"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/ops"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/perm"
+	"github.com/ImMakingAJarvis/ai-agent-build/runtime/redact"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/slot"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/tools"
 )
@@ -166,6 +168,13 @@ without the daemon. Refuses to start while a local round is running.
 			}
 		},
 	}
+	// Tool output is scrubbed before it is stored or shown: the known
+	// values come from the environment and the secrets store (card
+	// ELR-91).
+	redactValues := redact.FromEnv(os.Environ())
+	if home, err := os.UserHomeDir(); err == nil {
+		redactValues = append(redactValues, redact.FromDir(filepath.Join(home, ".config", "jarvis", "secrets"))...)
+	}
 	l = loop.New(loop.Deps{
 		Engine:   eng,
 		Slots:    mgr,
@@ -174,6 +183,7 @@ without the daemon. Refuses to start while a local round is running.
 		Store:    store,
 		Config:   cfg,
 		Now:      time.Now,
+		Redact:   redact.New(redactValues).Apply,
 	})
 
 	for _, id := range ids {
