@@ -82,6 +82,11 @@ func (t Shell) Run(ctx context.Context, c ops.Call, progress func()) ops.Result 
 	if err := cmd.Start(); err != nil {
 		return fail(err)
 	}
+	// The caller (the loop) records the PID so it can adopt the process
+	// when it restarts while the command still runs (card m3-1b).
+	if c.OnPID != nil {
+		c.OnPID(cmd.Process.Pid)
+	}
 	var (
 		mu       sync.Mutex
 		waitErr  error

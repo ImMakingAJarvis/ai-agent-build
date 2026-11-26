@@ -56,6 +56,10 @@ type Call struct {
 	Args      json.RawMessage
 	LogPath   string
 	Timeout   time.Duration
+	// OnPID, when set, is called by the tool right after it starts the
+	// command's process, so the caller can record the PID (the loop uses
+	// it to adopt the process across a restart — card m3-1b).
+	OnPID func(pid int)
 }
 
 // Result reports a finished op. Status uses the agentjob op constants:

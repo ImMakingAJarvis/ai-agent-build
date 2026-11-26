@@ -120,36 +120,52 @@ func (l *Loop) tick(ctx context.Context, jobID string) error {
 
 	// Start the tools, one Runner call per op.
 	for _, op := range tickOps {
-		if _, known := l.deps.Registry.Get(op.Tool); !known {
-			// A call for a tool the registry does not hold is not
-			// started: its result is an immediate failure the model
-			// reads on the next tick.
-			if err := l.HandleOpDone(jobID, op.ID, ops.Result{
-				Status: agentjob.OpFailed,
-				Error:  "unknown tool " + op.Tool,
-			}); err != nil {
-				return err
-			}
-			continue
-		}
-		now := l.deps.Now()
-		op.Status = agentjob.OpRunning
-		op.StartedAt = &now
-		if err := l.deps.Store.PutOp(jobID, op); err != nil {
-			return err
-		}
-		if err := l.deps.Runner.Start(ops.Call{
-			Name:      op.Tool,
-			JobID:     jobID,
-			OpID:      op.ID,
-			Workspace: job.Spec.Workspace,
-			Args:      op.Args,
-			LogPath:   l.deps.Store.OpLogPath(jobID, op.ID),
-		}); err != nil {
+		if err := l.startOp(jobID, op); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// startOp starts one op of the job: a call for a tool the registry does
+// not hold is not started (its result is an immediate failure the model
+// reads on the next tick); a known tool is marked running with a
+// started_at and handed to the Runner, which reports the result through
+// HandleOpDone. The tool's OnPID callback records the command's PID on
+// the op, so a restart can adopt the process (card m3-1b).
+func (l *Loop) startOp(jobID string, op agentjob.LoopOp) error {
+	if _, known := l.deps.Registry.Get(op.Tool); !known {
+		return l.HandleOpDone(jobID, op.ID, ops.Result{
+			Status: agentjob.OpFailed,
+			Error:  "unknown tool " + op.Tool,
+		})
+	}
+	job, err := l.deps.Store.Get(jobID)
+	if err != nil {
+		return err
+	}
+	now := l.deps.Now()
+	op.Status = agentjob.OpRunning
+	op.StartedAt = &now
+	if err := l.deps.Store.PutOp(jobID, op); err != nil {
+		return err
+	}
+	return l.deps.Runner.Start(ops.Call{
+		Name:      op.Tool,
+		JobID:     jobID,
+		OpID:      op.ID,
+		Workspace: job.Spec.Workspace,
+		Args:      op.Args,
+		LogPath:   l.deps.Store.OpLogPath(jobID, op.ID),
+		OnPID: func(pid int) {
+			cur, err := l.deps.Store.GetOp(jobID, op.ID)
+			if err != nil {
+				return
+			}
+			cur.PID = pid
+			_ = l.deps.Store.PutOp(jobID, cur)
+		},
+	})
 }
 
 // ask builds the prompt, sends it to the model in the leased slot and
