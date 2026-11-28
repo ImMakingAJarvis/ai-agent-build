@@ -58,6 +58,12 @@ type Deps struct {
 	// before they are stored or shown (card ELR-91); nil means no
 	// redaction.
 	Redact func(string) string
+
+	// Publish emits a loop event for a job (card ELR-110): the approval
+	// sweep publishes "approval.reminder" for a pending approval whose
+	// remind time is due, so a watcher can surface it. nil = no events
+	// are emitted.
+	Publish func(jobID, typ string)
 }
 
 // Loop interleaves the ticks of the ready jobs.
@@ -575,6 +581,12 @@ func (l *Loop) failGuard(jobID string, j agentjob.Job, reason string) (bool, err
 // ran is false; on success the job is removed (it is now waiting or done)
 // and ran is true.
 func (l *Loop) Step(ctx context.Context) (bool, error) {
+	// The approval sweep runs before the step picks work (card ELR-110):
+	// a due reminder fires and an expired approval is denied "expired"
+	// even when no job is ready to tick.
+	if err := l.SweepApprovals(); err != nil {
+		return false, err
+	}
 	l.mu.Lock()
 	if len(l.ready) == 0 {
 		l.mu.Unlock()

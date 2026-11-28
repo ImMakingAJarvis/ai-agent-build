@@ -35,6 +35,14 @@ skips the gate; denied finishes it as a failed op whose tool result is
 wake; a decision for a job cancelled meanwhile changes nothing, and
 cancelling a job parked on an approval (store stop) closes its parked
 ops as cancelled so nothing waits on a decision that will never come.
+The loop sweeps the parked approvals before every step (card ELR-110,
+M4.3e): a pending approval past `approval_remind_minutes` gets exactly
+one reminder — an `approval.reminder` event on the loop's `Deps.Publish`
+(when set) and a note appended to the job's messages — and one past
+`approval_expiry_hours` is denied `expired` (DecidedBy `expired`, the op
+finishing as `denied: expired`, the job back to ready); the approvals
+of jobs parked across a restart survive it — Recover puts the jobs back
+on the rails holding no slot, the sweep tends their approvals.
 
 ## Interfaces
 
@@ -163,9 +171,11 @@ ops as cancelled so nothing waits on a decision that will never come.
     ELR-105); the daemon still reads the `LOOPD_REPO` env for the repo
     path (card ELR-104).
   - `approval_expiry_hours` — how long a parked approval waits before
-    it expires; default 24, must not be negative (card ELR-107, M4.3b).
-  - `approval_remind_minutes` — how long after the request the owner is
-    reminded of a pending approval; default 60, must not be negative.
+    the sweep (card ELR-110) denies it `expired`; default 24, must not
+    be negative (card ELR-107, M4.3b).
+  - `approval_remind_minutes` — how long after the request the sweep
+    (card ELR-110) sends the owner's one reminder of a pending
+    approval; default 60, must not be negative.
   - `owner_discord_id` — the owner's Discord id approval requests and
     reminders are addressed to, and the id a
     `POST /v1/tasks/{id}/approvals` `decided_by` of the form
@@ -211,7 +221,10 @@ ops as cancelled so nothing waits on a decision that will never come.
 - Approval requests the loop parks for the owner live under the job's
   `approvals/` directory in the job store — one JSON per request,
   pending until decided or expired (card ELR-107); a recorded decision
-  is acted on by the loop (card ELR-108).
+  is acted on by the loop (card ELR-108). The sweep (card ELR-110)
+  reminds once at `approval_remind_minutes` and expires at
+  `approval_expiry_hours`; the records survive a restart, where the
+  jobs wait on the approvals holding no slot.
 - Restart survival (decision, card ELR-100, M4.1h): operations do NOT
   survive a container restart — the children die with the container.
   loopd relies on Recover (M1.2e) plus resume (card M8.5) to adopt or
