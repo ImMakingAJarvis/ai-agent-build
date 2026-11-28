@@ -207,7 +207,12 @@ on the rails holding no slot, the sweep tends their approvals.
   logs (ELR-8, ELR-9) through `agentjob.Open(agentjob.DataDir())`.
 - `loop.lock` in the store directory — the single-runtime flock
   (ELR-87) the daemon holds for its whole life; the kernel releases it
-  when the process dies.
+  when the process dies. The store's dead-claimer rule (card ELR-111,
+  M4.4a) anchors on this file: `ClaimLoop` records a claim with
+  `RanWith: loop` and PID 0 on purpose (container PIDs mean nothing on
+  the host), and in `Claim` and `Recover` such a claim is dead exactly
+  when nobody holds `loop.lock` — a non-blocking flock probe, never a
+  PID — while every other claim keeps the `alive(PID)` rule unchanged.
 - Workspace root `/var/lib/jarvis/workspaces` (`workspace.root`,
   default): one of the three writable mounts (card ELR-105, M4.2e) —
   the bind mount that holds the task worktrees.

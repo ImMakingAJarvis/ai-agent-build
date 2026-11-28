@@ -512,7 +512,7 @@ func (s *Store) Recover() error {
 		return err
 	}
 	for _, j := range jobs {
-		if (j.Status == Claimed || j.Status == Running) && !alive(j.PID) {
+		if (j.Status == Claimed || j.Status == Running) && s.claimDead(j) {
 			if err := s.setState(j.ID, State{Status: Ready}); err != nil {
 				return err
 			}
@@ -747,7 +747,7 @@ func (s *Store) Claim(id, round, driver string) (Job, error) {
 	if err != nil {
 		return j, err
 	}
-	if (j.Status == Claimed || j.Status == Running) && !alive(j.PID) {
+	if (j.Status == Claimed || j.Status == Running) && s.claimDead(j) {
 		j.Status = Ready
 	}
 	if j.Status != Ready {
