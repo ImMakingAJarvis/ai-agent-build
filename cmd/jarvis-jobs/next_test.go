@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
+	"github.com/ImMakingAJarvis/ai-agent-build/runtime/lock"
 )
 
 func seedWithDriver(t *testing.T, s *agentjob.Store, id, driver string, priority int) {
@@ -213,5 +214,81 @@ func TestHealthUp(t *testing.T) {
 	}
 	if healthUp(deadURL + "/health") {
 		t.Error("connection refused should count as down")
+	}
+}
+
+func upServer(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestJarvisJobsNextNeverPrintsLoopJob: with a ready loop job ahead of a
+// ready local job, `next` (nextRunnable) returns the local one — agent-run
+// never sees a job whose driver is loop (card ELR-112, M4.4b). The loop
+// job stays ready for loopd's own picker.
+func TestJarvisJobsNextNeverPrintsLoopJob(t *testing.T) {
+	s, err := agentjob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedWithDriver(t, s, "loopjob", "loop", 100)
+	seedWithDriver(t, s, "localjob", "local", 1)
+	t.Setenv("JARVIS_BRAIN_URL", upServer(t))
+
+	j, err := nextRunnable(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "localjob" {
+		t.Fatalf("next returned %+v, want localjob (the loop job is invisible to agent-run)", j)
+	}
+	lj, err := s.Get("loopjob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lj.Status != agentjob.Ready {
+		t.Fatalf("loopjob must stay ready for loopd, got %s", lj.Status)
+	}
+}
+
+// TestLoopJobClaimedByLiveLoopdNotReclaimedByNext: while loopd holds the
+// runtime lock, a loop job it has claimed is neither returned by `next`
+// nor requeued by it — the poll leaves the live claim alone
+// (card ELR-112, M4.4b).
+func TestLoopJobClaimedByLiveLoopdNotReclaimedByNext(t *testing.T) {
+	s, err := agentjob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedWithDriver(t, s, "loopjob", "loop", 100)
+	seedWithDriver(t, s, "localjob", "local", 1)
+
+	if _, err := s.ClaimLoop("loopjob", "r"); err != nil {
+		t.Fatal(err)
+	}
+	lk, err := lock.Acquire(filepath.Join(s.Dir(), "loop.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lk.Release() })
+	t.Setenv("JARVIS_BRAIN_URL", upServer(t))
+
+	j, err := nextRunnable(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j == nil || j.ID != "localjob" {
+		t.Fatalf("next returned %+v, want localjob (the claimed loopjob is neither offered nor reclaimed)", j)
+	}
+	lj, err := s.Get("loopjob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lj.Status != agentjob.Claimed {
+		t.Fatalf("loopjob must stay claimed while loopd lives, got %s", lj.Status)
 	}
 }

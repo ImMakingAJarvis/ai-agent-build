@@ -654,7 +654,11 @@ func (s *Store) Next() (*Job, error) { return s.NextExcluding(nil) }
 // ready and the worker idles on them instead of burning a dead round. It
 // sweeps dependencies first: the agent-run loop polls this on every idle
 // tick, so a blocker that got requeued or done between polls unblocks its
-// dependents here, and a newly failed task parks its dependents here.
+// dependents here, and a newly failed task parks its dependents here. It
+// also never returns a job whose spec driver is DriverLoop (card ELR-112,
+// M4.4b): agent-run must not see those jobs — loopd owns them through
+// NextLoop, and the two pickers must not be able to hand one job to two
+// runtimes. A skipped loop job stays ready, untouched.
 func (s *Store) NextExcluding(exclude map[string]bool) (*Job, error) {
 	if err := s.Recover(); err != nil {
 		return nil, err
@@ -671,7 +675,49 @@ func (s *Store) NextExcluding(exclude map[string]bool) (*Job, error) {
 		status[j.ID] = j.Status
 	}
 	for _, j := range jobs {
-		if j.Status != Ready || exclude[j.ID] {
+		if j.Status != Ready || exclude[j.ID] || j.Driver == DriverLoop {
+			continue
+		}
+		ok := true
+		for _, d := range j.DependsOn {
+			if status[d] != Done {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			j := j
+			return &j, nil
+		}
+	}
+	return nil, nil
+}
+
+// NextLoop is loopd's picker (card ELR-112, M4.4b): the same Recover +
+// SweepDeps + ready/dependencies-done walk as NextExcluding, but returning
+// only jobs whose spec driver is DriverLoop. NextExcluding skips exactly
+// those jobs, so a job can never be offered to agent-run and loopd at the
+// same time. A loop job already claimed (by loopd, with or without the
+// runtime lock) is not ready, so the walk skips it like any claimed job;
+// a dead loop claim is put back to ready by the Recover up front and
+// offered again.
+func (s *Store) NextLoop() (*Job, error) {
+	if err := s.Recover(); err != nil {
+		return nil, err
+	}
+	if _, err := s.SweepDeps(); err != nil {
+		return nil, err
+	}
+	jobs, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	status := map[string]string{}
+	for _, j := range jobs {
+		status[j.ID] = j.Status
+	}
+	for _, j := range jobs {
+		if j.Status != Ready || j.Driver != DriverLoop {
 			continue
 		}
 		ok := true

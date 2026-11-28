@@ -83,6 +83,14 @@ stop — no `dep_block`) are never touched; their dependents simply wait
 for them as for any unmet dep. `list` appends `[dep-blocked: <dep>:<reason>]`
 to such parked jobs and counts them in the trailing totals line.
 
+## Loop jobs (driver loop)
+
+`next` never returns a job whose spec driver is `loop` (card ELR-112,
+M4.4b): `NextExcluding` skips them and they stay `ready` for the
+event-loop runtime, which picks its own jobs through `Store.NextLoop`
+(specs/loopd.md). A loop job claimed by a live loopd is neither returned
+nor requeued by a `next` poll.
+
 ## Failure modes
 
 - Installed from a feature branch that predated `requeue -driver`; the

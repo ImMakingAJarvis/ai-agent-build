@@ -213,6 +213,12 @@ on the rails holding no slot, the sweep tends their approvals.
   the host), and in `Claim` and `Recover` such a claim is dead exactly
   when nobody holds `loop.lock` — a non-blocking flock probe, never a
   PID — while every other claim keeps the `alive(PID)` rule unchanged.
+- Picker split (card ELR-112, M4.4b): the daemon picks its own jobs with
+  `Store.NextLoop` — the same Recover + SweepDeps + ready/dependencies-done
+  walk as `NextExcluding`, restricted to jobs whose spec driver is
+  `loop`. `NextExcluding` (what `jarvis-jobs next` / agent-run poll)
+  skips exactly those jobs, so one job can never be offered to both
+  runtimes; a skipped loop job stays `ready` for the daemon.
 - Workspace root `/var/lib/jarvis/workspaces` (`workspace.root`,
   default): one of the three writable mounts (card ELR-105, M4.2e) —
   the bind mount that holds the task worktrees.
