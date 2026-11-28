@@ -46,6 +46,26 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
   ops). Every string in a served message or log passes the Redactor
   before it is written (edge case 2026-11-24): no endpoint returns raw
   text. The routes are not yet mounted in `cmd/loopd` (M4.1f).
+- Write API (ELR-95, M4.1c), behind the same Guard:
+  - `POST /v1/tasks` creates a task through `Deps.Submit` (default:
+    `Ingest`ed into the store as a ready loop job — id
+    `task-<unix seconds>-<8 hex>` from crypto/rand — then handed to
+    `Deps.Submitter`, the loop's `Submit`, wired by `cmd/loopd`; card
+    m4-2d wraps the default with the submit checks). 201 `{"id":..}`;
+    400 on bad JSON or empty instructions; 409 when Submit returns an
+    error wrapping `api.ErrConflict`.
+  - `POST /v1/tasks/{id}/cancel` cancels the job's running ops through
+    `Runner.Cancel` and sets the job status to stopped — the store's
+    `parked` status (the plan's "stopped/parked"): out of the active
+    queue, its ready dependents dep-blocked by the sweep. 200
+    `{"id":..,"status":..}`; 404 for an unknown id; a second cancel, or a
+    cancel of a finished job (done/failed/skipped), is a 200 no-op.
+  - `POST /v1/tasks/{id}/messages` appends `{"text":..}` to the job's
+    conversation log (messages.jsonl) as a user message; 200 with the
+    message's seq, 400 on bad JSON or empty text, 404 for an unknown job.
+  - `POST /v1/tasks/{id}/approvals` is registered and answers 501
+    `{"error":"not implemented"}` until card m4-3d replaces it.
+  Config changes are not an endpoint in M4.
 
 ## Configuration
 

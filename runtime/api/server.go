@@ -18,26 +18,42 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/redact"
 )
 
-// Deps is what the Server needs to serve the read side (M4.1b): the job
-// store (specs, states, ops, messages), the op runner (which ops are live
-// right now), the Redactor, the bearer token for the Guard, and the
-// version string the daemon was built with (a later card serves it).
+// Deps is what the Server needs to serve the read side (M4.1b) and the
+// write side (M4.1c): the job store (specs, states, ops, messages), the
+// op runner (which ops are live right now), the Redactor, the bearer
+// token for the Guard, the version string the daemon was built with (a
+// later card serves it), and Submit — the POST /v1/tasks creation path.
+// Submitter is what the default Submit hands the new task id to (the
+// loop's Submit, wired by cmd/loopd).
 type Deps struct {
 	Store    *agentjob.Store
 	Runner   *ops.Runner
 	Redactor *redact.Redactor
 	Token    string
 	Version  string
+	// Submit creates a task from POST /v1/tasks (M4.1c). nil means the
+	// default: Ingest the task as a ready loop job, then Submitter(id).
+	// Card m4-2d wraps it with the submit checks.
+	Submit func(TaskRequest) (string, error)
+	// Submitter hands a new task id to the runtime (loop.Submit); nil
+	// leaves the job ready in the store.
+	Submitter func(jobID string) error
 }
 
-// Server is loopd's HTTP server: the read side of the API behind the
-// bearer-token Guard.
+// Server is loopd's HTTP server: the read and write sides of the API
+// behind the bearer-token Guard.
 type Server struct {
 	deps Deps
 }
 
-// New builds a Server from its dependencies.
-func New(d Deps) *Server { return &Server{deps: d} }
+// New builds a Server from its dependencies, installing the default
+// Submit (write.go) when none is given.
+func New(d Deps) *Server {
+	if d.Submit == nil {
+		d.Submit = d.defaultSubmit
+	}
+	return &Server{deps: d}
+}
 
 // Version returns the version string the server was built with.
 func (s *Server) Version() string { return s.deps.Version }
@@ -48,14 +64,19 @@ func (s *Server) Version() string { return s.deps.Version }
 func (s *Server) Draining() bool { return false }
 
 // Handler returns the server's root handler: a ServeMux with the read
-// routes, wrapped in the bearer-token Guard (ELR-93) — /healthz passes
-// without a token, every /v1 route requires one.
+// routes (M4.1b) and the write routes (M4.1c), wrapped in the
+// bearer-token Guard (ELR-93) — /healthz passes without a token, every
+// /v1 route requires one.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /v1/state", s.handleState)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("GET /v1/tasks/{id}/messages", s.handleMessages)
+	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/cancel", s.handleCancel)
+	mux.HandleFunc("POST /v1/tasks/{id}/messages", s.handleAddMessage)
+	mux.HandleFunc("POST /v1/tasks/{id}/approvals", s.handleApprovals)
 	return Guard(s.deps.Token, mux)
 }
 
