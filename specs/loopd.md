@@ -66,6 +66,17 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
   - `POST /v1/tasks/{id}/approvals` is registered and answers 501
     `{"error":"not implemented"}` until card m4-3d replaces it.
   Config changes are not an endpoint in M4.
+- Event stream (ELR-96, M4.1d), behind the same Guard:
+  `GET /v1/events` streams the runtime's events as server-sent events —
+  `id: <id>\nevent: <type>\ndata: <json>\n\n`, flushed after each event.
+  The stream ends when the client goes away or the broker closes. The
+  broker is `runtime/api.Broker`: `NewBroker(buffer)` gives each
+  subscriber a buffered channel, `Publish` assigns the increasing id and
+  never blocks (a subscriber whose channel is full drops the event), and
+  `Subscribe` returns the channel and a cancel that closes it. Every
+  event's data passes the Redactor (re-marshalled string fields) before
+  it is written. A nil `Deps.Broker` answers 503; the loop's events are
+  wired into `Publish` by card m4-1f, so the stream is empty until then.
 
 ## Configuration
 

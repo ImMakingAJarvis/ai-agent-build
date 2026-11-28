@@ -38,6 +38,10 @@ type Deps struct {
 	// Submitter hands a new task id to the runtime (loop.Submit); nil
 	// leaves the job ready in the store.
 	Submitter func(jobID string) error
+	// Broker is the event stream (M4.1d): GET /v1/events serves its
+	// events as server-sent events. nil answers 503; card m4-1f builds
+	// it and wires the loop's events into Publish.
+	Broker *Broker
 }
 
 // Server is loopd's HTTP server: the read and write sides of the API
@@ -71,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /v1/state", s.handleState)
+	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("GET /v1/tasks/{id}/messages", s.handleMessages)
 	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
