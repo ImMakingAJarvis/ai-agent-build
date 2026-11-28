@@ -40,6 +40,11 @@ type Config struct {
 		StallMinutes  int `yaml:"stall_minutes"`
 	} `yaml:"timeouts"`
 	InstructionFiles []string `yaml:"instruction_files"`
+	Loopd            struct {
+		TokenFile            string `yaml:"token_file"`
+		ShutdownGraceSeconds int    `yaml:"shutdown_grace_seconds"`
+		Listen               string `yaml:"listen"`
+	} `yaml:"loopd"`
 }
 
 // Default returns the runtime defaults. snapshot_min_tokens is 900, the
@@ -64,6 +69,9 @@ func Default() Config {
 	c.Timeouts.NormalSeconds = 600
 	c.Timeouts.MaxOpHours = 24
 	c.Timeouts.StallMinutes = 10
+	c.Loopd.TokenFile = "/run/loopd/token"
+	c.Loopd.ShutdownGraceSeconds = 60
+	c.Loopd.Listen = ":9110"
 	return c
 }
 
@@ -146,6 +154,12 @@ func (c Config) Validate() error {
 	}
 	if c.Timeouts.StallMinutes < 0 {
 		return fmt.Errorf("timeouts.stall_minutes: %d is negative", c.Timeouts.StallMinutes)
+	}
+	if c.Loopd.ShutdownGraceSeconds < 0 {
+		return fmt.Errorf("loopd.shutdown_grace_seconds: %d is negative", c.Loopd.ShutdownGraceSeconds)
+	}
+	if c.Loopd.Listen == "" {
+		return fmt.Errorf("loopd.listen: empty")
 	}
 	return nil
 }

@@ -100,6 +100,8 @@ func TestValidateRejects(t *testing.T) {
 		{"negative normal_seconds", func(c *Config) { c.Timeouts.NormalSeconds = -1 }},
 		{"negative max_op_hours", func(c *Config) { c.Timeouts.MaxOpHours = -1 }},
 		{"negative stall_minutes", func(c *Config) { c.Timeouts.StallMinutes = -1 }},
+		{"negative loopd.shutdown_grace_seconds", func(c *Config) { c.Loopd.ShutdownGraceSeconds = -1 }},
+		{"empty loopd.listen", func(c *Config) { c.Loopd.Listen = "" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,5 +111,39 @@ func TestValidateRejects(t *testing.T) {
 				t.Errorf("Validate() = nil, want an error for %s", tc.name)
 			}
 		})
+	}
+}
+
+func TestLoopdDefaults(t *testing.T) {
+	c := Default()
+	if got, want := c.Loopd.TokenFile, "/run/loopd/token"; got != want {
+		t.Errorf("Loopd.TokenFile = %q, want %q", got, want)
+	}
+	if got, want := c.Loopd.ShutdownGraceSeconds, 60; got != want {
+		t.Errorf("Loopd.ShutdownGraceSeconds = %d, want %d", got, want)
+	}
+	if got, want := c.Loopd.Listen, ":9110"; got != want {
+		t.Errorf("Loopd.Listen = %q, want %q", got, want)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Default() with loopd keys does not validate: %v", err)
+	}
+}
+
+func TestLoopdNegativeGraceRejected(t *testing.T) {
+	c := Default()
+	c.Loopd.ShutdownGraceSeconds = -1
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for negative loopd.shutdown_grace_seconds")
+	}
+}
+
+func TestLoopdUnknownKeyRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "loopd.yaml")
+	if err := os.WriteFile(path, []byte("loopd:\n  bogus_key: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load(file with unknown loopd key) = nil error, want an error")
 	}
 }

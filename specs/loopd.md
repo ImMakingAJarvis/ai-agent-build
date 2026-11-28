@@ -25,10 +25,26 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
   `http://loopd:9110/healthz`.
 - `loopctl version` — prints `loopctl dev`; any other argument prints
   `usage: loopctl version` to stderr and exits 1.
+- Bearer-token guard (ELR-93, M4.1a): `runtime/api.Guard` requires the
+  header `Authorization: Bearer <token>` on every path and method — GET
+  included, nothing is served without it — and answers 401
+  `{"error":"unauthorized"}` otherwise; `/healthz` and `/metrics` are
+  exempt. `runtime/api.LoadToken` reads the token from the file at
+  `loopd.token_file` and rejects a missing file, an empty file, and a
+  mode with any group/other bit set (`mode & 0o077`). Both live in
+  `runtime/` for now; `cmd/loopd` is still the skeleton and M4.1f
+  mounts the guard in the daemon.
 
 ## Configuration
 
 - `LOOPD_ADDR` — listen address, default `:9110`. Read by `cmd/loopd`.
+- The runtime config file (`$LOOPD_CONFIG`, default
+  `~/.config/jarvis/loopd.yaml`) carries the `loopd` keys (ELR-93,
+  M4.1a), defined and validated in `runtime/config`:
+  - `loopd.token_file` — bearer token file, default `/run/loopd/token`
+    (must be owned and private, no group/other bits).
+  - `loopd.shutdown_grace_seconds` — default 60, must not be negative.
+  - `loopd.listen` — default `:9110`, must not be empty.
 - Compose profile `loop` — it never starts with `docker compose up -d`.
 - `env_file: agent.env`, like the other agent services.
 
@@ -52,4 +68,7 @@ Outside the profile it is expected to be absent (the map shows it down).
 
 ## Failure modes
 
-- None yet — the service is a skeleton (ELR-6, 2026-11-25).
+- `LoadToken` (ELR-93) refuses to load a token file that is missing,
+  empty, or group/other readable (`mode & 0o077` != 0) — a loose token
+  file fails loudly instead of being served. Not wired into the daemon
+  yet (skeleton, ELR-6, 2026-11-25).
