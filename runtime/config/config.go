@@ -53,6 +53,14 @@ type Config struct {
 		Allow []PermRule `yaml:"allow"`
 		Deny  []PermRule `yaml:"deny"`
 	} `yaml:"permissions"`
+	// Workspace is the task-worktree home (card ELR-105, M4.2e): Root is
+	// the directory holding one worktree per job — the container's only
+	// writable mount besides the job store and the slot dir — and Repo is
+	// the git repo the worktrees are cut from.
+	Workspace struct {
+		Root string `yaml:"root"`
+		Repo string `yaml:"repo"`
+	} `yaml:"workspace"`
 }
 
 // PermRule is one allow or deny rule from the permissions config. Tool is
@@ -89,6 +97,8 @@ func Default() Config {
 	c.Loopd.TokenFile = "/run/loopd/token"
 	c.Loopd.ShutdownGraceSeconds = 60
 	c.Loopd.Listen = ":9110"
+	c.Workspace.Root = "/var/lib/jarvis/workspaces"
+	c.Workspace.Repo = "/home/agent/ai-agent-build"
 	return c
 }
 
@@ -177,6 +187,12 @@ func (c Config) Validate() error {
 	}
 	if c.Loopd.Listen == "" {
 		return fmt.Errorf("loopd.listen: empty")
+	}
+	if c.Workspace.Root == "" {
+		return fmt.Errorf("workspace.root: empty")
+	}
+	if c.Workspace.Repo == "" {
+		return fmt.Errorf("workspace.repo: empty")
 	}
 	if err := validatePermRules("allow", c.Permissions.Allow); err != nil {
 		return err

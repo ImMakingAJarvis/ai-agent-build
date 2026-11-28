@@ -802,8 +802,11 @@ services:
   # jobs with driver loop. A normal service since card ELR-100 (M4.1h) —
   # no profile, it starts with the stack. The API is published on
   # 127.0.0.1 only; the bearer token file is mounted read-only at
-  # /run/loopd/token. The image keeps the Go toolchain, git and gh
-  # because rounds build and test inside it.
+  # /run/loopd/token. The rootfs is read-only (card ELR-105, M4.2e): the
+  # only writable mounts are the job store, the task worktrees
+  # (workspace.root) and the engine slots (engine.slot_dir), plus the
+  # /tmp tmpfs. The image keeps the Go toolchain, git and gh because
+  # rounds build and test inside it (caches on /tmp).
   loopd:
     build:
       context: .
@@ -819,10 +822,22 @@ services:
       # /.local/share/jarvis — pin it at the mount point.
       HOME: /home/agent
       LOOPD_ADDR: ":9110"
+      # Read-only rootfs (ELR-105): the Go caches sit on the /tmp tmpfs
+      # so in-container builds and tests keep working.
+      GOCACHE: /tmp/gocache
+      GOMODCACHE: /tmp/gomodcache
     ports:
       - "127.0.0.1:9110:9110"
+    # The three writable mounts (card ELR-105, M4.2e): the job store, the
+    # task-worktree root (workspace.root, default /var/lib/jarvis/workspaces)
+    # and the engine slot dir (engine.slot_dir, default /var/lib/jarvis/slots).
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /var/lib/jarvis/workspaces:/var/lib/jarvis/workspaces
+      - /var/lib/jarvis/slots:/var/lib/jarvis/slots
       - /home/agent/.local/share/jarvis/secrets/loopd-token:/run/loopd/token:ro
     # loopd.shutdown_grace_seconds (default 60) + 10s headroom for the
     # HTTP shutdown and the lock release. Raise it with the config if

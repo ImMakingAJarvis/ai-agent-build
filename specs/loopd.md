@@ -125,8 +125,20 @@ it starts with the stack, published on 127.0.0.1:9110 only.
     (must be owned and private, no group/other bits).
   - `loopd.shutdown_grace_seconds` — default 60, must not be negative.
   - `loopd.listen` — default `:9110`, must not be empty.
+  - `workspace.root` — the task-worktree root, default
+    `/var/lib/jarvis/workspaces`, must not be empty (card ELR-105,
+    M4.2e); the container's worktree mount is this directory.
+  - `workspace.repo` — the git repo the task worktrees are cut from,
+    default `/home/agent/ai-agent-build`, must not be empty (card
+    ELR-105); the daemon still reads the `LOOPD_REPO` env for the repo
+    path (card ELR-104).
 - No compose profile since ELR-100 (M4.1h): it starts with plain
   `docker compose up -d`.
+- `read_only: true` and `tmpfs: /tmp` (card ELR-105, M4.2e): the
+  rootfs is read-only; the container writes only to the job store, the
+  workspace root and the slot dir (the Data mounts) and to /tmp.
+  `GOCACHE` and `GOMODCACHE` are pinned to /tmp so the in-container Go
+  builds and tests keep working on the read-only rootfs.
 - The bearer token file `~/.local/share/jarvis/secrets/loopd-token`
   (mode 0600) is bind-mounted read-only at `/run/loopd/token` — the
   default of `loopd.token_file`.
@@ -147,6 +159,12 @@ it starts with the stack, published on 127.0.0.1:9110 only.
 - `loop.lock` in the store directory — the single-runtime flock
   (ELR-87) the daemon holds for its whole life; the kernel releases it
   when the process dies.
+- Workspace root `/var/lib/jarvis/workspaces` (`workspace.root`,
+  default): one of the three writable mounts (card ELR-105, M4.2e) —
+  the bind mount that holds the task worktrees.
+- Engine slot dir `/var/lib/jarvis/slots` (`engine.slot_dir`,
+  default): the writable mount for slot save and restore (card
+  ELR-105).
 - Task worktrees (ELR-104, M4.2d) under `workspaces/<jobID>` in the
   store directory — one per submitted task, cut from `HEAD` of
   `LOOPD_REPO`, created by `POST /v1/tasks` and removed again when the
@@ -177,6 +195,10 @@ guard (ELR-99, M4.1g) runs first: it asks the running daemon
 `running_ops` is not empty, unless `--force` is given (which names the
 ops and goes ahead). When the daemon is not reachable — or the token
 file is missing, so it cannot be up — the install proceeds.
+Before the first `up`, the writable mount sources must exist on the
+host owned by the agent user (`/var/lib/jarvis/workspaces`,
+`/var/lib/jarvis/slots`): Docker creates a missing bind source
+root-owned, which the container's uid 1001 cannot write.
 
 ## Verify live
 
@@ -189,6 +211,11 @@ file is missing, so it cannot be up — the install proceeds.
     docker cp scripts/loopd-image-check.sh jarvis-loopd:/tmp/
     docker exec jarvis-loopd bash /tmp/loopd-image-check.sh
                                               # one line per capability: ok/MISSING
+    docker exec jarvis-loopd sh -c 'touch /etc/x'
+                                              # must FAIL: read-only rootfs
+    docker exec jarvis-loopd sh -c \
+      'touch /var/lib/jarvis/workspaces/x && rm /var/lib/jarvis/workspaces/x'
+                                              # must work: writable worktree mount
     docker logs --tail 20 jarvis-loopd          # loopd listening on :9110
 
 The API is loopback-only (published on 127.0.0.1:9110): the verify

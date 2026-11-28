@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -213,5 +214,33 @@ func TestPermissionsBadPatternRejected(t *testing.T) {
 	c.Permissions.Allow = []PermRule{{Tool: "read_file", Pattern: "*.md"}}
 	if err := c.Validate(); err != nil {
 		t.Errorf("Validate() = %v, want nil for a well-formed pattern", err)
+	}
+}
+
+func TestWorkspaceDefaults(t *testing.T) {
+	c := Default()
+	if got, want := c.Workspace.Root, "/var/lib/jarvis/workspaces"; got != want {
+		t.Errorf("Workspace.Root = %q, want %q", got, want)
+	}
+	if got, want := c.Workspace.Repo, "/home/agent/ai-agent-build"; got != want {
+		t.Errorf("Workspace.Repo = %q, want %q", got, want)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Default() with workspace keys does not validate: %v", err)
+	}
+}
+
+func TestWorkspaceEmptyRepoRejected(t *testing.T) {
+	c := Default()
+	c.Workspace.Repo = ""
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "workspace.repo") {
+		t.Fatalf("Validate() with empty workspace.repo = %v, want an error naming workspace.repo", err)
+	}
+	// The root is checked the same way.
+	c2 := Default()
+	c2.Workspace.Root = ""
+	if err := c2.Validate(); err == nil {
+		t.Error("Validate() = nil, want an error for an empty workspace.root")
 	}
 }
