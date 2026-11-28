@@ -30,8 +30,13 @@ M4.1f). Card ELR-6 (M1.1a) created the homes (`runtime/`, `cmd/loopd`,
   env, when set, still overrides it) — returns 200 and the text `ok`.
   Containers on the compose network reach it at
   `http://loopd:9110/healthz`.
-- `loopctl version` — prints `loopctl dev`; any other argument prints
-  `usage: loopctl version` to stderr and exits 1.
+- `loopctl drain [--addr URL] [--token-file PATH] [--wait DURATION]`
+  (ELR-99, M4.1g) — asks the daemon to stop taking new work: POST
+  `/v1/drain` (the bearer token read from `--token-file`, default
+  `/run/loopd/token`, against `--addr`, default `http://127.0.0.1:9110`),
+  prints the running ops one `job/op` pair per line, and with `--wait`
+  keeps polling `GET /v1/state` until `running_ops` is empty (exit 0)
+  or the duration is up (exit 1, the still-running ops printed).
 - Bearer-token guard (ELR-93, M4.1a): `runtime/api.Guard` requires the
   header `Authorization: Bearer <token>` on every path and method — GET
   included, nothing is served without it — and answers 401
@@ -126,7 +131,18 @@ M4.1f). Card ELR-6 (M1.1a) created the homes (`runtime/`, `cmd/loopd`,
 
 ## Deploy
 
-    docker compose --profile loop build loopd && docker compose --profile loop up -d loopd
+    scripts/install_loopd.sh [--force]
+
+The script builds the image and runs
+`docker compose --profile loop build loopd && docker compose
+--profile loop up -d loopd`, then waits for `/healthz`. The deploy
+guard (ELR-99, M4.1g) runs first: it asks the running daemon
+`GET /v1/state` (token from `$LOOPD_TOKEN_FILE`, default
+`/run/loopd/token`; address `$LOOPD_API_URL`, default
+`http://127.0.0.1:9110`) and exits 1 with the running ops when
+`running_ops` is not empty, unless `--force` is given (which names the
+ops and goes ahead). When the daemon is not reachable — or the token
+file is missing, so it cannot be up — the install proceeds.
 
 ## Verify live
 
@@ -142,6 +158,9 @@ Outside the profile it is expected to be absent (the map shows it down).
 
 ## Failure modes
 
+- The deploy guard (ELR-99): `scripts/install_loopd.sh` exits 1 with
+  the running ops while `running_ops` is not empty; that is the guard
+  working — drain first (`loopctl drain --wait 10m`) or pass `--force`.
 - An unusable token file (missing, empty, or group/other readable —
   `mode & 0o077` != 0, ELR-93) makes the daemon fail to start: `run`
   returns before the listener opens (card ELR-98).

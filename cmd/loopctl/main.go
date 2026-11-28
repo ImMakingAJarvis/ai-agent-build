@@ -1,10 +1,11 @@
 // loopctl is the command-line client for the event-loop runtime
 // (ELR-6 skeleton; M2.4 adds "config show", card ELR-23; M3.6a adds
-// "run", card ELR-34).
+// "run", card ELR-34; M4.1g adds "drain", card ELR-99).
 package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -33,10 +34,15 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(run(args, llamacpp.New(cfg.Engine.URL), os.Stdout))
+	case len(args) >= 1 && args[0] == "drain":
+		// The API address and token file come from the flags (defaults
+		// in drain()); the daemon's config is not read.
+		os.Exit(drain(args, http.DefaultClient, os.Stdout))
 	default:
 		fmt.Fprintln(os.Stderr, `usage: loopctl version
        loopctl config show
-       loopctl run [--slot N] [--workspace DIR] "<instructions>" ["<instructions>" ...]`)
+       loopctl run [--slot N] [--workspace DIR] "<instructions>" ["<instructions>" ...]
+       loopctl drain [--addr URL] [--token-file PATH] [--wait DURATION]`)
 		os.Exit(1)
 	}
 }
