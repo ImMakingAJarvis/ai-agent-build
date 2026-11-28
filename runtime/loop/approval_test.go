@@ -259,3 +259,226 @@ func TestTwentyJobsParkedHoldZeroSlots(t *testing.T) {
 		t.Errorf("twenty parked jobs still hold a slot: Acquire(other) = %v", err)
 	}
 }
+
+// parkJob ticks the job until its one call is parked for approval, as in
+// TestAskParksOpAwaitingApproval, and returns the parked op.
+func parkJob(t *testing.T, l *Loop, store *agentjob.Store, eng *fake.Engine) agentjob.LoopOp {
+	t.Helper()
+	eng.Script(tickInstructions, fake.Step{
+		Reply:        toolReply("call_1", "read_file", `{"path":"/etc/passwd"}`),
+		PromptTokens: 100, OutputTokens: 10,
+	})
+	if err := l.tick(context.Background(), tickJobID); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	opsList, err := store.Ops(tickJobID)
+	if err != nil || len(opsList) != 1 {
+		t.Fatalf("ops = %d (err %v), want 1", len(opsList), err)
+	}
+	return opsList[0]
+}
+
+// decideAndAct records the owner's decision through the store (the
+// hash-checked one-shot decide, card ELR-106) and hands the approval to
+// the loop — the order the decision endpoint (card ELR-109) uses.
+func decideAndAct(t *testing.T, store *agentjob.Store, l *Loop, approve bool, note string) {
+	t.Helper()
+	aps, err := store.Approvals(tickJobID)
+	if err != nil || len(aps) != 1 {
+		t.Fatalf("approvals = %d (err %v), want 1", len(aps), err)
+	}
+	if ok, err := store.DecideApproval(tickJobID, aps[0].ID, aps[0].Hash, "owner", note, approve); err != nil || !ok {
+		t.Fatalf("DecideApproval: ok=%v err=%v", ok, err)
+	}
+	if err := l.HandleApprovalDecided(tickJobID, aps[0].ID); err != nil {
+		t.Fatalf("HandleApprovalDecided: %v", err)
+	}
+}
+
+// TestDecidedApprovedStartsOp: an approved decision starts the parked op
+// through the run path that skips the gate — the runner holds the call,
+// the op is running, and the job waits on the op, not the approval.
+func TestDecidedApprovedStartsOp(t *testing.T) {
+	got := make(chan ops.Call, 1)
+	eng := fake.New(1)
+	l, store := newApprovalEnv(t, eng, perm.Rules{},
+		captureTool{name: "read_file", gotCh: got})
+	parkJob(t, l, store, eng)
+	decideAndAct(t, store, l, true, "ok to read")
+	op, err := store.GetOp(tickJobID, "call_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Status != agentjob.OpRunning {
+		t.Fatalf("op status = %q, want %s", op.Status, agentjob.OpRunning)
+	}
+	select {
+	case c := <-got:
+		if c.Name != "read_file" || c.OpID != "call_1" {
+			t.Errorf("runner call = %+v, want the approved op", c)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the approved call never reached the runner")
+	}
+	j, err := store.Get(tickJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != agentjob.Waiting || j.WaitReason != agentjob.WaitOperation {
+		t.Errorf("job = %q (wait_reason %q), want waiting on the op",
+			j.Status, j.WaitReason)
+	}
+}
+
+// TestDecidedDeniedResultIsDeniedNote: a denied decision finishes the op
+// as a failed op whose tool result is "denied: <the note>" — the model
+// reads the denial as the call's result — the runner never saw the call,
+// and the job is ready for the tick that shows it to the model.
+func TestDecidedDeniedResultIsDeniedNote(t *testing.T) {
+	got := make(chan ops.Call, 1)
+	eng := fake.New(1)
+	l, store := newApprovalEnv(t, eng, perm.Rules{},
+		captureTool{name: "read_file", gotCh: got})
+	parkJob(t, l, store, eng)
+	decideAndAct(t, store, l, false, "not now")
+	select {
+	case <-got:
+		t.Fatal("the denied call reached the runner")
+	default:
+	}
+	op, err := store.GetOp(tickJobID, "call_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Status != agentjob.OpFailed {
+		t.Fatalf("op status = %q, want %s", op.Status, agentjob.OpFailed)
+	}
+	if !strings.Contains(string(op.Result), "denied: not now") {
+		t.Errorf("op result = %s, want it to carry \"denied: not now\"", op.Result)
+	}
+	// The model reads the denial as the call's tool result.
+	msgs, err := store.Messages(tickJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, m := range msgs {
+		if m.Role != "tool" {
+			continue
+		}
+		var tc toolContent
+		if json.Unmarshal(m.Content, &tc) == nil && tc.ToolCallID == "call_1" &&
+			strings.Contains(tc.Content, "denied: not now") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no tool message carrying the denial for call_1")
+	}
+	j, err := store.Get(tickJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != agentjob.Ready {
+		t.Errorf("job status = %q, want %s (the model sees the denial next tick)",
+			j.Status, agentjob.Ready)
+	}
+}
+
+// TestDecidedTwiceStartsOnce: the decision acts once — a repeated
+// HandleApprovalDecided is a no-op and the op never starts twice.
+func TestDecidedTwiceStartsOnce(t *testing.T) {
+	got := make(chan ops.Call, 2)
+	eng := fake.New(1)
+	l, store := newApprovalEnv(t, eng, perm.Rules{},
+		captureTool{name: "read_file", gotCh: got})
+	parkJob(t, l, store, eng)
+	decideAndAct(t, store, l, true, "ok")
+	if err := l.HandleApprovalDecided(tickJobID, "call_1"); err != nil {
+		t.Fatalf("second HandleApprovalDecided: %v (want a no-op nil)", err)
+	}
+	select {
+	case <-got: // the first start
+	case <-time.After(2 * time.Second):
+		t.Fatal("the approved call never reached the runner")
+	}
+	select {
+	case c := <-got:
+		t.Fatalf("the op started twice: second call %+v", c)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestDecisionForCancelledJobChangesNothing: the owner decides, the job
+// is cancelled before the loop acts, and the decision that then lands
+// returns nil and changes nothing — the job stays parked, the op stays
+// closed, and the recorded decision stays recorded.
+func TestDecisionForCancelledJobChangesNothing(t *testing.T) {
+	eng := fake.New(1)
+	l, store := newApprovalEnv(t, eng, perm.Rules{},
+		captureTool{name: "read_file"})
+	parkJob(t, l, store, eng)
+	aps, err := store.Approvals(tickJobID)
+	if err != nil || len(aps) != 1 {
+		t.Fatalf("approvals = %d (err %v), want 1", len(aps), err)
+	}
+	if ok, err := store.DecideApproval(tickJobID, aps[0].ID, aps[0].Hash, "owner", "ok", true); err != nil || !ok {
+		t.Fatalf("DecideApproval: ok=%v err=%v", ok, err)
+	}
+	if err := store.Stop(tickJobID); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := l.HandleApprovalDecided(tickJobID, aps[0].ID); err != nil {
+		t.Fatalf("HandleApprovalDecided after cancel: %v (want nil)", err)
+	}
+	j, err := store.Get(tickJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != agentjob.Parked {
+		t.Errorf("job status = %q, want %s", j.Status, agentjob.Parked)
+	}
+	op, err := store.GetOp(tickJobID, "call_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Status != agentjob.OpCancelled {
+		t.Errorf("op status = %q, want %s", op.Status, agentjob.OpCancelled)
+	}
+	aps, err = store.Approvals(tickJobID)
+	if err != nil || len(aps) != 1 || aps[0].Status != agentjob.ApprovalApproved {
+		t.Errorf("approval after cancel = %+v (err %v), want still approved", aps, err)
+	}
+}
+
+// TestCancelClosesParkedOps: cancelling a job parked on an approval
+// (Store stop) closes its parked ops as cancelled — nothing waits on a
+// decision that will never come — and parks the job; a second stop is a
+// no-op.
+func TestCancelClosesParkedOps(t *testing.T) {
+	eng := fake.New(1)
+	l, store := newApprovalEnv(t, eng, perm.Rules{},
+		captureTool{name: "read_file"})
+	parkJob(t, l, store, eng)
+	if err := store.Stop(tickJobID); err != nil {
+		t.Fatalf("Stop on the parked job: %v", err)
+	}
+	j, err := store.Get(tickJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != agentjob.Parked {
+		t.Fatalf("job status = %q, want %s", j.Status, agentjob.Parked)
+	}
+	opsList, err := store.Ops(tickJobID)
+	if err != nil || len(opsList) != 1 {
+		t.Fatalf("ops = %d (err %v), want 1", len(opsList), err)
+	}
+	if opsList[0].Status != agentjob.OpCancelled {
+		t.Errorf("op status = %q, want %s (the cancel closes the parked op)",
+			opsList[0].Status, agentjob.OpCancelled)
+	}
+	if err := store.Stop(tickJobID); err != nil {
+		t.Errorf("second Stop: %v", err)
+	}
+}

@@ -794,6 +794,9 @@ func (s *Store) Pause(id string) error {
 // it later with SetStatus(Ready). Like Pause, it is a no-op when the job
 // is already parked, and it refuses a job that is not running: a signal
 // that lands after a clean finish must not park a done or skipped job.
+// A loop job parked on an approval (waiting, reason approval, card
+// ELR-108) stops too: its awaiting_approval ops are closed as cancelled
+// first, so nothing waits on a decision that will never come.
 func (s *Store) Stop(id string) error {
 	j, err := s.Get(id)
 	if err != nil {
@@ -802,8 +805,24 @@ func (s *Store) Stop(id string) error {
 	if j.Status == Parked {
 		return nil
 	}
-	if j.Status != Running {
+	approvalWait := j.Status == Waiting && j.WaitReason == WaitApproval
+	if j.Status != Running && !approvalWait {
 		return fmt.Errorf("job %s is %s, not running", id, j.Status)
+	}
+	if approvalWait {
+		ops, err := s.Ops(id)
+		if err != nil {
+			return err
+		}
+		for _, op := range ops {
+			if op.Status != OpAwaitingApproval {
+				continue
+			}
+			op.Status = OpCancelled
+			if err := s.PutOp(id, op); err != nil {
+				return err
+			}
+		}
 	}
 	j.Status = Parked
 	return s.setState(id, j.State)

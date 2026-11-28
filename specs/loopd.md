@@ -28,7 +28,13 @@ op the loop consults the permission layer (card ELR-107, M4.3b):
 result `denied: <the matching rule>`), or sends it to the owner (the op
 is parked awaiting_approval with a pending approval, and the job waits
 on the approval holding no slot — the tick releases the slot before the
-op starts).
+op starts). A recorded decision on a parked approval acts on it (card
+ELR-108, M4.3c): approved starts the op through the run path that
+skips the gate; denied finishes it as a failed op whose tool result is
+`denied: <the note>`, and the job goes back to ready either way it can
+wake; a decision for a job cancelled meanwhile changes nothing, and
+cancelling a job parked on an approval (store stop) closes its parked
+ops as cancelled so nothing waits on a decision that will never come.
 
 ## Interfaces
 
@@ -183,7 +189,8 @@ op starts).
   submit fails after the create.
 - Approval requests the loop parks for the owner live under the job's
   `approvals/` directory in the job store — one JSON per request,
-  pending until decided or expired (card ELR-107).
+  pending until decided or expired (card ELR-107); a recorded decision
+  is acted on by the loop (card ELR-108).
 - Restart survival (decision, card ELR-100, M4.1h): operations do NOT
   survive a container restart — the children die with the container.
   loopd relies on Recover (M1.2e) plus resume (card M8.5) to adopt or
