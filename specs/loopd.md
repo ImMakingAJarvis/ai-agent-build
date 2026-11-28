@@ -1,27 +1,34 @@
 ---
 id: loopd
 name: Loopd (event-loop runtime)
-summary: The event-loop agent runtime daemon — schedules ticks for jobs with driver loop. Skeleton only for now.
+summary: The event-loop agent runtime daemon — serves the runtime API and runs the scheduler loop for jobs with driver loop; drains on SIGTERM.
 group: agent
 kind: container
 status: optional
 compose: [loopd]
 binaries: [cmd/loopd, cmd/loopctl]
-ports: ["9110 health (published on 127.0.0.1 only; LOOPD_ADDR, default :9110)"]
+ports: ["9110 API (loopd.listen, default :9110; the LOOPD_ADDR env still overrides it; published on 127.0.0.1 only)"]
 health: http://loopd:9110/healthz
 ---
 
 ## Purpose
 
-The event-loop agent runtime daemon: schedules ticks for jobs with driver
-loop. Skeleton only for now — the card ELR-6 (M1.1a) created the homes
-(`runtime/`, `cmd/loopd`, `cmd/loopctl`) that the later ELR cards fill in.
-Since ELR-7 it builds as a compose service behind the `loop` profile.
+The event-loop agent runtime daemon. It reads the bearer token (failing
+to start when the file is unusable), serves the runtime API behind the
+bearer-token guard, and runs the scheduler: one tick at a time for jobs
+with driver loop, sleeping the idle the loop measures when Step reports
+no work, and no new tick once the drain has begun. On SIGTERM it starts
+the drain, waits up to `loopd.shutdown_grace_seconds` for the running
+tick and its ops, shuts the HTTP server down, and exits 0 (card ELR-98,
+M4.1f). Card ELR-6 (M1.1a) created the homes (`runtime/`, `cmd/loopd`,
+`cmd/loopctl`); since ELR-7 it builds as a compose service behind the
+`loop` profile.
 
 ## Interfaces
 
-- `GET /healthz` on `LOOPD_ADDR` (default `:9110`) — returns 200 and the
-  text `ok`. Containers on the compose network reach it at
+- `GET /healthz` on `loopd.listen` (default `:9110`; the `LOOPD_ADDR`
+  env, when set, still overrides it) — returns 200 and the text `ok`.
+  Containers on the compose network reach it at
   `http://loopd:9110/healthz`.
 - `loopctl version` — prints `loopctl dev`; any other argument prints
   `usage: loopctl version` to stderr and exits 1.
@@ -31,9 +38,9 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
   `{"error":"unauthorized"}` otherwise; `/healthz` and `/metrics` are
   exempt. `runtime/api.LoadToken` reads the token from the file at
   `loopd.token_file` and rejects a missing file, an empty file, and a
-  mode with any group/other bit set (`mode & 0o077`). Both live in
-  `runtime/` for now; `cmd/loopd` is still the skeleton and M4.1f
-  mounts the guard in the daemon.
+  mode with any group/other bit set (`mode & 0o077`). The daemon reads
+  it at start, fails to start when it is unusable, and serves the API
+  behind the guard (card ELR-98, M4.1f).
 - Read API (ELR-94, M4.1b): `runtime/api.Server` (`New(Deps{Store,
   Runner, Redactor, Token, Version})`, `Handler()`) serves, behind the
   same Guard, `GET /v1/tasks/{id}` (the job's spec and state plus its
@@ -46,7 +53,7 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
   `running_ops` joins the Runner's live ops to the store's running
   ops). Every string in a served message or log passes the Redactor
   before it is written (edge case 2026-11-24): no endpoint returns raw
-  text. The routes are not yet mounted in `cmd/loopd` (M4.1f).
+  text. All the read routes are mounted in `cmd/loopd` (M4.1f).
 - Write API (ELR-95, M4.1c), behind the same Guard:
   - `POST /v1/tasks` creates a task through `Deps.Submit` (default:
     `Ingest`ed into the store as a ready loop job — id
@@ -87,12 +94,15 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
   never blocks (a subscriber whose channel is full drops the event), and
   `Subscribe` returns the channel and a cancel that closes it. Every
   event's data passes the Redactor (re-marshalled string fields) before
-  it is written. A nil `Deps.Broker` answers 503; the loop's events are
-  wired into `Publish` by card m4-1f, so the stream is empty until then.
+  it is written. The daemon wires the runtime's events into `Publish`
+  (M4.1f): `op.progress` from `Runner.OnProgress`, `op.done` from
+  `Runner.OnDone` (data: the result's status), and one `tick` event at
+  the end of every tick that ran.
 
 ## Configuration
 
-- `LOOPD_ADDR` — listen address, default `:9110`. Read by `cmd/loopd`.
+- `LOOPD_ADDR` — the old env override (ELR-6): when set, it wins over
+  `loopd.listen`.
 - The runtime config file (`$LOOPD_CONFIG`, default
   `~/.config/jarvis/loopd.yaml`) carries the `loopd` keys (ELR-93,
   M4.1a), defined and validated in `runtime/config`:
@@ -105,9 +115,14 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
 
 ## Data
 
-- None yet — the skeleton holds no state. The job store
-  (`~/.local/share/jarvis`) is mounted into the container; later cards add
-  the job-store fields and the message log (ELR-8, ELR-9).
+- The job store (`~/.local/share/jarvis`), mounted into the container:
+  the daemon reads and writes the job specs, states, ops, and message
+  logs (ELR-8, ELR-9) through `agentjob.Open(agentjob.DataDir())`.
+- `loop.lock` in the store directory — the single-runtime flock
+  (ELR-87) the daemon holds for its whole life; the kernel releases it
+  when the process dies.
+- No other state: the loop's metrics registry is in-process and resets
+  on restart.
 
 ## Deploy
 
@@ -117,13 +132,22 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
 
     docker compose --profile loop up -d loopd
     curl http://127.0.0.1:9110/healthz          # → ok
+    curl http://127.0.0.1:9110/metrics          # → 200, the loop's series
+    curl http://127.0.0.1:9110/v1/state         # → 401 {"error":"unauthorized"}
+    curl -H "Authorization: Bearer $(cat /run/loopd/token)" \
+         http://127.0.0.1:9110/v1/state         # → 200 {"draining":false,...}
     docker logs --tail 20 jarvis-loopd          # loopd listening on :9110
 
 Outside the profile it is expected to be absent (the map shows it down).
 
 ## Failure modes
 
-- `LoadToken` (ELR-93) refuses to load a token file that is missing,
-  empty, or group/other readable (`mode & 0o077` != 0) — a loose token
-  file fails loudly instead of being served. Not wired into the daemon
-  yet (skeleton, ELR-6, 2026-11-25).
+- An unusable token file (missing, empty, or group/other readable —
+  `mode & 0o077` != 0, ELR-93) makes the daemon fail to start: `run`
+  returns before the listener opens (card ELR-98).
+- Another runtime holds `loop.lock` (ELR-87): the daemon prints the
+  holder and exits 3 without serving anything.
+- SIGTERM with a tick or ops still running at the grace deadline: the
+  daemon exits 0 anyway and names what is still running in the log line
+  (`shutdown deadline reached; still running: ...`); the ops are adopted
+  or reported lost on the next start (ELR-90).
