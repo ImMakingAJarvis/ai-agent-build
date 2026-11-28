@@ -60,13 +60,20 @@ it starts with the stack, published on 127.0.0.1:9110 only.
   before it is written (edge case 2026-11-24): no endpoint returns raw
   text. All the read routes are mounted in `cmd/loopd` (M4.1f).
 - Write API (ELR-95, M4.1c), behind the same Guard:
-  - `POST /v1/tasks` creates a task through `Deps.Submit` (default:
-    `Ingest`ed into the store as a ready loop job — id
-    `task-<unix seconds>-<8 hex>` from crypto/rand — then handed to
-    `Deps.Submitter`, the loop's `Submit`, wired by `cmd/loopd`; card
-    m4-2d wraps the default with the submit checks). 201 `{"id":..}`;
-    400 on bad JSON or empty instructions; 409 when Submit returns an
-    error wrapping `api.ErrConflict`.
+  - `POST /v1/tasks` creates a task through `Deps.Submit`.
+    `cmd/loopd` wires `api.NewSubmit` (ELR-104, M4.2d): it generates the
+    branch `loop/<id>` when the request names none, refuses a branch a
+    live job already uses — any status except done, failed, skipped and
+    parked (the plan's "stopped") — and a branch checked out in another
+    worktree (`workspace.ErrBranchInUse`), both as an error wrapping
+    `api.ErrConflict`; it then `Create()`s the task's worktree (cut from
+    `HEAD` of the repo at `LOOPD_REPO`), sets `Spec.Workspace` to the
+    worktree's path, `Ingest`s the job (id `task-<unix seconds>-<8 hex>`
+    from crypto/rand, class `build`, source `api`), and hands the id to
+    the loop's `Submit` — any error after the worktree exists removes it
+    again. 201 `{"id":..}`; 400 on bad JSON or empty instructions; 409
+    on a branch conflict. A server without a `Deps.Submit` keeps the
+    default: `Ingest` + `Deps.Submitter`, no worktree.
   - `POST /v1/tasks/{id}/cancel` cancels the job's running ops through
     `Runner.Cancel` and sets the job status to stopped — the store's
     `parked` status (the plan's "stopped/parked"): out of the active
@@ -108,6 +115,9 @@ it starts with the stack, published on 127.0.0.1:9110 only.
 
 - `LOOPD_ADDR` — the old env override (ELR-6): when set, it wins over
   `loopd.listen`.
+- `LOOPD_REPO` — the git repo the task worktrees are cut from (ELR-104,
+  M4.2d); unset, `NewSubmit`'s `ws.Create` fails and `POST /v1/tasks`
+  answers 500.
 - The runtime config file (`$LOOPD_CONFIG`, default
   `~/.config/jarvis/loopd.yaml`) carries the `loopd` keys (ELR-93,
   M4.1a), defined and validated in `runtime/config`:
@@ -137,6 +147,10 @@ it starts with the stack, published on 127.0.0.1:9110 only.
 - `loop.lock` in the store directory — the single-runtime flock
   (ELR-87) the daemon holds for its whole life; the kernel releases it
   when the process dies.
+- Task worktrees (ELR-104, M4.2d) under `workspaces/<jobID>` in the
+  store directory — one per submitted task, cut from `HEAD` of
+  `LOOPD_REPO`, created by `POST /v1/tasks` and removed again when the
+  submit fails after the create.
 - Restart survival (decision, card ELR-100, M4.1h): operations do NOT
   survive a container restart — the children die with the container.
   loopd relies on Recover (M1.2e) plus resume (card M8.5) to adopt or

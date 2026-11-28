@@ -35,6 +35,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/redact"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/slot"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/tools"
+	"github.com/ImMakingAJarvis/ai-agent-build/runtime/workspace"
 )
 
 // version is what the API reports the daemon was built with.
@@ -311,11 +312,23 @@ func (d deps) handler(token string) http.Handler {
 		Redactor:  d.redactor,
 		Token:     token,
 		Version:   version,
+		Submit:    api.NewSubmit(d.store, workspaceManager(), d.loop.Submit),
 		Submitter: d.loop.Submit,
 		Broker:    d.broker,
 		Drainer:   d.drainer,
 	}).Handler())
 	return root
+}
+
+// workspaceManager builds the task worktree manager (card ELR-104,
+// M4.2d): the worktrees live under the job store — the one directory
+// the container mounts, so they survive a restart — and are cut from
+// the repo at $LOOPD_REPO.
+func workspaceManager() *workspace.Manager {
+	return &workspace.Manager{
+		Repo: os.Getenv("LOOPD_REPO"),
+		Root: filepath.Join(agentjob.DataDir(), "workspaces"),
+	}
 }
 
 // storeJobs is the slot.Jobs view over the agent job store: the slot
