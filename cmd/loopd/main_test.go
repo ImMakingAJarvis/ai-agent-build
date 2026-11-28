@@ -54,6 +54,7 @@ func (f *fakeLoop) Submit(string) error           { return nil }
 func (f *fakeLoop) HandleOpDone(string, string, ops.Result) error {
 	return nil
 }
+func (f *fakeLoop) HandleApprovalDecided(string, string) error { return nil }
 
 // blockTool blocks until its context ends: an op that is still running
 // when the shutdown deadline comes.

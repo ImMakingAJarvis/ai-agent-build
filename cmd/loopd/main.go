@@ -55,6 +55,10 @@ type loopDriver interface {
 	IdleWhileReady() time.Duration
 	Submit(jobID string) error
 	HandleOpDone(jobID, opID string, res ops.Result) error
+	// HandleApprovalDecided acts on an approval decision the API recorded
+	// (card ELR-109): an approval starts the parked op, a denial finishes
+	// it as a failed op.
+	HandleApprovalDecided(jobID, approvalID string) error
 }
 
 // deps is what run drives: the pieces of the runtime, built by newDeps in
@@ -67,6 +71,10 @@ type deps struct {
 	redactor *redact.Redactor
 	loop     loopDriver
 	metrics  *prometheus.Registry
+	// ownerDiscord is the owner's Discord id (the config's
+	// owner_discord_id): a POST /v1/tasks/{id}/approvals decided_by of the
+	// form discord:<id> must name it, or it is 403 (card ELR-109).
+	ownerDiscord string
 }
 
 func main() {
@@ -193,6 +201,7 @@ func newDeps(cfg config.Config) (deps, error) {
 		redactor: red,
 		loop:     l,
 		metrics:  metrics,
+		ownerDiscord: cfg.OwnerDiscordID,
 	}, nil
 }
 
@@ -316,6 +325,8 @@ func (d deps) handler(token string) http.Handler {
 		Submitter: d.loop.Submit,
 		Broker:    d.broker,
 		Drainer:   d.drainer,
+		OwnerDiscordID:    d.ownerDiscord,
+		OnApprovalDecided: d.loop.HandleApprovalDecided,
 	}).Handler())
 	return root
 }

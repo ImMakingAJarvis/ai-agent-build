@@ -46,6 +46,15 @@ type Deps struct {
 	// /v1/drain calls its Begin. nil reports not draining and answers
 	// 503 on /v1/drain; card m4-1f builds one and passes it in.
 	Drainer *Drainer
+	// OwnerDiscordID is the owner's Discord id (the loopd config's
+	// owner_discord_id): a POST /v1/tasks/{id}/approvals decided_by of
+	// the form discord:<id> must name it, or the decision is 403 (card
+	// ELR-109, M4.3d). Empty accepts no discord id.
+	OwnerDiscordID string
+	// OnApprovalDecided acts on a recorded decision (card ELR-109): the
+	// loop's HandleApprovalDecided, wired by cmd/loopd. nil records the
+	// decision without acting on it.
+	OnApprovalDecided func(jobID, approvalID string) error
 }
 
 // Server is loopd's HTTP server: the read and write sides of the API
@@ -92,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /v1/tasks/{id}/messages", s.handleAddMessage)
 	mux.HandleFunc("POST /v1/tasks/{id}/approvals", s.handleApprovals)
+	mux.HandleFunc("GET /v1/tasks/{id}/approvals", s.handleListApprovals)
 	return Guard(s.deps.Token, mux)
 }
 

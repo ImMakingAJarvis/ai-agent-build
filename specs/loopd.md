@@ -95,8 +95,25 @@ ops as cancelled so nothing waits on a decision that will never come.
   - `POST /v1/tasks/{id}/messages` appends `{"text":..}` to the job's
     conversation log (messages.jsonl) as a user message; 200 with the
     message's seq, 400 on bad JSON or empty text, 404 for an unknown job.
-  - `POST /v1/tasks/{id}/approvals` is registered and answers 501
-    `{"error":"not implemented"}` until card m4-3d replaces it.
+  - `POST /v1/tasks/{id}/approvals` records the owner's decision on a
+    parked approval (card ELR-109, M4.3d): body
+    `{"approval_id":..,"hash":..,"decision":"approve"|"deny","note":..,
+    "decided_by":..}`. The bearer token is the API owner identity; a
+    `decided_by` of the form `discord:<id>` must name the configured
+    `owner_discord_id` or the decision is 403 and changes nothing. The
+    decision is recorded through `Store.DecideApproval`, then — only
+    when it is new — acted on through `Deps.OnApprovalDecided` (the
+    loop's `HandleApprovalDecided`: an approval starts the parked op, a
+    denial finishes it as a failed op whose result carries
+    `denied: <note>`) and published on the Broker as
+    `approval.decided`. 200 `{"changed":true}`; 200 `{"changed":false}`
+    for a second decision on the same approval; 400 on a hash mismatch,
+    a bad decision, or a missing approval_id; 409 after the task lapsed
+    (the job is done, failed or parked); 404 for an unknown job or
+    approval.
+  - `GET /v1/tasks/{id}/approvals` lists the job's approvals, the
+    request text through the Redactor (card ELR-109); an empty array
+    for a job with no approvals yet, 404 for an unknown job.
   Config changes are not an endpoint in M4.
 - Drain (ELR-97, M4.1e), behind the same Guard:
   `POST /v1/drain` starts the drain through `Deps.Drainer.Begin` and
@@ -120,8 +137,9 @@ ops as cancelled so nothing waits on a decision that will never come.
   event's data passes the Redactor (re-marshalled string fields) before
   it is written. The daemon wires the runtime's events into `Publish`
   (M4.1f): `op.progress` from `Runner.OnProgress`, `op.done` from
-  `Runner.OnDone` (data: the result's status), and one `tick` event at
-  the end of every tick that ran.
+  `Runner.OnDone` (data: the result's status), one `tick` event at the
+  end of every tick that ran, and `approval.decided` from the approval
+  endpoint (data: the decision's status; card ELR-109).
 
 ## Configuration
 
@@ -149,7 +167,10 @@ ops as cancelled so nothing waits on a decision that will never come.
   - `approval_remind_minutes` — how long after the request the owner is
     reminded of a pending approval; default 60, must not be negative.
   - `owner_discord_id` — the owner's Discord id approval requests and
-    reminders are addressed to; default empty.
+    reminders are addressed to, and the id a
+    `POST /v1/tasks/{id}/approvals` `decided_by` of the form
+    `discord:<id>` must name or the decision is 403 (card ELR-109);
+    default empty.
 - No compose profile since ELR-100 (M4.1h): it starts with plain
   `docker compose up -d`.
 - `read_only: true` and `tmpfs: /tmp` (card ELR-105, M4.2e): the

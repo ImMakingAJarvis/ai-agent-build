@@ -262,17 +262,6 @@ func TestMessageEmpty400(t *testing.T) {
 	}
 }
 
-func TestApprovalsIs501(t *testing.T) {
-	s, _ := newTestServer(t)
-	rec := postWithToken(t, s.Handler(), "/v1/tasks/j1/approvals", `{}`)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("code = %d, want 501 (body %s)", rec.Code, rec.Body.String())
-	}
-	if body := rec.Body.String(); body != `{"error":"not implemented"}` {
-		t.Fatalf("body = %q, want %q", body, `{"error":"not implemented"}`)
-	}
-}
-
 func TestWritesRequireToken(t *testing.T) {
 	s, store := newTestServer(t)
 	if _, err := store.Ingest(agentjob.Spec{ID: "j1", Title: "j", Instructions: "i"}); err != nil {

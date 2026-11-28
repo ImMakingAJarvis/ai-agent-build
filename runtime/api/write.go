@@ -1,7 +1,7 @@
 // Package api is loopd's HTTP layer (M4.1). This file (card ELR-95,
-// M4.1c) adds the write side: create a task, cancel it, add a user
-// message to its conversation, and the approvals placeholder that card
-// m4-3d replaces.
+// M4.1c) adds the write side: create a task, cancel it, and add a user
+// message to its conversation. The approval endpoints moved to
+// approvals.go with card m4-3d (ELR-109).
 package api
 
 import (
@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -192,15 +191,4 @@ func (s *Server) handleAddMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, map[string]any{"seq": msgs[0].Seq})
-}
-
-// handleApprovals is registered for POST /v1/tasks/{id}/approvals and
-// answers 501 {"error":"not implemented"} until card m4-3d replaces it
-// with the approval endpoints.
-func (s *Server) handleApprovals(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	if _, err := io.WriteString(w, `{"error":"not implemented"}`); err != nil {
-		// The client went away; there is nothing left to do.
-	}
 }
