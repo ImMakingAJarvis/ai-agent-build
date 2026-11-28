@@ -34,6 +34,18 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
   mode with any group/other bit set (`mode & 0o077`). Both live in
   `runtime/` for now; `cmd/loopd` is still the skeleton and M4.1f
   mounts the guard in the daemon.
+- Read API (ELR-94, M4.1b): `runtime/api.Server` (`New(Deps{Store,
+  Runner, Redactor, Token, Version})`, `Handler()`) serves, behind the
+  same Guard, `GET /v1/tasks/{id}` (the job's spec and state plus its
+  ops; 404 `{"error":"not found"}` for an unknown id),
+  `GET /v1/tasks/{id}/messages` (the job's conversation log as a JSON
+  array, empty array for a job with no log), and `GET /v1/state`
+  (`{"draining":false,"running_ops":[{"job":..,"op":..}],"jobs":{
+  status:count}}` — `draining` stays false until card m4-1e;
+  `running_ops` joins the Runner's live ops to the store's running
+  ops). Every string in a served message or log passes the Redactor
+  before it is written (edge case 2026-11-24): no endpoint returns raw
+  text. The routes are not yet mounted in `cmd/loopd` (M4.1f).
 
 ## Configuration
 
