@@ -1,6 +1,9 @@
 package agentjob
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,17 +54,52 @@ func (o LoopOp) Finished() bool {
 	return false
 }
 
+// Approval statuses. Pending is the state a request sits in until
+// DecideApproval records its one decision: approved or denied.
+const (
+	ApprovalPending  = "pending"
+	ApprovalApproved = "approved"
+	ApprovalDenied   = "denied"
+)
+
 // LoopApproval is an approval request for an op: the loop asks the owner
 // (or a guard) before the operation runs. It lives at
-// <JobDir>/approvals/<ID>.json.
+// <JobDir>/approvals/<ID>.json. Files written before Hash and ExpiresAt
+// existed load with them empty (zero value / nil).
 type LoopApproval struct {
 	ID        string          `json:"id"`
 	OpID      string          `json:"op_id"`
 	Request   json.RawMessage `json:"request"`
 	Status    string          `json:"status"` // "pending", "approved", "denied"
-	DecidedBy string          `json:"decided_by,omitempty"`
-	DecidedAt *time.Time      `json:"decided_at,omitempty"`
-	RemindAt  *time.Time      `json:"remind_at,omitempty"`
+	// Hash binds the approval to the exact call it covers: ApprovalHash
+	// of the op's tool and args at request time. DecideApproval refuses a
+	// decision whose hash does not match (ErrApprovalHashMismatch).
+	Hash      string     `json:"hash"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	DecidedBy string     `json:"decided_by,omitempty"`
+	DecidedAt *time.Time `json:"decided_at,omitempty"`
+	RemindAt  *time.Time `json:"remind_at,omitempty"`
+	// Note is the decider's note, kept with the decision.
+	Note string `json:"note,omitempty"`
+}
+
+// ApprovalHash is the hash that binds an approval to the exact call it
+// covers: the hex sha256 of tool + "\x00" + the args compacted with
+// json.Compact. The same tool and args always give the same hash (the
+// JSON's formatting does not matter); either changed gives a different
+// one, so a decision for one call cannot apply to another.
+func ApprovalHash(tool string, args json.RawMessage) string {
+	b := make([]byte, 0, len(tool)+len(args)+1)
+	b = append(b, tool...)
+	b = append(b, 0)
+	var compacted bytes.Buffer
+	if err := json.Compact(&compacted, args); err != nil {
+		b = append(b, args...) // not valid JSON: hash what was stored
+	} else {
+		b = append(b, compacted.Bytes()...)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // validOpID reports whether id may name an op or approval file: non-empty
