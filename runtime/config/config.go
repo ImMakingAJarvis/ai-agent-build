@@ -34,7 +34,15 @@ type Config struct {
 	MaxAcceptanceFails      int      `yaml:"max_acceptance_fails"`
 	AfterEdit               []string `yaml:"after_edit"`
 	AfterEditTimeoutSeconds int      `yaml:"after_edit_timeout_seconds"`
-	Timeouts                struct {
+	// Approval is the parking the loop does for a tool call Decide wants a
+	// human answer for (card ELR-107, M4.3b): the op waits
+	// awaiting_approval until ApprovalExpiryHours are up, and the owner is
+	// reminded from ApprovalRemindMinutes after the request. OwnerDiscordID
+	// is the owner's Discord id the reminders and requests go to.
+	ApprovalExpiryHours   int    `yaml:"approval_expiry_hours"`
+	ApprovalRemindMinutes int    `yaml:"approval_remind_minutes"`
+	OwnerDiscordID        string `yaml:"owner_discord_id"`
+	Timeouts              struct {
 		QuickSeconds  int `yaml:"quick_seconds"`
 		NormalSeconds int `yaml:"normal_seconds"`
 		MaxOpHours    int `yaml:"max_op_hours"`
@@ -90,6 +98,8 @@ func Default() Config {
 	c.RepeatFail = 5
 	c.MaxAcceptanceFails = 5
 	c.AfterEditTimeoutSeconds = 300
+	c.ApprovalExpiryHours = 24
+	c.ApprovalRemindMinutes = 60
 	c.Timeouts.QuickSeconds = 30
 	c.Timeouts.NormalSeconds = 600
 	c.Timeouts.MaxOpHours = 24
@@ -169,6 +179,12 @@ func (c Config) Validate() error {
 	}
 	if c.AfterEditTimeoutSeconds < 0 {
 		return fmt.Errorf("after_edit_timeout_seconds: %d is negative", c.AfterEditTimeoutSeconds)
+	}
+	if c.ApprovalExpiryHours < 0 {
+		return fmt.Errorf("approval_expiry_hours: %d is negative", c.ApprovalExpiryHours)
+	}
+	if c.ApprovalRemindMinutes < 0 {
+		return fmt.Errorf("approval_remind_minutes: %d is negative", c.ApprovalRemindMinutes)
 	}
 	if c.Timeouts.QuickSeconds < 0 {
 		return fmt.Errorf("timeouts.quick_seconds: %d is negative", c.Timeouts.QuickSeconds)

@@ -244,3 +244,33 @@ func TestWorkspaceEmptyRepoRejected(t *testing.T) {
 		t.Error("Validate() = nil, want an error for an empty workspace.root")
 	}
 }
+
+func TestApprovalDefaultsInConfig(t *testing.T) {
+	c := Default()
+	if c.ApprovalExpiryHours != 24 {
+		t.Errorf("Default() approval_expiry_hours = %d, want 24", c.ApprovalExpiryHours)
+	}
+	if c.ApprovalRemindMinutes != 60 {
+		t.Errorf("Default() approval_remind_minutes = %d, want 60", c.ApprovalRemindMinutes)
+	}
+	if c.OwnerDiscordID != "" {
+		t.Errorf("Default() owner_discord_id = %q, want empty", c.OwnerDiscordID)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Default() with approval keys does not validate: %v", err)
+	}
+}
+
+func TestNegativeApprovalExpiryRejected(t *testing.T) {
+	c := Default()
+	c.ApprovalExpiryHours = -1
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "approval_expiry_hours") {
+		t.Fatalf("Validate() with negative approval_expiry_hours = %v, want an error naming it", err)
+	}
+	c2 := Default()
+	c2.ApprovalRemindMinutes = -1
+	if err := c2.Validate(); err == nil || !strings.Contains(err.Error(), "approval_remind_minutes") {
+		t.Fatalf("Validate() with negative approval_remind_minutes = %v, want an error naming it", err)
+	}
+}

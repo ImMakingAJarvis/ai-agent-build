@@ -22,7 +22,13 @@ the drain, waits up to `loopd.shutdown_grace_seconds` for the running
 tick and its ops, shuts the HTTP server down, and exits 0 (card ELR-98,
 M4.1f). Card ELR-6 (M1.1a) created the homes (`runtime/`, `cmd/loopd`,
 `cmd/loopctl`); since ELR-100 (M4.1h) it is a normal compose service —
-it starts with the stack, published on 127.0.0.1:9110 only.
+it starts with the stack, published on 127.0.0.1:9110 only. Before every
+op the loop consults the permission layer (card ELR-107, M4.3b):
+`perm.Decide` allows the op, refuses it (the op fails at once, its tool
+result `denied: <the matching rule>`), or sends it to the owner (the op
+is parked awaiting_approval with a pending approval, and the job waits
+on the approval holding no slot — the tick releases the slot before the
+op starts).
 
 ## Interfaces
 
@@ -132,6 +138,12 @@ it starts with the stack, published on 127.0.0.1:9110 only.
     default `/home/agent/ai-agent-build`, must not be empty (card
     ELR-105); the daemon still reads the `LOOPD_REPO` env for the repo
     path (card ELR-104).
+  - `approval_expiry_hours` — how long a parked approval waits before
+    it expires; default 24, must not be negative (card ELR-107, M4.3b).
+  - `approval_remind_minutes` — how long after the request the owner is
+    reminded of a pending approval; default 60, must not be negative.
+  - `owner_discord_id` — the owner's Discord id approval requests and
+    reminders are addressed to; default empty.
 - No compose profile since ELR-100 (M4.1h): it starts with plain
   `docker compose up -d`.
 - `read_only: true` and `tmpfs: /tmp` (card ELR-105, M4.2e): the
@@ -169,6 +181,9 @@ it starts with the stack, published on 127.0.0.1:9110 only.
   store directory — one per submitted task, cut from `HEAD` of
   `LOOPD_REPO`, created by `POST /v1/tasks` and removed again when the
   submit fails after the create.
+- Approval requests the loop parks for the owner live under the job's
+  `approvals/` directory in the job store — one JSON per request,
+  pending until decided or expired (card ELR-107).
 - Restart survival (decision, card ELR-100, M4.1h): operations do NOT
   survive a container restart — the children die with the container.
   loopd relies on Recover (M1.2e) plus resume (card M8.5) to adopt or

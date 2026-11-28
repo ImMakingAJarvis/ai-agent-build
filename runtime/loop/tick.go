@@ -10,12 +10,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ImMakingAJarvis/ai-agent-build/internal/agentjob"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/engine"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/ops"
+	"github.com/ImMakingAJarvis/ai-agent-build/runtime/perm"
 )
 
 // emptyReplyNote is the user message appended after a tick whose reply
@@ -268,6 +271,21 @@ func (l *Loop) startOp(jobID string, op agentjob.LoopOp) error {
 	if err != nil {
 		return err
 	}
+	// The permission gate (card ELR-107): for the tools the permission
+	// layer targets, Decide runs before the op starts. Allow falls
+	// through to the start below; Deny finishes the op at once with the
+	// denial as its tool result; Ask parks the op as awaiting_approval
+	// with a pending approval, and the job waits on it — the tick
+	// released the slot before startOp, so a parked job holds none.
+	if d, call := permGate(l.deps.Rules, op.Tool, argsObj, job.Spec.Workspace); d != perm.Allow {
+		if d == perm.Deny {
+			return l.HandleOpDone(jobID, op.ID, ops.Result{
+				Status: agentjob.OpFailed,
+				Error:  deniedReason(l.deps.Rules, call),
+			})
+		}
+		return l.parkForApproval(jobID, op)
+	}
 	now := l.deps.Now()
 	op.Status = agentjob.OpRunning
 	op.StartedAt = &now
@@ -295,6 +313,113 @@ func (l *Loop) startOp(jobID string, op agentjob.LoopOp) error {
 	}
 	l.markOpStarted(op.ID)
 	return nil
+}
+
+// permGate returns the permission decision for the call (card ELR-107)
+// and the ToolCall Decide saw. Only the tools the permission layer
+// targets are gated: the shell — its "cmd" presented under the
+// "command" key Decide reads — and the file tools, which Decide reads
+// by their "path". A tool outside the layer's model, or a call with no
+// command or path to match, is not gated: it runs as today.
+func permGate(rules perm.Rules, tool string, argsObj map[string]any, workspace string) (perm.Decision, perm.ToolCall) {
+	call := perm.ToolCall{Tool: tool, Workspace: workspace}
+	switch tool {
+	case "shell":
+		cmd, ok := argsObj["cmd"].(string)
+		if !ok || cmd == "" {
+			return perm.Allow, call
+		}
+		b, err := json.Marshal(map[string]string{"command": cmd})
+		if err != nil {
+			return perm.Allow, call
+		}
+		call.Args = b
+	case "read_file", "write_file", "edit_file":
+		p, ok := argsObj["path"].(string)
+		if !ok || p == "" {
+			return perm.Allow, call
+		}
+		// The path is the only field Decide reads; the rest of the args
+		// (content, ...) stay out of the decision.
+		b, err := json.Marshal(map[string]string{"path": p})
+		if err != nil {
+			return perm.Allow, call
+		}
+		call.Args = b
+	default:
+		return perm.Allow, call
+	}
+	return perm.Decide(rules, call), call
+}
+
+// deniedReason names the rule behind a Deny decision (card ELR-107):
+// "denied: <tool> <pattern>" for the deny rule that matched, or the
+// guard's refusal when a shell command was blocked that no rule named.
+// Decide itself is pure and names no rule, so the rescan mirrors perm's
+// matching over the same target Decide saw: the command (shell) or the
+// path (file tools).
+func deniedReason(rules perm.Rules, call perm.ToolCall) string {
+	var target string
+	var m map[string]any
+	if json.Unmarshal(call.Args, &m) == nil {
+		switch call.Tool {
+		case "shell":
+			target, _ = m["command"].(string)
+		case "read_file", "write_file", "edit_file":
+			target, _ = m["path"].(string)
+		}
+	}
+	for _, r := range rules.Deny {
+		if r.Tool != call.Tool || target == "" {
+			continue
+		}
+		if ok, _ := path.Match(r.Pattern, target); ok {
+			return "denied: " + r.Tool + " " + r.Pattern
+		}
+	}
+	return "denied: " + call.Tool + " command blocked by the guard"
+}
+
+// parkForApproval parks an op the permission gate sent to the owner
+// (card ELR-107): the op waits awaiting_approval, a pending LoopApproval
+// carries the call, its hash and the remind and expiry times, and the
+// job checkpoints Waiting on the approval. The slot was released by the
+// tick before startOp, so the parked job holds none.
+func (l *Loop) parkForApproval(jobID string, op agentjob.LoopOp) error {
+	now := l.deps.Now()
+	op.Status = agentjob.OpAwaitingApproval
+	if err := l.deps.Store.PutOp(jobID, op); err != nil {
+		return err
+	}
+	remindAt := now.Add(time.Duration(l.deps.Config.ApprovalRemindMinutes) * time.Minute)
+	expiresAt := now.Add(time.Duration(l.deps.Config.ApprovalExpiryHours) * time.Hour)
+	req, err := json.Marshal(struct {
+		Tool string          `json:"tool"`
+		Args json.RawMessage `json:"args"`
+	}{op.Tool, op.Args})
+	if err != nil {
+		return err
+	}
+	a := agentjob.LoopApproval{
+		ID:        op.ID,
+		OpID:      op.ID,
+		Request:   req,
+		Status:    agentjob.ApprovalPending,
+		Hash:      agentjob.ApprovalHash(op.Tool, op.Args),
+		RemindAt:  &remindAt,
+		ExpiresAt: &expiresAt,
+	}
+	if err := l.deps.Store.PutApproval(jobID, a); err != nil {
+		return err
+	}
+	job, err := l.deps.Store.Get(jobID)
+	if err != nil {
+		return err
+	}
+	st := job.State
+	st.Status = agentjob.Waiting
+	st.WaitReason = agentjob.WaitApproval
+	return l.deps.Store.SetStatus(jobID, st)
 }
 
 // ask builds the prompt, sends it to the model in the leased slot and

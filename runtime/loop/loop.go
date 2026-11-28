@@ -30,6 +30,7 @@ import (
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/config"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/engine"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/ops"
+	"github.com/ImMakingAJarvis/ai-agent-build/runtime/perm"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/slot"
 	"github.com/ImMakingAJarvis/ai-agent-build/runtime/tools"
 )
@@ -44,10 +45,15 @@ type Deps struct {
 	Slots    *slot.Manager
 	Runner   *ops.Runner
 	Registry *ops.Registry
-	Store    *agentjob.Store
-	Config   config.Config
-	Now      func() time.Time
-	Metrics  *Metrics
+	// Rules is the permission set the loop consults before every op
+	// (card ELR-107): perm.Decide runs the call, refuses it, or parks it
+	// for an approval. Empty rules leave the workspace and guard checks
+	// as the only gate.
+	Rules   perm.Rules
+	Store   *agentjob.Store
+	Config  config.Config
+	Now     func() time.Time
+	Metrics *Metrics
 	// Redact scrubs secrets from a finished op's output and error
 	// before they are stored or shown (card ELR-91); nil means no
 	// redaction.
