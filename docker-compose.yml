@@ -799,26 +799,35 @@ services:
 
   # ---------------- loopd (event-loop runtime, port 9110) -----------------
   # The event-loop agent runtime daemon (epic ELR-1): schedules ticks for
-  # jobs with driver loop. Skeleton for now (card ELR-6). Behind the 'loop'
-  # profile on purpose — it builds and can be started, but does not start
-  # with the stack yet (card ELR-7). The image keeps the Go toolchain, git
-  # and gh because later cards run builds and tests inside it.
+  # jobs with driver loop. A normal service since card ELR-100 (M4.1h) —
+  # no profile, it starts with the stack. The API is published on
+  # 127.0.0.1 only; the bearer token file is mounted read-only at
+  # /run/loopd/token. The image keeps the Go toolchain, git and gh
+  # because rounds build and test inside it.
   loopd:
     build:
       context: .
       dockerfile: docker/loopd/Dockerfile
     image: jarvis/loopd:local
     container_name: jarvis-loopd
-    profiles: ["loop"]
     restart: unless-stopped
     env_file:
       - /home/agent/.config/jarvis/agent.env
     environment:
+      # The image has no /etc/passwd entry for uid 1001, so the runtime
+      # leaves HOME at "/" and the job-store path would resolve to
+      # /.local/share/jarvis — pin it at the mount point.
+      HOME: /home/agent
       LOOPD_ADDR: ":9110"
     ports:
       - "127.0.0.1:9110:9110"
     volumes:
       - /home/agent/.local/share/jarvis:/home/agent/.local/share/jarvis
+      - /home/agent/.local/share/jarvis/secrets/loopd-token:/run/loopd/token:ro
+    # loopd.shutdown_grace_seconds (default 60) + 10s headroom for the
+    # HTTP shutdown and the lock release. Raise it with the config if
+    # the grace is raised.
+    stop_grace_period: 70s
 
   # ---------------- cap-echo (event-driven brain test worker) -------------
   # The fake capability behind the Phase 2 wait/wake gate (plan task 17):

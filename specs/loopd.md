@@ -4,7 +4,7 @@ name: Loopd (event-loop runtime)
 summary: The event-loop agent runtime daemon — serves the runtime API and runs the scheduler loop for jobs with driver loop; drains on SIGTERM.
 group: agent
 kind: container
-status: optional
+status: active
 compose: [loopd]
 binaries: [cmd/loopd, cmd/loopctl]
 ports: ["9110 API (loopd.listen, default :9110; the LOOPD_ADDR env still overrides it; published on 127.0.0.1 only)"]
@@ -21,8 +21,8 @@ no work, and no new tick once the drain has begun. On SIGTERM it starts
 the drain, waits up to `loopd.shutdown_grace_seconds` for the running
 tick and its ops, shuts the HTTP server down, and exits 0 (card ELR-98,
 M4.1f). Card ELR-6 (M1.1a) created the homes (`runtime/`, `cmd/loopd`,
-`cmd/loopctl`); since ELR-7 it builds as a compose service behind the
-`loop` profile.
+`cmd/loopctl`); since ELR-100 (M4.1h) it is a normal compose service —
+it starts with the stack, published on 127.0.0.1:9110 only.
 
 ## Interfaces
 
@@ -115,8 +115,19 @@ M4.1f). Card ELR-6 (M1.1a) created the homes (`runtime/`, `cmd/loopd`,
     (must be owned and private, no group/other bits).
   - `loopd.shutdown_grace_seconds` — default 60, must not be negative.
   - `loopd.listen` — default `:9110`, must not be empty.
-- Compose profile `loop` — it never starts with `docker compose up -d`.
+- No compose profile since ELR-100 (M4.1h): it starts with plain
+  `docker compose up -d`.
+- The bearer token file `~/.local/share/jarvis/secrets/loopd-token`
+  (mode 0600) is bind-mounted read-only at `/run/loopd/token` — the
+  default of `loopd.token_file`.
+- `stop_grace_period: 70s` — `loopd.shutdown_grace_seconds` (default 60)
+  plus 10s of headroom; raise it in compose if the grace is raised.
 - `env_file: agent.env`, like the other agent services.
+- `HOME: /home/agent` — the image has no passwd entry for uid 1001, so
+  the runtime leaves HOME at "/" and `agentjob.DataDir()` (which reads
+  $HOME) would resolve the job store to `/.local/share/jarvis` (card
+  ELR-100: the container crash-looped on the lock's mkdir until HOME
+  was pinned at the mount point).
 
 ## Data
 
@@ -126,6 +137,12 @@ M4.1f). Card ELR-6 (M1.1a) created the homes (`runtime/`, `cmd/loopd`,
 - `loop.lock` in the store directory — the single-runtime flock
   (ELR-87) the daemon holds for its whole life; the kernel releases it
   when the process dies.
+- Restart survival (decision, card ELR-100, M4.1h): operations do NOT
+  survive a container restart — the children die with the container.
+  loopd relies on Recover (M1.2e) plus resume (card M8.5) to adopt or
+  finish them at the next start, and the deploy guard (card ELR-99)
+  refuses a restart while ops run. There is no separate loop-ops
+  container in M4.
 - No other state: the loop's metrics registry is in-process and resets
   on restart.
 
@@ -135,7 +152,10 @@ M4.1f). Card ELR-6 (M1.1a) created the homes (`runtime/`, `cmd/loopd`,
 
 The script builds the image and runs
 `docker compose --profile loop build loopd && docker compose
---profile loop up -d loopd`, then waits for `/healthz`. The deploy
+--profile loop up -d loopd`, then waits for `/healthz` — the
+`--profile loop` flags are inert since the service lost its profile
+(ELR-100); the plain equivalent is `docker compose build loopd &&
+docker compose up -d loopd`. The deploy
 guard (ELR-99, M4.1g) runs first: it asks the running daemon
 `GET /v1/state` (token from `$LOOPD_TOKEN_FILE`, default
 `/run/loopd/token`; address `$LOOPD_API_URL`, default
@@ -146,15 +166,21 @@ file is missing, so it cannot be up — the install proceeds.
 
 ## Verify live
 
-    docker compose --profile loop up -d loopd
+    docker compose build loopd && docker compose up -d loopd
     curl http://127.0.0.1:9110/healthz          # → ok
     curl http://127.0.0.1:9110/metrics          # → 200, the loop's series
     curl http://127.0.0.1:9110/v1/state         # → 401 {"error":"unauthorized"}
     curl -H "Authorization: Bearer $(cat /run/loopd/token)" \
          http://127.0.0.1:9110/v1/state         # → 200 {"draining":false,...}
+    docker cp scripts/loopd-image-check.sh jarvis-loopd:/tmp/
+    docker exec jarvis-loopd bash /tmp/loopd-image-check.sh
+                                              # one line per capability: ok/MISSING
     docker logs --tail 20 jarvis-loopd          # loopd listening on :9110
 
-Outside the profile it is expected to be absent (the map shows it down).
+The API is loopback-only (published on 127.0.0.1:9110): the verify
+commands run on the box itself; from other machines the port is not
+reachable. The image-check script is not in the image (the report on
+card ELR-100), hence the docker cp.
 
 ## Failure modes
 
@@ -170,3 +196,8 @@ Outside the profile it is expected to be absent (the map shows it down).
   daemon exits 0 anyway and names what is still running in the log line
   (`shutdown deadline reached; still running: ...`); the ops are adopted
   or reported lost on the next start (ELR-90).
+- A hard restart (crash, or a forced redeploy): the running ops die
+  with the container — there is no loop-ops container (decision, card
+  ELR-100); Recover plus resume (card M8.5) adopts or reports them
+  lost at the next start, and the deploy guard (ELR-99) refuses a
+  graceful restart while ops run.
