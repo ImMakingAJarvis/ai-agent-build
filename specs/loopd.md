@@ -40,8 +40,9 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
   ops; 404 `{"error":"not found"}` for an unknown id),
   `GET /v1/tasks/{id}/messages` (the job's conversation log as a JSON
   array, empty array for a job with no log), and `GET /v1/state`
-  (`{"draining":false,"running_ops":[{"job":..,"op":..}],"jobs":{
-  status:count}}` — `draining` stays false until card m4-1e;
+  (`{"draining":..,"running_ops":[{"job":..,"op":..}],"jobs":{
+  status:count}}` — `draining` reads the Drainer (M4.1e; false when
+  the Server has none);
   `running_ops` joins the Runner's live ops to the store's running
   ops). Every string in a served message or log passes the Redactor
   before it is written (edge case 2026-11-24): no endpoint returns raw
@@ -66,6 +67,17 @@ Since ELR-7 it builds as a compose service behind the `loop` profile.
   - `POST /v1/tasks/{id}/approvals` is registered and answers 501
     `{"error":"not implemented"}` until card m4-3d replaces it.
   Config changes are not an endpoint in M4.
+- Drain (ELR-97, M4.1e), behind the same Guard:
+  `POST /v1/drain` starts the drain through `Deps.Drainer.Begin` and
+  answers at once (it does not wait) with
+  `{"draining":true,"running_ops":[...]}` — the same `job`/`op` join as
+  `GET /v1/state`. The drain state is `runtime/api.Drainer`
+  (`NewDrainer`, idempotent `Begin`, `Draining`, and `Wait(ctx,
+  running)` which polls every 200 ms until `running()` is empty or the
+  context ends and returns the op ids still running). Scheduler
+  contract card m4-1f builds on: once `Draining()` is true no new tick
+  is started; a tick already running finishes and checkpoints. A
+  nil `Deps.Drainer` answers 503 and reports not draining.
 - Event stream (ELR-96, M4.1d), behind the same Guard:
   `GET /v1/events` streams the runtime's events as server-sent events —
   `id: <id>\nevent: <type>\ndata: <json>\n\n`, flushed after each event.

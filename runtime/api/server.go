@@ -42,6 +42,10 @@ type Deps struct {
 	// events as server-sent events. nil answers 503; card m4-1f builds
 	// it and wires the loop's events into Publish.
 	Broker *Broker
+	// Drainer is the drain state (M4.1e): Draining() reads it and POST
+	// /v1/drain calls its Begin. nil reports not draining and answers
+	// 503 on /v1/drain; card m4-1f builds one and passes it in.
+	Drainer *Drainer
 }
 
 // Server is loopd's HTTP server: the read and write sides of the API
@@ -63,9 +67,14 @@ func New(d Deps) *Server {
 func (s *Server) Version() string { return s.deps.Version }
 
 // Draining reports whether the server is draining: it accepts no new work
-// and lets running work finish. Until card m4-1e adds the drain state and
-// POST /v1/drain, it always reports false.
-func (s *Server) Draining() bool { return false }
+// and lets running work finish (M4.1e). It reads the Drainer from Deps;
+// a server without one never drains.
+func (s *Server) Draining() bool {
+	if s.deps.Drainer == nil {
+		return false
+	}
+	return s.deps.Drainer.Draining()
+}
 
 // Handler returns the server's root handler: a ServeMux with the read
 // routes (M4.1b) and the write routes (M4.1c), wrapped in the
@@ -75,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /v1/state", s.handleState)
+	mux.HandleFunc("POST /v1/drain", s.handleDrain)
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("GET /v1/tasks/{id}/messages", s.handleMessages)
@@ -135,8 +145,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, out)
 }
 
-// handleState serves GET /v1/state: the draining flag (false until card
-// m4-1e), the ops running now, and the job counts by status.
+// handleState serves GET /v1/state: the draining flag (the Drainer,
+// M4.1e), the ops running now, and the job counts by status.
 func (s *Server) handleState(w http.ResponseWriter, _ *http.Request) {
 	jobs, err := s.deps.Store.List()
 	if err != nil {
@@ -146,6 +156,43 @@ func (s *Server) handleState(w http.ResponseWriter, _ *http.Request) {
 	counts := make(map[string]int)
 	for _, j := range jobs {
 		counts[j.Status]++
+	}
+	running, err := s.runningOps()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "%v", err)
+		return
+	}
+	s.writeJSON(w, map[string]any{
+		"draining":    s.Draining(),
+		"running_ops": running,
+		"jobs":        counts,
+	})
+}
+
+// handleDrain serves POST /v1/drain (M4.1e): it starts the drain and
+// answers at once with the flag and the ops still running — it does not
+// wait for them, that is what Drainer.Wait is for. A server without a
+// Drainer answers 503.
+func (s *Server) handleDrain(w http.ResponseWriter, _ *http.Request) {
+	if s.deps.Drainer == nil {
+		httpError(w, http.StatusServiceUnavailable, "drain not wired")
+		return
+	}
+	s.deps.Drainer.Begin()
+	running, err := s.runningOps()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "%v", err)
+		return
+	}
+	s.writeJSON(w, map[string]any{"draining": true, "running_ops": running})
+}
+
+// runningOps joins the Runner's live ops to the store's running ops:
+// one {"job": id, "op": id} per live running op, sorted by job then op.
+func (s *Server) runningOps() ([]map[string]string, error) {
+	jobs, err := s.deps.Store.List()
+	if err != nil {
+		return nil, fmt.Errorf("list jobs: %w", err)
 	}
 	running := []map[string]string{}
 	if s.deps.Runner != nil {
@@ -160,8 +207,7 @@ func (s *Server) handleState(w http.ResponseWriter, _ *http.Request) {
 		for _, j := range jobs {
 			jobOps, err := s.deps.Store.Ops(j.ID)
 			if err != nil {
-				httpError(w, http.StatusInternalServerError, "ops %s: %v", j.ID, err)
-				return
+				return nil, fmt.Errorf("ops %s: %w", j.ID, err)
 			}
 			for _, op := range jobOps {
 				if live[op.ID] && op.Status == agentjob.OpRunning {
@@ -176,11 +222,7 @@ func (s *Server) handleState(w http.ResponseWriter, _ *http.Request) {
 			return running[a]["op"] < running[b]["op"]
 		})
 	}
-	s.writeJSON(w, map[string]any{
-		"draining":    s.Draining(),
-		"running_ops": running,
-		"jobs":        counts,
-	})
+	return running, nil
 }
 
 // writeJSON redacts v (every string through the Redactor) and writes it
