@@ -1,0 +1,80 @@
+{
+ "suite_version": 1,
+ "driver": "local",
+ "scenario": "S1",
+ "fake": false,
+ "sampling": {
+  "temperature": 0.7,
+  "seed": 42,
+  "model_file": "/opt/jarvis-engine/models/jarvis-brain.gguf",
+  "note": "temperature/seed are applied to the chat messages (direct engine calls). Job rounds use the driver's own sampling; the seed is requested only. Repeat each setup and compare against the spread (README: noise rule)."
+ },
+ "run": {
+  "wall_s": 660.97,
+  "jobs_total": 6,
+  "jobs_passed": 6,
+  "gpu": {
+   "util_avg_pct": 62.32,
+   "vram_peak_mb": 20071.0,
+   "idle_while_unfinished_s": 120,
+   "source": "http://localhost:9090 (nvidia_gpu_utilization, nvidia_gpu_mem_used_mb)"
+  },
+  "tokens": {
+   "prompt": 123138,
+   "generated": 15533,
+   "source": "http://127.0.0.1:11434/metrics"
+  },
+  "total_kwh": 0.040064
+ },
+ "jobs": [
+  {
+   "id": "edit-small",
+   "status": "done",
+   "check_passed": true,
+   "wall_s": 60.26,
+   "kwh": 0.004990498724908906,
+   "model": "jarvis-brain"
+  },
+  {
+   "id": "slow-test",
+   "status": "done",
+   "check_passed": true,
+   "wall_s": 126.54,
+   "kwh": 0.005850867505995664,
+   "model": "jarvis-brain"
+  },
+  {
+   "id": "slow-command",
+   "status": "done",
+   "check_passed": true,
+   "wall_s": 245.05,
+   "kwh": 0.015775470795348398,
+   "model": "jarvis-brain"
+  },
+  {
+   "id": "multi-file",
+   "status": "done",
+   "check_passed": true,
+   "wall_s": 86.38,
+   "kwh": 0.004217168034115541,
+   "model": "jarvis-brain"
+  },
+  {
+   "id": "big-log",
+   "status": "done",
+   "check_passed": true,
+   "wall_s": 78.35,
+   "kwh": 0.005484863862793996,
+   "model": "jarvis-brain"
+  },
+  {
+   "id": "docs",
+   "status": "done",
+   "check_passed": true,
+   "wall_s": 64.29,
+   "kwh": 0.0037455437260979912,
+   "model": "jarvis-brain"
+  }
+ ],
+ "chat": null
+}
