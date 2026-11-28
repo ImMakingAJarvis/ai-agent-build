@@ -147,3 +147,71 @@ func TestLoopdUnknownKeyRejected(t *testing.T) {
 		t.Fatal("Load(file with unknown loopd key) = nil error, want an error")
 	}
 }
+
+func TestPermissionsLoadFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "loopd.yaml")
+	yaml := "permissions:\n" +
+		"  allow:\n" +
+		"    - tool: read_file\n" +
+		"      pattern: \"docs/*.md\"\n" +
+		"  deny:\n" +
+		"    - tool: shell\n" +
+		"      pattern: \"rm*\"\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if want := []PermRule{{Tool: "read_file", Pattern: "docs/*.md"}}; !reflect.DeepEqual(c.Permissions.Allow, want) {
+		t.Errorf("Permissions.Allow = %v, want %v", c.Permissions.Allow, want)
+	}
+	if want := []PermRule{{Tool: "shell", Pattern: "rm*"}}; !reflect.DeepEqual(c.Permissions.Deny, want) {
+		t.Errorf("Permissions.Deny = %v, want %v", c.Permissions.Deny, want)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil for a loaded permission config", err)
+	}
+}
+
+func TestPermissionsDefaultEmpty(t *testing.T) {
+	c := Default()
+	if len(c.Permissions.Allow) != 0 {
+		t.Errorf("Default().Permissions.Allow = %v, want empty", c.Permissions.Allow)
+	}
+	if len(c.Permissions.Deny) != 0 {
+		t.Errorf("Default().Permissions.Deny = %v, want empty", c.Permissions.Deny)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Default().Validate() = %v, want nil (empty permissions are valid)", err)
+	}
+}
+
+func TestPermissionsEmptyToolRejected(t *testing.T) {
+	c := Default()
+	c.Permissions.Allow = []PermRule{{Tool: "", Pattern: "*.md"}}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate() = nil, want an error for an empty allow tool")
+	}
+	// The deny list is checked the same way.
+	c2 := Default()
+	c2.Permissions.Deny = []PermRule{{Tool: "", Pattern: "rm*"}}
+	if err := c2.Validate(); err == nil {
+		t.Error("Validate() = nil, want an error for an empty deny tool")
+	}
+}
+
+func TestPermissionsBadPatternRejected(t *testing.T) {
+	c := Default()
+	c.Permissions.Allow = []PermRule{{Tool: "read_file", Pattern: "[unclosed"}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for a malformed permission pattern")
+	}
+	// A valid pattern on the same list still passes, so the rejection is
+	// about the pattern, not the tool.
+	c.Permissions.Allow = []PermRule{{Tool: "read_file", Pattern: "*.md"}}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil for a well-formed pattern", err)
+	}
+}

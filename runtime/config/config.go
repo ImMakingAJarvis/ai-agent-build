@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -45,6 +46,22 @@ type Config struct {
 		ShutdownGraceSeconds int    `yaml:"shutdown_grace_seconds"`
 		Listen               string `yaml:"listen"`
 	} `yaml:"loopd"`
+	// Permissions are the allow/deny rule lists the loop consults before a
+	// tool call (card ELR-102). Defaults empty: with no rules the loop
+	// relies on the workspace and guard checks alone.
+	Permissions struct {
+		Allow []PermRule `yaml:"allow"`
+		Deny  []PermRule `yaml:"deny"`
+	} `yaml:"permissions"`
+}
+
+// PermRule is one allow or deny rule from the permissions config. Tool is
+// the tool name and Pattern is a path.Match glob over the call's path
+// argument (file tools) or command string (shell). perm.FromConfig copies
+// these into perm.Rule.
+type PermRule struct {
+	Tool    string `yaml:"tool"`
+	Pattern string `yaml:"pattern"`
 }
 
 // Default returns the runtime defaults. snapshot_min_tokens is 900, the
@@ -160,6 +177,30 @@ func (c Config) Validate() error {
 	}
 	if c.Loopd.Listen == "" {
 		return fmt.Errorf("loopd.listen: empty")
+	}
+	if err := validatePermRules("allow", c.Permissions.Allow); err != nil {
+		return err
+	}
+	if err := validatePermRules("deny", c.Permissions.Deny); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validatePermRules checks one permission list: every rule must name a
+// non-empty tool and carry a pattern path.Match accepts. A malformed
+// pattern is the only pattern error path.Match can return (ErrBadPattern),
+// and the error names the offending rule, e.g. permissions.allow[0]. An
+// empty pattern is accepted — path.Match treats it as a valid glob that
+// matches only the empty string.
+func validatePermRules(name string, rules []PermRule) error {
+	for i, r := range rules {
+		if r.Tool == "" {
+			return fmt.Errorf("permissions.%s[%d]: tool is empty", name, i)
+		}
+		if _, err := path.Match(r.Pattern, ""); errors.Is(err, path.ErrBadPattern) {
+			return fmt.Errorf("permissions.%s[%d]: bad pattern %q: %v", name, i, r.Pattern, err)
+		}
 	}
 	return nil
 }
